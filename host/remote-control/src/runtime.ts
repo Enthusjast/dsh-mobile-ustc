@@ -10,7 +10,7 @@ const definiteRejections = new Set([
   'access.denied', 'model.not_available', 'protocol.invalid', 'runtime.changed', 'runtime.offline', 'session.not_found',
 ])
 
-export type CommandStateObserver = (state: CommandState) => void | Promise<void>
+export type CommandStateObserver = (state: CommandState, result?: unknown) => void | Promise<void>
 
 export class ProbeRuntime {
   readonly epoch = randomUUID()
@@ -31,15 +31,17 @@ export class ProbeRuntime {
   async dispatch(command: Command, signal: AbortSignal, owner: CommandOwner = localCommandOwner, observe?: CommandStateObserver): Promise<Frame> {
     this.check(command)
     signal.throwIfAborted()
-    const report = async (state: CommandState) => {
-      try { await observe?.(state) } catch { /* Receipts are best effort; the durable local journal remains authoritative. */ }
+    const report = async (state: CommandState, result?: unknown) => {
+      try { await observe?.(state, result) } catch { /* Receipts are best effort; the durable local journal remains authoritative. */ }
     }
     const run = async () => {
       this.check(command)
       switch (command.type) {
         case 'session.list': return this.client.list(signal)
         case 'model.catalog': return this.client.modelCatalog()
-        case 'session.create': return this.client.create(command.payload.workspace, command.payload.preset)
+        case 'session.create': return 'workspace_id' in command.payload
+          ? this.client.createRemote(command.payload.workspace_id, command.payload.preset, signal)
+          : this.client.create(command.payload.workspace, command.payload.preset)
         case 'session.page': return this.sync.page(command, signal)
         case 'interaction.list': return this.interactions.list()
         case 'interaction.answer': {
@@ -90,7 +92,7 @@ export class ProbeRuntime {
         // A mobile retry may reach a host whose durable journal is ahead of the
         // Relay. Rebuild the server transition from its last known `received` state.
         await report('host_accepted')
-        await report(admission.state)
+        await report(admission.state, admission.result)
         payload = admission.result
       } else if (admission.state === 'dispatching' && command.type !== 'message.submit') {
         this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
@@ -125,7 +127,7 @@ export class ProbeRuntime {
             }
             const state = command.type === 'message.submit' ? 'agent_queued' : 'settled'
             this.journal.complete(command.request_id, owner, state, value)
-            await report(state)
+            await report(state, value)
             return value
           } catch (error) {
             if (!recoveringDispatch && error instanceof ProbeError && definiteRejections.has(error.code)) {

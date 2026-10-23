@@ -154,7 +154,23 @@ export class DshClient {
     if (allowed === undefined || !this.presets.includes(preset)) throw new ProbeError('access.denied')
     const result = await this.controller.create({ cwd: allowed.cwd, agentPreset: preset })
     const id = SessionId(result.sessionId)
-    return { session_id: mobileSessionId(this.runtimeId, result.sessionId), checkpoint: await this.checkpoint(id) }
+    const mobile = mobileSessionId(this.runtimeId, result.sessionId)
+    this.ids.set(mobile, String(id))
+    return { session_id: mobile, checkpoint: await this.checkpoint(id) }
+  }
+
+  async createRemote(workspaceId: string, preset: string, signal: AbortSignal) {
+    const matches = this.workspaces.filter(item => item.remoteId === workspaceId)
+    if (matches.length !== 1) throw new ProbeError('access.denied')
+    signal.throwIfAborted()
+    const result = await this.create(matches[0]!.id, preset)
+    if (result.checkpoint.state !== 'persisted') return result
+    const nativeId = this.ids.get(result.session_id)
+    if (!nativeId) throw new ProbeError('session.not_found')
+    const items = await this.sessionCatalog(signal, [nativeId])
+    const item = items.find(item => item.session_id === result.session_id && item.workspace_id === workspaceId && item.state !== 'unavailable')
+    if (!item) throw new ProbeError('session.persistence_unavailable')
+    return { ...result, catalog_item: item }
   }
 
   async modelCatalog() {

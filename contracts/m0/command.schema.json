@@ -95,24 +95,47 @@
           "const": "session.create"
         },
         "payload": {
-          "type": "object",
-          "properties": {
-            "workspace": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "preset": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "workspace",
+                "preset"
+              ],
+              "additionalProperties": false
             },
-            "preset": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
+            {
+              "type": "object",
+              "properties": {
+                "workspace_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "preset": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                }
+              },
+              "required": [
+                "workspace_id",
+                "preset"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "workspace",
-            "preset"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       "required": [

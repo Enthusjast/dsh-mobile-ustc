@@ -16,7 +16,10 @@ const textContent = z.strictObject({ type: z.literal('text'), text: z.string().m
 export const Command = z.discriminatedUnion('type', [
   command('session.list', empty),
   command('model.catalog', empty),
-  command('session.create', z.strictObject({ workspace: z.string().min(1).max(128), preset: z.string().min(1).max(128) })),
+  command('session.create', z.union([
+    z.strictObject({ workspace: z.string().min(1).max(128), preset: z.string().min(1).max(128) }),
+    z.strictObject({ workspace_id: uuid, preset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/) }),
+  ])),
   sessionCommand('message.submit', z.union([
     z.strictObject({ mode: z.enum(['queue', 'steer']), text: z.string().min(1).max(32_768).regex(/\S/) }),
     z.strictObject({ mode: z.enum(['queue', 'steer']), content: z.array(textContent).min(1).max(16) }),

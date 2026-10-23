@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,7 +42,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.catalog.v1", "session.read.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -53,6 +54,7 @@ type Repository interface {
 	TouchRuntimeConnection(context.Context, string, string, string, string) error
 	DetachRuntimeConnection(context.Context, string, string, string, string) error
 	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error)
+	RecordRealtimeSessionCreate(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
@@ -167,8 +169,10 @@ type messageSubmitPayload struct {
 }
 
 type commandReceiptPayload struct {
-	State         string `json:"state"`
-	PayloadSHA256 string `json:"payload_sha256"`
+	State          string                    `json:"state"`
+	PayloadSHA256  string                    `json:"payload_sha256"`
+	WorkspaceID    string                    `json:"workspace_id,omitempty"`
+	CreatedSession *store.SessionCatalogItem `json:"created_session,omitempty"`
 }
 
 type sessionCatalogPayload struct {
@@ -786,7 +790,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			}) != nil {
 				return
 			}
-		case "message.submit", "session.cancel":
+		case "message.submit", "session.cancel", "session.create":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				closePolicy(connection, "operation denied")
@@ -806,7 +810,11 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				server.sendProtocolError(parent, live, "rate.limited", &envelope)
 				continue
 			}
-			server.routeSessionCommand(parent, live, envelope)
+			if envelope.Type == "session.create" {
+				server.routeSessionCreate(parent, live, envelope)
+			} else {
+				server.routeSessionCommand(parent, live, envelope)
+			}
 		case "command.receipt":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
@@ -1018,6 +1026,10 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		server.sendProtocolError(parent, live, commandErrorCode(err), &envelope)
 		return
 	}
+	server.forwardRecordedCommand(parent, live, host, envelope, payload, digest, status)
+}
+
+func (server *Server) forwardRecordedCommand(parent context.Context, live, host *liveConnection, envelope wireEnvelope, payload any, digest string, status store.CommandStatus) {
 	if err := server.database.ValidateRealtimeLease(parent, live.peer.redemption); err != nil {
 		server.revokeDeviceConnection(parent, live, err)
 		return
@@ -1028,6 +1040,9 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 			"runtime_id": live.runtimeID, "runtime_epoch": host.runtimeEpoch, "session_id": envelope.SessionID,
 			"user_id": live.peer.redemption.UserID, "device_id": live.peer.deviceID,
 			"payload_sha256": digest, "payload": payload,
+		}
+		if envelope.SessionID == "" {
+			delete(forward, "session_id")
 		}
 		sendCtx, cancel := context.WithTimeout(parent, 2*time.Second)
 		err := host.sendJSON(sendCtx, forward)
@@ -1055,7 +1070,7 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 		return
 	}
 	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
-		envelope.RuntimeEpoch != live.runtimeEpoch || !uuidPattern.MatchString(envelope.SessionID) ||
+		envelope.RuntimeEpoch != live.runtimeEpoch || (envelope.SessionID != "" && !uuidPattern.MatchString(envelope.SessionID)) ||
 		!uuidPattern.MatchString(envelope.DeviceID) || envelope.UserID != "" || envelope.PayloadSHA256 != "" || envelope.SubscriptionID != "" || envelope.SyncID != "" {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
@@ -1065,10 +1080,16 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
+	if (payload.WorkspaceID == "" && envelope.SessionID == "") ||
+		(payload.WorkspaceID != "" && (!uuidPattern.MatchString(payload.WorkspaceID) || !live.supports("session.create.v1"))) {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
 	status, err := server.database.RecordRealtimeCommandReceipt(parent, store.RelayCommandReceipt{
 		InstallationID: host.InstallationID, KeyVersion: live.peer.installation.KeyVersion,
 		RuntimeID: live.runtimeID, RuntimeEpoch: live.runtimeEpoch, ConnectionID: live.connectionID,
 		DeviceID: envelope.DeviceID, RequestID: envelope.RequestID, SessionID: envelope.SessionID,
+		WorkspaceID: payload.WorkspaceID, CreatedSession: payload.CreatedSession,
 		PayloadSHA256: payload.PayloadSHA256, State: payload.State,
 	})
 	if err != nil {
@@ -1084,19 +1105,30 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 
 func (server *Server) sendCommandReceipt(ctx context.Context, live *liveConnection, status store.CommandStatus, runtimeEpoch string) error {
 	if live.peer.role == "device" {
+		if status.WorkspaceID != "" && (!live.supports("session.create.v1") || !slices.Contains(live.peer.redemption.Scope.Workspaces, status.WorkspaceID) ||
+			(!slices.Contains(live.peer.redemption.Scope.Actions, "session.create") && !slices.Contains(live.peer.redemption.Scope.Actions, "command.status"))) {
+			return nil
+		}
 		if err := server.database.ValidateRealtimeLease(ctx, live.peer.redemption); err != nil {
 			server.revokeDeviceConnection(ctx, live, err)
 			return err
 		}
 	}
-	return live.sendJSON(ctx, map[string]any{
+	frame := map[string]any{
 		"v": 1, "type": "command.receipt", "request_id": status.RequestID,
-		"runtime_id": live.runtimeID, "session_id": status.SessionID,
+		"runtime_id":    live.runtimeID,
 		"runtime_epoch": runtimeEpoch,
 		"payload": map[string]any{
 			"state": status.State, "payload_sha256": status.PayloadSHA256, "updated_at": status.UpdatedAt,
 		},
-	})
+	}
+	if status.SessionID != "" {
+		frame["session_id"] = status.SessionID
+	}
+	if status.WorkspaceID != "" {
+		frame["payload"].(map[string]any)["workspace_id"] = status.WorkspaceID
+	}
+	return live.sendJSON(ctx, frame)
 }
 
 func (server *Server) revokeDeviceConnection(ctx context.Context, live *liveConnection, cause error) {

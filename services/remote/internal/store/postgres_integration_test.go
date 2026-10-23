@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -714,7 +715,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 37, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 38, 8); err != nil {
 		t.Fatal(err)
 	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
@@ -724,7 +725,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 37, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 38, 8); err != nil {
 		t.Fatal(err)
 	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint)
@@ -740,7 +741,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 38, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 39, 9); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := postgres.PendingControlEvents(ctx, 128)
@@ -899,7 +900,7 @@ func assertChangeCounts(ctx context.Context, database *sql.DB, audits, outbox in
 		return err
 	}
 	if actualAudits != audits || actualOutbox != outbox {
-		return errors.New("audit or outbox row count did not match expected transaction state")
+		return fmt.Errorf("audit/outbox counts=%d/%d, want %d/%d", actualAudits, actualOutbox, audits, outbox)
 	}
 	return nil
 }

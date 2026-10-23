@@ -115,6 +115,11 @@ func testPostgresSessionCreation(t *testing.T, ctx context.Context, postgres *Po
 	if _, err := postgres.DB.ExecContext(ctx, `drop trigger reject_creation on commands; drop function reject_creation_settlement()`); err != nil {
 		t.Fatal(err)
 	}
+	newer := item
+	newer.State, newer.LastPersistedSeq = "running", 4
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, RuntimeConnection{InstallationID: receipt.InstallationID, RuntimeID: receipt.RuntimeID, RuntimeEpoch: receipt.RuntimeEpoch, ConnectionID: receipt.ConnectionID}, receipt.KeyVersion, false, []SessionCatalogItem{newer}); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
 		status, err := postgres.RecordRealtimeCommandReceipt(ctx, receipt)
 		if err != nil || status.State != "settled" || status.SessionID != newSessionID || status.WorkspaceID != workspaceID {
@@ -130,5 +135,10 @@ func testPostgresSessionCreation(t *testing.T, ctx context.Context, postgres *Po
 	}
 	if err := postgres.DB.QueryRowContext(ctx, `select count(*) from sessions`).Scan(&after); err != nil || after != before+1 {
 		t.Fatalf("creation duplicated sessions: count=%d error=%v", after, err)
+	}
+	var catalogState string
+	var cursor int64
+	if err := postgres.DB.QueryRowContext(ctx, `select state, last_persisted_seq from sessions where id = $1`, newSessionID).Scan(&catalogState, &cursor); err != nil || catalogState != "running" || cursor != 4 {
+		t.Fatalf("creation result regressed newer catalog: state=%s cursor=%d error=%v", catalogState, cursor, err)
 	}
 }

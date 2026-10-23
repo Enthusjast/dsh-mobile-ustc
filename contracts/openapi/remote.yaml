@@ -347,7 +347,13 @@ paths:
         Devices may send a v=1 `message.submit` frame with request_id, runtime_id, session_id, and
         payload {mode: queue|steer, content: [{type: text, text: ...}]}. Text content is bounded to
         32,768 Unicode characters per block and 16 blocks per frame; the complete UTF-8 frame is
-        limited to 64 KiB. Each submission rechecks device key version, current
+        limited to 64 KiB. Both peers may additionally negotiate `session.cancel.v1` for an
+        epoch-bound `session.cancel` with an empty payload and explicit session.cancel action.
+        Negotiating `session.create.v1` allows `session.create` with the current runtime_epoch and
+        payload {workspace_id, preset}, before a session UUID exists. It requires session.create
+        and workspace scope; the host maps the UUID to one configured local workspace and preset.
+        Creation receipts include payload.workspace_id; a settled receipt adds the resulting
+        session_id. Matching retries return stored state; changed bodies conflict. Each submission rechecks device key version, current
         grant version, message.submit action, and session/workspace scope. PostgreSQL stores only the
         command ID/session/state and canonical payload digest. The host receives the request ID,
         digest, and authenticated user/device IDs, then returns v=1 `command.receipt` frames with the

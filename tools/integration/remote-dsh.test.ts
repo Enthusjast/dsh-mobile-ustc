@@ -10,7 +10,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
-import { hostHelloDigest, relayPayloadDigest, relayCancelDigest } from '../../host/remote-control/src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayCreateDigest } from '../../host/remote-control/src/relay-client.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -246,14 +246,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {
     v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId === undefined ? {} : { session_id: sessionId }),
   })
-  const created = await command('session.create', { workspace: 'probe', preset: 'standard' })
-  const sessionId = created.payload.session_id
-  await until(async () => {
-    const directory = await phone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)
-    return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available') ? true : undefined
-  }, 'host catalog in PostgreSQL')
+  const beforeCreate = (await command('session.list', {})).payload.items.length
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
-  const scope = { actions: ['message.submit', 'session.cancel', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
+  const scope = { actions: ['message.submit', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
   await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
@@ -264,7 +259,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const collector = new FrameCollector(socket, value => validate(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.read.v1']
+    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -276,6 +271,40 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     return collector
   }
   const mobile = await connectPhone(phone, device.device_id, phoneKey, ticket)
+  const creationId = randomUUID()
+  const creation = { v: 1, type: 'session.create', request_id: creationId, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+    payload: { workspace_id: enrollment.workspaces[0].workspace_id, preset: 'standard' } }
+  mobile.send(creation)
+  for (const state of ['received', 'host_accepted', 'dispatching', 'settled']) {
+    const receipt = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === creationId && frame.payload.state === state)
+    assert.equal(receipt.payload.payload_sha256, relayCreateDigest(probe.runtime_epoch, creation.payload))
+    assert.equal(receipt.payload.workspace_id, creation.payload.workspace_id)
+    if (state !== 'settled') assert.equal(receipt.session_id, undefined)
+  }
+  const created = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === creationId && frame.payload.state === 'settled')
+  const sessionId = created.session_id
+  assert.match(sessionId, /^[0-9a-f-]{36}$/)
+  assert.equal((await command('session.list', {})).payload.items.length, beforeCreate + 1)
+  const creationRetryFrom = mobile.frames.length
+  mobile.send(creation)
+  assert.equal((await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === creationId && frame.payload.state === 'settled', creationRetryFrom)).session_id, sessionId)
+  mobile.send({ ...creation, payload: { ...creation.payload, preset: 'changed' } })
+  await mobile.wait(frame => frame.type === 'error' && frame.request_id === creationId && frame.payload.code === 'command.request_conflict')
+  const wrongWorkspaceId = randomUUID()
+  mobile.send({ ...creation, request_id: wrongWorkspaceId, payload: { ...creation.payload, workspace_id: randomUUID() } })
+  await mobile.wait(frame => frame.type === 'error' && frame.request_id === wrongWorkspaceId && frame.payload.code === 'access.denied')
+  const rejectedPresetId = randomUUID()
+  mobile.send({ ...creation, request_id: rejectedPresetId, payload: { ...creation.payload, preset: 'not-configured' } })
+  await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === rejectedPresetId && frame.payload.state === 'rejected')
+  assert.equal((await command('session.list', {})).payload.items.length, beforeCreate + 1, 'retries or rejected preset created extra sessions')
+  const creationStatus = await phone('GET', `/v1/commands/${creationId}?device_id=${device.device_id}`)
+  assert.equal(creationStatus.state, 'settled')
+  assert.equal(creationStatus.session_id, sessionId)
+  assert.equal(creationStatus.workspace_id, creation.payload.workspace_id)
+  await until(async () => {
+    const directory = await phone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)
+    return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available') ? true : undefined
+  }, 'created session in PostgreSQL directory')
   const subscribe = () => {
     const id = randomUUID()
     mobile.send({ v: 1, type: 'session.subscribe', request_id: id, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 30 } })
@@ -376,5 +405,5 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   t.diagnostic(`Idle device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
-  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, catalog, snapshots, assistant stream, pagination, idempotency, cancellation, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
+  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, cancellation, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

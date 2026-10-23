@@ -16,6 +16,12 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
     '../../../contracts/ws/v1/golden/session-cancel.json',
     '../../../contracts/ws/v1/golden/session-cancel.forwarded.json',
+    '../../../contracts/ws/v1/golden/session-create.json',
+    '../../../contracts/ws/v1/golden/session-create.forwarded.json',
+    '../../../contracts/ws/v1/golden/host-session-create.host_accepted.json',
+    '../../../contracts/ws/v1/golden/host-session-create.settled.json',
+    '../../../contracts/ws/v1/golden/device-session-create.received.json',
+    '../../../contracts/ws/v1/golden/device-session-create.settled.json',
     '../../../contracts/ws/v1/golden/host-command-receipt.json',
     '../../../contracts/ws/v1/golden/host-session-catalog.json',
     '../../../contracts/ws/v1/golden/host-session-catalog.ack.json',
@@ -45,6 +51,12 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   const { runtime_epoch: _epoch, ...missingEpoch } = deviceCancel
   assert.equal(validate(missingEpoch), false)
   assert.equal(validate({ ...deviceCancel, payload: { all: true } }), false)
+  const creation = await load('../../../contracts/ws/v1/golden/session-create.forwarded.json') as Record<string, unknown>
+  assert.equal(creation.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: creation.type, runtime_epoch: creation.runtime_epoch, payload: creation.payload }))).digest('hex'))
+  assert.equal(validate({ ...creation, session_id: creation.request_id }), false)
+  assert.equal(validate({ ...creation, payload: { workspace_id: creation.request_id, preset: '../standard' } }), false)
+  const settledCreation = await load('../../../contracts/ws/v1/golden/host-session-create.settled.json') as { payload: Record<string, unknown> }
+  assert.equal(validate({ ...settledCreation, payload: { ...settledCreation.payload, created_session: undefined } }), false)
 })
 
 function canonicalValue(value: unknown): unknown {

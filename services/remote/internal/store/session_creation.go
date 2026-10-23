@@ -73,8 +73,8 @@ func recordCreatedSession(ctx context.Context, transaction *sql.Tx, receipt Rela
 	result, err := transaction.ExecContext(ctx, `
 		insert into sessions (id, runtime_id, workspace_id, dsh_session_id, state, last_persisted_seq)
 		values ($1, $2, $3, $4, $5, $6)
-		on conflict (id) do update set state = excluded.state,
-		  last_persisted_seq = greatest(sessions.last_persisted_seq, excluded.last_persisted_seq), updated_at = clock_timestamp()
+		on conflict (id) do update set
+		  last_persisted_seq = greatest(sessions.last_persisted_seq, excluded.last_persisted_seq)
 		where sessions.runtime_id = excluded.runtime_id and sessions.workspace_id = excluded.workspace_id
 		  and sessions.dsh_session_id = excluded.dsh_session_id`, item.SessionID, receipt.RuntimeID, receipt.WorkspaceID, item.DSHSessionID, item.State, item.LastPersistedSeq)
 	if err != nil {

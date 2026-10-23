@@ -29,8 +29,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
 test('host hello digest matches the Go length-prefixed protocol golden', () => {
   assert.equal(hostHelloDigest([
     'host', runtimeId, runtimeEpoch, '0.2.1-rc.2', '1.2.3', '0.0.1', '1',
-    ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.read.v1'].join('\n'),
-  ]), 'vZRHT5B3AZhNqILsgn_AYW81SArwNJdjyHT0V5ZvsNg')
+    ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'].join('\n'),
+  ]), 'F4OaXrvN-8s9YhttbHm8bJsVrsYczdUd58BbAQYlfEA')
 })
 
 test('Relay shutdown does not wait on a credential provider that ignores cancellation', async () => {
@@ -98,14 +98,14 @@ test('Relay host client proves the installation key and routes only digest-match
             && claims.iss === installationId && claims.aud === 'urn:dsh-mobile-ustc:realtime'
             && claims.challenge_id === challengeId && claims.connection_id === connectionId
             && claims.nonce === nonce && claims.runtime_id === runtimeId && claims.runtime_epoch === runtimeEpoch
-            && claims.hello_sha256 === 'vZRHT5B3AZhNqILsgn_AYW81SArwNJdjyHT0V5ZvsNg'
+            && claims.hello_sha256 === 'F4OaXrvN-8s9YhttbHm8bJsVrsYczdUd58BbAQYlfEA'
             && verify('sha256', Buffer.from(signingInput), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
           if (!valid) return reject(new Error('host hello proof did not match the challenge'))
           helloClaims = claims
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: connectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: runtimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.read.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolve()

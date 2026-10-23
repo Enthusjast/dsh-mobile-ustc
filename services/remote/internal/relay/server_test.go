@@ -113,7 +113,7 @@ func (fake *relayTestStore) RecordRealtimeCommand(_ context.Context, ticket stor
 		fake.commands = make(map[string]store.CommandStatus)
 	}
 	if previous, ok := fake.commands[requestID]; ok {
-		if previous.SessionID != sessionID || previous.PayloadSHA256 != digest {
+		if previous.SessionID != sessionID || previous.WorkspaceID != "" || previous.PayloadSHA256 != digest {
 			return store.CommandStatus{}, store.ErrCommandConflict
 		}
 		return previous, nil
@@ -123,12 +123,35 @@ func (fake *relayTestStore) RecordRealtimeCommand(_ context.Context, ticket stor
 	return status, nil
 }
 
+func (fake *relayTestStore) RecordRealtimeSessionCreate(_ context.Context, ticket store.TicketRedemption, requestID, workspaceID, digest string) (store.CommandStatus, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if !slices.Contains(ticket.Scope.Actions, "session.create") || !slices.Contains(ticket.Scope.Workspaces, workspaceID) {
+		return store.CommandStatus{}, store.ErrAccessDenied
+	}
+	if fake.commands == nil {
+		fake.commands = make(map[string]store.CommandStatus)
+	}
+	if previous, ok := fake.commands[requestID]; ok {
+		if previous.WorkspaceID != workspaceID || previous.PayloadSHA256 != digest {
+			return store.CommandStatus{}, store.ErrCommandConflict
+		}
+		return previous, nil
+	}
+	status := store.CommandStatus{RequestID: requestID, WorkspaceID: workspaceID, State: "received", PayloadSHA256: digest, UpdatedAt: time.Now()}
+	fake.commands[requestID] = status
+	return status, nil
+}
+
 func (fake *relayTestStore) RecordRealtimeCommandReceipt(_ context.Context, receipt store.RelayCommandReceipt) (store.CommandStatus, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	status, ok := fake.commands[receipt.RequestID]
-	if !ok || status.SessionID != receipt.SessionID || status.PayloadSHA256 != receipt.PayloadSHA256 {
+	if !ok || (status.WorkspaceID == "" && status.SessionID != receipt.SessionID) || status.WorkspaceID != receipt.WorkspaceID || status.PayloadSHA256 != receipt.PayloadSHA256 {
 		return store.CommandStatus{}, store.ErrCommandTransition
+	}
+	if receipt.CreatedSession != nil {
+		status.SessionID = receipt.SessionID
 	}
 	status.State = receipt.State
 	status.UpdatedAt = time.Now()
@@ -648,7 +671,7 @@ func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, instal
 		t.Fatal(err)
 	}
 	if len(capabilities) == 0 {
-		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.catalog.v1", "session.read.v1"}
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
 	}
 	challenge := readChallenge(t, connection, "installation")
 	hello := hostHandshakePayload{
@@ -685,7 +708,7 @@ func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, tick
 		t.Fatal(err)
 	}
 	if len(capabilities) == 0 {
-		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.read.v1"}
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.create.v1", "session.read.v1"}
 	}
 	challenge := readChallenge(t, connection, "device")
 	hello := deviceHandshakePayload{

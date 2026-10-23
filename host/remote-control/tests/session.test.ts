@@ -168,3 +168,41 @@ test('a settled cancellation retries without executing again and cannot move to 
   assert.equal(cancels, 1)
   restarted.close()
 })
+
+test('remote creation maps one configured workspace, persists its catalog result and never replays ambiguous work', async () => {
+  const h = await host({ probe: false })
+  const workspaceId = randomUUID()
+  const client = new DshClient(h.ctx, h.runtimeId, [{ id: 'fixture', remoteId: workspaceId, cwd: h.cwd }], ['fixture'])
+  const interactions = { close() {} } as InteractionRouter
+  const journal = new MemoryCommandJournal(client.runtimeId)
+  const runtime = new ProbeRuntime(client, interactions, journal)
+  const signal = new AbortController().signal
+  try {
+    const command = parseCommand({ v: 0, type: 'session.create', request_id: randomUUID(), runtime_epoch: runtime.epoch, payload: { workspace_id: workspaceId, preset: 'fixture' } })
+    const states: string[] = []
+    let settled: unknown
+    const first = await runtime.dispatch(command, signal, undefined, (state, result) => { states.push(state); if (state === 'settled') settled = result })
+    assert.deepEqual(states, ['host_accepted', 'dispatching', 'settled'])
+    const result = first.payload as { session_id: string; checkpoint: { state: string }; catalog_item: { session_id: string; workspace_id: string } }
+    assert.equal(result.checkpoint.state, 'persisted')
+    assert.equal(result.catalog_item.session_id, result.session_id)
+    assert.equal(result.catalog_item.workspace_id, workspaceId)
+    assert.deepEqual(settled, result)
+    const retry = await runtime.dispatch(command, signal, undefined, (state, value) => { if (state === 'settled') settled = value })
+    assert.deepEqual(retry, first)
+    assert.deepEqual(settled, result, 'recovered receipt lost its persisted creation metadata')
+    const count = (await client.list(signal)).items.length
+    assert.equal(count, 1)
+    await assert.rejects(runtime.dispatch({ ...command, request_id: randomUUID(), payload: { workspace_id: workspaceId, preset: 'not-configured' } } as typeof command, signal), /access.denied/)
+    await assert.rejects(client.createRemote(randomUUID(), 'fixture', signal), /access.denied/)
+    const ambiguous = { ...command, request_id: randomUUID() }
+    journal.admit(ambiguous, { userId: 'local', deviceId: 'local' })
+    journal.start(ambiguous.request_id, { userId: 'local', deviceId: 'local' })
+    await assert.rejects(runtime.dispatch(ambiguous, signal), /command.outcome_unknown/)
+    runtime.close()
+    const restarted = new ProbeRuntime(client, interactions, journal)
+    await assert.rejects(restarted.dispatch({ ...command, runtime_epoch: restarted.epoch }, signal), /command.request_conflict/)
+    assert.equal((await client.list(signal)).items.length, count)
+    restarted.close()
+  } finally { runtime.close(); await h.close() }
+})

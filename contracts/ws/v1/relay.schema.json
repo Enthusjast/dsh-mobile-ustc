@@ -17,6 +17,10 @@
     { "$ref": "#/$defs/messageSubmitToHost" },
     { "$ref": "#/$defs/sessionCancel" },
     { "$ref": "#/$defs/sessionCancelToHost" },
+    { "$ref": "#/$defs/sessionCreate" },
+    { "$ref": "#/$defs/sessionCreateToHost" },
+    { "$ref": "#/$defs/hostCreationReceipt" },
+    { "$ref": "#/$defs/deviceCreationReceipt" },
     { "$ref": "#/$defs/hostCommandReceipt" },
     { "$ref": "#/$defs/deviceCommandReceipt" },
     { "$ref": "#/$defs/error" },
@@ -216,6 +220,328 @@
         "runtime_epoch": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" },
         "user_id": { "$ref": "#/$defs/uuid" }, "device_id": { "$ref": "#/$defs/uuid" },
         "payload_sha256": { "$ref": "#/$defs/sha256" }, "payload": { "type": "object", "maxProperties": 0 }
+      }
+    },
+    "sessionCreate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.create"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "workspace_id",
+            "preset"
+          ],
+          "properties": {
+            "workspace_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "preset": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            }
+          }
+        }
+      }
+    },
+    "sessionCreateToHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "payload",
+        "user_id",
+        "device_id",
+        "payload_sha256"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.create"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "workspace_id",
+            "preset"
+          ],
+          "properties": {
+            "workspace_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "preset": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            }
+          }
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "hostCreationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "device_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "command.receipt"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "payload_sha256",
+            "workspace_id"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "host_accepted",
+                "dispatching",
+                "settled",
+                "rejected",
+                "outcome_unknown"
+              ]
+            },
+            "payload_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "workspace_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "created_session": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/sessionCatalogItem"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "available",
+                        "running"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "if": {
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "created_session"
+            ],
+            "properties": {
+              "created_session": {}
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "created_session"
+              ],
+              "properties": {
+                "created_session": {}
+              }
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "session_id"
+        ],
+        "properties": {
+          "session_id": {}
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "session_id"
+          ],
+          "properties": {
+            "session_id": {}
+          }
+        }
+      }
+    },
+    "deviceCreationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "command.receipt"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "payload_sha256",
+            "workspace_id",
+            "updated_at"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "received",
+                "host_accepted",
+                "dispatching",
+                "settled",
+                "rejected",
+                "outcome_unknown"
+              ]
+            },
+            "payload_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "workspace_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "session_id"
+        ],
+        "properties": {
+          "session_id": {}
+        }
       }
     },
     "submitPayload": {

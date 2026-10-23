@@ -45,6 +45,7 @@ type Repository interface {
 	TouchRuntimeConnection(context.Context, string, string, string, string) error
 	DetachRuntimeConnection(context.Context, string, string, string, string) error
 	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error)
+	RecordRealtimeSessionCreate(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error

@@ -72,6 +72,8 @@ DSH CLI 0.2.1-rc.2 集成测试使用临时 P-256 密钥和本机回环 WSS 协�
 
 Relay 双方协商 `session.read.v1` 后，可打开按连接隔离的会话订阅。主机发送带 `subscription_id` / `sync_id` 的快照、原生事件、持久化检查点和 assistant 流，分页引用仍打开的固定快照。取消订阅只释放 follower，不中断 Agent；断线后重新订阅。正文投影最大 2 MiB，超过 64 KiB 信封时按字节分片。每订阅 / 整个主机连接的待发队列分别限制为 3 MiB / 12 MiB，超限后中止 follower 并要求重同步。读取仍依赖 Relay 每帧核对 `session.read` 及当前授权范围。协议、限制和待完成项见 [会话读取说明](../../docs/session-read-protocol.md)。
 
+双方协商 `session.create.v1` 后，手机可在获授权的 workspace UUID 下用已配置 preset 创建会话。创建命令先保存工作区目标，完成后返回持久会话 UUID；重试共用命令去重，不会重复创建。协议与验收范围见 [会话创建说明](../../docs/session-create-protocol.md)。
+
 双方协商 `session.cancel.v1` 后，手机可用独立的 `session.cancel` 权限中断当前会话；请求须绑定当前 `runtime_epoch`。已完成的请求重试只返回持久回执，不能再次中断后续任务。`settled` 表示原生 cancel 已应答，任务停止应以随后的 `turn/end` 为准。详见 [远程中断协议](../../docs/session-cancel-protocol.md)。
 
 另运行 `npm run test:remote-dsh` 可启动真实 Go 服务、隔离 PostgreSQL 和同一本机 npm DSH，验证完整的登记、双端绑定、密钥证明、目录、聊天读取与撤权链路。该测试已通过；身份、模型和密钥 provider 使用本地夹具，学校 IdP、Android 和生产密钥库仍待验收。运行条件及数据边界见 [联合测试记录](../../docs/go-dsh-integration.md)。

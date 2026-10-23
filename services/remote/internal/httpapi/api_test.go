@@ -130,6 +130,9 @@ func (fake *fakeRepository) DetachRuntimeConnection(context.Context, string, str
 func (fake *fakeRepository) RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error) {
 	return store.CommandStatus{}, nil
 }
+func (fake *fakeRepository) RecordRealtimeSessionCreate(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error) {
+	return store.CommandStatus{}, nil
+}
 func (fake *fakeRepository) RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error) {
 	return store.CommandStatus{}, nil
 }
