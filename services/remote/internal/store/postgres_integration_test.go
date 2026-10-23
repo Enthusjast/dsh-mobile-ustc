@@ -72,7 +72,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if !ok {
 		t.Fatal("resolve integration test source path")
 	}
-	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql", "003_host_credentials.up.sql", "004_realtime_handshake.up.sql"} {
+	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql", "003_host_credentials.up.sql", "004_realtime_handshake.up.sql", "005_session_creation_commands.up.sql"} {
 		migrationPath := filepath.Join(filepath.Dir(sourceFile), "../../../../deploy/sql", name)
 		migration, err := os.ReadFile(migrationPath)
 		if err != nil {
@@ -665,6 +665,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "message.submit", cancelRequestID, relaySessionID, messageDigestHex); !errors.Is(err, ErrCommandConflict) {
 		t.Fatalf("request ID changed command type: %v", err)
 	}
+	testPostgresSessionCreation(t, ctx, postgres, messageTicketRedemption, commandReceipt, enrollment.Workspaces[0].ID, relaySessionID)
 	if err := postgres.ValidateRealtimeLease(ctx, messageTicketRedemption); err != nil {
 		t.Fatalf("active message ticket lease was rejected: %v", err)
 	}
@@ -713,7 +714,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 32, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 37, 8); err != nil {
 		t.Fatal(err)
 	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
@@ -723,7 +724,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 32, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 37, 8); err != nil {
 		t.Fatal(err)
 	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint)
@@ -739,7 +740,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 33, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 38, 9); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := postgres.PendingControlEvents(ctx, 128)

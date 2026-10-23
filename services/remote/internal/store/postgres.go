@@ -51,7 +51,8 @@ type Session struct {
 
 type CommandStatus struct {
 	RequestID     string    `json:"request_id"`
-	SessionID     string    `json:"session_id"`
+	SessionID     string    `json:"session_id,omitempty"`
+	WorkspaceID   string    `json:"workspace_id,omitempty"`
 	State         string    `json:"state"`
 	PayloadSHA256 string    `json:"payload_sha256"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -305,11 +306,12 @@ func (postgres *Postgres) ListSessions(ctx context.Context, identity UserIdentit
 func (postgres *Postgres) CommandStatus(ctx context.Context, identity UserIdentity, deviceID, requestID string) (CommandStatus, error) {
 	var status CommandStatus
 	err := postgres.DB.QueryRowContext(ctx, `
-		select c.request_id::text, c.session_id::text, c.state, c.payload_sha256, c.updated_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at
 		from users u
 		join devices d on d.user_id = u.id and d.id = $3 and d.revoked_at is null
 		join commands c on c.device_id = d.id and c.user_id = u.id and c.request_id = $4::uuid
-		join sessions s on s.id = c.session_id and s.runtime_id = c.runtime_id
+		left join sessions s on s.id = c.session_id and s.runtime_id = c.runtime_id
+		left join workspaces w on w.id = c.workspace_id and w.runtime_id = c.runtime_id
 		join runtime_grants g on g.runtime_id = c.runtime_id and g.user_id = u.id
 		join runtimes r on r.id = c.runtime_id and r.revoked_at is null
 		join installations i on i.id = r.installation_id and i.revoked_at is null
@@ -319,11 +321,15 @@ func (postgres *Postgres) CommandStatus(ctx context.Context, identity UserIdenti
 		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > now())
 		  and g.scope->'actions' ? 'command.status'
 		  and (
-		      coalesce(g.scope->'sessions', '[]'::jsonb) @> jsonb_build_array(s.id::text)
-		      or (s.workspace_id is not null and coalesce(g.scope->'workspaces', '[]'::jsonb) @> jsonb_build_array(s.workspace_id::text))
+		      (c.workspace_id is not null and w.id is not null
+		        and (c.session_id is null or s.workspace_id = c.workspace_id)
+		        and g.scope->'workspaces' @> jsonb_build_array(w.id::text))
+		      or (c.workspace_id is null and (
+		        g.scope->'sessions' @> jsonb_build_array(s.id::text)
+		        or (s.workspace_id is not null and g.scope->'workspaces' @> jsonb_build_array(s.workspace_id::text))))
 		  )`,
 		identity.Issuer, identity.Subject, deviceID, requestID).
-		Scan(&status.RequestID, &status.SessionID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrDeviceNotFound
 	}

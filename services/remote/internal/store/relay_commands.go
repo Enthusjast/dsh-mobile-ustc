@@ -21,6 +21,8 @@ type RelayCommandReceipt struct {
 	DeviceID       string
 	RequestID      string
 	SessionID      string
+	WorkspaceID    string
+	CreatedSession *SessionCatalogItem
 	PayloadSHA256  string
 	State          string
 }
@@ -95,14 +97,18 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 		return CommandStatus{}, ErrAccessDenied
 	}
 
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID)
+}
+
+func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID string) (CommandStatus, error) {
 	var status CommandStatus
 	var existingUserID, existingRuntimeID string
-	err = transaction.QueryRowContext(ctx, `
-		select request_id::text, user_id::text, runtime_id::text, session_id::text, state, payload_sha256, updated_at
+	err := transaction.QueryRowContext(ctx, `
+		select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at
 		from commands where device_id = $1 and request_id = $2 for update`, ticket.DeviceID, requestID).
-		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
 	if err == nil {
-		if existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || status.SessionID != sessionID || status.PayloadSHA256 != payloadSHA256 {
+		if existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256 {
 			return CommandStatus{}, ErrCommandConflict
 		}
 		if err := transaction.Commit(); err != nil {
@@ -115,20 +121,20 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 	}
 
 	err = transaction.QueryRowContext(ctx, `
-		insert into commands (device_id, request_id, user_id, runtime_id, session_id, payload_sha256, state)
-		values ($1, $2, $3, $4, $5, $6, 'received')
+		insert into commands (device_id, request_id, user_id, runtime_id, session_id, payload_sha256, workspace_id, state)
+		values ($1, $2, $3, $4, nullif($5, '')::uuid, $6, nullif($7, '')::uuid, 'received')
 		on conflict (device_id, request_id) do nothing
-		returning request_id::text, user_id::text, runtime_id::text, session_id::text, state, payload_sha256, updated_at`,
-		ticket.DeviceID, requestID, ticket.UserID, ticket.RuntimeID, sessionID, payloadSHA256).
-		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		returning request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at`,
+		ticket.DeviceID, requestID, ticket.UserID, ticket.RuntimeID, sessionID, payloadSHA256, workspaceID).
+		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
 	inserted := err == nil
 	if errors.Is(err, sql.ErrNoRows) {
 		// A concurrent retry inserted the same primary key after the first lookup.
 		err = transaction.QueryRowContext(ctx, `
-			select request_id::text, user_id::text, runtime_id::text, session_id::text, state, payload_sha256, updated_at
+			select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at
 			from commands where device_id = $1 and request_id = $2 for update`, ticket.DeviceID, requestID).
-			Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
-		if err == nil && (existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || status.SessionID != sessionID || status.PayloadSHA256 != payloadSHA256) {
+			Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		if err == nil && (existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256) {
 			return CommandStatus{}, ErrCommandConflict
 		}
 	}
@@ -137,11 +143,11 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 	}
 	if inserted {
 		metadata, _ := json.Marshal(map[string]any{
-			"request_id": requestID, "payload_sha256": payloadSHA256, "state": status.State,
+			"request_id": requestID, "payload_sha256": payloadSHA256, "state": status.State, "workspace_id": workspaceID,
 		})
 		if _, err := transaction.ExecContext(ctx, `
 			insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, session_id, action, result, metadata)
-			values ($1, 'device', $2::uuid::text, $2, $3, $4, 'command.received', 'success', $5::jsonb)`,
+			values ($1, 'device', $2::uuid::text, $2, $3, nullif($4, '')::uuid, 'command.received', 'success', $5::jsonb)`,
 			orgID, ticket.DeviceID, ticket.RuntimeID, sessionID, string(metadata)); err != nil {
 			return CommandStatus{}, ErrDatabaseUnavailable
 		}
@@ -158,8 +164,24 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 	if !grantUUIDPattern.MatchString(receipt.InstallationID) || !grantUUIDPattern.MatchString(receipt.RuntimeID) ||
 		!grantUUIDPattern.MatchString(receipt.RuntimeEpoch) || !grantUUIDPattern.MatchString(receipt.ConnectionID) ||
 		!grantUUIDPattern.MatchString(receipt.DeviceID) || !grantUUIDPattern.MatchString(receipt.RequestID) ||
-		!grantUUIDPattern.MatchString(receipt.SessionID) || receipt.KeyVersion <= 0 || !validSHA256Hex(receipt.PayloadSHA256) {
+		receipt.KeyVersion <= 0 || !validSHA256Hex(receipt.PayloadSHA256) {
 		return CommandStatus{}, ErrCommandTransition
+	}
+	if receipt.WorkspaceID == "" {
+		if !grantUUIDPattern.MatchString(receipt.SessionID) || receipt.CreatedSession != nil {
+			return CommandStatus{}, ErrCommandTransition
+		}
+	} else {
+		if !grantUUIDPattern.MatchString(receipt.WorkspaceID) || receipt.State == "agent_queued" || receipt.State == "observed" {
+			return CommandStatus{}, ErrCommandTransition
+		}
+		if receipt.State == "settled" {
+			if err := validateCreatedSession(receipt); err != nil {
+				return CommandStatus{}, err
+			}
+		} else if receipt.SessionID != "" || receipt.CreatedSession != nil {
+			return CommandStatus{}, ErrCommandTransition
+		}
 	}
 	if _, ok := relayReceiptStates[receipt.State]; !ok {
 		return CommandStatus{}, ErrCommandTransition
@@ -187,18 +209,20 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 	}
 	var status CommandStatus
 	err = transaction.QueryRowContext(ctx, `
-		select c.request_id::text, c.session_id::text, c.state, c.payload_sha256, c.updated_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at
 		from commands c
 		where c.device_id = $1 and c.request_id = $2 and c.runtime_id = $3
 		for update`, receipt.DeviceID, receipt.RequestID, receipt.RuntimeID).
-		Scan(&status.RequestID, &status.SessionID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
-	if status.SessionID != receipt.SessionID || status.PayloadSHA256 != receipt.PayloadSHA256 {
+	if status.WorkspaceID != receipt.WorkspaceID || status.PayloadSHA256 != receipt.PayloadSHA256 ||
+		(status.WorkspaceID == "" && status.SessionID != receipt.SessionID) ||
+		(status.WorkspaceID != "" && status.SessionID != "" && status.SessionID != receipt.SessionID) {
 		return CommandStatus{}, ErrCommandConflict
 	}
 	if status.State == receipt.State {
@@ -210,10 +234,16 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 	if _, ok := commandTransitions[status.State][receipt.State]; !ok {
 		return CommandStatus{}, ErrCommandTransition
 	}
+	if receipt.CreatedSession != nil {
+		if err := recordCreatedSession(ctx, transaction, receipt); err != nil {
+			return CommandStatus{}, err
+		}
+		status.SessionID = receipt.SessionID
+	}
 	err = transaction.QueryRowContext(ctx, `
-		update commands set state = $1, updated_at = clock_timestamp()
+		update commands set state = $1, session_id = nullif($4, '')::uuid, updated_at = clock_timestamp()
 		where device_id = $2 and request_id = $3
-		returning updated_at`, receipt.State, receipt.DeviceID, receipt.RequestID).Scan(&status.UpdatedAt)
+		returning updated_at`, receipt.State, receipt.DeviceID, receipt.RequestID, status.SessionID).Scan(&status.UpdatedAt)
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
@@ -224,7 +254,7 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 	})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (org_id, actor_type, actor_id, runtime_id, session_id, action, result, metadata)
-		values ($1, 'installation', $2, $3, $4, 'command.receipt', 'success', $5::jsonb)`,
+		values ($1, 'installation', $2, $3, nullif($4, '')::uuid, 'command.receipt', 'success', $5::jsonb)`,
 		orgID, receipt.InstallationID, receipt.RuntimeID, receipt.SessionID, string(metadata)); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
@@ -240,7 +270,7 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket TicketRedemption, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
 	if !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) ||
 		!grantUUIDPattern.MatchString(ticket.RuntimeID) || !grantUUIDPattern.MatchString(requestID) ||
-		!grantUUIDPattern.MatchString(sessionID) || !validSHA256Hex(payloadSHA256) {
+		(sessionID != "" && !grantUUIDPattern.MatchString(sessionID)) || !validSHA256Hex(payloadSHA256) {
 		return CommandStatus{}, ErrCommandTransition
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -250,11 +280,11 @@ func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket
 	defer transaction.Rollback()
 	var status CommandStatus
 	err = transaction.QueryRowContext(ctx, `
-		select c.request_id::text, c.session_id::text, c.state, c.payload_sha256, c.updated_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at
 		from commands c
 		where c.device_id = $1 and c.user_id = $2 and c.request_id = $3 and c.runtime_id = $4
 		for update`, ticket.DeviceID, ticket.UserID, requestID, ticket.RuntimeID).
-		Scan(&status.RequestID, &status.SessionID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}
@@ -280,7 +310,7 @@ func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket
 	metadata, _ := json.Marshal(map[string]any{"request_id": requestID, "payload_sha256": payloadSHA256, "state": status.State})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (actor_type, actor_id, device_id, runtime_id, session_id, action, result, metadata)
-		values ('device', $1::uuid::text, $1, $2, $3, 'command.outcome_unknown', 'unknown', $4::jsonb)`,
+		values ('device', $1::uuid::text, $1, $2, nullif($3, '')::uuid, 'command.outcome_unknown', 'unknown', $4::jsonb)`,
 		ticket.DeviceID, ticket.RuntimeID, sessionID, string(metadata)); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}

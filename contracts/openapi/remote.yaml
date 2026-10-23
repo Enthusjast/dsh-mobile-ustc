@@ -792,10 +792,14 @@ components:
         data:
           type: object
           additionalProperties: false
-          required: [request_id, session_id, state, payload_sha256, updated_at]
+          required: [request_id, state, payload_sha256, updated_at]
+          anyOf:
+            - required: [session_id]
+            - required: [workspace_id]
           properties:
             request_id: { type: string, format: uuid }
             session_id: { type: string, format: uuid }
+            workspace_id: { type: string, format: uuid, description: Original workspace target of a session creation command; session_id appears after settlement. }
             state: { enum: [received, host_accepted, dispatching, agent_queued, observed, settled, rejected, outcome_unknown] }
             payload_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
             updated_at: { type: string, format: date-time }

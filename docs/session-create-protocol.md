@@ -1,0 +1,11 @@
+# Session creation command storage
+
+Migration 005 allows a creation command to exist before a session UUID is known. It stores the authorized workspace UUID, request/user/device/runtime identity, canonical body digest and delivery state. Creation parameters, presets, local paths and bodies are not stored by the control plane. Existing message/cancel rows retain their session target and need no data rewrite.
+
+Admission requires explicit `session.create` in the ticket and current grant, an authorized workspace in that runtime, current user/device/key/version, organization membership and active installation/runtime/grant. A session-only grant cannot create a new session. Creation and existing-session commands use the same `(device_id, request_id)` namespace; retries preserve the target and digest, including after the result session becomes known. Pending and unknown commands can be queried through the existing authorized command-status endpoint using their workspace target.
+
+The current installation/runtime connection may report creation progress without a session UUID. A settled receipt must supply metadata for a persisted, available/running session in the command's workspace. The store validates the UUIDv5 native-to-mobile mapping, inserts or matches the session metadata, and atomically records the result UUID and settled command state with audit. A database error rolls all those writes back. No session body is accepted. Existing catalog synchronization may independently publish that same metadata.
+
+The isolated PostgreSQL suite applies migrations 001–005 and covers workspace/action/key/grant denial, pending status, cross-operation request conflicts, unknown progress, invalid metadata, stale connections, atomic rollback after an injected command-update failure, duplicate settlement and retry after completion. Relay/host/mobile creation transport is being connected separately; this storage implementation alone does not establish a remote creation flow.
+
+Apply 005 after 004 before using the updated Go service. Rollback refuses to remove creation-command evidence when any workspace-targeted command exists. Reconcile and preserve that evidence explicitly before attempting a downgrade; the down migration never deletes it automatically.
