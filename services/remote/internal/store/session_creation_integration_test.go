@@ -46,6 +46,9 @@ func testPostgresSessionCreation(t *testing.T, ctx context.Context, postgres *Po
 	if err != nil || status.State != "received" || status.SessionID != "" || status.WorkspaceID != workspaceID {
 		t.Fatalf("pending creation: status=%+v error=%v", status, err)
 	}
+	if err := postgres.AuthorizeRealtimeCommandReceipt(ctx, creationTicket, status); err != nil {
+		t.Fatalf("pending creation receipt denied: %v", err)
+	}
 	identity := UserIdentity{Issuer: "https://id.example.edu", Subject: "owner-subject"}
 	if status, err := postgres.CommandStatus(ctx, identity, ticket.DeviceID, requestID); err != nil || status.SessionID != "" || status.WorkspaceID != workspaceID {
 		t.Fatalf("pending creation status: status=%+v error=%v", status, err)
@@ -124,6 +127,9 @@ func testPostgresSessionCreation(t *testing.T, ctx context.Context, postgres *Po
 		status, err := postgres.RecordRealtimeCommandReceipt(ctx, receipt)
 		if err != nil || status.State != "settled" || status.SessionID != newSessionID || status.WorkspaceID != workspaceID {
 			t.Fatalf("atomic creation settlement: status=%+v error=%v", status, err)
+		}
+		if err := postgres.AuthorizeRealtimeCommandReceipt(ctx, creationTicket, status); err != nil {
+			t.Fatalf("settled creation receipt denied: %v", err)
 		}
 	}
 	if retry, err := postgres.RecordRealtimeSessionCreate(ctx, creationTicket, requestID, workspaceID, digest); err != nil || retry.State != "settled" || retry.SessionID != newSessionID {

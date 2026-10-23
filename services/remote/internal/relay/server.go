@@ -49,6 +49,7 @@ type Repository interface {
 	PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
 	ConsumeRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
 	ValidateRealtimeLease(context.Context, store.TicketRedemption) error
+	AuthorizeRealtimeCommandReceipt(context.Context, store.TicketRedemption, store.CommandStatus) error
 	LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error)
 	AttachRuntimeConnection(context.Context, store.RuntimeConnectionInput) (store.RuntimeConnection, error)
 	TouchRuntimeConnection(context.Context, string, string, string, string) error
@@ -1109,7 +1110,10 @@ func (server *Server) sendCommandReceipt(ctx context.Context, live *liveConnecti
 			(!slices.Contains(live.peer.redemption.Scope.Actions, "session.create") && !slices.Contains(live.peer.redemption.Scope.Actions, "command.status"))) {
 			return nil
 		}
-		if err := server.database.ValidateRealtimeLease(ctx, live.peer.redemption); err != nil {
+		if err := server.database.AuthorizeRealtimeCommandReceipt(ctx, live.peer.redemption, status); err != nil {
+			if errors.Is(err, store.ErrAccessDenied) {
+				return nil
+			}
 			server.revokeDeviceConnection(ctx, live, err)
 			return err
 		}

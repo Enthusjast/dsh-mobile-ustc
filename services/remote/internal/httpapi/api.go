@@ -40,6 +40,7 @@ type Repository interface {
 	PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
 	ConsumeRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
 	ValidateRealtimeLease(context.Context, store.TicketRedemption) error
+	AuthorizeRealtimeCommandReceipt(context.Context, store.TicketRedemption, store.CommandStatus) error
 	LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error)
 	AttachRuntimeConnection(context.Context, store.RuntimeConnectionInput) (store.RuntimeConnection, error)
 	TouchRuntimeConnection(context.Context, string, string, string, string) error

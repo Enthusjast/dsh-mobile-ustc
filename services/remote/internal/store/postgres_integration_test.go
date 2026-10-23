@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -606,6 +607,30 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	receivedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "message.submit", relayRequestID, relaySessionID, messageDigestHex)
 	if err != nil || receivedCommand.State != "received" || receivedCommand.PayloadSHA256 != messageDigestHex {
 		t.Fatalf("persist message receipt: command=%+v error=%v", receivedCommand, err)
+	}
+	if err := postgres.AuthorizeRealtimeCommandReceipt(ctx, messageTicketRedemption, receivedCommand); err != nil {
+		t.Fatalf("workspace recipient denied: %v", err)
+	}
+	for _, variant := range []string{"scope", "device-key", "grant-version", "request", "digest", "session"} {
+		ticket, status := messageTicketRedemption, receivedCommand
+		switch variant {
+		case "scope":
+			ticket.Scope.Workspaces = []string{}
+			ticket.Scope.Sessions = []string{}
+		case "device-key":
+			ticket.DeviceKeyVersion++
+		case "grant-version":
+			ticket.GrantVersion++
+		case "request":
+			status.RequestID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+		case "digest":
+			status.PayloadSHA256 = strings.Repeat("0", 64)
+		case "session":
+			status.SessionID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+		}
+		if err := postgres.AuthorizeRealtimeCommandReceipt(ctx, ticket, status); !errors.Is(err, ErrAccessDenied) && !errors.Is(err, ErrTicketInvalid) {
+			t.Fatalf("receipt accepted %s: %v", variant, err)
+		}
 	}
 	retriedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "message.submit", relayRequestID, relaySessionID, messageDigestHex)
 	if err != nil || retriedCommand.State != "received" {

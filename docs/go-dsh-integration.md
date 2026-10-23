@@ -16,4 +16,6 @@ The test opens the real host and mobile WebSocket connections, waits for the DSH
 
 A database dump is checked for absence of the unique prompt, model reply, local workspace path, enrollment code, raw host credential and mobile ticket. PostgreSQL still contains the intended command IDs, states and canonical digests. The test also exercises graceful service shutdown with upgraded sockets.
 
+Two simultaneous sockets use the same registered phone key with different workspace tickets. The socket scoped to another workspace must stay connected and receive no command receipts from the active workspace. This covers receipt metadata as well as the separate session-content subscription checks.
+
 The identity issuer, model adapter and host credential/key provider are local fixtures. The test does not validate school IdP registration, PKCE, real model access, OS key storage, Android merging/cache or a production TLS ingress. Single-process outbox propagation and periodic authoritative connection checks are implemented; see [revocation evidence and deployment limits](revocation-propagation.md). Mobile lease renewal, durable multi-node fanout and target-load/failure-window measurements remain separate gates. This is combined Go/PostgreSQL/DSH evidence, not a production readiness or Android acceptance claim.

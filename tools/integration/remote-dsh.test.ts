@@ -176,7 +176,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const enrollment = await owner('POST', '/v1/enrollments', {
     request_id: randomUUID(), organization_id: orgId, alias: 'DSH integration', profile_ref: 'e2e', dsh_version: '0.2.1-rc.2',
     application_version: 'dsh-go-integration', plugin_version: '0.0.1', protocol_version: 1,
-    installation_public_jwk: installationKey.jwk, code, workspace_refs: ['e2e-workspace'],
+    installation_public_jwk: installationKey.jwk, code, workspace_refs: ['e2e-workspace', 'other-workspace'],
   }, 201)
   const partial = await phone('POST', `/v1/enrollments/${enrollment.enrollment_id}/confirm`, { code })
   assert.equal(partial.state, 'user_confirmed')
@@ -305,6 +305,10 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const directory = await phone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)
     return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available') ? true : undefined
   }, 'created session in PostgreSQL directory')
+  const unrelatedTicket = await phone('POST', '/v1/realtime/tickets', {
+    runtime_id: enrollment.runtime_id, scope: { actions: ['message.submit'], workspaces: [enrollment.workspaces[1].workspace_id], sessions: [] },
+  }, 201)
+  const unrelatedMobile = await connectPhone(phone, device.device_id, phoneKey, unrelatedTicket)
   const subscribe = () => {
     const id = randomUUID()
     mobile.send({ v: 1, type: 'session.subscribe', request_id: id, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 30 } })
@@ -323,6 +327,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await mobile.wait(frame => frame.type === 'assistant.chunk' && frame.subscription_id === opening.subscription_id)
   await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'assistant/message')
   const settled = await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'turn/end')
+  unrelatedMobile.send({ v: 1, type: 'ping', payload: {} })
+  await unrelatedMobile.wait(frame => frame.type === 'pong')
+  assert.equal(unrelatedMobile.frames.some(frame => frame.type === 'command.receipt'), false, 'command metadata leaked to a socket scoped to another workspace')
   const status = await phone('GET', `/v1/commands/${requestId}?device_id=${device.device_id}`)
   assert.equal(status.state, 'agent_queued')
   assert.equal(status.payload_sha256, relayPayloadDigest(sessionId, payload))
@@ -405,5 +412,5 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   t.diagnostic(`Idle device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
-  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, cancellation, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
+  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

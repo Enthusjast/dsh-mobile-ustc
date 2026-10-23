@@ -103,6 +103,9 @@ func (fake *fakeRepository) ConsumeRealtimeTicket(context.Context, string) (stor
 func (fake *fakeRepository) ValidateRealtimeLease(context.Context, store.TicketRedemption) error {
 	return nil
 }
+func (fake *fakeRepository) AuthorizeRealtimeCommandReceipt(context.Context, store.TicketRedemption, store.CommandStatus) error {
+	return nil
+}
 func (fake *fakeRepository) LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error) {
 	return fake.hostCredential, fake.hostCredentialErr
 }

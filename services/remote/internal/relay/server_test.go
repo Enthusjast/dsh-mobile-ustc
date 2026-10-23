@@ -68,6 +68,20 @@ func (fake *relayTestStore) ValidateRealtimeLease(context.Context, store.TicketR
 	return fake.leaseErr
 }
 
+func (fake *relayTestStore) AuthorizeRealtimeCommandReceipt(ctx context.Context, ticket store.TicketRedemption, status store.CommandStatus) error {
+	if err := fake.ValidateRealtimeLease(ctx, ticket); err != nil {
+		return err
+	}
+	if status.WorkspaceID != "" {
+		if slices.Contains(ticket.Scope.Workspaces, status.WorkspaceID) {
+			return nil
+		}
+	} else if slices.Contains(ticket.Scope.Sessions, status.SessionID) {
+		return nil
+	}
+	return store.ErrAccessDenied
+}
+
 func (fake *relayTestStore) LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
