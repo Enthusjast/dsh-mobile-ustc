@@ -60,6 +60,7 @@ func (auth *Authenticator) Middleware(next http.Handler) http.Handler {
 		}
 		response.Header().Set("DPoP-Nonce", nonce)
 		response.Header().Set("Cache-Control", "no-store")
+		principal.ProofJTI = proof.JTI
 		next.ServeHTTP(response, request.WithContext(context.WithValue(request.Context(), contextKey{}, principal)))
 	})
 }

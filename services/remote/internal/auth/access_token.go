@@ -38,6 +38,7 @@ type Principal struct {
 	TokenID     string
 	Scopes      map[string]struct{}
 	ProofKeyJKT string
+	ProofJTI    string
 	ExpiresAt   time.Time
 	IssuedAt    time.Time
 }
@@ -250,7 +251,7 @@ func parseCompactJWS(compact string) (map[string]any, map[string]any, []byte, []
 
 // JWKThumbprint returns the RFC 7638 thumbprint for a P-256 public JWK.
 func JWKThumbprint(raw map[string]any) (string, error) {
-	if raw["d"] != nil || raw["kty"] != "EC" || raw["crv"] != "P-256" {
+	if _, hasPrivateMaterial := raw["d"]; hasPrivateMaterial || raw["kty"] != "EC" || raw["crv"] != "P-256" {
 		return "", errors.New("auth: DPoP requires a public P-256 JWK")
 	}
 	x, _ := raw["x"].(string)
@@ -272,4 +273,60 @@ func JWKThumbprint(raw map[string]any) (string, error) {
 	}
 	digest := sha256.Sum256(canonical)
 	return base64.RawURLEncoding.EncodeToString(digest[:]), nil
+}
+
+// PublicP256JWKThumbprint validates the EC public-key form used for DPoP and approvals.
+func PublicP256JWKThumbprint(raw map[string]any) (string, error) {
+	for name := range raw {
+		switch name {
+		case "kty", "crv", "x", "y", "alg", "use", "key_ops", "kid", "ext":
+		default:
+			return "", errors.New("auth: unsupported public JWK member")
+		}
+	}
+	if value, exists := raw["alg"]; exists {
+		algorithm, ok := value.(string)
+		if !ok || algorithm != "ES256" {
+			return "", errors.New("auth: public JWK algorithm must be ES256")
+		}
+	}
+	if value, exists := raw["use"]; exists {
+		usage, ok := value.(string)
+		if !ok || usage != "sig" {
+			return "", errors.New("auth: public JWK use must be sig")
+		}
+	}
+	if value, exists := raw["key_ops"]; exists {
+		operations, ok := value.([]any)
+		if !ok || len(operations) != 1 || operations[0] != "verify" {
+			return "", errors.New("auth: public JWK key_ops must contain only verify")
+		}
+	}
+	if value, exists := raw["kid"]; exists {
+		keyID, ok := value.(string)
+		if !ok || len(keyID) > 128 {
+			return "", errors.New("auth: invalid public JWK key ID")
+		}
+	}
+	if value, exists := raw["ext"]; exists {
+		if _, ok := value.(bool); !ok {
+			return "", errors.New("auth: invalid public JWK ext member")
+		}
+	}
+	key, err := parsePublicJWK(raw)
+	if err != nil || !keyMatchesAlgorithm(key.key, "ES256") {
+		return "", errors.New("auth: public key must be P-256")
+	}
+	return JWKThumbprint(raw)
+}
+
+func PublicP256JWKThumbprintJSON(value []byte) (string, error) {
+	if len(value) == 0 || len(value) > 8<<10 {
+		return "", errors.New("auth: invalid public JWK size")
+	}
+	object, err := decodeObject(value)
+	if err != nil {
+		return "", err
+	}
+	return PublicP256JWKThumbprint(object)
 }

@@ -138,6 +138,49 @@ func TestUnknownJWKSKeyIDsCannotForceUnboundedRefreshes(t *testing.T) {
 	}
 }
 
+func TestDeviceKeyThumbprintsAcceptOnlyPublicP256SigningJWKs(t *testing.T) {
+	keys := newTestKeys(t)
+	publicJWK := testProofJWK(keys.proof)
+	thumbprint, err := PublicP256JWKThumbprint(publicJWK)
+	if err != nil || thumbprint != keys.proofJKT {
+		t.Fatalf("valid P-256 public JWK rejected: thumbprint=%s error=%v", thumbprint, err)
+	}
+	privateJWK := testProofJWK(keys.proof)
+	privateJWK["d"] = "private-material"
+	if _, err := PublicP256JWKThumbprint(privateJWK); err == nil {
+		t.Fatal("private JWK material accepted for a registered public key")
+	}
+	privateJWK = testProofJWK(keys.proof)
+	privateJWK["d"] = nil
+	if _, err := PublicP256JWKThumbprint(privateJWK); err == nil {
+		t.Fatal("null private JWK member accepted for a registered public key")
+	}
+	if _, err := PublicP256JWKThumbprint(map[string]any{"kty": "RSA", "n": "x", "e": "AQAB"}); err == nil {
+		t.Fatal("non-P-256 key accepted for a device key")
+	}
+	unsupported := testProofJWK(keys.proof)
+	unsupported["x5u"] = "https://attacker.example/key"
+	if _, err := PublicP256JWKThumbprint(unsupported); err == nil {
+		t.Fatal("remote key reference accepted")
+	}
+	for _, member := range []map[string]any{
+		{"use": "enc"},
+		{"alg": "RS256"},
+		{"key_ops": []any{"verify", "sign"}},
+		{"key_ops": "verify"},
+		{"kid": 12},
+		{"ext": "true"},
+	} {
+		candidate := testProofJWK(keys.proof)
+		for name, value := range member {
+			candidate[name] = value
+		}
+		if _, err := PublicP256JWKThumbprint(candidate); err == nil {
+			t.Fatalf("invalid public JWK metadata accepted: %v", member)
+		}
+	}
+}
+
 func splitTestToken(t *testing.T, compact string) [3][]byte {
 	t.Helper()
 	var result [3][]byte

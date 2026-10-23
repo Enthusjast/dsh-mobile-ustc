@@ -1,0 +1,319 @@
+openapi: 3.1.0
+info:
+  title: DSH Mobile Remote Control API
+  version: 0.1.0
+  description: M1 authenticated control-plane surface currently implemented by the Go service.
+servers:
+  - url: https://remote.example.edu
+security:
+  - DPoP: []
+paths:
+  /healthz:
+    get:
+      security: []
+      responses:
+        '204': { description: Process is alive }
+  /readyz:
+    get:
+      security: []
+      responses:
+        '204': { description: PostgreSQL is reachable }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/me:
+    get:
+      responses:
+        '200':
+          description: Verified token identity and resource scopes.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401': { $ref: '#/components/responses/Error' }
+  /v1/devices:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceRegistration'
+      responses:
+        '201':
+          description: Device keys are registered for the verified user. The proof key must match the DPoP-bound access token; an ES256 approval-key possession proof binds the identity, keys, name digest and current DPoP request. The keys must be distinct.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceResponse'
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/devices/{id}:
+    delete:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Device revocation is stored transactionally with an audit row and control-outbox event. Repeating a successful revocation is idempotent.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceRevoked'
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/hosts:
+    get:
+      responses:
+        '200':
+          description: Hosts visible through active organization membership and runtime grants.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data:
+                    type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Host' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes:
+    get:
+      responses:
+        '200':
+          description: Runtimes visible through active grants.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data:
+                    type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Runtime' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes/{id}/sessions:
+    get:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Session metadata visible through an active session.list grant.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data:
+                    type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/commands/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: device_id
+          in: query
+          required: true
+          description: Must identify the active device whose DPoP key authenticated this request.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Command metadata only; request body and chat content are not returned.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandStatusResponse'
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    DPoP:
+      type: http
+      scheme: DPoP
+      description: JWT access token sender-constrained with an ES256 DPoP proof; nonce and jti are single-use. Directory, command-status, and revocation routes also require the proof key to belong to a non-revoked device.
+  parameters:
+    UUID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Error:
+      description: Stable non-sensitive service error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  headers:
+    DPoP-Nonce:
+      description: One-use nonce to include in the next DPoP proof for this key.
+      schema: { type: string, minLength: 32, maxLength: 64 }
+  schemas:
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, error]
+      properties:
+        ok: { const: false }
+        error:
+          type: object
+          additionalProperties: false
+          required: [code]
+          properties:
+            code: { type: string }
+    MeResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [issuer, subject, client_id, scopes]
+          properties:
+            issuer: { type: string, format: uri }
+            subject: { type: string }
+            client_id: { type: string }
+            scopes: { type: array, items: { type: string }, uniqueItems: true }
+    DeviceRegistration:
+      type: object
+      additionalProperties: false
+      required: [name, approval_public_jwk, approval_proof, proof_public_jwk]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        approval_public_jwk: { $ref: '#/components/schemas/P256PublicJWK' }
+        approval_proof:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: ES256 JWS signed by approval_public_jwk; binds issuer, subject, both key thumbprints, normalized name digest, current DPoP jti, iat, and a unique jti.
+        proof_public_jwk: { $ref: '#/components/schemas/P256PublicJWK' }
+    P256PublicJWK:
+      type: object
+      additionalProperties: false
+      required: [kty, crv, x, y]
+      properties:
+        kty: { const: EC }
+        crv: { const: P-256 }
+        x: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+        y: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+        alg: { const: ES256 }
+        use: { const: sig }
+        key_ops: { type: array, items: { const: verify }, minItems: 1, maxItems: 1 }
+        kid: { type: string, maxLength: 128 }
+        ext: { type: boolean }
+    DeviceResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [device_id, key_version]
+          properties:
+            device_id: { type: string, format: uuid }
+            key_version: { type: integer, const: 1 }
+    DeviceRevoked:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [revoked]
+          properties:
+            revoked: { const: true }
+    Host:
+      type: object
+      additionalProperties: false
+      required: [id, alias, state]
+      properties:
+        id: { type: string, format: uuid }
+        alias: { type: string }
+        state: { const: active }
+    Runtime:
+      type: object
+      additionalProperties: false
+      required: [id, host_id, protocol_version]
+      properties:
+        id: { type: string, format: uuid }
+        host_id: { type: string, format: uuid }
+        dsh_version: { type: string }
+        application_version: { type: string }
+        plugin_version: { type: string }
+        protocol_version: { type: integer, minimum: 1 }
+        last_seen_at: { type: string, format: date-time }
+    Session:
+      type: object
+      additionalProperties: false
+      required: [session_id, state, last_persisted_seq, updated_at]
+      properties:
+        session_id: { type: string, format: uuid }
+        state: { enum: [available, running, archived, unavailable] }
+        last_persisted_seq: { type: integer, minimum: -1 }
+        updated_at: { type: string, format: date-time }
+    CommandStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [request_id, session_id, state, payload_sha256, updated_at]
+          properties:
+            request_id: { type: string, format: uuid }
+            session_id: { type: string, format: uuid }
+            state: { enum: [received, host_accepted, dispatching, agent_queued, observed, settled, rejected, outcome_unknown] }
+            payload_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+            updated_at: { type: string, format: date-time }

@@ -26,6 +26,12 @@ func decodeObject(data []byte) (map[string]any, error) {
 	return value.(map[string]any), nil
 }
 
+// ValidateJSONObject rejects duplicate members at every nesting level.
+func ValidateJSONObject(data []byte) error {
+	_, err := decodeObject(data)
+	return err
+}
+
 func readJSONValue(decoder *json.Decoder, depth int) (any, error) {
 	if depth > 32 {
 		return nil, errInvalidJSON

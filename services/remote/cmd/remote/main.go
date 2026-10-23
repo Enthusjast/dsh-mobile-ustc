@@ -2,24 +2,24 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
+	"dsh-mobile-ustc/services/remote/internal/httpapi"
+	"dsh-mobile-ustc/services/remote/internal/store"
 )
 
 func main() {
 	if err := run(); err != nil {
-		log.Print("remote service stopped")
+		log.Print(err)
 		os.Exit(1)
 	}
 }
@@ -37,37 +37,18 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("remote service identity configuration is invalid: %w", err)
 	}
-
-	api := http.NewServeMux()
-	api.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
-		response.Header().Set("Cache-Control", "no-store")
-		response.WriteHeader(http.StatusNoContent)
-	})
-	api.Handle("GET /v1/me", verifier.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		principal, ok := auth.PrincipalFromContext(request.Context())
-		if !ok {
-			writeError(response, http.StatusUnauthorized, "auth.expired")
-			return
-		}
-		scopes := make([]string, 0, len(principal.Scopes))
-		for scope := range principal.Scopes {
-			scopes = append(scopes, scope)
-		}
-		sort.Strings(scopes)
-		response.Header().Set("Cache-Control", "no-store")
-		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(map[string]any{"ok": true, "data": map[string]any{
-			"issuer":    principal.Issuer,
-			"subject":   principal.Subject,
-			"client_id": principal.ClientID,
-			"scopes":    scopes,
-		}})
-	})))
+	database, err := store.Open(context.Background(), os.Getenv("REMOTE_DATABASE_URL"))
+	if err != nil {
+		return errors.New("remote service database is unavailable or insecurely configured")
+	}
+	defer database.Close()
 
 	server := &http.Server{
 		Addr:              envOr("REMOTE_LISTEN_ADDR", "127.0.0.1:8080"),
-		Handler:           api,
+		Handler:           httpapi.New(database, verifier),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    32 << 10,
 	}
@@ -111,11 +92,4 @@ func envOr(name, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func writeError(response http.ResponseWriter, status int, code string) {
-	response.Header().Set("Cache-Control", "no-store")
-	response.Header().Set("Content-Type", "application/json")
-	response.WriteHeader(status)
-	_ = json.NewEncoder(response).Encode(map[string]any{"ok": false, "error": map[string]string{"code": code}})
 }

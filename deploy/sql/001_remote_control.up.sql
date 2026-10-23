@@ -30,14 +30,17 @@ create table devices (
     user_id uuid not null references users(id),
     name text not null check (length(name) between 1 and 160),
     approval_public_jwk jsonb not null check (jsonb_typeof(approval_public_jwk) = 'object'),
+    approval_key_thumbprint text not null unique,
     proof_public_jwk jsonb not null check (jsonb_typeof(proof_public_jwk) = 'object'),
+    proof_key_thumbprint text not null unique,
     key_version bigint not null default 1 check (key_version > 0),
     push_provider text check (push_provider in ('fcm', 'vendor') or push_provider is null),
     push_token_ciphertext bytea,
     last_seen_at timestamptz,
     revoked_at timestamptz,
     created_at timestamptz not null default now(),
-    unique (user_id, id)
+    unique (user_id, id),
+    check (approval_key_thumbprint <> proof_key_thumbprint)
 );
 
 create table hosts (
@@ -101,7 +104,14 @@ create table runtime_grants (
     runtime_id uuid not null references runtimes(id),
     user_id uuid not null references users(id),
     role text not null check (role in ('viewer', 'operator', 'owner')),
-    scope jsonb not null default '{}'::jsonb check (jsonb_typeof(scope) = 'object'),
+    scope jsonb not null check (
+        jsonb_typeof(scope) = 'object'
+        and scope ?& array['actions', 'workspaces', 'sessions']
+        and scope - 'actions' - 'workspaces' - 'sessions' = '{}'::jsonb
+        and jsonb_typeof(scope->'actions') = 'array'
+        and jsonb_typeof(scope->'workspaces') = 'array'
+        and jsonb_typeof(scope->'sessions') = 'array'
+    ),
     grant_version bigint not null default 1 check (grant_version > 0),
     granted_by uuid not null references users(id),
     expires_at timestamptz,
@@ -110,10 +120,24 @@ create table runtime_grants (
     primary key (runtime_id, user_id)
 );
 create index runtime_grants_user_active on runtime_grants (user_id, runtime_id) where revoked_at is null;
+comment on column runtime_grants.scope is
+    'Explicit JSON object: actions, workspaces and sessions arrays; empty arrays grant no access.';
+
+create table workspaces (
+    id uuid primary key default gen_random_uuid(),
+    runtime_id uuid not null references runtimes(id),
+    workspace_ref text not null check (length(workspace_ref) between 1 and 512),
+    created_at timestamptz not null default now(),
+    unique (runtime_id, workspace_ref),
+    unique (runtime_id, id)
+);
+comment on column workspaces.workspace_ref is
+    'Opaque runtime-owned workspace identity; never a host filesystem path.';
 
 create table sessions (
     id uuid primary key default gen_random_uuid(),
     runtime_id uuid not null references runtimes(id),
+    workspace_id uuid,
     dsh_session_id text not null check (length(dsh_session_id) between 1 and 2048),
     state text not null default 'available'
         check (state in ('available', 'running', 'archived', 'unavailable')),
@@ -121,7 +145,8 @@ create table sessions (
     updated_at timestamptz not null default now(),
     created_at timestamptz not null default now(),
     unique (runtime_id, dsh_session_id),
-    unique (runtime_id, id)
+    unique (runtime_id, id),
+    foreign key (runtime_id, workspace_id) references workspaces(runtime_id, id)
 );
 create index sessions_runtime_updated on sessions (runtime_id, updated_at desc, id);
 
@@ -139,6 +164,7 @@ create table commands (
     updated_at timestamptz not null default now(),
     created_at timestamptz not null default now(),
     primary key (device_id, request_id),
+    foreign key (user_id, device_id) references devices(user_id, id),
     foreign key (runtime_id, session_id) references sessions(runtime_id, id)
 );
 create index commands_session_state on commands (session_id, state, updated_at);

@@ -176,14 +176,26 @@ func parsePublicJWK(raw map[string]any) (publicJWK, error) {
 		return value
 	}
 	kid, alg := stringClaim("kid"), stringClaim("alg")
-	if raw["d"] != nil || raw["jku"] != nil || raw["x5u"] != nil {
+	if _, exists := raw["d"]; exists {
 		return publicJWK{}, errors.New("auth: private or remote JWK is not accepted")
 	}
-	if usage := stringClaim("use"); usage != "" && usage != "sig" {
-		return publicJWK{}, errors.New("auth: non-signing JWK")
+	if _, exists := raw["jku"]; exists {
+		return publicJWK{}, errors.New("auth: private or remote JWK is not accepted")
 	}
-	if operations, ok := raw["key_ops"].([]any); ok && !containsString(operations, "verify") {
-		return publicJWK{}, errors.New("auth: JWK cannot verify signatures")
+	if _, exists := raw["x5u"]; exists {
+		return publicJWK{}, errors.New("auth: private or remote JWK is not accepted")
+	}
+	if rawUse, exists := raw["use"]; exists {
+		usage, ok := rawUse.(string)
+		if !ok || usage != "sig" {
+			return publicJWK{}, errors.New("auth: non-signing JWK")
+		}
+	}
+	if rawOperations, exists := raw["key_ops"]; exists {
+		operations, ok := rawOperations.([]any)
+		if !ok || len(operations) != 1 || operations[0] != "verify" {
+			return publicJWK{}, errors.New("auth: JWK must be restricted to signature verification")
+		}
 	}
 	switch stringClaim("kty") {
 	case "RSA":

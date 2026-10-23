@@ -5,6 +5,7 @@ drop table if exists files;
 drop table if exists approvals;
 drop table if exists commands;
 drop table if exists sessions;
+drop table if exists workspaces;
 drop table if exists runtime_grants;
 drop table if exists runtimes;
 drop table if exists enrollments;
