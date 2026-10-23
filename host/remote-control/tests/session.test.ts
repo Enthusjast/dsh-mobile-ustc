@@ -78,6 +78,50 @@ test('model catalog only exposes and selects models already registered on the de
   } finally { await h.close() }
 })
 
+test('active-session steer reaches the same Agent and is recorded with its stable request id', async () => {
+  const h = await host({ probe: false })
+  try {
+    const client = new DshClient(h.ctx, h.runtimeId, [{ id: 'fixture', cwd: h.cwd }], ['fixture'])
+    const created = await client.create('fixture', 'fixture')
+    const native = await client.resolve(created.session_id, new AbortController().signal)
+    const original = h.ctx.agents.get(native)!
+    const held = h.model.holdNext()
+    await client.prompt(native, randomUUID(), 'queue', 'start active work', new AbortController().signal)
+    await held.started
+    const steerRequest = randomUUID()
+    const response = await client.prompt(native, steerRequest, 'steer', 'redirect the active step', new AbortController().signal)
+    assert.equal(response.native_accepted, true)
+    held.release()
+    await original.whenIdle()
+    assert.equal(h.ctx.agents.get(native), original)
+    const messages = original.session.snapshotEvents().filter(event => event.type === 'user/message')
+    assert.ok(messages.some(event => {
+      const source = event.data.source as unknown as { kind: string; rpcId?: string }
+      return source.kind === 'user' && source.rpcId === `m0:${steerRequest}`
+    }), JSON.stringify(messages.map(event => event.data)))
+    assert.equal(h.errors.length, 0)
+  } finally { await h.close() }
+})
+
+test('cancel stops an in-flight model call and leaves the active turn settled', async () => {
+  const h = await host({ probe: false })
+  try {
+    const client = new DshClient(h.ctx, h.runtimeId, [{ id: 'fixture', cwd: h.cwd }], ['fixture'])
+    const created = await client.create('fixture', 'fixture')
+    const native = await client.resolve(created.session_id, new AbortController().signal)
+    const original = h.ctx.agents.get(native)!
+    const held = h.model.holdNext()
+    await client.prompt(native, randomUUID(), 'queue', 'start cancelable work', new AbortController().signal)
+    await held.started
+    assert.deepEqual(client.cancel(native), { accepted: true })
+    await original.whenIdle()
+    const events = original.session.snapshotEvents()
+    assert.ok(events.some(event => event.type === 'turn/end'))
+    assert.equal(events.some(event => event.type === 'assistant/message'), false)
+    assert.equal(h.errors.length, 0)
+  } finally { await h.close() }
+})
+
 test('in-epoch concurrent retries are serialized and conflicts cannot dispatch again', async () => {
   let calls = 0
   const client = { create: async () => { calls++; return { session_id: randomUUID() } } } as unknown as DshClient

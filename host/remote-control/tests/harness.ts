@@ -11,10 +11,36 @@ import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 
 /** The only model in offline tests is deterministic; no real identity or provider is exercised. */
 export class TestModel extends LlmAdapter {
+  private readonly holds: { started(): void; resume: Promise<void>; release(): void }[] = []
+
   override providerInfo() { return { id: 'fixture', name: 'Offline fixture' } }
   override async listModels() { return [{ provider: 'fixture', id: 'fixture', name: 'Offline fixture' }] }
+
+  holdNext() {
+    let start!: () => void
+    let resume!: () => void
+    const held = {
+      started: new Promise<void>(resolve => { start = resolve }),
+      resume: new Promise<void>(resolve => { resume = resolve }),
+      release: resume,
+    }
+    this.holds.push({ started: start, resume: held.resume, release: held.release })
+    return held
+  }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     options.signal?.throwIfAborted()
+    const held = this.holds.shift()
+    if (held) {
+      held.started()
+      let abort!: () => void
+      const aborted = new Promise<void>(resolve => { abort = resolve })
+      const onAbort = () => abort()
+      options.signal?.addEventListener('abort', onAbort, { once: true })
+      try { await Promise.race([held.resume, aborted]) }
+      finally { options.signal?.removeEventListener('abort', onAbort) }
+      options.signal?.throwIfAborted()
+    }
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: 'offline reply' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'offline reply' } }
@@ -64,7 +90,8 @@ export async function host(options: { probe?: boolean; timeoutMs?: number } = {}
     await ctx.loader.await()
     await Promise.all([...ctx.loader.entries()].map(entry => entry.fiber?.await()))
     if (errors.length) throw new AggregateError(errors, 'fixture Loader errors')
-    ctx.llm.registerAdapter(['fixture'], new TestModel())
+    const model = new TestModel()
+    ctx.llm.registerAdapter(['fixture'], model)
     const disposePreset = await ctx.agentPresets.register({ id: 'fixture', plugins: [] })
     const socketPath = join(directory, 'debug', 'probe.sock')
     const runtimeId = randomUUID()
@@ -75,7 +102,7 @@ export async function host(options: { probe?: boolean; timeoutMs?: number } = {}
       await Promise.all([...ctx.loader.entries()].map(entry => entry.fiber?.await()))
       if (errors.length) throw new AggregateError(errors, 'probe Loader errors')
     }
-    return { ctx, cwd, directory, socketPath, runtimeId, config, errors, async close() {
+    return { ctx, cwd, directory, socketPath, runtimeId, config, errors, model, async close() {
       await disposePreset()
       await ctx.fiber.dispose()
       await rm(directory, { recursive: true, force: true })
