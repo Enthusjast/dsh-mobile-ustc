@@ -89,6 +89,41 @@ func NormalizeRuntimeGrantInput(input RuntimeGrantInput, now time.Time) (Runtime
 	return input, nil
 }
 
+func NormalizeTicketScope(role string, scope GrantScope) (GrantScope, error) {
+	allowedActions, ok := roleActions[role]
+	if !ok {
+		return GrantScope{}, ErrGrantInvalid
+	}
+	if role == "owner" {
+		allowedActions = actionSet(
+			"host.list", "session.list", "command.status", "session.create", "message.submit",
+			"session.cancel", "session.archive", "approval.decide", "question.answer", "file.upload", "file.download",
+		)
+	}
+	if len(scope.Actions) == 0 || len(scope.Actions) > len(allowedActions) || len(scope.Workspaces) > 256 || len(scope.Sessions) > 256 {
+		return GrantScope{}, ErrGrantInvalid
+	}
+	var err error
+	scope.Actions, err = normalizeStrings(scope.Actions, false)
+	if err != nil {
+		return GrantScope{}, err
+	}
+	scope.Workspaces, err = normalizeStrings(scope.Workspaces, true)
+	if err != nil {
+		return GrantScope{}, err
+	}
+	scope.Sessions, err = normalizeStrings(scope.Sessions, true)
+	if err != nil {
+		return GrantScope{}, err
+	}
+	for _, action := range scope.Actions {
+		if _, ok := allowedActions[action]; !ok {
+			return GrantScope{}, ErrGrantInvalid
+		}
+	}
+	return scope, nil
+}
+
 func normalizeStrings(values []string, uuidValues bool) ([]string, error) {
 	if len(values) == 0 {
 		return []string{}, nil
@@ -291,7 +326,7 @@ func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx,
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
 		where r.id = $1 and r.revoked_at is null
-		for key share of r, i, h`, runtimeID).Scan(&orgID)
+		for share of r, i, h`, runtimeID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", GrantScope{}, false, ErrAccessDenied
 	}
@@ -300,7 +335,7 @@ func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx,
 	}
 	var membershipRole string
 	err = tx.QueryRowContext(ctx, `
-		select role from org_memberships where org_id = $1 and user_id = $2 for key share`, orgID, actorID).Scan(&membershipRole)
+		select role from org_memberships where org_id = $1 and user_id = $2 for share`, orgID, actorID).Scan(&membershipRole)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", GrantScope{}, false, ErrAccessDenied
 	}
@@ -336,7 +371,7 @@ func activeOrganizationUser(ctx context.Context, tx *sql.Tx, orgID, userID strin
 		select u.id::text from users u
 		join org_memberships m on m.user_id = u.id and m.org_id = $1
 		where u.id = $2 and u.status = 'active'
-		for key share of u, m`, orgID, userID).Scan(&id)
+		for share of u, m`, orgID, userID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrAccessDenied
 	}

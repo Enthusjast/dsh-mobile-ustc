@@ -29,6 +29,7 @@ type Repository interface {
 	RevokeDevice(context.Context, string, string, string) error
 	PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error)
 	RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string) (int64, error)
+	IssueRealtimeTicket(context.Context, store.UserIdentity, string, string, store.GrantScope) (store.RealtimeTicket, error)
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
@@ -62,6 +63,7 @@ func New(database Repository, identity *auth.Authenticator) http.Handler {
 	mux.Handle("GET /v1/runtimes/{id}/sessions", api.protected(http.HandlerFunc(api.listSessions)))
 	mux.Handle("PUT /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.putRuntimeGrant)))
 	mux.Handle("DELETE /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.revokeRuntimeGrant)))
+	mux.Handle("POST /v1/realtime/tickets", api.protected(http.HandlerFunc(api.issueRealtimeTicket)))
 	mux.Handle("GET /v1/commands/{id}", api.protected(http.HandlerFunc(api.commandStatus)))
 	return mux
 }
@@ -267,33 +269,66 @@ func (api *API) revokeRuntimeGrant(response http.ResponseWriter, request *http.R
 	writeData(response, http.StatusOK, map[string]any{"revoked": true, "grant_version": version})
 }
 
+func (api *API) issueRealtimeTicket(response http.ResponseWriter, request *http.Request) {
+	var envelope struct {
+		RuntimeID string          `json:"runtime_id"`
+		Scope     json.RawMessage `json:"scope"`
+	}
+	if !decodeBody(response, request, &envelope) || !uuidPattern.MatchString(envelope.RuntimeID) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	scope, ok := decodeGrantScope(envelope.Scope)
+	if !ok {
+		writeError(response, http.StatusBadRequest, "grant.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
+	ticket, err := api.database.IssueRealtimeTicket(request.Context(),
+		store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, deviceID, envelope.RuntimeID, scope)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusCreated, ticket)
+}
+
 func decodeRuntimeGrantBody(response http.ResponseWriter, request *http.Request) (store.RuntimeGrantInput, bool) {
 	var envelope struct {
 		Role      string          `json:"role"`
 		Scope     json.RawMessage `json:"scope"`
 		ExpiresAt *time.Time      `json:"expires_at,omitempty"`
 	}
-	if !decodeBody(response, request, &envelope) || len(envelope.Scope) == 0 || auth.ValidateJSONObject(envelope.Scope) != nil {
+	if !decodeBody(response, request, &envelope) {
 		return store.RuntimeGrantInput{}, false
+	}
+	scope, ok := decodeGrantScope(envelope.Scope)
+	if !ok {
+		return store.RuntimeGrantInput{}, false
+	}
+	return store.RuntimeGrantInput{Role: envelope.Role, Scope: scope, ExpiresAt: envelope.ExpiresAt}, true
+}
+
+func decodeGrantScope(raw json.RawMessage) (store.GrantScope, bool) {
+	if len(raw) == 0 || auth.ValidateJSONObject(raw) != nil {
+		return store.GrantScope{}, false
 	}
 	var scope struct {
 		Actions    *[]string `json:"actions"`
 		Workspaces *[]string `json:"workspaces"`
 		Sessions   *[]string `json:"sessions"`
 	}
-	decoder := json.NewDecoder(bytes.NewReader(envelope.Scope))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&scope); err != nil || scope.Actions == nil || scope.Workspaces == nil || scope.Sessions == nil {
-		return store.RuntimeGrantInput{}, false
+		return store.GrantScope{}, false
 	}
 	var trailing any
 	if !errors.Is(decoder.Decode(&trailing), io.EOF) {
-		return store.RuntimeGrantInput{}, false
+		return store.GrantScope{}, false
 	}
-	return store.RuntimeGrantInput{
-		Role: envelope.Role, Scope: store.GrantScope{Actions: *scope.Actions, Workspaces: *scope.Workspaces, Sessions: *scope.Sessions},
-		ExpiresAt: envelope.ExpiresAt,
-	}, true
+	return store.GrantScope{Actions: *scope.Actions, Workspaces: *scope.Workspaces, Sessions: *scope.Sessions}, true
 }
 
 func decodeBody(response http.ResponseWriter, request *http.Request, target any) bool {
@@ -319,6 +354,8 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusForbidden, "access.denied")
 	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrGrantNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")
+	case errors.Is(err, store.ErrTicketInvalid):
+		writeError(response, http.StatusUnauthorized, "ticket.invalid")
 	case errors.Is(err, store.ErrGrantInvalid):
 		writeError(response, http.StatusBadRequest, "grant.invalid")
 	case errors.Is(err, store.ErrDatabaseUnavailable):

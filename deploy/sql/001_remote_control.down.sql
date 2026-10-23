@@ -1,6 +1,7 @@
 drop table if exists app_releases;
 drop table if exists control_outbox;
 drop table if exists audit_log;
+drop table if exists realtime_tickets;
 drop table if exists files;
 drop table if exists approvals;
 drop table if exists commands;

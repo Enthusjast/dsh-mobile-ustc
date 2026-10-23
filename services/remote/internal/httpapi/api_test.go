@@ -20,6 +20,7 @@ type fakeRepository struct {
 	activeDeviceErr  error
 	activeDeviceCall int
 	commandCalls     int
+	ticketCalls      int
 }
 
 func (fake *fakeRepository) Ready(context.Context) error { return fake.readyError }
@@ -38,6 +39,10 @@ func (fake *fakeRepository) PutRuntimeGrant(context.Context, store.UserIdentity,
 }
 func (fake *fakeRepository) RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string) (int64, error) {
 	return 2, nil
+}
+func (fake *fakeRepository) IssueRealtimeTicket(context.Context, store.UserIdentity, string, string, store.GrantScope) (store.RealtimeTicket, error) {
+	fake.ticketCalls++
+	return store.RealtimeTicket{Token: strings.Repeat("A", 43), ExpiresAt: time.Now().Add(30 * time.Second)}, nil
 }
 func (fake *fakeRepository) ListHosts(context.Context, store.UserIdentity) ([]store.Host, error) {
 	fake.listCalls++

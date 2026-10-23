@@ -123,6 +123,31 @@ create index runtime_grants_user_active on runtime_grants (user_id, runtime_id) 
 comment on column runtime_grants.scope is
     'Explicit JSON object: actions, workspaces and sessions arrays; empty arrays grant no access.';
 
+create table realtime_tickets (
+    token_sha256 bytea primary key check (octet_length(token_sha256) = 32),
+    user_id uuid not null,
+    device_id uuid not null,
+    runtime_id uuid not null references runtimes(id),
+    grant_version bigint not null check (grant_version > 0),
+    scope jsonb not null check (
+        jsonb_typeof(scope) = 'object'
+        and scope ?& array['actions', 'workspaces', 'sessions']
+        and scope - 'actions' - 'workspaces' - 'sessions' = '{}'::jsonb
+        and jsonb_typeof(scope->'actions') = 'array'
+        and jsonb_typeof(scope->'workspaces') = 'array'
+        and jsonb_typeof(scope->'sessions') = 'array'
+    ),
+    expires_at timestamptz not null,
+    consumed_at timestamptz,
+    created_at timestamptz not null default now(),
+    foreign key (user_id, device_id) references devices(user_id, id),
+    check (expires_at > created_at)
+);
+create index realtime_tickets_pending on realtime_tickets (expires_at)
+    where consumed_at is null;
+comment on table realtime_tickets is
+    'Stores only SHA-256 digests of one-use, short-lived mobile Relay tickets.';
+
 create table workspaces (
     id uuid primary key default gen_random_uuid(),
     runtime_id uuid not null references runtimes(id),

@@ -141,7 +141,7 @@ func (postgres *Postgres) userID(ctx context.Context, tx *sql.Tx, issuer, subjec
 	err := tx.QueryRowContext(ctx, `
 		select id::text from users
 		where issuer = $1 and subject = $2 and status = 'active'
-		for key share`, issuer, subject).Scan(&id)
+		for share`, issuer, subject).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrIdentityNotProvisioned
 	}

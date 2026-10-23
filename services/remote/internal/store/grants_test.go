@@ -67,4 +67,27 @@ func TestGrantScopeSubsetCannotExpandActionsOrResources(t *testing.T) {
 	}
 }
 
+func TestNormalizeTicketScopeExcludesGrantManagementAndRequiresExplicitReadScope(t *testing.T) {
+	workspaceID := "44444444-4444-4444-8444-444444444444"
+	scope, err := NormalizeTicketScope("owner", GrantScope{
+		Actions: []string{"session.list", "host.list"}, Workspaces: []string{workspaceID}, Sessions: []string{},
+	})
+	if err != nil {
+		t.Fatalf("valid owner read ticket scope rejected: %v", err)
+	}
+	if scope.Actions[0] != "host.list" || scope.Actions[1] != "session.list" {
+		t.Fatalf("ticket actions were not normalized: %v", scope.Actions)
+	}
+	for _, invalid := range []GrantScope{
+		{Actions: []string{}, Workspaces: []string{}, Sessions: []string{}},
+		{Actions: []string{"grant.manage"}, Workspaces: []string{}, Sessions: []string{}},
+		{Actions: []string{"shell.exec"}, Workspaces: []string{}, Sessions: []string{}},
+		{Actions: []string{"session.list"}, Workspaces: []string{"not-a-uuid"}, Sessions: []string{}},
+	} {
+		if _, err := NormalizeTicketScope("owner", invalid); !errors.Is(err, ErrGrantInvalid) {
+			t.Fatalf("invalid ticket scope error = %v, want ErrGrantInvalid", err)
+		}
+	}
+}
+
 func timePointer(value time.Time) *time.Time { return &value }

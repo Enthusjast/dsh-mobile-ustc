@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -82,9 +83,18 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 	if status.Code != http.StatusForbidden || repo.commandCalls != 0 {
 		t.Fatalf("device queried another device's command: status=%d command-calls=%d", status.Code, repo.commandCalls)
 	}
+	ticketRequest := map[string]any{
+		"runtime_id": "55555555-5555-4555-8555-555555555555",
+		"scope":      map[string]any{"actions": []string{"session.list"}, "workspaces": []string{}, "sessions": []string{}},
+	}
+	ticket := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/realtime/tickets", "proof-jti-ticket-create-0005", status.Header().Get("DPoP-Nonce"), ticketRequest)
+	if ticket.Code != http.StatusCreated || repo.ticketCalls != 1 || !strings.Contains(ticket.Body.String(), `"ticket"`) {
+		t.Fatalf("active device could not request a scoped Relay ticket: status=%d calls=%d body=%s", ticket.Code, repo.ticketCalls, ticket.Body.String())
+	}
 }
 
-func sendDPoPRequest(t *testing.T, handler http.Handler, access string, proofKey *ecdsa.PrivateKey, proofJWK map[string]any, method, uri, jti, nonce string) *httptest.ResponseRecorder {
+func sendDPoPRequest(t *testing.T, handler http.Handler, access string, proofKey *ecdsa.PrivateKey, proofJWK map[string]any, method, uri, jti, nonce string, body ...any) *httptest.ResponseRecorder {
 	t.Helper()
 	digest := sha256.Sum256([]byte(access))
 	proofURI := uri
@@ -95,12 +105,23 @@ func sendDPoPRequest(t *testing.T, handler http.Handler, access string, proofKey
 		"jti": jti, "htm": method, "htu": proofURI, "iat": time.Now().Unix(),
 		"ath": base64.RawURLEncoding.EncodeToString(digest[:]), "nonce": nonce,
 	}, proofKey)
-	request := httptest.NewRequest(method, uri, nil)
+	var requestBody io.Reader
+	if len(body) > 0 {
+		encoded, err := json.Marshal(body[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestBody = strings.NewReader(string(encoded))
+	}
+	request := httptest.NewRequest(method, uri, requestBody)
 	request.URL.Scheme = "https"
 	request.URL.Host = "api.example.edu"
 	request.Host = "api.example.edu"
 	request.Header.Set("Authorization", "DPoP "+access)
 	request.Header.Set("DPoP", proof)
+	if requestBody != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response

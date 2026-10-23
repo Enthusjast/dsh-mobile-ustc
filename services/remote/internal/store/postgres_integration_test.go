@@ -191,6 +191,52 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err != nil || len(sessions) != 1 || sessions[0].ID != "99999999-9999-4999-8999-999999999999" {
 		t.Fatalf("owner session visibility: sessions=%+v error=%v", sessions, err)
 	}
+	ticketScope := GrantScope{Actions: []string{"session.list"}, Workspaces: scope.Workspaces, Sessions: []string{}}
+	if _, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, runtimeID, GrantScope{
+		Actions: []string{"message.submit"}, Workspaces: scope.Workspaces, Sessions: []string{},
+	}); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("ticket scope exceeded active grant: %v", err)
+	}
+	if _, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, runtimeID, GrantScope{
+		Actions: []string{"grant.manage"}, Workspaces: []string{}, Sessions: []string{},
+	}); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("ticket exposed grant-management action: %v", err)
+	}
+	ticket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, runtimeID, ticketScope)
+	if err != nil || len(ticket.Token) != 43 || ticket.GrantVersion != 1 || !ticket.ExpiresAt.After(time.Now()) || ticket.ExpiresAt.After(time.Now().Add(31*time.Second)) {
+		t.Fatalf("issue scoped realtime ticket: ticket=%+v error=%v", ticket, err)
+	}
+	var storedTicketHash []byte
+	if err := testDB.QueryRowContext(ctx, `select token_sha256 from realtime_tickets where runtime_id = $1`, runtimeID).Scan(&storedTicketHash); err != nil {
+		t.Fatalf("read stored ticket digest: %v", err)
+	}
+	if len(storedTicketHash) != 32 || string(storedTicketHash) == ticket.Token {
+		t.Fatal("database did not store only the SHA-256 ticket digest")
+	}
+	redemption, err := postgres.ConsumeRealtimeTicket(ctx, ticket.Token)
+	if err != nil || redemption.UserID != "22222222-2222-4222-8222-222222222222" || redemption.DeviceID != deviceID ||
+		redemption.RuntimeID != runtimeID || redemption.GrantVersion != ticket.GrantVersion || !redemption.ConsumedAt.After(time.Time{}) {
+		t.Fatalf("consume realtime ticket: redemption=%+v error=%v", redemption, err)
+	}
+	if err := assertChangeCounts(ctx, testDB, 5, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.ConsumeRealtimeTicket(ctx, ticket.Token); !errors.Is(err, ErrTicketInvalid) {
+		t.Fatalf("replayed realtime ticket error=%v, want ErrTicketInvalid", err)
+	}
+	staleTicket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, runtimeID, ticketScope)
+	if err != nil {
+		t.Fatalf("issue ticket for stale-grant check: %v", err)
+	}
+	if _, err := testDB.ExecContext(ctx, `update runtime_grants set grant_version = grant_version + 1 where runtime_id = $1 and user_id = $2`, runtimeID, "22222222-2222-4222-8222-222222222222"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.ConsumeRealtimeTicket(ctx, staleTicket.Token); !errors.Is(err, ErrTicketInvalid) {
+		t.Fatalf("ticket survived a grant version change: %v", err)
+	}
+	if err := assertChangeCounts(ctx, testDB, 6, 3); err != nil {
+		t.Fatal(err)
+	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, "proof-jkt-actor")
 	if err != nil || activeDeviceID != deviceID {
 		t.Fatalf("active device lookup: id=%s error=%v", activeDeviceID, err)
@@ -204,7 +250,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 4, 4); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 7, 4); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -188,6 +188,25 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/realtime/tickets:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RealtimeTicketRequest' }
+      responses:
+        '201':
+          description: Issues a 30-second one-use ticket bound to the active device, runtime grant version, and requested scope. Only the ticket hash is stored.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RealtimeTicketCreated' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/commands/{id}:
     get:
       parameters:
@@ -370,6 +389,51 @@ components:
           properties:
             revoked: { const: true }
             grant_version: { type: integer, minimum: 1 }
+    RealtimeTicketRequest:
+      type: object
+      additionalProperties: false
+      required: [runtime_id, scope]
+      properties:
+        runtime_id: { type: string, format: uuid }
+        scope: { $ref: '#/components/schemas/RealtimeTicketScope' }
+    RealtimeTicketScope:
+      type: object
+      additionalProperties: false
+      required: [actions, workspaces, sessions]
+      properties:
+        actions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          maxItems: 11
+          items:
+            enum: [host.list, session.list, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download]
+        workspaces:
+          type: array
+          uniqueItems: true
+          maxItems: 256
+          items: { type: string, format: uuid }
+        sessions:
+          type: array
+          uniqueItems: true
+          maxItems: 256
+          items: { type: string, format: uuid }
+    RealtimeTicketCreated:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [ticket, runtime_id, grant_version, scope, expires_at]
+          properties:
+            ticket: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+            runtime_id: { type: string, format: uuid }
+            grant_version: { type: integer, minimum: 1 }
+            scope: { $ref: '#/components/schemas/RealtimeTicketScope' }
+            expires_at: { type: string, format: date-time }
     Host:
       type: object
       additionalProperties: false
