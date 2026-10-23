@@ -7,7 +7,7 @@ import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { host } from './harness.js'
 import { request } from 'node:http'
 
-async function command(socketPath: string, type: string, payload: unknown = {}) {
+async function command(socketPath: string, type: string, payload: unknown = {}, sessionId?: string) {
   const send = (path: string, body?: unknown): Promise<any> => new Promise((accept, reject) => {
     const req = request({ socketPath, path, method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json' } }, res => {
       let data = ''
@@ -19,7 +19,7 @@ async function command(socketPath: string, type: string, payload: unknown = {}) 
     req.end(body === undefined ? undefined : JSON.stringify(body))
   })
   const probe = await send('/m0/probe')
-  return send('/m0/command', { v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload })
+  return send('/m0/command', { v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId ? { session_id: sessionId } : {}) })
 }
 
 async function fixture(timeoutMs = 1000) {
@@ -53,6 +53,9 @@ test('native approval plus final guard executes only the locally allowed exact i
     const pending = await h.pending()
     assert.equal(pending.kind, 'approval')
     assert.deepEqual(pending.detail.arguments, { value: 'exact arguments' })
+    assert.equal(h.calls(), 0)
+    const wrongKind = await command(h.socketPath, 'question.answer', { question_id: pending.interaction_id, answers: [{ id: 'approval', selected: ['allow_once'] }] }, pending.session_id)
+    assert.equal(wrongKind.payload.code, 'interaction.stale')
     assert.equal(h.calls(), 0)
     await command(h.socketPath, 'interaction.answer', { interaction_id: pending.interaction_id, answer: { decision: 'allow_once' } })
     assert.equal((await result).isError, false)

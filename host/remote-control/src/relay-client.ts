@@ -7,13 +7,14 @@ import type { SessionCatalogChange, SessionCatalogItem } from './dsh-client.js'
 import { parseCommand, ProbeError, type Command } from './protocol.js'
 import type { CommandStateObserver } from './runtime.js'
 import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
+import { questionAnswerPayload } from './questions.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
 const PROTOCOL = 'dsh.remote.v1'
 const PROOF_TYPE = 'dsh-relay-handshake-proof+jwt'
 const AUDIENCE = 'urn:dsh-mobile-ustc:realtime'
-const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'] as const
+const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'] as const
 const requiredCapabilities = ['command.relay.v1', 'connection.heartbeat.v1'] as const
 const uuid = z.uuid()
 const nonEmptyText = z.string().min(1).max(32_768).regex(/\S/).refine(text => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text))
@@ -71,10 +72,11 @@ const submitSchema = z.strictObject({
   }),
 })
 const cancelSchema = submitSchema.extend({ type: z.literal('session.cancel'), payload: z.strictObject({}) })
+const questionSchema = submitSchema.extend({ type: z.literal('question.answer'), payload: questionAnswerPayload })
 const createSchema = submitSchema.omit({ session_id: true }).extend({
   type: z.literal('session.create'), payload: z.strictObject({ workspace_id: uuid, preset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/) }),
 })
-const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, cancelSchema, createSchema])
+const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, cancelSchema, createSchema, questionSchema])
 type ForwardedCommand = z.infer<typeof forwardedCommandSchema>
 const catalogItemSchema = z.strictObject({
   session_id: uuid,
@@ -329,6 +331,8 @@ function parseForwarded(data: unknown, runtimeId: string, runtimeEpoch: string):
   if (!parsed.success || parsed.data.runtime_id !== runtimeId || parsed.data.runtime_epoch !== runtimeEpoch
     || (parsed.data.type === 'session.cancel'
       ? relayCancelDigest(parsed.data.session_id, parsed.data.runtime_epoch)
+      : parsed.data.type === 'question.answer'
+        ? relayQuestionDigest(parsed.data.session_id, parsed.data.runtime_epoch, parsed.data.payload)
       : parsed.data.type === 'session.create'
         ? relayCreateDigest(parsed.data.runtime_epoch, parsed.data.payload)
         : forwardedDigest(parsed.data.session_id, parsed.data.payload)) !== parsed.data.payload_sha256) {
@@ -549,6 +553,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
         if (forwarded.type === 'session.cancel' && !ack.data.payload.capabilities.includes('session.cancel.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.create' && !ack.data.payload.capabilities.includes('session.create.v1')) throw new ProbeError('protocol.unsupported')
+        if (forwarded.type === 'question.answer' && !ack.data.payload.capabilities.includes('question.blocking.v1')) throw new ProbeError('protocol.unsupported')
         const command = makeCommand(forwarded)
         const owner: CommandOwner = { userId: forwarded.user_id, deviceId: forwarded.device_id }
         let reported: CommandState | undefined
@@ -675,4 +680,8 @@ export function relayCancelDigest(sessionId: string, runtimeEpoch: string): stri
 
 export function relayCreateDigest(runtimeEpoch: string, payload: z.infer<typeof createSchema>['payload']): string {
   return createHash('sha256').update(JSON.stringify(jcs({ type: 'session.create', runtime_epoch: runtimeEpoch, payload }))).digest('hex')
+}
+
+export function relayQuestionDigest(sessionId: string, runtimeEpoch: string, payload: z.infer<typeof questionAnswerPayload>): string {
+  return createHash('sha256').update(JSON.stringify(jcs({ type: 'question.answer', runtime_epoch: runtimeEpoch, session_id: sessionId, payload }))).digest('hex')
 }

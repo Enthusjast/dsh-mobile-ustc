@@ -8,6 +8,7 @@ import { SessionSync } from './session-sync.js'
 const localCommandOwner: CommandOwner = { userId: 'local', deviceId: 'local' }
 const definiteRejections = new Set([
   'access.denied', 'model.not_available', 'protocol.invalid', 'runtime.changed', 'runtime.offline', 'session.not_found',
+  'interaction.stale', 'interaction.invalid_answer',
 ])
 
 export type CommandStateObserver = (state: CommandState, result?: unknown) => void | Promise<void>
@@ -20,7 +21,7 @@ export class ProbeRuntime {
   private closed = false
 
   constructor(readonly client: DshClient, private readonly interactions: InteractionRouter, private readonly journal: CommandJournal = new MemoryCommandJournal(client.runtimeId)) {
-    this.sync = new SessionSync(client, this.epoch)
+    this.sync = new SessionSync(client, this.epoch, interactions)
   }
 
   private check(command: Command): void {
@@ -51,6 +52,9 @@ export class ProbeRuntime {
           })
         }
         case 'session.cancel': return this.client.cancel(await this.client.resolve(command.session_id, signal))
+        case 'question.answer': return this.interactions.answerQuestion(command.session_id, command.payload.question_id, {
+          answers: command.payload.answers.map(item => ({ id: item.id, selected: item.selected, ...(item.custom === undefined ? {} : { custom: item.custom }) })),
+        })
         case 'session.model.select': {
           const id = await this.client.resolve(command.session_id, signal)
           return this.client.selectModel(id, {
@@ -70,7 +74,7 @@ export class ProbeRuntime {
         case 'session.subscribe': throw new ProbeError('protocol.streaming_required')
       }
     }
-    const mutating = ['session.create', 'message.submit', 'session.cancel', 'session.model.select', 'interaction.answer'].includes(command.type)
+    const mutating = ['session.create', 'message.submit', 'session.cancel', 'session.model.select', 'interaction.answer', 'question.answer'].includes(command.type)
     let payload: unknown
     if (!mutating) payload = await run()
     else {

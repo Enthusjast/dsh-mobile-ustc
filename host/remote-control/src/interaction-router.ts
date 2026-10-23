@@ -6,19 +6,24 @@ import type { ApprovalRequest, ApprovalOutcome } from '@deepseek-ai/dsh-user-app
 import type { AskUserQuestionRequest, AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions'
 import { mobileSessionId } from './dsh-client.js'
 import { ProbeError } from './protocol.js'
+import { questionItem, type BlockingQuestion, type QuestionSnapshot, type QuestionSource } from './questions.js'
 
 type Answer = { decision: 'allow_once' | 'reject' } | AskUserQuestionAnswer
 interface Pending {
   view: { interaction_id: string; session_id: string; kind: 'approval' | 'question'; expires_at: string; detail: unknown }
   finish(answer?: Answer): void
+  question?: BlockingQuestion
 }
 
 /** M0 local human answerer, without mobile identity or production signing claims. */
-export class InteractionRouter {
+export class InteractionRouter implements QuestionSource {
   private readonly pending = new Map<string, Pending>()
   private readonly executions = new Map<string, ToolExecution>()
   private readonly approved = new Set<symbol>()
   private closed = false
+  private revision = 0
+  private questionBytes = 0
+  private readonly questionListeners = new Map<string, Set<() => void>>()
 
   constructor(
     private readonly ctx: Context,
@@ -89,26 +94,71 @@ export class InteractionRouter {
   private wait(agent: Agent, kind: 'approval' | 'question', detail: unknown, signal?: AbortSignal): Promise<Answer | undefined> {
     if (this.closed || signal?.aborted || this.pending.size >= 64) return Promise.resolve(undefined)
     const id = randomUUID()
+    const sessionId = mobileSessionId(this.runtimeId, agent.id)
+    const expiresAt = new Date(Date.now() + this.timeoutMs).toISOString()
+    const question = kind === 'question' ? this.projectQuestion(id, expiresAt, detail) : undefined
+    const bytes = question === undefined ? 0 : Buffer.byteLength(JSON.stringify(question))
+    if (bytes > 128 * 1024 || this.questionBytes + bytes > 1024 * 1024) return Promise.reject(new ProbeError('question.too_large'))
     return new Promise(resolve => {
       const onAbort = () => finish()
       const timer = setTimeout(onAbort, this.timeoutMs)
       timer.unref()
       const finish = (answer?: Answer) => {
         if (!this.pending.delete(id)) return
+        this.questionBytes -= bytes
         clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
         resolve(answer)
+        if (question) this.changed(sessionId)
       }
       this.pending.set(id, {
-        view: { interaction_id: id, session_id: mobileSessionId(this.runtimeId, agent.id), kind, expires_at: new Date(Date.now() + this.timeoutMs).toISOString(), detail },
-        finish,
+        view: { interaction_id: id, session_id: sessionId, kind, expires_at: expiresAt, detail },
+        finish, ...(question ? { question } : {}),
       })
+      this.questionBytes += bytes
+      if (question) this.changed(sessionId)
       signal?.addEventListener('abort', onAbort, { once: true })
       if (signal?.aborted) finish()
     })
   }
 
   list() { return { items: [...this.pending.values()].map(item => item.view) } }
+
+  private projectQuestion(id: string, expiresAt: string, detail: unknown): BlockingQuestion {
+    const { questions } = detail as { questions: AskUserQuestionRequest['questions'] }
+    const projected = questions.map(question => questionItem.parse({
+      id: question.id, question: question.question,
+      ...(question.detail === undefined ? {} : { detail: question.detail }),
+      ...(question.header === undefined ? {} : { header: question.header }),
+      ...(question.options === undefined ? {} : { options: question.options.map(option => ({ label: option.label, ...(option.description === undefined ? {} : { description: option.description }) })) }),
+      ...(question.multiSelect === undefined ? {} : { multi_select: question.multiSelect }),
+      ...(question.intent === undefined ? {} : { intent: { kind: question.intent.kind, approve: question.intent.approve } }),
+    }))
+    if (projected.length < 1 || projected.length > 32 || new Set(projected.map(item => item.id)).size !== projected.length) throw new ProbeError('question.invalid')
+    return { question_id: id, expires_at: expiresAt, questions: projected }
+  }
+
+  snapshot(sessionId: string): QuestionSnapshot {
+    return { revision: this.revision, items: [...this.pending.values()].filter(item => item.view.session_id === sessionId && item.question).map(item => structuredClone(item.question!)) }
+  }
+
+  watch(sessionId: string, listener: () => void): () => void {
+    const listeners = this.questionListeners.get(sessionId) ?? new Set()
+    listeners.add(listener)
+    this.questionListeners.set(sessionId, listeners)
+    return () => { listeners.delete(listener); if (!listeners.size) this.questionListeners.delete(sessionId) }
+  }
+
+  private changed(sessionId: string): void {
+    this.revision++
+    for (const listener of this.questionListeners.get(sessionId) ?? []) listener()
+  }
+
+  answerQuestion(sessionId: string, id: string, answer: AskUserQuestionAnswer) {
+    const pending = this.pending.get(id)
+    if (!pending || pending.view.kind !== 'question' || pending.view.session_id !== sessionId) throw new ProbeError('interaction.stale')
+    return this.answer(id, answer)
+  }
 
   answer(id: string, answer: Answer) {
     const item = this.pending.get(id)
@@ -141,5 +191,6 @@ export class InteractionRouter {
     for (const item of this.pending.values()) item.finish()
     this.approved.clear()
     this.executions.clear()
+    this.questionListeners.clear()
   }
 }

@@ -685,7 +685,7 @@ func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, instal
 		t.Fatal(err)
 	}
 	if len(capabilities) == 0 {
-		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
 	}
 	challenge := readChallenge(t, connection, "installation")
 	hello := hostHandshakePayload{
@@ -722,7 +722,7 @@ func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, tick
 		t.Fatal(err)
 	}
 	if len(capabilities) == 0 {
-		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.create.v1", "session.read.v1"}
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "session.cancel.v1", "session.create.v1", "session.read.v1"}
 	}
 	challenge := readChallenge(t, connection, "device")
 	hello := deviceHandshakePayload{

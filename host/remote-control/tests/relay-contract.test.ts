@@ -16,6 +16,9 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
     '../../../contracts/ws/v1/golden/session-cancel.json',
     '../../../contracts/ws/v1/golden/session-cancel.forwarded.json',
+    '../../../contracts/ws/v1/golden/question-answer.json',
+    '../../../contracts/ws/v1/golden/question-answer.forwarded.json',
+    '../../../contracts/ws/v1/golden/question-snapshot.json',
     '../../../contracts/ws/v1/golden/session-create.json',
     '../../../contracts/ws/v1/golden/session-create.forwarded.json',
     '../../../contracts/ws/v1/golden/host-session-create.host_accepted.json',
@@ -51,6 +54,9 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   const { runtime_epoch: _epoch, ...missingEpoch } = deviceCancel
   assert.equal(validate(missingEpoch), false)
   assert.equal(validate({ ...deviceCancel, payload: { all: true } }), false)
+  const question = await load('../../../contracts/ws/v1/golden/question-answer.forwarded.json') as Record<string, unknown>
+  assert.equal(question.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: question.type, runtime_epoch: question.runtime_epoch, session_id: question.session_id, payload: question.payload }))).digest('hex'))
+  assert.equal(validate({ ...question, payload: { question_id: question.request_id, decision: 'allow_once' } }), false)
   const creation = await load('../../../contracts/ws/v1/golden/session-create.forwarded.json') as Record<string, unknown>
   assert.equal(creation.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: creation.type, runtime_epoch: creation.runtime_epoch, payload: creation.payload }))).digest('hex'))
   assert.equal(validate({ ...creation, session_id: creation.request_id }), false)

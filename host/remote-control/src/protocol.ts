@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { questionAnswerPayload } from './questions.js'
 
 export const MAX_FRAME_BYTES = 64 * 1024
 export const MAX_QUEUE_BYTES = 512 * 1024
@@ -25,6 +26,7 @@ export const Command = z.discriminatedUnion('type', [
     z.strictObject({ mode: z.enum(['queue', 'steer']), content: z.array(textContent).min(1).max(16) }),
   ])),
   sessionCommand('session.cancel', empty),
+  sessionCommand('question.answer', questionAnswerPayload),
   sessionCommand('session.model.select', z.strictObject({
     provider: z.string().min(1).max(128), model: z.string().min(1).max(128), reasoning_effort: z.string().min(1).max(64).optional(),
   })),

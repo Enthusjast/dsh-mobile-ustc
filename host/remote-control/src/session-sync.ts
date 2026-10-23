@@ -3,14 +3,69 @@ import type { DshClient } from './dsh-client.js'
 import type { Command, Frame } from './protocol.js'
 import { ProbeError } from './protocol.js'
 import { projectChunk, projectEvent, projectStream } from './projection.js'
+import type { QuestionSource } from './questions.js'
 
 interface Sync { session: string; through: number }
 
 export class SessionSync {
   private readonly cuts = new Map<string, Sync>()
-  constructor(private readonly client: DshClient, private readonly epoch: string) {}
+  constructor(private readonly client: DshClient, private readonly epoch: string, private readonly questions?: QuestionSource) {}
 
   async *follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal): AsyncIterable<Frame> {
+    if (!this.questions) { yield* this.nativeFollow(command, signal); return }
+    const lifetime = new AbortController()
+    let changed = true
+    let wake: (() => void) | undefined
+    const abort = () => { lifetime.abort(); wake?.() }
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) abort()
+    const dispose = this.questions.watch(command.session_id, () => { changed = true; wake?.() })
+    const iterator = this.nativeFollow(command, lifetime.signal)[Symbol.asyncIterator]()
+    let nativeValue: IteratorResult<Frame> | undefined
+    let nativeFailed = false
+    let nativeError: unknown
+    const advance = () => {
+      // Attach once per native read. Repeated question notices must not add
+      // Promise.race handlers to an indefinitely pending native follower.
+      void iterator.next().then(value => { nativeValue = value; wake?.() }, error => {
+        nativeFailed = true; nativeError = error; wake?.()
+      })
+    }
+    advance()
+    let syncId: string | undefined
+    let baselineReady = false
+    try {
+      while (!signal.aborted) {
+        if (nativeFailed) throw nativeError
+        if (changed && syncId && baselineReady) {
+          changed = false
+          yield { v: 0, type: 'question.snapshot', runtime_epoch: this.epoch, request_id: command.request_id,
+            session_id: command.session_id, sync_id: syncId, payload: this.questions.snapshot(command.session_id) }
+          continue
+        }
+        if (!nativeValue) {
+          await new Promise<void>(resolve => { wake = resolve })
+          wake = undefined
+          continue
+        }
+        const item = nativeValue
+        nativeValue = undefined
+        if (item.done) return
+        const frame = item.value
+        if (frame.type === 'session.snapshot') syncId = frame.sync_id
+        if (frame.type === 'session.checkpoint') baselineReady = true
+        advance()
+        yield frame
+      }
+    } finally {
+      dispose()
+      signal.removeEventListener('abort', abort)
+      lifetime.abort()
+      await iterator.return?.()
+    }
+  }
+
+  private async *nativeFollow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal): AsyncIterable<Frame> {
     if (this.cuts.size >= 32) throw new ProbeError('rate.limited')
     const native = await this.client.resolve(command.session_id, signal)
     const syncId = randomUUID()

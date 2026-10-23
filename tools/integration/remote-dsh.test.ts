@@ -10,7 +10,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
-import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayCreateDigest } from '../../host/remote-control/src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayCreateDigest, relayQuestionDigest } from '../../host/remote-control/src/relay-client.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -248,7 +248,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   })
   const beforeCreate = (await command('session.list', {})).payload.items.length
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
-  const scope = { actions: ['message.submit', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
+  const scope = { actions: ['message.submit', 'question.answer', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
   await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
@@ -259,7 +259,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const collector = new FrameCollector(socket, value => validate(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
+    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -386,12 +386,39 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(query(`select count(*) from commands where request_id='${cancelId}'`), '1')
   assert.equal(query(`select count(*) from commands where request_id='${staleCancelId}'`), '0')
 
+  const siblingMobile = await connectPhone(siblingPhone, siblingDevice.device_id, siblingKey)
+  const questionFrom = mobile.frames.length, questionPromptId = randomUUID(), questionMarker = `M0_QUESTION_TEST_${randomUUID()}`
+  mobile.send({ ...submit, request_id: questionPromptId, payload: { mode: 'queue', content: [{ type: 'text', text: questionMarker }] } })
+  const questionState = await mobile.wait(frame => frame.type === 'question.snapshot' && frame.payload.items.length > 0, questionFrom)
+  const question = questionState.payload.items[0]
+  assert.equal(question.questions[0].id, 'm0-choice')
+  const answerMarker = `REMOTE_ANSWER_${randomUUID()}`
+  const questionAnswer = { v: 1, type: 'question.answer', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: sessionId,
+    payload: { question_id: question.question_id, answers: [{ id: 'm0-choice', selected: ['Local answer'], custom: answerMarker }] } }
+  const invalidAnswerId = randomUUID()
+  mobile.send({ ...questionAnswer, request_id: invalidAnswerId, payload: { ...questionAnswer.payload, answers: [{ id: 'm0-choice', selected: ['invented'] }] } })
+  await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === invalidAnswerId && frame.payload.state === 'rejected')
+  assert.equal(mobile.closed, false, 'invalid question answer disconnected subscriptions')
+  const competingAnswer = { ...questionAnswer, request_id: randomUUID() }
+  mobile.send(questionAnswer)
+  siblingMobile.send(competingAnswer)
+  const terminal = (collector: FrameCollector, id: string) => collector.wait(frame => frame.type === 'command.receipt' && frame.request_id === id && ['settled', 'rejected'].includes(frame.payload.state))
+  const results = await Promise.all([terminal(mobile, questionAnswer.request_id), terminal(siblingMobile, competingAnswer.request_id)])
+  assert.deepEqual(results.map(frame => frame.payload.state).sort(), ['rejected', 'settled'], 'multiple devices completed the same question')
+  const winner = results[0].payload.state === 'settled' ? { collector: mobile, answer: questionAnswer } : { collector: siblingMobile, answer: competingAnswer }
+  const answerRetryFrom = winner.collector.frames.length
+  winner.collector.send(winner.answer)
+  const retriedAnswer = await winner.collector.wait(frame => frame.type === 'command.receipt' && frame.request_id === winner.answer.request_id && frame.payload.state === 'settled', answerRetryFrom)
+  assert.equal(retriedAnswer.payload.payload_sha256, relayQuestionDigest(sessionId, probe.runtime_epoch, winner.answer.payload))
+  await mobile.wait(frame => frame.type === 'question.snapshot' && frame.payload.revision > questionState.payload.revision && frame.payload.items.length === 0, questionFrom)
+  await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'turn/end', questionFrom)
+  assert.equal((await phone('GET', `/v1/commands/${questionAnswer.request_id}?device_id=${device.device_id}`)).state, results[0].payload.state)
+
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, cancelMarker, 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
+  for (const secret of [marker, cancelMarker, questionMarker, answerMarker, 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
-  const siblingMobile = await connectPhone(siblingPhone, siblingDevice.device_id, siblingKey)
   const deviceRevokedAt = Date.now()
   await phone('DELETE', `/v1/devices/${siblingDevice.device_id}`)
   await siblingMobile.wait(frame => frame.type === 'access.revoked' && frame.payload.code === 'access.revoked')
@@ -412,5 +439,6 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   t.diagnostic(`Idle device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
-  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
+  t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
+  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, questions, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

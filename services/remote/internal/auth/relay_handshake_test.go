@@ -110,9 +110,9 @@ func TestRelayHelloDigestIsStableAndLengthDelimited(t *testing.T) {
 func TestRelayHelloDigestMatchesNodeGolden(t *testing.T) {
 	got := RelayHelloDigest(
 		"host", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444",
-		"0.2.1-rc.2", "1.2.3", "0.0.1", "1", "command.relay.v1\nconnection.heartbeat.v1\nsession.cancel.v1\nsession.catalog.v1\nsession.create.v1\nsession.read.v1",
+		"0.2.1-rc.2", "1.2.3", "0.0.1", "1", "command.relay.v1\nconnection.heartbeat.v1\nquestion.blocking.v1\nsession.cancel.v1\nsession.catalog.v1\nsession.create.v1\nsession.read.v1",
 	)
-	const want = "F4OaXrvN-8s9YhttbHm8bJsVrsYczdUd58BbAQYlfEA"
+	const want = "6bfw1MRmLMWQIfpf6s1poIA-rcxNbspnlg-ydFksA3c"
 	if got != want {
 		t.Fatalf("relay hello digest=%s, want %s", got, want)
 	}

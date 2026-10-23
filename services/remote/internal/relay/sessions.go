@@ -13,6 +13,7 @@ type sessionSubscription struct {
 	ready                            bool
 	pages                            map[string]string
 	fragment                         *sessionFragmentState
+	questions                        bool
 }
 
 type sessionFragmentState struct {
@@ -39,7 +40,7 @@ type sessionFragmentPayload struct {
 
 func isSessionContent(kind string) bool {
 	switch kind {
-	case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result":
+	case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "question.snapshot":
 		return true
 	}
 	return false
@@ -91,7 +92,7 @@ func (server *Server) routeSessionRead(ctx context.Context, live *liveConnection
 		server.sendProtocolError(ctx, live, "internal", &envelope)
 		return
 	}
-	subscription := &sessionSubscription{id: id, requestID: envelope.RequestID, sessionID: envelope.SessionID, device: live, host: host, pages: make(map[string]string)}
+	subscription := &sessionSubscription{id: id, requestID: envelope.RequestID, sessionID: envelope.SessionID, device: live, host: host, pages: make(map[string]string), questions: live.supports("question.blocking.v1") && host.supports("question.blocking.v1")}
 	server.mu.Lock()
 	code := ""
 	for _, existing := range live.subscriptions {
@@ -127,7 +128,11 @@ func (server *Server) routeSessionRead(ctx context.Context, live *liveConnection
 		return
 	}
 	envelope.SubscriptionID, envelope.RuntimeEpoch = id, host.runtimeEpoch
-	envelope.Payload, _ = json.Marshal(payload)
+	forward := map[string]any{"max_messages": *payload.MaxMessages}
+	if subscription.questions {
+		forward["questions"] = true
+	}
+	envelope.Payload, _ = json.Marshal(forward)
 	if err := host.sendJSON(ctx, envelope); err != nil {
 		server.dropSubscription(ctx, subscription, "protocol.resync_required", true)
 	}
@@ -296,6 +301,9 @@ func validateSessionContent(subscription *sessionSubscription, envelope wireEnve
 		return true
 	}
 	if !subscription.ready || subscription.syncID != envelope.SyncID {
+		return false
+	}
+	if kind == "question.snapshot" && !subscription.questions {
 		return false
 	}
 	if kind == "session.page.result" {

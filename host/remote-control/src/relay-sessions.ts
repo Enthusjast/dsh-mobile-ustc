@@ -8,7 +8,7 @@ const base = {
   session_id: uuid, subscription_id: uuid,
 }
 const requestSchema = z.discriminatedUnion('type', [
-  z.strictObject({ ...base, type: z.literal('session.subscribe'), payload: z.strictObject({ max_messages: z.int().min(1).max(100) }) }),
+  z.strictObject({ ...base, type: z.literal('session.subscribe'), payload: z.strictObject({ max_messages: z.int().min(1).max(100), questions: z.boolean().optional() }) }),
   z.strictObject({ ...base, type: z.literal('session.unsubscribe'), payload: z.strictObject({}) }),
   z.strictObject({ ...base, type: z.literal('session.page'), payload: z.strictObject({
     sync_id: uuid, through_seq: z.int().min(-1), before_seq: z.int().min(0), max_messages: z.int().min(1).max(100),
@@ -37,7 +37,7 @@ const MAX_FRAME = 64 * 1024
 const MAX_PAYLOAD = 2 * 1024 * 1024
 const MAX_SUBSCRIPTION_BYTES = 3 * 1024 * 1024
 const MAX_TOTAL_BYTES = 12 * 1024 * 1024
-const contentTypes = new Set(['session.snapshot', 'session.event', 'session.checkpoint', 'assistant.start', 'assistant.chunk', 'assistant.end'])
+const contentTypes = new Set(['session.snapshot', 'session.event', 'session.checkpoint', 'assistant.start', 'assistant.chunk', 'assistant.end', 'question.snapshot'])
 
 /** Split only the projected payload. Routing and sync identities remain visible on every fragment. */
 export function encodeSessionFrames(frame: Record<string, unknown>): Record<string, unknown>[] {
@@ -109,10 +109,11 @@ export class RelaySessions {
     const request = subscription.request
     try {
       const command = parseCommand({ v: 0, type: 'session.subscribe', request_id: request.request_id,
-        runtime_epoch: request.runtime_epoch, session_id: request.session_id, payload: request.payload })
+        runtime_epoch: request.runtime_epoch, session_id: request.session_id, payload: { max_messages: request.payload.max_messages } })
       if (command.type !== 'session.subscribe') throw new ProbeError('protocol.invalid')
       for await (const source of this.runtime.follow(command, subscription.abort.signal)) {
         if (subscription.abort.signal.aborted) return
+        if (source.type === 'question.snapshot' && (request.type !== 'session.subscribe' || !request.payload.questions)) continue
         if (!contentTypes.has(source.type) || source.session_id !== request.session_id || source.runtime_epoch !== request.runtime_epoch || !source.sync_id) throw new ProbeError('protocol.invalid')
         this.enqueue(subscription, this.envelope(request, source.type, source.payload, source.sync_id))
       }

@@ -151,7 +151,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           relayRuntimeEpoch = proof.runtime_epoch
           const helloDigest = hostHelloDigest([
             'host', runtimeId, relayRuntimeEpoch, '0.2.1-rc.2', 'dsh-cli-integration', '0.0.1', '1',
-            ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'].join('\n'),
+            ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'].join('\n'),
           ])
           const valid = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')).typ === 'dsh-relay-handshake-proof+jwt'
             && proof.iss === installationId && proof.aud === 'urn:dsh-mobile-ustc:realtime'
@@ -163,7 +163,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolveRelayConnected()

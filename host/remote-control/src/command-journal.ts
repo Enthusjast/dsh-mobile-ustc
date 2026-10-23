@@ -63,7 +63,7 @@ function canonicalValue(value: unknown): unknown {
 export function commandDigest(command: Command): string {
   const body = {
     type: command.type,
-    ...(command.type === 'session.cancel' || (command.type === 'session.create' && 'workspace_id' in command.payload)
+    ...(command.type === 'session.cancel' || command.type === 'question.answer' || (command.type === 'session.create' && 'workspace_id' in command.payload)
       ? { runtime_epoch: command.runtime_epoch } : {}),
     ...('session_id' in command ? { session_id: command.session_id } : {}),
     payload: command.payload,

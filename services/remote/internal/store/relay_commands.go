@@ -43,7 +43,7 @@ var relayReceiptStates = map[string]struct{}{
 
 // RecordRealtimeCommand persists status and a digest; the request body remains transient.
 func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket TicketRedemption, commandType, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
-	if commandType != "message.submit" && commandType != "session.cancel" {
+	if commandType != "message.submit" && commandType != "session.cancel" && commandType != "question.answer" {
 		return CommandStatus{}, ErrGrantInvalid
 	}
 	if !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) ||

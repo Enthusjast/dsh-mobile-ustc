@@ -668,6 +668,9 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.RecordRealtimeCommand(ctx, noCancel, "session.cancel", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("cancel accepted without explicit action: %v", err)
 	}
+	if _, err := postgres.RecordRealtimeCommand(ctx, noCancel, "question.answer", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("question answer accepted without explicit action: %v", err)
+	}
 	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "session.archive", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrGrantInvalid) {
 		t.Fatalf("unimplemented command type accepted: %v", err)
 	}

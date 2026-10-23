@@ -17,6 +17,9 @@
     { "$ref": "#/$defs/messageSubmitToHost" },
     { "$ref": "#/$defs/sessionCancel" },
     { "$ref": "#/$defs/sessionCancelToHost" },
+    { "$ref": "#/$defs/questionAnswer" },
+    { "$ref": "#/$defs/questionAnswerToHost" },
+    { "$ref": "#/$defs/questionSnapshot" },
     { "$ref": "#/$defs/sessionCreate" },
     { "$ref": "#/$defs/sessionCreateToHost" },
     { "$ref": "#/$defs/hostCreationReceipt" },
@@ -544,6 +547,294 @@
         }
       }
     },
+    "questionAnswerPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "answers"
+      ],
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "answers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "selected"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "selected": {
+                "type": "array",
+                "maxItems": 32,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "maxLength": 4096
+                }
+              },
+              "custom": {
+                "type": "string",
+                "maxLength": 16384
+              }
+            }
+          }
+        }
+      }
+    },
+    "questionItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "question"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "header": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "multi_select": {
+          "type": "boolean"
+        },
+        "options": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 16384
+              }
+            }
+          }
+        },
+        "intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "approve"
+          ],
+          "properties": {
+            "kind": {
+              "const": "plan-review"
+            },
+            "approve": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    "blockingQuestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "expires_at",
+        "questions"
+      ],
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/questionItem"
+          }
+        }
+      }
+    },
+    "questionAnswer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.answer"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/questionAnswerPayload"
+        }
+      }
+    },
+    "questionAnswerToHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "user_id",
+        "device_id",
+        "payload_sha256",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.answer"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "payload": {
+          "$ref": "#/$defs/questionAnswerPayload"
+        }
+      }
+    },
+    "questionSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.snapshot"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "revision",
+            "items"
+          ],
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "items": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/blockingQuestion"
+              }
+            }
+          }
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
     "submitPayload": {
       "type": "object", "additionalProperties": false, "required": ["mode", "content"],
       "properties": {
@@ -658,20 +949,54 @@
     "hostSessionSubscribe": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload"
+      ],
       "properties": {
-        "v": {"const": 1},
-        "type": {"const": "session.subscribe"},
-        "request_id": {"$ref": "#/$defs/uuid"},
-        "runtime_id": {"$ref": "#/$defs/uuid"},
-        "runtime_epoch": {"$ref": "#/$defs/uuid"},
-        "session_id": {"$ref": "#/$defs/uuid"},
-        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.subscribe"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["max_messages"],
-          "properties": {"max_messages": {"type": "integer", "minimum": 1, "maximum": 100}}
+          "required": [
+            "max_messages"
+          ],
+          "properties": {
+            "max_messages": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "questions": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },
@@ -951,30 +1276,86 @@
     "sessionFragment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
       "properties": {
-        "v": {"const": 1},
-        "type": {"const": "session.fragment"},
-        "request_id": {"$ref": "#/$defs/uuid"},
-        "runtime_id": {"$ref": "#/$defs/uuid"},
-        "runtime_epoch": {"$ref": "#/$defs/uuid"},
-        "session_id": {"$ref": "#/$defs/uuid"},
-        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.fragment"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "fragment_id", "index", "count", "data"],
+          "required": [
+            "type",
+            "fragment_id",
+            "index",
+            "count",
+            "data"
+          ],
           "properties": {
             "type": {
-              "enum": ["session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result"]
+              "enum": [
+                "session.snapshot",
+                "session.event",
+                "session.checkpoint",
+                "assistant.start",
+                "assistant.chunk",
+                "assistant.end",
+                "session.page.result",
+                "question.snapshot"
+              ]
             },
-            "fragment_id": {"$ref": "#/$defs/uuid"},
-            "index": {"type": "integer", "minimum": 0, "maximum": 51},
-            "count": {"type": "integer", "minimum": 2, "maximum": 52},
-            "data": {"type": "string", "minLength": 4, "maxLength": 54616, "pattern": "^[A-Za-z0-9+/]+={0,2}$"}
+            "fragment_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 51
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 52
+            },
+            "data": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 54616,
+              "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+            }
           }
         },
-        "sync_id": {"$ref": "#/$defs/uuid"}
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
       }
     },
     "sessionError": {
