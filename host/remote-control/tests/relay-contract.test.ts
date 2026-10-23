@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
@@ -20,4 +21,21 @@ test('WSS relay business-frame schema accepts golden requests and receipts only'
   }
   const invalid = await load('../../../contracts/ws/v1/golden/invalid-message-submit.json')
   assert.equal(validate(invalid), false)
+
+  const forwarded = await load('../../../contracts/ws/v1/golden/message-submit.forwarded.json') as {
+    request_id: string
+    session_id: string
+    payload: { mode: string; content: Array<{ type: string; text: string }> }
+    payload_sha256: string
+  }
+  const body = canonicalValue({ type: 'message.submit', session_id: forwarded.session_id, payload: forwarded.payload })
+  const digest = createHash('sha256').update(JSON.stringify(body)).digest('hex')
+  assert.equal(forwarded.payload_sha256, digest)
 })
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue)
+  if (typeof value !== 'object' || value === null) return value
+  const object = value as Record<string, unknown>
+  return Object.fromEntries(Object.keys(object).sort().map(key => [key, canonicalValue(object[key])]))
+}

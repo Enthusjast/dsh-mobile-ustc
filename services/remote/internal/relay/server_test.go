@@ -209,6 +209,20 @@ func TestDeviceTicketRequiresKeyProofBeforeHelloAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestMessageSubmitDigestMatchesCrossLanguageGolden(t *testing.T) {
+	const sessionID = "55555555-5555-4555-8555-555555555555"
+	digest, err := messageSubmitDigest(sessionID, messageSubmitPayload{
+		Mode: "queue", Content: []messageContent{{Type: "text", Text: "Continue the current task."}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expected = "788209dea3f4077e600000b21b3265cadc9b95ea38d05a86daeb72231a70b4a2"
+	if digest != expected {
+		t.Fatalf("canonical relay command digest=%s, want %s", digest, expected)
+	}
+}
+
 func TestInvalidDeviceProofDoesNotConsumeTicket(t *testing.T) {
 	key := relayTestKey(t)
 	publicJWK, thumbprint := relayTestPublicJWK(t, key)

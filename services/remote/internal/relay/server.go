@@ -967,13 +967,60 @@ func normalizeMessageSubmit(payload messageSubmitPayload) error {
 }
 
 func messageSubmitDigest(sessionID string, payload messageSubmitPayload) (string, error) {
-	normalized := normalizedMessageSubmit{Type: "message.submit", SessionID: sessionID, Payload: payload}
-	encoded, err := json.Marshal(normalized)
-	if err != nil {
-		return "", err
+	// JCS order for this text-only command is fixed: top-level payload/session/type,
+	// payload content/mode, and each text block text/type.
+	encoded := []byte(`{"payload":{"content":[`)
+	for index, item := range payload.Content {
+		if index > 0 {
+			encoded = append(encoded, ',')
+		}
+		encoded = append(encoded, `{"text":`...)
+		encoded = appendJSONString(encoded, item.Text)
+		encoded = append(encoded, `,"type":"text"}`...)
 	}
+	encoded = append(encoded, `],"mode":`...)
+	encoded = appendJSONString(encoded, payload.Mode)
+	encoded = append(encoded, `},"session_id":`...)
+	encoded = appendJSONString(encoded, sessionID)
+	encoded = append(encoded, `,"type":"message.submit"}`...)
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func appendJSONString(output []byte, value string) []byte {
+	output = append(output, '"')
+	for _, char := range value {
+		switch char {
+		case '"':
+			output = append(output, '\\', '"')
+		case '\\':
+			output = append(output, '\\', '\\')
+		case '\b':
+			output = append(output, '\\', 'b')
+		case '\f':
+			output = append(output, '\\', 'f')
+		case '\n':
+			output = append(output, '\\', 'n')
+		case '\r':
+			output = append(output, '\\', 'r')
+		case '\t':
+			output = append(output, '\\', 't')
+		default:
+			if char < 0x20 {
+				output = append(output, '\\', 'u', '0', '0', lowerHex(byte(char>>4)), lowerHex(byte(char&0xf)))
+			} else {
+				output = utf8.AppendRune(output, char)
+			}
+		}
+	}
+	return append(output, '"')
+}
+
+func lowerHex(value byte) byte {
+	if value < 10 {
+		return '0' + value
+	}
+	return 'a' + value - 10
 }
 
 func validSHA256Hex(value string) bool {
