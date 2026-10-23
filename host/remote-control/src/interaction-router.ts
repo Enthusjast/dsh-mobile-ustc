@@ -7,6 +7,7 @@ import type { AskUserQuestionRequest, AskUserQuestionAnswer } from '@deepseek-ai
 import { mobileSessionId } from './dsh-client.js'
 import { ProbeError } from './protocol.js'
 import { questionItem, type BlockingQuestion, type QuestionSnapshot, type QuestionSource } from './questions.js'
+import { TimedQuestions } from './timed-questions.js'
 
 type Answer = { decision: 'allow_once' | 'reject' } | AskUserQuestionAnswer
 interface Pending {
@@ -17,6 +18,7 @@ interface Pending {
 
 /** M0 local human answerer, without mobile identity or production signing claims. */
 export class InteractionRouter implements QuestionSource {
+  readonly timed: TimedQuestions
   private readonly pending = new Map<string, Pending>()
   private readonly executions = new Map<string, ToolExecution>()
   private readonly approved = new Set<symbol>()
@@ -32,6 +34,9 @@ export class InteractionRouter implements QuestionSource {
     private readonly highRiskTools: readonly string[],
     private readonly timeoutMs: number,
   ) {
+    this.timed = new TimedQuestions(ctx, runtimeId, managed,
+      questions => this.projectQuestion('', '', { questions }).questions,
+      (questions, answer) => this.validateAnswer({ questions }, answer, true))
     ctx.on('tools/pre-execute', async (exec, next) => {
       if (!this.protected(exec)) return next()
       const previous = await next()
@@ -82,9 +87,7 @@ export class InteractionRouter implements QuestionSource {
 
   private async question(request: AskUserQuestionRequest, next: () => Promise<AskUserQuestionAnswer>): Promise<AskUserQuestionAnswer> {
     if (!this.managed(request.agent)) return next()
-    // A timed question also requires the native wait claim and late-answer path.
-    // Until that adapter is verified, fail closed instead of pretending it is indefinite.
-    if (request.wait?.timed) throw new ProbeError('question.timed_unsupported')
+    if (request.wait?.timed) return this.timed.question(request)
     if (request.agent === undefined) throw new ProbeError('question.unavailable')
     const answer = await this.wait(request.agent, 'question', { questions: request.questions }, request.signal)
     if (answer === undefined || !('answers' in answer)) throw new ProbeError('question.cancelled')
@@ -170,7 +173,7 @@ export class InteractionRouter implements QuestionSource {
     return { accepted: true }
   }
 
-  private validateAnswer(detail: unknown, answer: AskUserQuestionAnswer): void {
+  private validateAnswer(detail: unknown, answer: AskUserQuestionAnswer, allowSkipped = false): void {
     const { questions } = detail as { questions: AskUserQuestionRequest['questions'] }
     const ids = new Set(answer.answers.map(item => item.id))
     if (ids.size !== questions.length || answer.answers.length !== questions.length) throw new ProbeError('interaction.invalid_answer')
@@ -179,15 +182,17 @@ export class InteractionRouter implements QuestionSource {
       if (value === undefined || new Set(value.selected).size !== value.selected.length
         || (!question.multiSelect && value.selected.length > 1)
         || value.selected.some(label => !question.options?.some(option => option.label === label))
-        || (value.selected.length === 0 && !value.custom?.trim())) throw new ProbeError('interaction.invalid_answer')
+        || (!allowSkipped && value.selected.length === 0 && !value.custom?.trim())) throw new ProbeError('interaction.invalid_answer')
     }
   }
 
   invalidate(sessionId: string): void {
+    this.timed.invalidate(sessionId)
     for (const item of this.pending.values()) if (item.view.session_id === sessionId) item.finish()
   }
   close(): void {
     this.closed = true
+    this.timed.close()
     for (const item of this.pending.values()) item.finish()
     this.approved.clear()
     this.executions.clear()

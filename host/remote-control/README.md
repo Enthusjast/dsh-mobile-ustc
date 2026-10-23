@@ -58,7 +58,7 @@ curl --unix-socket /tmp/dsh-remote-private/probe.sock http://localhost/m0/probe
 
 受保护工具在原生审批服务中等待本地应答，并通过最终 guard 检查当前执行 token。前置 listener 跳过等待或桌面入口直接返回允许时，guard 仍拒绝执行。这只验证了已声明工具经 DSH ToolRuntime 的路径；底层 capability、真实微信 / 桌面共存及完整企业策略需另行组合验收。
 
-普通提问与工具批准分开处理。timed question 的原生前台 claim 和迟到回答适配尚未完成，当前明确拒绝该类型。文件、归档、子 Agent 接管、签名审批、学校身份和账号切换仍未交付。Windows 命名管道代码已实现，仍需发行包及 Windows 实机验收。
+普通提问与工具批准分开处理。主机已接入 timed question 的原生前台 claim、超时 continued 投影与迟到消息路径，已用本机 npm DSH 服务及真实工具循环验证；其 Relay / 手机传输尚未接入，当前不声明远程 timed capability。生命周期、重载与验收范围见 [timed question 适配记录](../../docs/timed-question-adapter.md)。文件、归档、子 Agent 接管、签名审批、学校身份和账号切换仍未交付。Windows 命名管道代码已实现，仍需发行包及 Windows 实机验收。
 
 Relay 双方协商 `question.blocking.v1` 后，普通阻塞式问题和计划确认随会话订阅发送待答快照。回答须绑定会话与 epoch、具备 `question.answer` 权限，并经加密命令日志记录；多设备只能完成一次，重试返回持久结果。问题回答不能应答工具审批。协议、限制及 timed question 待办见 [问题应答说明](../../docs/question-protocol.md)。
 

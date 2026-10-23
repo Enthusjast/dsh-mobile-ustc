@@ -23,3 +23,11 @@ export interface QuestionSource {
   snapshot(sessionId: string): QuestionSnapshot
   watch(sessionId: string, changed: () => void): () => void
 }
+
+export interface TimedQuestionView {
+  question_id: string
+  state: 'open' | 'continued' | 'reply_queued'
+  expires_at: string | null
+  questions: BlockingQuestion['questions']
+}
+export interface TimedQuestionSnapshot { revision: number; items: TimedQuestionView[] }

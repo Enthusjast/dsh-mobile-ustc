@@ -10,7 +10,7 @@ import { startHostRelay, type HostCredentialProvider } from './relay-client.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
 
 export const name = 'ustc-remote-control'
-export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions']
+export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections']
 
 export interface Config {
   enabled?: boolean
