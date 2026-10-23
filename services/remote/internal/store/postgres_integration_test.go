@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -71,7 +72,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if !ok {
 		t.Fatal("resolve integration test source path")
 	}
-	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql"} {
+	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql", "003_host_credentials.up.sql"} {
 		migrationPath := filepath.Join(filepath.Dir(sourceFile), "../../../../deploy/sql", name)
 		migration, err := os.ReadFile(migrationPath)
 		if err != nil {
@@ -331,6 +332,88 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := assertChangeCounts(ctx, testDB, 11, 8); err != nil {
 		t.Fatal(err)
 	}
+	challenge, err := postgres.CreateHostCredentialChallenge(ctx, identity, installationThumbprint)
+	if err != nil || challenge.InstallationID != enrollment.InstallationID || challenge.Audience != auth.HostCredentialProofAudience {
+		t.Fatalf("create installation challenge: challenge=%+v error=%v", challenge, err)
+	}
+	var staleChallenge HostCredentialChallenge
+	for pending := 1; pending < 4; pending++ {
+		createdChallenge, err := postgres.CreateHostCredentialChallenge(ctx, identity, installationThumbprint)
+		if err != nil {
+			t.Fatalf("create pending installation challenge %d: %v", pending+1, err)
+		}
+		if pending == 3 {
+			staleChallenge = createdChallenge
+		}
+	}
+	if _, err := postgres.CreateHostCredentialChallenge(ctx, identity, installationThumbprint); !errors.Is(err, ErrHostChallengeLimit) {
+		t.Fatalf("fifth pending installation challenge error=%v, want ErrHostChallengeLimit", err)
+	}
+	var challengeHash []byte
+	if err := testDB.QueryRowContext(ctx, `select challenge_sha256 from installation_challenges where id = $1`, challenge.ChallengeID).Scan(&challengeHash); err != nil {
+		t.Fatal(err)
+	}
+	if len(challengeHash) != 32 || string(challengeHash) == challenge.Challenge {
+		t.Fatal("installation challenge was stored in plaintext")
+	}
+	expectedChallengeHash := sha256.Sum256([]byte(challenge.Challenge))
+	if string(challengeHash) != string(expectedChallengeHash[:]) {
+		t.Fatal("installation challenge digest does not match the returned challenge")
+	}
+	hostProof := integrationHostCredentialProof(t, hostKey, challenge)
+	if _, err := postgres.ExchangeHostCredential(ctx, identity, installationThumbprint, challenge.ChallengeID, hostProof+"."); !errors.Is(err, ErrHostCredentialInvalid) {
+		t.Fatalf("invalid installation proof error=%v, want ErrHostCredentialInvalid", err)
+	}
+	connectionCredential, err := postgres.ExchangeHostCredential(ctx, identity, installationThumbprint, challenge.ChallengeID, hostProof)
+	if err != nil || connectionCredential.InstallationID != enrollment.InstallationID || connectionCredential.KeyThumbprint != installationThumbprint {
+		t.Fatalf("exchange installation challenge: credential=%+v error=%v", connectionCredential, err)
+	}
+	var credentialHash []byte
+	if err := testDB.QueryRowContext(ctx, `select token_sha256 from host_connection_credentials where installation_id = $1`, enrollment.InstallationID).Scan(&credentialHash); err != nil {
+		t.Fatal(err)
+	}
+	if len(credentialHash) != 32 || string(credentialHash) == connectionCredential.Credential {
+		t.Fatal("host connection credential was stored in plaintext")
+	}
+	expectedCredentialHash := sha256.Sum256([]byte(connectionCredential.Credential))
+	if string(credentialHash) != string(expectedCredentialHash[:]) {
+		t.Fatal("host credential digest does not match the returned credential")
+	}
+	verifiedCredential, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint)
+	if err != nil || verifiedCredential.InstallationID != enrollment.InstallationID {
+		t.Fatalf("validate active host credential: result=%+v error=%v", verifiedCredential, err)
+	}
+	otherHostKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPublicJWK, err := integrationP256JWK(otherHostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherThumbprint, err := auth.PublicP256JWKThumbprintJSON(otherPublicJWK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, otherThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
+		t.Fatalf("host credential accepted a different installation key: %v", err)
+	}
+	if _, err := postgres.ExchangeHostCredential(ctx, identity, installationThumbprint, challenge.ChallengeID, hostProof); !errors.Is(err, ErrHostCredentialInvalid) {
+		t.Fatalf("replayed installation challenge error=%v, want ErrHostCredentialInvalid", err)
+	}
+	if _, err := testDB.ExecContext(ctx, `update installations set key_version = key_version + 1 where id = $1`, enrollment.InstallationID); err != nil {
+		t.Fatal(err)
+	}
+	staleProof := integrationHostCredentialProof(t, hostKey, staleChallenge)
+	if _, err := postgres.ExchangeHostCredential(ctx, identity, installationThumbprint, staleChallenge.ChallengeID, staleProof); !errors.Is(err, ErrHostCredentialInvalid) {
+		t.Fatalf("challenge from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
+	}
+	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
+		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
+	}
+	if err := assertChangeCounts(ctx, testDB, 16, 8); err != nil {
+		t.Fatal(err)
+	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
 	if err != nil || len(phoneHosts) != 1 || phoneHosts[0].Alias != "Second host" {
 		t.Fatalf("confirmed phone owner host visibility: hosts=%+v error=%v", phoneHosts, err)
@@ -338,7 +421,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 11, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 16, 8); err != nil {
 		t.Fatal(err)
 	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, "proof-jkt-actor")
@@ -354,9 +437,33 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 12, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 17, 9); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func integrationHostCredentialProof(t *testing.T, key *ecdsa.PrivateKey, challenge HostCredentialChallenge) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]string{"typ": "dsh-host-credential-proof+jwt", "alg": "ES256"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := json.Marshal(map[string]any{
+		"iss": challenge.InstallationID, "aud": auth.HostCredentialProofAudience,
+		"challenge_id": challenge.ChallengeID, "nonce": challenge.Challenge,
+		"iat": time.Now().UTC().Unix(), "jti": "host-proof-jti-integration-0001",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
+	digest := sha256.Sum256([]byte(input))
+	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...)
+	return input + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
 func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) {

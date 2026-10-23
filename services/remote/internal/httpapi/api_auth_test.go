@@ -45,7 +45,7 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 	t.Cleanup(keyServer.Close)
 	identity, err := auth.New(auth.Config{
 		Issuer: issuer, Audience: "urn:dsh-remote", JWKSURL: keyServer.URL,
-		AllowedClients: []string{"mobile-client"}, RequiredScopes: []string{"remote.access"},
+		AllowedClients: []string{"mobile-client", "host-client"}, RequiredScopes: []string{"remote.access"},
 		PublicOrigin: "https://api.example.edu", MaxTokenLifetime: 15 * time.Minute, Clock: func() time.Time { return now },
 	})
 	if err != nil {
@@ -54,6 +54,11 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 	access := httpSignCompact(t, map[string]any{"typ": "at+jwt", "alg": "RS256", "kid": "issuer-key"}, map[string]any{
 		"iss": issuer, "sub": "user-ustc-123", "aud": "urn:dsh-remote", "client_id": "mobile-client",
 		"jti": "access-token-id-0001", "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(),
+		"scope": "remote.access", "cnf": map[string]any{"jkt": proofJKT},
+	}, accessKey)
+	hostAccess := httpSignCompact(t, map[string]any{"typ": "at+jwt", "alg": "RS256", "kid": "issuer-key"}, map[string]any{
+		"iss": issuer, "sub": "user-ustc-123", "aud": "urn:dsh-remote", "client_id": "host-client",
+		"jti": "access-token-id-host-0002", "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(),
 		"scope": "remote.access", "cnf": map[string]any{"jkt": proofJKT},
 	}, accessKey)
 	deviceID := "44444444-4444-4444-8444-444444444444"
@@ -97,29 +102,66 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 	if hostEnroll.Code != http.StatusForbidden || repo.enrollmentCalls != 0 {
 		t.Fatalf("mobile OAuth client reached host enrollment: status=%d enrollment-calls=%d", hostEnroll.Code, repo.enrollmentCalls)
 	}
+	hostChallengeDenied := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/host-credentials/challenges", "proof-jti-mobile-host-challenge-0007", hostEnroll.Header().Get("DPoP-Nonce"))
+	if hostChallengeDenied.Code != http.StatusForbidden || repo.challengeCalls != 0 {
+		t.Fatalf("mobile OAuth client reached host credential challenge: status=%d calls=%d", hostChallengeDenied.Code, repo.challengeCalls)
+	}
+	hostExchangeDenied := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/host-credentials", "proof-jti-mobile-host-exchange-0008", hostChallengeDenied.Header().Get("DPoP-Nonce"), map[string]any{})
+	if hostExchangeDenied.Code != http.StatusForbidden || repo.credentialCalls != 0 {
+		t.Fatalf("mobile OAuth client reached host credential exchange: status=%d calls=%d", hostExchangeDenied.Code, repo.credentialCalls)
+	}
 	repo.enrollmentResult = store.EnrollmentCreated{
 		EnrollmentID: "77777777-7777-4777-8777-777777777777", HostID: "11111111-1111-4111-8111-111111111111",
 		InstallationID: "22222222-2222-4222-8222-222222222222", RuntimeID: "55555555-5555-4555-8555-555555555555",
 		RequestID: "66666666-6666-4666-8666-666666666666", ProfileRef: "profile", State: "pending",
 		ExpiresAt: now.Add(5 * time.Minute), Workspaces: []store.EnrollmentWorkspace{},
 	}
-	hostAPI := New(repo, identity, Config{HostClientIDs: []string{"mobile-client"}})
+	hostAPI := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
+	wrongClientChallenge := sendDPoPRequest(t, hostAPI, access, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/host-credentials/challenges", "proof-jti-mobile-on-host-api-0009", hostExchangeDenied.Header().Get("DPoP-Nonce"))
+	if wrongClientChallenge.Code != http.StatusForbidden || repo.challengeCalls != 0 {
+		t.Fatalf("mobile OAuth client reached host-client API: status=%d calls=%d", wrongClientChallenge.Code, repo.challengeCalls)
+	}
 	createBody := map[string]any{
 		"request_id": "66666666-6666-4666-8666-666666666666", "organization_id": "33333333-3333-4333-8333-333333333333",
 		"alias": "host", "profile_ref": "profile", "dsh_version": "0.2.1-rc.2", "application_version": "1.0",
 		"plugin_version": "1.0", "protocol_version": 1, "installation_public_jwk": proofJWK,
 		"code": base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "workspace_refs": []string{"project"},
 	}
-	created := sendDPoPRequest(t, hostAPI, access, proofKey, proofJWK, http.MethodPost,
-		"https://api.example.edu/v1/enrollments", "proof-jti-host-enroll-0007", hostEnroll.Header().Get("DPoP-Nonce"), createBody)
+	created := sendDPoPRequest(t, hostAPI, hostAccess, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/enrollments", "proof-jti-host-enroll-0010", wrongClientChallenge.Header().Get("DPoP-Nonce"), createBody)
 	if created.Code != http.StatusCreated || repo.enrollmentCalls != 1 {
 		t.Fatalf("allowlisted DPoP host client could not create enrollment: status=%d calls=%d body=%s", created.Code, repo.enrollmentCalls, created.Body.String())
 	}
-	confirmed := sendDPoPRequest(t, hostAPI, access, proofKey, proofJWK, http.MethodPost,
+	confirmed := sendDPoPRequest(t, hostAPI, hostAccess, proofKey, proofJWK, http.MethodPost,
 		"https://api.example.edu/v1/enrollments/77777777-7777-4777-8777-777777777777/host-confirm",
-		"proof-jti-host-confirm-0008", created.Header().Get("DPoP-Nonce"), map[string]any{"code": createBody["code"]})
+		"proof-jti-host-confirm-0011", created.Header().Get("DPoP-Nonce"), map[string]any{"code": createBody["code"]})
 	if confirmed.Code != http.StatusOK || repo.hostConfirmCalls != 1 || repo.hostConfirmJKT != proofJKT {
 		t.Fatalf("host confirmation did not bind to the DPoP installation key: status=%d calls=%d key=%s", confirmed.Code, repo.hostConfirmCalls, repo.hostConfirmJKT)
+	}
+	repo.challengeResult = store.HostCredentialChallenge{
+		ChallengeID: "88888888-8888-4888-8888-888888888888", Challenge: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		InstallationID: "22222222-2222-4222-8222-222222222222", Audience: auth.HostCredentialProofAudience, ExpiresAt: now.Add(90 * time.Second),
+	}
+	hostCredentialChallenge := sendDPoPRequest(t, hostAPI, hostAccess, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/host-credentials/challenges", "proof-jti-host-challenge-0012", confirmed.Header().Get("DPoP-Nonce"))
+	if hostCredentialChallenge.Code != http.StatusCreated || repo.challengeCalls != 1 || repo.challengeJKT != proofJKT ||
+		!strings.Contains(hostCredentialChallenge.Body.String(), `"challenge_id"`) {
+		t.Fatalf("allowlisted host could not request a key-bound challenge: status=%d calls=%d key=%s body=%s", hostCredentialChallenge.Code, repo.challengeCalls, repo.challengeJKT, hostCredentialChallenge.Body.String())
+	}
+	repo.credentialResult = store.HostConnectionCredential{
+		Credential: strings.Repeat("B", 43), TokenType: "DSH-Host", InstallationID: repo.challengeResult.InstallationID,
+		KeyThumbprint: proofJKT, ExpiresAt: now.Add(5 * time.Minute),
+	}
+	credential := sendDPoPRequest(t, hostAPI, hostAccess, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/host-credentials", "proof-jti-host-credential-0013", hostCredentialChallenge.Header().Get("DPoP-Nonce"),
+		map[string]any{"challenge_id": repo.challengeResult.ChallengeID, "proof": "installation-signature"})
+	if credential.Code != http.StatusCreated || repo.credentialCalls != 1 || repo.credentialJKT != proofJKT ||
+		repo.credentialID != repo.challengeResult.ChallengeID || repo.credentialProof != "installation-signature" ||
+		!strings.Contains(credential.Body.String(), `"credential"`) {
+		t.Fatalf("host credential exchange did not bind challenge and DPoP key: status=%d calls=%d key=%s challenge=%s body=%s", credential.Code, repo.credentialCalls, repo.credentialJKT, repo.credentialID, credential.Body.String())
 	}
 }
 

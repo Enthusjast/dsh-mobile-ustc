@@ -150,6 +150,42 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/host-credentials/challenges:
+    post:
+      description: Host-client-only challenge issuance. The active installation owner must authenticate with a DPoP key matching the registered installation key. Challenges are valid for 90 seconds, at most four may be pending per installation, and no more than 20 may be created in five minutes.
+      responses:
+        '201':
+          description: Returns a 256-bit one-use challenge. Only its SHA-256 digest is stored.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostCredentialChallengeCreated' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/host-credentials:
+    post:
+      description: Host-client-only exchange. An ES256 proof signed by the enrolled installation key binds the installation ID, challenge ID, challenge nonce, audience, issuance time, and a unique proof ID. Challenge consumption and credential insertion are atomic.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HostCredentialExchangeRequest' }
+      responses:
+        '201':
+          description: Returns an opaque five-minute connection credential. Only its SHA-256 digest is stored, and at most eight unexpired credentials may be active per installation. A Relay must still require a fresh signed installation-key challenge when the host connects.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostConnectionCredentialCreated' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/hosts:
     get:
       responses:
@@ -545,6 +581,49 @@ components:
       required: [code]
       properties:
         code: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+    HostCredentialExchangeRequest:
+      type: object
+      additionalProperties: false
+      required: [challenge_id, proof]
+      properties:
+        challenge_id: { type: string, format: uuid }
+        proof:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: ES256 compact JWS with typ dsh-host-credential-proof+jwt, signed by the enrolled installation key. Claims are iss installation_id, aud urn:dsh-mobile-ustc:host-credential, challenge_id, nonce, iat and unique jti.
+    HostCredentialChallengeCreated:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [challenge_id, challenge, installation_id, audience, expires_at]
+          properties:
+            challenge_id: { type: string, format: uuid }
+            challenge: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+            installation_id: { type: string, format: uuid }
+            audience: { const: urn:dsh-mobile-ustc:host-credential }
+            expires_at: { type: string, format: date-time }
+    HostConnectionCredentialCreated:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [credential, token_type, installation_id, key_thumbprint, expires_at]
+          properties:
+            credential: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+            token_type: { const: DSH-Host }
+            installation_id: { type: string, format: uuid }
+            key_thumbprint: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+            expires_at: { type: string, format: date-time }
     EnrollmentCreated:
       type: object
       additionalProperties: false

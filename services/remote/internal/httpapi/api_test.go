@@ -25,6 +25,14 @@ type fakeRepository struct {
 	enrollmentResult store.EnrollmentCreated
 	hostConfirmCalls int
 	hostConfirmJKT   string
+	challengeCalls   int
+	challengeJKT     string
+	challengeResult  store.HostCredentialChallenge
+	credentialCalls  int
+	credentialJKT    string
+	credentialID     string
+	credentialProof  string
+	credentialResult store.HostConnectionCredential
 }
 
 func (fake *fakeRepository) Ready(context.Context) error { return fake.readyError }
@@ -46,6 +54,18 @@ func (fake *fakeRepository) ConfirmEnrollmentHost(_ context.Context, _ store.Use
 	fake.hostConfirmCalls++
 	fake.hostConfirmJKT = thumbprint
 	return store.EnrollmentConfirmation{EnrollmentID: enrollmentID, State: "approved"}, nil
+}
+func (fake *fakeRepository) CreateHostCredentialChallenge(_ context.Context, _ store.UserIdentity, thumbprint string) (store.HostCredentialChallenge, error) {
+	fake.challengeCalls++
+	fake.challengeJKT = thumbprint
+	return fake.challengeResult, nil
+}
+func (fake *fakeRepository) ExchangeHostCredential(_ context.Context, _ store.UserIdentity, thumbprint, challengeID, proof string) (store.HostConnectionCredential, error) {
+	fake.credentialCalls++
+	fake.credentialJKT = thumbprint
+	fake.credentialID = challengeID
+	fake.credentialProof = proof
+	return fake.credentialResult, nil
 }
 func (fake *fakeRepository) RegisterDevice(context.Context, store.DeviceRegistration) (string, error) {
 	return "", errors.New("not implemented")

@@ -29,6 +29,8 @@ type Repository interface {
 	GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error)
 	ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
 	ConfirmEnrollmentHost(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
+	CreateHostCredentialChallenge(context.Context, store.UserIdentity, string) (store.HostCredentialChallenge, error)
+	ExchangeHostCredential(context.Context, store.UserIdentity, string, string, string) (store.HostConnectionCredential, error)
 	RegisterDevice(context.Context, store.DeviceRegistration) (string, error)
 	RevokeDevice(context.Context, string, string, string) error
 	PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error)
@@ -78,6 +80,11 @@ type enrollmentCodeRequest struct {
 	Code string `json:"code"`
 }
 
+type hostCredentialExchangeRequest struct {
+	ChallengeID string `json:"challenge_id"`
+	Proof       string `json:"proof"`
+}
+
 func New(database Repository, identity *auth.Authenticator, configs ...Config) http.Handler {
 	api := &API{database: database, identity: identity, hostClients: make(map[string]struct{})}
 	if len(configs) > 0 {
@@ -96,6 +103,8 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) h
 	mux.Handle("GET /v1/enrollments/{id}", api.protected(http.HandlerFunc(api.getEnrollment)))
 	mux.Handle("POST /v1/enrollments/{id}/confirm", api.protected(http.HandlerFunc(api.confirmEnrollmentUser)))
 	mux.Handle("POST /v1/enrollments/{id}/host-confirm", api.hostAuthenticated(http.HandlerFunc(api.confirmEnrollmentHost)))
+	mux.Handle("POST /v1/host-credentials/challenges", api.hostAuthenticated(http.HandlerFunc(api.createHostCredentialChallenge)))
+	mux.Handle("POST /v1/host-credentials", api.hostAuthenticated(http.HandlerFunc(api.exchangeHostCredential)))
 	mux.Handle("DELETE /v1/devices/{id}", api.protected(http.HandlerFunc(api.revokeDevice)))
 	mux.Handle("GET /v1/hosts", api.protected(http.HandlerFunc(api.listHosts)))
 	mux.Handle("GET /v1/runtimes", api.protected(http.HandlerFunc(api.listRuntimes)))
@@ -225,6 +234,34 @@ func (api *API) confirmEnrollment(response http.ResponseWriter, request *http.Re
 		return
 	}
 	writeData(response, http.StatusOK, confirmation)
+}
+
+func (api *API) createHostCredentialChallenge(response http.ResponseWriter, request *http.Request) {
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	challenge, err := api.database.CreateHostCredentialChallenge(request.Context(),
+		store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, principal.ProofKeyJKT)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusCreated, challenge)
+}
+
+func (api *API) exchangeHostCredential(response http.ResponseWriter, request *http.Request) {
+	var input hostCredentialExchangeRequest
+	if !decodeBody(response, request, &input) || !uuidPattern.MatchString(input.ChallengeID) || input.Proof == "" || len(input.Proof) > 8<<10 {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	credential, err := api.database.ExchangeHostCredential(request.Context(),
+		store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, principal.ProofKeyJKT,
+		input.ChallengeID, input.Proof)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusCreated, credential)
 }
 
 func (api *API) health(response http.ResponseWriter, _ *http.Request) {
@@ -498,6 +535,12 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusForbidden, "access.denied")
 	case errors.Is(err, store.ErrTicketInvalid):
 		writeError(response, http.StatusUnauthorized, "ticket.invalid")
+	case errors.Is(err, store.ErrHostCredentialInvalid):
+		writeError(response, http.StatusUnauthorized, "host_credential.invalid")
+	case errors.Is(err, store.ErrHostChallengeLimit):
+		writeError(response, http.StatusTooManyRequests, "rate.limited")
+	case errors.Is(err, store.ErrHostCredentialLimit):
+		writeError(response, http.StatusTooManyRequests, "rate.limited")
 	case errors.Is(err, store.ErrEnrollmentInvalid):
 		writeError(response, http.StatusForbidden, "access.denied")
 	case errors.Is(err, store.ErrEnrollmentConflict):
