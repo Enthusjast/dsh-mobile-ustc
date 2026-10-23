@@ -15,7 +15,9 @@ EduWork 核心源码已按 `core.lock.json` 检出。发行审计命令 `node .l
 
 ## 已验证
 
-`npm run verify` 通过 TypeScript 严格检查、插件构建及 20 项离线测试。Loader 测试用真实 Cordis Loader 与 DSH 0.2.1-rc.2 的 Session、Agent、Session Controller、JSON 存储、Workspace 注册、附件、审批、问题和 Tool Runtime 服务；唯一替代项是确定性离线模型，没有连接模型服务、学校身份或真实桌面发行版。
+`npm ci --ignore-scripts && npm run verify` 通过干净安装、契约生成检查、TypeScript 严格检查、插件构建及 24 项测试。本机 `dsh --version` 确认为 `0.2.1-rc.2`。CLI 集成测试用独立临时 `DSH_HOME` 启动真实 `dsh` Web profile，加载构建后的插件和一个确定性本地模型插件，完成会话创建、列表、发送、实时 assistant 输出、取消、快照和历史分页；子进程不继承模型 Key 或用户登录状态，模型响应完全来自本地 fixture。进程退出后检查 IPC socket 已清理。
+
+其余 Loader 测试用真实 Cordis Loader 与 DSH 0.2.1-rc.2 的 Session、Agent、Session Controller、JSON 存储、Workspace 注册、附件、审批、问题和 Tool Runtime 服务。没有连接真实模型、学校身份或桌面发行包。CLI profile 中会话是在临时 DSH 主机内新建的；它不证明已安装桌面 profile 中的既有会话可见，也不代替 TokenWorks 发行组合验收。
 
 验证覆盖工作区及 preset 白名单、opaque 原生 ID 到 profile UUID 的映射、同一 Agent 继续会话、queue、checkpoint、实时订阅、历史分页、session cursor、实时改名事件、桌面模型目录校验、审批允许 / 拒绝 / 取消 / 超时、普通结构化提问和计划选择、提前返回允许的 listener 无法绕过最终 guard，以及卸载后 socket 和挂起交互清理。M0 协议 v0 的生成式 JSON Schema 与 TS 解析器共享两份 golden 请求和一份拒绝样例。
 
@@ -28,7 +30,7 @@ EduWork 核心源码已按 `core.lock.json` 检出。发行审计命令 `node .l
 - 子 Agent 有原生父子身份。M0 列表隐藏子 Agent；远端不能用根会话接口接管子 Agent。
 - `approval/request` 提供一次决策，但没有完整工具参数。原型将真实 Tool Runtime 执行上下文与 call ID 绑定，并在最终 guard 消费当前执行 token；没有在真实 TokenWorks / 微信组合里验证 listener 顺序或绕过路径。
 - 普通问题与工具批准走各自的 DSH 服务。Timed question 需要前台 claim 及迟到答案路径；本原型拒绝 timed question，不把它降级成普通问题。
-- M0 使用运行于同一用户下的 Unix socket，未连接 oidc-proxy。账号切换撤权、发行版关闭窗口和桌面服务共存仍需在真实 dev 包中验证。
+- M0 在 Unix 平台使用当前用户私有 socket，在 Windows 使用关闭全用户读写的命名管道。Linux Unix socket 已在真实 DSH CLI profile 中验证；Windows 命名管道和 ACL 尚未在 Windows 实机运行。测试覆盖临时 DSH profile，不读取已安装用户 profile，也未连接 oidc-proxy；账号切换撤权和已安装桌面 profile 共存仍未验证。
 
 ## M0 尚未验收的出口
 
