@@ -1,8 +1,8 @@
 # dsh-mobile-ustc
 
-TokenWorks / DSH 移动远程控制平台。当前开发处于 M0：在现有运行进程中接入会话、流式历史和人工交互。
+TokenWorks / DSH 移动远程控制平台。M0 进程内原型已完成本机 DSH CLI 验证；M1 的资源身份与 DPoP 验证基础正在实现。
 
-已实现的原型位于 [host/remote-control](host/remote-control/README.md)。它通过本机 IPC 提供本地调试入口，默认关闭；尚无公网服务或 Android 客户端。
+主机端原型位于 [host/remote-control](host/remote-control/README.md)，Go 资源身份基础位于 [services/remote](services/remote/README.md)。主机原型通过本机 IPC 提供调试入口，默认关闭；尚无生产中继或 Android 客户端。
 
 需要 Node.js 24（至少 24.15.0）：
 

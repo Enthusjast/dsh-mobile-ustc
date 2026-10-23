@@ -1,0 +1,16 @@
+drop table if exists app_releases;
+drop table if exists control_outbox;
+drop table if exists audit_log;
+drop table if exists files;
+drop table if exists approvals;
+drop table if exists commands;
+drop table if exists sessions;
+drop table if exists runtime_grants;
+drop table if exists runtimes;
+drop table if exists enrollments;
+drop table if exists installations;
+drop table if exists hosts;
+drop table if exists devices;
+drop table if exists org_memberships;
+drop table if exists users;
+drop table if exists orgs;
