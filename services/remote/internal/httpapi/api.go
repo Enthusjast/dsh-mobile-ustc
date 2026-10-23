@@ -47,6 +47,7 @@ type Repository interface {
 	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
+	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)

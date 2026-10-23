@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { hostHelloDigest, relayPayloadDigest, startHostRelay } from '../src/relay-client.js'
+import { mobileSessionId, type SessionCatalogChange } from '../src/dsh-client.js'
 
 const ws = createRequire(import.meta.url)('ws') as { WebSocketServer: new (options: object) => any }
 const runtimeId = '33333333-3333-4333-8333-333333333333'
@@ -28,12 +29,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
 test('host hello digest matches the Go length-prefixed protocol golden', () => {
   assert.equal(hostHelloDigest([
     'host', runtimeId, runtimeEpoch, '0.2.1-rc.2', '1.2.3', '0.0.1', '1',
-    ['command.relay.v1', 'connection.heartbeat.v1'].join('\n'),
-  ]), 'RQfjlKjYAvuc0sWjM4QWNcGqAnErlKBbE_o9x8E2dC8')
+    ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'].join('\n'),
+  ]), 'dR6VN0kayU_d0sHLIYNLHe97lBZ9n9pQhKfwTM4gR8c')
 })
 
 test('Relay shutdown does not wait on a credential provider that ignores cancellation', async () => {
-  const runtime = { epoch: runtimeEpoch, client: { runtimeId }, async dispatch() { throw new Error('unused') } }
+  const runtime = {
+    epoch: runtimeEpoch,
+    client: { runtimeId, async sessionCatalog() { return [] }, watchSessionCatalog() { return () => {} } },
+    async dispatch() { throw new Error('unused') },
+  }
   const relay = startHostRelay({
     url: 'ws://127.0.0.1:1', runtime, dshVersion: '0.2.1-rc.2', applicationVersion: 'test', pluginVersion: '0.0.1',
     credentials: { acquire() { return new Promise(() => {}) } },
@@ -57,12 +62,19 @@ test('Relay host client proves the installation key and routes only digest-match
   const connectionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
   const nonce = Buffer.alloc(32, 7).toString('base64url')
   const payload = { mode: 'queue' as const, content: [{ type: 'text' as const, text: 'Continue the current task.' }] }
+  const catalog = Array.from({ length: 300 }, (_, index) => ({
+    session_id: mobileSessionId(runtimeId, `native:workspace/session-${index}`), dsh_session_id: `native:workspace/session-${index}`,
+    workspace_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', state: 'running' as const, last_persisted_seq: 17,
+  }))
   const forwarded = {
     v: 1, type: 'message.submit', request_id: requestId, runtime_id: runtimeId,
     runtime_epoch: runtimeEpoch, session_id: sessionId, user_id: userId, device_id: deviceId,
     payload_sha256: relayPayloadDigest(sessionId, payload), payload,
   }
   const received: unknown[] = []
+  const catalogPages: any[] = []
+  const catalogSnapshots = new Map<string, any[]>()
+  let catalogChanged: ((change: SessionCatalogChange) => void) | undefined
   const routed: { command: unknown; owner: unknown }[] = []
   let relaySocket: any
   let helloClaims: any
@@ -85,17 +97,31 @@ test('Relay host client proves the installation key and routes only digest-match
             && claims.iss === installationId && claims.aud === 'urn:dsh-mobile-ustc:realtime'
             && claims.challenge_id === challengeId && claims.connection_id === connectionId
             && claims.nonce === nonce && claims.runtime_id === runtimeId && claims.runtime_epoch === runtimeEpoch
-            && claims.hello_sha256 === 'RQfjlKjYAvuc0sWjM4QWNcGqAnErlKBbE_o9x8E2dC8'
+            && claims.hello_sha256 === 'dR6VN0kayU_d0sHLIYNLHe97lBZ9n9pQhKfwTM4gR8c'
             && verify('sha256', Buffer.from(signingInput), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
           if (!valid) return reject(new Error('host hello proof did not match the challenge'))
           helloClaims = claims
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: connectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: runtimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolve()
+        }
+        if (frame.type === 'session.catalog') {
+          catalogPages.push(frame)
+          const snapshot = catalogSnapshots.get(frame.request_id) ?? []
+          snapshot.push(...frame.payload.items)
+          catalogSnapshots.set(frame.request_id, snapshot)
+          if (frame.payload.complete) socket.send(JSON.stringify({
+            v: 1, type: 'session.catalog.ack', request_id: frame.request_id,
+            runtime_id: runtimeId, runtime_epoch: runtimeEpoch,
+            payload: {
+              session_count: snapshot.length,
+              server_time: new Date().toISOString(),
+            },
+          }))
         }
       })
     })
@@ -108,7 +134,13 @@ test('Relay host client proves the installation key and routes only digest-match
 
   const runtime = {
     epoch: runtimeEpoch,
-    client: { runtimeId },
+    client: {
+      runtimeId,
+      async sessionCatalog(_signal: AbortSignal, ids?: readonly string[]) {
+        return ids === undefined ? catalog : catalog.filter(item => ids.includes(item.dsh_session_id))
+      },
+      watchSessionCatalog(onChange: (change: SessionCatalogChange) => void) { catalogChanged = onChange; return () => { catalogChanged = undefined } },
+    },
     async dispatch(command: unknown, signal: AbortSignal, owner: unknown, observe?: (state: 'host_accepted' | 'dispatching' | 'agent_queued') => void | Promise<void>) {
       signal.throwIfAborted()
       routed.push({ command, owner })
@@ -128,6 +160,13 @@ test('Relay host client proves the installation key and routes only digest-match
   })
   try {
     await Promise.race([ready, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Relay handshake timed out')), 3000))])
+    await waitFor(() => catalogPages.some(page => page.payload.complete))
+    assert.deepEqual(catalogPages.flatMap(page => page.payload.items), catalog)
+    assert.ok(catalogPages.length > 1)
+    assert.ok(catalogPages.every(page => page.payload.items.length <= 256 && Buffer.byteLength(JSON.stringify(page)) <= 65_536))
+    catalogChanged?.({ kind: 'delta', sessionIds: catalog.map(item => item.dsh_session_id) })
+    await waitFor(() => catalogPages.some(page => page.payload.mode === 'delta' && page.payload.complete))
+    assert.deepEqual(catalogPages.filter(page => page.payload.mode === 'delta').flatMap(page => page.payload.items), catalog)
     assert.equal(helloClaims.iat <= Math.floor(Date.now() / 1000), true)
     relaySocket.send(JSON.stringify(forwarded))
     await waitFor(() => routed.length === 1 && received.filter(frame => (frame as { type?: string }).type === 'command.receipt').length === 3)

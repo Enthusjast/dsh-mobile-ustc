@@ -37,6 +37,12 @@ type relayTestStore struct {
 	commands           map[string]store.CommandStatus
 	leaseCalls         int
 	leaseErr           error
+	catalogCalls       int
+	catalogKeyVersion  int64
+	catalogConnection  store.RuntimeConnection
+	catalogReplace     bool
+	catalogItems       []store.SessionCatalogItem
+	catalogErr         error
 }
 
 func (fake *relayTestStore) PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error) {
@@ -141,6 +147,26 @@ func (fake *relayTestStore) MarkRealtimeCommandUnknown(_ context.Context, _ stor
 	return status, nil
 }
 
+func (fake *relayTestStore) SyncRealtimeSessionCatalog(_ context.Context, connection store.RuntimeConnection, keyVersion int64, replace bool, items []store.SessionCatalogItem) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.catalogCalls++
+	fake.catalogConnection = connection
+	fake.catalogKeyVersion = keyVersion
+	fake.catalogReplace = replace
+	fake.catalogItems = append([]store.SessionCatalogItem(nil), items...)
+	if fake.catalogErr != nil {
+		return fake.catalogErr
+	}
+	for _, item := range items {
+		mapped, err := store.MobileSessionID(connection.RuntimeID, item.DSHSessionID)
+		if err != nil || mapped != item.SessionID {
+			return store.ErrSessionCatalogInvalid
+		}
+	}
+	return nil
+}
+
 func TestDeviceTicketRequiresKeyProofBeforeHelloAndHeartbeat(t *testing.T) {
 	key := relayTestKey(t)
 	publicJWK, thumbprint := relayTestPublicJWK(t, key)
@@ -209,6 +235,26 @@ func TestDeviceTicketRequiresKeyProofBeforeHelloAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestUnregisterHostDropsOnlyItsCurrentRuntimeRoute(t *testing.T) {
+	server := New(&relayTestStore{})
+	const runtimeID = "33333333-3333-4333-8333-333333333333"
+	live := &liveConnection{peer: peer{role: "installation"}, runtimeID: runtimeID, done: make(chan struct{})}
+	replacement := &liveConnection{peer: peer{role: "installation"}, runtimeID: runtimeID, done: make(chan struct{})}
+	server.connections[live.conn] = live
+	server.hosts[runtimeID] = replacement
+	server.active.Add(1)
+	server.unregisterConnection(live)
+	if server.hostForRuntime(runtimeID) != replacement {
+		t.Fatal("stale host disconnect removed the replacement runtime route")
+	}
+	server.connections[replacement.conn] = replacement
+	server.active.Add(1)
+	server.unregisterConnection(replacement)
+	if server.hostForRuntime(runtimeID) != nil {
+		t.Fatal("disconnected host remains in runtime routing table")
+	}
+}
+
 func TestMessageSubmitDigestMatchesCrossLanguageGolden(t *testing.T) {
 	const sessionID = "55555555-5555-4555-8555-555555555555"
 	digest, err := messageSubmitDigest(sessionID, messageSubmitPayload{
@@ -220,6 +266,111 @@ func TestMessageSubmitDigestMatchesCrossLanguageGolden(t *testing.T) {
 	const expected = "788209dea3f4077e600000b21b3265cadc9b95ea38d05a86daeb72231a70b4a2"
 	if digest != expected {
 		t.Fatalf("canonical relay command digest=%s, want %s", digest, expected)
+	}
+}
+
+func TestHostSessionCatalogIsConnectionBoundAndChecksStableSessionMapping(t *testing.T) {
+	key := relayTestKey(t)
+	publicJWK, thumbprint := relayTestPublicJWK(t, key)
+	const installationID = "11111111-1111-4111-8111-111111111111"
+	const runtimeID = "33333333-3333-4333-8333-333333333333"
+	const runtimeEpoch = "44444444-4444-4444-8444-444444444444"
+	fake := &relayTestStore{
+		hostCredential: store.HostCredentialIdentity{
+			InstallationID: installationID, KeyThumbprint: thumbprint, PublicJWK: publicJWK,
+			KeyVersion: 3, ExpiresAt: time.Now().Add(5 * time.Minute),
+		},
+		detached: make(chan store.RuntimeConnection, 1),
+	}
+	server := httptest.NewServer(New(fake))
+	t.Cleanup(server.Close)
+	connection := dialRelayHost(t, server.URL, key, installationID, runtimeID, runtimeEpoch)
+	t.Cleanup(func() { _ = connection.Close(websocket.StatusNormalClosure, "test complete") })
+
+	sessionID, err := store.MobileSessionID(runtimeID, "native:workspace/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID := "77777777-7777-4777-8777-777777777777"
+	workspaceID := "88888888-8888-4888-8888-888888888888"
+	item := store.SessionCatalogItem{
+		SessionID: sessionID, DSHSessionID: "native:workspace/session", WorkspaceID: &workspaceID,
+		State: "running", LastPersistedSeq: 17,
+	}
+	writeWireFrame(t, connection, map[string]any{
+		"v": 1, "type": "session.catalog", "request_id": snapshotID,
+		"runtime_id": runtimeID, "runtime_epoch": runtimeEpoch,
+		"payload": map[string]any{"mode": "snapshot", "index": 0, "complete": false, "items": []store.SessionCatalogItem{item}},
+	})
+	writeEnvelope(t, connection, "ping", map[string]any{})
+	if pong := readEnvelope(t, connection); pong.Type != "pong" {
+		t.Fatalf("catalog chunk was not processed before heartbeat: %+v", pong)
+	}
+	fake.mu.Lock()
+	partialCalls := fake.catalogCalls
+	fake.mu.Unlock()
+	if partialCalls != 0 {
+		t.Fatal("partial catalog was persisted before the final chunk")
+	}
+	writeWireFrame(t, connection, map[string]any{
+		"v": 1, "type": "session.catalog", "request_id": snapshotID,
+		"runtime_id": runtimeID, "runtime_epoch": runtimeEpoch,
+		"payload": map[string]any{"mode": "snapshot", "index": 1, "complete": true, "items": []store.SessionCatalogItem{}},
+	})
+	ack := readEnvelope(t, connection)
+	if ack.Type != "session.catalog.ack" || ack.RequestID != snapshotID || ack.Payload["session_count"] != float64(1) {
+		t.Fatalf("unexpected session catalog acknowledgement: %+v", ack)
+	}
+	fake.mu.Lock()
+	gotCalls, gotVersion, gotConnection, gotItems := fake.catalogCalls, fake.catalogKeyVersion, fake.catalogConnection, append([]store.SessionCatalogItem(nil), fake.catalogItems...)
+	gotReplace := fake.catalogReplace
+	fake.mu.Unlock()
+	if gotCalls != 1 || gotVersion != 3 || !gotReplace || gotConnection.ConnectionID == "" || len(gotItems) != 1 ||
+		gotItems[0].SessionID != item.SessionID || gotItems[0].DSHSessionID != item.DSHSessionID ||
+		gotItems[0].WorkspaceID == nil || *gotItems[0].WorkspaceID != workspaceID ||
+		gotItems[0].State != item.State || gotItems[0].LastPersistedSeq != item.LastPersistedSeq {
+		t.Fatalf("session catalog sync call=%d version=%d connection=%+v items=%+v", gotCalls, gotVersion, gotConnection, gotItems)
+	}
+	item.State = "available"
+	item.LastPersistedSeq = 18
+	deltaID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	writeWireFrame(t, connection, map[string]any{
+		"v": 1, "type": "session.catalog", "request_id": deltaID,
+		"runtime_id": runtimeID, "runtime_epoch": runtimeEpoch,
+		"payload": map[string]any{"mode": "delta", "index": 0, "complete": false, "items": []store.SessionCatalogItem{item}},
+	})
+	second := item
+	second.DSHSessionID = "native:second/session"
+	second.SessionID, err = store.MobileSessionID(runtimeID, second.DSHSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWireFrame(t, connection, map[string]any{
+		"v": 1, "type": "session.catalog", "request_id": deltaID,
+		"runtime_id": runtimeID, "runtime_epoch": runtimeEpoch,
+		"payload": map[string]any{"mode": "delta", "index": 1, "complete": true, "items": []store.SessionCatalogItem{second}},
+	})
+	deltaAck := readEnvelope(t, connection)
+	if deltaAck.Type != "session.catalog.ack" || deltaAck.RequestID != deltaID || deltaAck.Payload["session_count"] != float64(2) {
+		t.Fatalf("unexpected session catalog delta acknowledgement: %+v", deltaAck)
+	}
+	fake.mu.Lock()
+	deltaCalls, deltaReplace := fake.catalogCalls, fake.catalogReplace
+	fake.mu.Unlock()
+	if deltaCalls != 2 || deltaReplace {
+		t.Fatalf("session catalog delta calls=%d replace=%t, want 2/false", deltaCalls, deltaReplace)
+	}
+
+	bad := item
+	bad.SessionID = "99999999-9999-4999-8999-999999999999"
+	writeWireFrame(t, connection, map[string]any{
+		"v": 1, "type": "session.catalog", "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"runtime_id": runtimeID, "runtime_epoch": runtimeEpoch,
+		"payload": map[string]any{"mode": "snapshot", "index": 0, "complete": true, "items": []store.SessionCatalogItem{bad}},
+	})
+	protocolError := readEnvelope(t, connection)
+	if protocolError.Type != "error" || protocolError.Payload["code"] != "protocol.invalid" {
+		t.Fatalf("invalid stable session mapping was accepted: %+v", protocolError)
 	}
 }
 
@@ -478,7 +629,7 @@ func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, instal
 	hello := hostHandshakePayload{
 		RuntimeID: runtimeID, RuntimeEpoch: runtimeEpoch,
 		DSHVersion: "0.2.1-rc.2", ApplicationVersion: "1.0.0", PluginVersion: "0.1.0",
-		ProtocolVersion: 1, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1"},
+		ProtocolVersion: 1, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1"},
 	}
 	normalized, err := normalizeHostHello(hello)
 	if err != nil {

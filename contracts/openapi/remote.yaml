@@ -352,10 +352,18 @@ paths:
         command ID/session/state and canonical payload digest. The host receives the request ID,
         digest, and authenticated user/device IDs, then returns v=1 `command.receipt` frames with the
         device_id, state, and matching digest. Receipts advance through the host_accepted/agent_queued
-        state machine and persist without storing message bodies. Request IDs are idempotent per
-        device; a changed digest returns command.request_conflict. Only ping, message.submit, and
-        command.receipt frames are accepted; session snapshots, streaming, approval, and question
-        routing are not enabled. Both peers must negotiate `command.relay.v1` to exchange message
+        state machine and persist without storing message bodies. Hosts also publish indexed
+        `session.catalog` metadata with stable session IDs, opaque DSH IDs, mapped workspace IDs,
+        state, and the last persisted sequence. Complete snapshots atomically replace the directory;
+        bounded deltas update changed sessions. Relay accepts them only from the current
+        key-version-bound runtime connection, verifies the runtime-namespaced UUIDv5 session mapping,
+        and stores no session body, title,
+        workspace path, or event content. Missing sessions become unavailable; disconnect marks the
+        runtime's sessions unavailable until the next catalog snapshot. Request IDs are idempotent per
+        device; a changed digest returns command.request_conflict. Only ping, message.submit,
+        command.receipt, and host session.catalog frames are accepted; session snapshots, streaming,
+        approval, and question routing are not enabled. Host catalogs require `session.catalog.v1`;
+        peers must negotiate `command.relay.v1` to exchange message
         and receipt frames. Application heartbeats are limited to one per second and message
         submits to 20 per second per socket. Each socket has a bounded outbound queue. Device
         connections expire within five minutes; host connections expire with their host credential.

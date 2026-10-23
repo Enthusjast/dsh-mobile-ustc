@@ -459,11 +459,65 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replace runtime connection: %v", err)
 	}
-	var relaySessionID string
-	if err := testDB.QueryRowContext(ctx, `
-		insert into sessions (runtime_id, workspace_id, dsh_session_id)
-		values ($1, $2, 'relay-session') returning id::text`, enrollment.RuntimeID, enrollment.Workspaces[0].ID).Scan(&relaySessionID); err != nil {
+	relayNativeSessionID := "relay-session"
+	relaySessionID, err := MobileSessionID(enrollment.RuntimeID, relayNativeSessionID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	workspaceID := enrollment.Workspaces[0].ID
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, replacement, 1, true, []SessionCatalogItem{{
+		SessionID: relaySessionID, DSHSessionID: relayNativeSessionID, WorkspaceID: &workspaceID,
+		State: "running", LastPersistedSeq: 12,
+	}}); err != nil {
+		t.Fatalf("sync runtime session catalog: %v", err)
+	}
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, replacement, 1, false, []SessionCatalogItem{{
+		SessionID: relaySessionID, DSHSessionID: relayNativeSessionID, WorkspaceID: &workspaceID,
+		State: "running", LastPersistedSeq: 13,
+	}}); err != nil {
+		t.Fatalf("refresh runtime session catalog: %v", err)
+	}
+	visibleSessions, err := postgres.ListSessions(ctx, identity, enrollment.RuntimeID)
+	if err != nil || len(visibleSessions) != 1 || visibleSessions[0].ID != relaySessionID ||
+		visibleSessions[0].State != "running" || visibleSessions[0].LastPersistedSeq != 13 {
+		t.Fatalf("catalog metadata was not exposed through the active workspace grant: sessions=%+v error=%v", visibleSessions, err)
+	}
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, connection, 1, true, nil); !errors.Is(err, ErrRuntimeConnectionStale) {
+		t.Fatalf("superseded connection changed the session directory: %v", err)
+	}
+	unknownWorkspace := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, replacement, 1, true, []SessionCatalogItem{{
+		SessionID: relaySessionID, DSHSessionID: relayNativeSessionID, WorkspaceID: &unknownWorkspace,
+		State: "available", LastPersistedSeq: 0,
+	}}); !errors.Is(err, ErrSessionCatalogInvalid) {
+		t.Fatalf("unregistered workspace was accepted: %v", err)
+	}
+	visibleSessions, err = postgres.ListSessions(ctx, identity, enrollment.RuntimeID)
+	if err != nil || len(visibleSessions) != 1 || visibleSessions[0].State != "running" || visibleSessions[0].LastPersistedSeq != 13 {
+		t.Fatalf("rejected snapshot changed the directory: sessions=%+v error=%v", visibleSessions, err)
+	}
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, replacement, 1, false, []SessionCatalogItem{{
+		SessionID: relaySessionID, DSHSessionID: relayNativeSessionID, State: "unavailable", LastPersistedSeq: -1,
+	}}); err != nil {
+		t.Fatalf("remove session through catalog delta: %v", err)
+	}
+	var removedSeq int64
+	var removedWorkspace sql.NullString
+	if err := testDB.QueryRowContext(ctx, `select workspace_id::text, last_persisted_seq from sessions where id = $1`, relaySessionID).Scan(&removedWorkspace, &removedSeq); err != nil || removedWorkspace.Valid || removedSeq != 13 {
+		t.Fatalf("tombstone did not clear scope and preserve persisted cursor: workspace=%v seq=%d error=%v", removedWorkspace, removedSeq, err)
+	}
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, replacement, 1, true, nil); err != nil {
+		t.Fatalf("replace runtime session catalog with empty snapshot: %v", err)
+	}
+	var unavailableState string
+	if err := testDB.QueryRowContext(ctx, `select state from sessions where id = $1`, relaySessionID).Scan(&unavailableState); err != nil || unavailableState != "unavailable" {
+		t.Fatalf("removed session was not marked unavailable: state=%q error=%v", unavailableState, err)
+	}
+	if err := postgres.SyncRealtimeSessionCatalog(ctx, replacement, 1, true, []SessionCatalogItem{{
+		SessionID: relaySessionID, DSHSessionID: relayNativeSessionID, WorkspaceID: &workspaceID,
+		State: "running", LastPersistedSeq: 13,
+	}}); err != nil {
+		t.Fatalf("restore runtime session catalog: %v", err)
 	}
 	messageScope := GrantScope{Actions: []string{"message.submit"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
 	messageTicket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, enrollment.RuntimeID, messageScope)
@@ -534,6 +588,9 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.DetachRuntimeConnection(ctx, connection.InstallationID, connection.RuntimeID, connection.RuntimeEpoch, connection.ConnectionID); err != nil {
 		t.Fatalf("stale runtime connection detach: %v", err)
 	}
+	if err := testDB.QueryRowContext(ctx, `select state from sessions where id = $1`, relaySessionID).Scan(&unavailableState); err != nil || unavailableState != "running" {
+		t.Fatalf("stale detach changed the active session: state=%q error=%v", unavailableState, err)
+	}
 	if _, err := testDB.ExecContext(ctx, `update installations set key_version = key_version + 1 where id = $1`, enrollment.InstallationID); err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +610,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 24, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 29, 8); err != nil {
 		t.Fatal(err)
 	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
@@ -563,7 +620,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 24, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 29, 8); err != nil {
 		t.Fatal(err)
 	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint)
@@ -579,7 +636,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 25, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 30, 9); err != nil {
 		t.Fatal(err)
 	}
 }

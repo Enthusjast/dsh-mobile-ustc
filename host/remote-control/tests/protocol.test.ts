@@ -31,6 +31,7 @@ test('strict local protocol rejects extra fields, native identifiers, wrong vers
 test('session UUID mapping is stable, preserves opaque input and isolates profiles', () => {
   const namespace = randomUUID()
   assert.equal(mobileSessionId(namespace, 'native:中文/42'), mobileSessionId(namespace, 'native:中文/42'))
+  assert.equal(mobileSessionId('33333333-3333-4333-8333-333333333333', 'native:中文/42'), '1c6bb930-979b-5043-8b44-71f62e126939')
   assert.notEqual(mobileSessionId(namespace, 'native:中文/42'), mobileSessionId(randomUUID(), 'native:中文/42'))
   assert.match(mobileSessionId(namespace, 'native:中文/42'), /^[a-f0-9-]{14}5/)
 })

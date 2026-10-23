@@ -26,20 +26,22 @@ import (
 )
 
 const (
-	protocolName          = "dsh.remote.v1"
-	maxFrameBytes         = 64 << 10
-	maxMobileCommandFrame = maxFrameBytes - 1024
-	handshakeTimeout      = 15 * time.Second
-	connectionIdleTime    = 45 * time.Second
-	deviceConnectionLife  = 5 * time.Minute
-	closeHandshakeGrace   = 250 * time.Millisecond
-	heartbeatSeconds      = 20
-	commandsPerSecond     = 20
+	protocolName                = "dsh.remote.v1"
+	maxFrameBytes               = 64 << 10
+	maxMobileCommandFrame       = maxFrameBytes - 1024
+	handshakeTimeout            = 15 * time.Second
+	connectionIdleTime          = 45 * time.Second
+	deviceConnectionLife        = 5 * time.Minute
+	closeHandshakeGrace         = 250 * time.Millisecond
+	heartbeatSeconds            = 20
+	commandsPerSecond           = 20
+	maxSessionCatalogBytes      = 8 << 20
+	maxSessionCatalogBytesTotal = 64 << 20
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -53,16 +55,18 @@ type Repository interface {
 	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
+	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
 }
 
 type Server struct {
-	database    Repository
-	mu          sync.Mutex
-	connections map[*websocket.Conn]*liveConnection
-	hosts       map[string]*liveConnection
-	devices     map[string]map[string]map[*liveConnection]struct{}
-	active      sync.WaitGroup
-	draining    bool
+	database     Repository
+	mu           sync.Mutex
+	connections  map[*websocket.Conn]*liveConnection
+	hosts        map[string]*liveConnection
+	devices      map[string]map[string]map[*liveConnection]struct{}
+	active       sync.WaitGroup
+	draining     bool
+	catalogBytes int
 }
 
 type liveConnection struct {
@@ -78,6 +82,11 @@ type liveConnection struct {
 	lastHeartbeat      time.Time
 	commandWindowStart time.Time
 	commandWindowCount int
+	catalogSnapshotID  string
+	catalogMode        string
+	catalogNextIndex   int
+	catalogBytes       int
+	catalogItems       []store.SessionCatalogItem
 }
 
 type outboundFrame struct {
@@ -153,6 +162,13 @@ type messageSubmitPayload struct {
 type commandReceiptPayload struct {
 	State         string `json:"state"`
 	PayloadSHA256 string `json:"payload_sha256"`
+}
+
+type sessionCatalogPayload struct {
+	Mode     string                     `json:"mode"`
+	Index    *int                       `json:"index"`
+	Complete *bool                      `json:"complete"`
+	Items    []store.SessionCatalogItem `json:"items"`
 }
 
 type normalizedMessageSubmit struct {
@@ -350,7 +366,16 @@ func (server *Server) registerConnection(connection *websocket.Conn, identity pe
 func (server *Server) unregisterConnection(live *liveConnection) {
 	server.mu.Lock()
 	delete(server.connections, live.conn)
-	if live.peer.role == "host" && server.hosts[live.runtimeID] == live {
+	server.catalogBytes -= live.catalogBytes
+	if server.catalogBytes < 0 {
+		server.catalogBytes = 0
+	}
+	live.catalogSnapshotID = ""
+	live.catalogMode = ""
+	live.catalogNextIndex = 0
+	live.catalogBytes = 0
+	live.catalogItems = nil
+	if live.peer.role == "installation" && server.hosts[live.runtimeID] == live {
 		delete(server.hosts, live.runtimeID)
 	}
 	if live.peer.role == "device" {
@@ -774,12 +799,123 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeCommandReceipt(parent, live, host, envelope)
+		case "session.catalog":
+			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				closePolicy(connection, "operation denied")
+				return
+			}
+			server.routeSessionCatalog(parent, live, host, envelope, data)
 		default:
 			server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
 			closePolicy(connection, "unsupported frame")
 			return
 		}
 	}
+}
+
+func (server *Server) routeSessionCatalog(parent context.Context, live *liveConnection, host *store.RuntimeConnection, envelope wireEnvelope, data []byte) {
+	if !live.supports("session.catalog.v1") {
+		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+		return
+	}
+	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
+		envelope.RuntimeEpoch != live.runtimeEpoch || envelope.SessionID != "" || envelope.DeviceID != "" ||
+		envelope.UserID != "" || envelope.PayloadSHA256 != "" || len(data) > maxFrameBytes {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	var payload sessionCatalogPayload
+	if decodePayload(envelope.Payload, &payload) != nil || payload.Index == nil || payload.Complete == nil ||
+		payload.Items == nil || *payload.Index < 0 || len(payload.Items) > 256 ||
+		(payload.Mode != "snapshot" && payload.Mode != "delta") ||
+		(!*payload.Complete && len(payload.Items) == 0) ||
+		(payload.Mode == "delta" && len(payload.Items) == 0) {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	index, complete := *payload.Index, *payload.Complete
+	var (
+		items         []store.SessionCatalogItem
+		invalid       bool
+		rateLimited   bool
+		replace       bool
+		applyingBytes int
+	)
+	server.mu.Lock()
+	if index == 0 {
+		server.catalogBytes -= live.catalogBytes
+		live.catalogSnapshotID = envelope.RequestID
+		live.catalogMode = payload.Mode
+		live.catalogNextIndex = 0
+		live.catalogBytes = 0
+		live.catalogItems = nil
+	}
+	if live.catalogSnapshotID != envelope.RequestID || live.catalogMode != payload.Mode || live.catalogNextIndex != index {
+		invalid = true
+	} else if live.catalogBytes+len(data) > maxSessionCatalogBytes ||
+		server.catalogBytes+len(data) > maxSessionCatalogBytesTotal || len(live.catalogItems)+len(payload.Items) > 20_000 {
+		rateLimited = true
+	} else {
+		live.catalogNextIndex++
+		live.catalogBytes += len(data)
+		server.catalogBytes += len(data)
+		live.catalogItems = append(live.catalogItems, payload.Items...)
+		if complete {
+			items = live.catalogItems
+			replace = live.catalogMode == "snapshot"
+			applyingBytes = live.catalogBytes
+			live.catalogSnapshotID = ""
+			live.catalogMode = ""
+			live.catalogNextIndex = 0
+			live.catalogBytes = 0
+			live.catalogItems = nil
+		}
+	}
+	if invalid || rateLimited {
+		server.catalogBytes -= live.catalogBytes
+		live.catalogSnapshotID = ""
+		live.catalogMode = ""
+		live.catalogNextIndex = 0
+		live.catalogBytes = 0
+		live.catalogItems = nil
+	}
+	server.mu.Unlock()
+	if invalid {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	if rateLimited {
+		server.sendProtocolError(parent, live, "rate.limited", &envelope)
+		return
+	}
+	if !complete {
+		return
+	}
+	// Keep completed snapshots in the global budget while database work is
+	// queued; otherwise every waiting host could retain another full catalog.
+	defer func() {
+		server.mu.Lock()
+		server.catalogBytes -= applyingBytes
+		server.mu.Unlock()
+	}()
+	if err := server.database.SyncRealtimeSessionCatalog(parent, *host, live.peer.installation.KeyVersion, replace, items); err != nil {
+		if errors.Is(err, store.ErrRuntimeConnectionStale) {
+			closePolicy(live.conn, "runtime connection expired")
+			return
+		}
+		code := "internal"
+		if errors.Is(err, store.ErrSessionCatalogInvalid) {
+			code = "protocol.invalid"
+		}
+		server.sendProtocolError(parent, live, code, &envelope)
+		return
+	}
+	_ = live.sendJSON(parent, map[string]any{
+		"v": 1, "type": "session.catalog.ack", "request_id": envelope.RequestID,
+		"runtime_id": live.runtimeID, "runtime_epoch": live.runtimeEpoch,
+		"payload": map[string]any{"session_count": len(items), "server_time": time.Now().UTC()},
+	})
 }
 
 func (server *Server) routeMessageSubmit(parent context.Context, live *liveConnection, envelope wireEnvelope) {

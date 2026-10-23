@@ -54,11 +54,18 @@ test('workspace and profile boundaries reject arbitrary native paths and child t
     await assert.rejects(client.create('/etc', 'fixture'), /access.denied/)
     await assert.rejects(client.create('fixture', 'unknown'), /access.denied/)
     const created = await client.create('fixture', 'fixture')
+    const native = await client.resolve(created.session_id, new AbortController().signal)
     const other = new DshClient(h.ctx, randomUUID(), [{ id: 'fixture', cwd: h.cwd }], ['fixture'])
     await assert.rejects(other.resolve(created.session_id, new AbortController().signal), /session.not_found/)
     assert.notEqual(created.session_id, mobileSessionId(other.runtimeId, 'opaque'))
     const hidden = new DshClient(h.ctx, h.runtimeId, [], [])
     assert.deepEqual(await hidden.list(new AbortController().signal), { items: [] })
+    assert.deepEqual(await hidden.sessionCatalog(new AbortController().signal), [])
+    const removal = await hidden.sessionCatalog(new AbortController().signal, [String(native)])
+    assert.equal(removal.length, 1)
+    assert.equal(removal[0]?.session_id, created.session_id)
+    assert.equal(removal[0]?.state, 'unavailable')
+    assert.equal(removal[0]?.workspace_id, null)
   } finally { await h.close() }
 })
 

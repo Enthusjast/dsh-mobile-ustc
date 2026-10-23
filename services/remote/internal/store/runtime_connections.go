@@ -78,6 +78,11 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 		input.PluginVersion, input.RuntimeID, input.InstallationID, input.KeyVersion); err != nil {
 		return RuntimeConnection{}, ErrDatabaseUnavailable
 	}
+	if _, err := transaction.ExecContext(ctx, `
+		update sessions set state = 'unavailable', updated_at = clock_timestamp()
+		where runtime_id = $1`, input.RuntimeID); err != nil {
+		return RuntimeConnection{}, ErrDatabaseUnavailable
+	}
 	metadata, _ := json.Marshal(map[string]any{
 		"runtime_id": input.RuntimeID, "runtime_epoch": input.RuntimeEpoch,
 		"connection_id": input.ConnectionID, "protocol_version": input.ProtocolVersion,
@@ -120,11 +125,30 @@ func (postgres *Postgres) TouchRuntimeConnection(ctx context.Context, installati
 }
 
 func (postgres *Postgres) DetachRuntimeConnection(ctx context.Context, installationID, runtimeID, runtimeEpoch, connectionID string) error {
-	_, err := postgres.DB.ExecContext(ctx, `
+	transaction, err := postgres.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	defer transaction.Rollback()
+	result, err := transaction.ExecContext(ctx, `
 		update runtimes r set connection_id = null, connection_key_version = null, last_seen_at = null
 		where r.id = $1 and r.installation_id = $2 and r.epoch = $3 and r.connection_id = $4`,
 		runtimeID, installationID, runtimeEpoch, connectionID)
 	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	if rows == 1 {
+		if _, err := transaction.ExecContext(ctx, `
+			update sessions set state = 'unavailable', updated_at = clock_timestamp()
+			where runtime_id = $1`, runtimeID); err != nil {
+			return ErrDatabaseUnavailable
+		}
+	}
+	if err := transaction.Commit(); err != nil {
 		return ErrDatabaseUnavailable
 	}
 	return nil

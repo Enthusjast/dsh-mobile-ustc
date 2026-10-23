@@ -112,6 +112,10 @@ func (fake *fakeRepository) AttachRuntimeConnection(context.Context, store.Runti
 func (fake *fakeRepository) TouchRuntimeConnection(context.Context, string, string, string, string) error {
 	return fake.runtimeTouchErr
 }
+func (fake *fakeRepository) SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error {
+	return nil
+}
+
 func (fake *fakeRepository) DetachRuntimeConnection(context.Context, string, string, string, string) error {
 	return nil
 }

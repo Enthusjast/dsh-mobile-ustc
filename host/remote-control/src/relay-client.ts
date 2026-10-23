@@ -3,6 +3,7 @@ import { createRequire } from 'node:module'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import type { CommandOwner, CommandState } from './command-journal.js'
+import type { SessionCatalogChange, SessionCatalogItem } from './dsh-client.js'
 import { parseCommand, ProbeError, type Command } from './protocol.js'
 import type { CommandStateObserver } from './runtime.js'
 
@@ -11,7 +12,8 @@ const MAX_BUFFERED_BYTES = 512 * 1024
 const PROTOCOL = 'dsh.remote.v1'
 const PROOF_TYPE = 'dsh-relay-handshake-proof+jwt'
 const AUDIENCE = 'urn:dsh-mobile-ustc:realtime'
-const capabilities = ['command.relay.v1', 'connection.heartbeat.v1'] as const
+const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'] as const
+const requiredCapabilities = ['command.relay.v1', 'connection.heartbeat.v1'] as const
 const uuid = z.uuid()
 const nonEmptyText = z.string().min(1).max(32_768).regex(/\S/).refine(text => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text))
 
@@ -44,6 +46,14 @@ const helloOkSchema = z.strictObject({
     lease_expires_at: z.string().datetime({ offset: true }),
   }),
 })
+const sessionCatalogAckSchema = z.strictObject({
+  v: z.literal(1),
+  type: z.literal('session.catalog.ack'),
+  request_id: uuid,
+  runtime_id: uuid,
+  runtime_epoch: uuid,
+  payload: z.strictObject({ session_count: z.number().int().min(0).max(20_000), server_time: z.string().datetime({ offset: true }) }),
+})
 const submitSchema = z.strictObject({
   v: z.literal(1),
   type: z.literal('message.submit'),
@@ -58,6 +68,13 @@ const submitSchema = z.strictObject({
     mode: z.enum(['queue', 'steer']),
     content: z.array(z.strictObject({ type: z.literal('text'), text: nonEmptyText })).min(1).max(16),
   }),
+})
+const catalogItemSchema = z.strictObject({
+  session_id: uuid,
+  dsh_session_id: z.string().min(1).refine(value => Buffer.byteLength(value) <= 2048 && !value.includes('\0')),
+  workspace_id: uuid.nullable(),
+  state: z.enum(['available', 'running', 'archived', 'unavailable']),
+  last_persisted_seq: z.number().int().min(-1),
 })
 
 export interface HostHandshakeSigner {
@@ -80,7 +97,11 @@ export interface HostRelayOptions {
   url: string
   runtime: {
     epoch: string
-    client: { runtimeId: string }
+    client: {
+      runtimeId: string
+      sessionCatalog(signal: AbortSignal, sessionIds?: readonly string[]): Promise<SessionCatalogItem[]>
+      watchSessionCatalog(onChange: (change: SessionCatalogChange) => void): () => void
+    }
     dispatch(command: Command, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
   }
   credentials: HostCredentialProvider
@@ -190,6 +211,27 @@ function sendFrame(socket: RelaySocket, value: unknown): Promise<void> {
     return Promise.reject(new ProbeError('protocol.resync_required'))
   }
   return new Promise((resolve, reject) => socket.send(encoded, error => error ? reject(error) : resolve()))
+}
+
+function splitSessionCatalog(mode: 'snapshot' | 'delta', runtimeId: string, runtimeEpoch: string, snapshotId: string, items: SessionCatalogItem[]): SessionCatalogItem[][] {
+  if (items.length > 20_000) throw new ProbeError('rate.limited')
+  const chunks: SessionCatalogItem[][] = []
+  let current: SessionCatalogItem[] = []
+  for (const item of items) {
+    if (!catalogItemSchema.safeParse(item).success) throw new ProbeError('protocol.invalid')
+    const candidate = [...current, item]
+    const probe = {
+      v: 1, type: 'session.catalog', request_id: snapshotId, runtime_id: runtimeId, runtime_epoch: runtimeEpoch,
+      payload: { mode, index: chunks.length, complete: false, items: candidate },
+    }
+    if (candidate.length > 256 || Buffer.byteLength(JSON.stringify(probe)) > MAX_FRAME_BYTES - 1024) {
+      if (current.length === 0) throw new ProbeError('protocol.frame_too_large')
+      chunks.push(current)
+      current = [item]
+    } else current = candidate
+  }
+  if (current.length > 0 || chunks.length === 0) chunks.push(current)
+  return chunks
 }
 
 function endpoint(value: string): string {
@@ -329,6 +371,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     perMessageDeflate: false,
   })
   const connection = new AbortController()
+  let stopWatchingCatalog = () => {}
+  let catalogRetryTimer: NodeJS.Timeout | undefined
   const abortConnection = () => {
     connection.abort()
     socket.terminate()
@@ -364,14 +408,117 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       || ack.data.payload.runtime_epoch !== options.runtime.epoch
       || ack.data.payload.protocol_version !== 1 || !ack.data.payload.protocols.includes(1)
       || ack.data.payload.max_frame_bytes > MAX_FRAME_BYTES || Date.parse(ack.data.payload.lease_expires_at) <= Date.now()
-      || !capabilities.every(capability => ack.data.payload.capabilities.includes(capability))) {
+      || !requiredCapabilities.every(capability => ack.data.payload.capabilities.includes(capability))) {
       throw new ProbeError('protocol.unsupported')
     }
+
+    const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
+    const pendingCatalogAcks = new Map<string, { count: number; resolve(): void; reject(error: Error): void }>()
+    let catalogRefresh: Promise<void> | undefined
+    let catalogDirty = false
+    let snapshotRequested = true
+    const deltaSessionIDs = new Set<string>()
+    const waitForCatalogAck = (snapshotId: string, count: number) => new Promise<void>((resolve, reject) => {
+      let timer: NodeJS.Timeout
+      const aborted = () => entry.reject(new Error('Relay connection aborted'))
+      const cleanup = () => {
+        clearTimeout(timer)
+        connection.signal.removeEventListener('abort', aborted)
+        pendingCatalogAcks.delete(snapshotId)
+      }
+      const entry = {
+        count,
+        resolve: () => { cleanup(); resolve() },
+        reject: (error: Error) => { cleanup(); reject(error) },
+      }
+      timer = setTimeout(() => entry.reject(new Error('Relay session catalog acknowledgement timed out')), 15_000)
+      timer.unref()
+      pendingCatalogAcks.set(snapshotId, entry)
+      connection.signal.addEventListener('abort', aborted, { once: true })
+      if (connection.signal.aborted) aborted()
+    })
+    const startCatalogRefresh = () => {
+      if (!catalogEnabled || catalogRefresh) return
+      catalogRefresh = (async () => {
+        while (catalogDirty && !connection.signal.aborted) {
+          catalogDirty = false
+          const mode = snapshotRequested ? 'snapshot' : 'delta'
+          const sessionIDs = mode === 'snapshot' ? undefined : [...deltaSessionIDs]
+          snapshotRequested = false
+          deltaSessionIDs.clear()
+          const items = await options.runtime.client.sessionCatalog(connection.signal, sessionIDs)
+          if (mode === 'delta' && items.length === 0) continue
+          const snapshotId = randomUUID()
+          const chunks = splitSessionCatalog(mode, options.runtime.client.runtimeId, options.runtime.epoch, snapshotId, items)
+          const acknowledged = waitForCatalogAck(snapshotId, items.length)
+          // A failed write can end this task before it reaches the acknowledgement.
+          void acknowledged.catch(() => {})
+          try {
+            for (let index = 0; index < chunks.length; index++) {
+              await sendFrame(socket, {
+                v: 1,
+                type: 'session.catalog',
+                request_id: snapshotId,
+                runtime_id: options.runtime.client.runtimeId,
+                runtime_epoch: options.runtime.epoch,
+                payload: { mode, index, complete: index === chunks.length - 1, items: chunks[index] },
+              })
+            }
+            await acknowledged
+          } finally {
+            pendingCatalogAcks.get(snapshotId)?.reject(new Error('Relay catalog publication ended'))
+          }
+          if (catalogRetryTimer) clearTimeout(catalogRetryTimer)
+          catalogRetryTimer = undefined
+        }
+      })().finally(() => {
+        catalogRefresh = undefined
+        if (catalogDirty && !connection.signal.aborted) startCatalogRefresh()
+      })
+      void catalogRefresh.catch(scheduleCatalogRetry)
+    }
+    const scheduleCatalogRetry = () => {
+      if (!catalogEnabled || catalogRetryTimer || connection.signal.aborted) return
+      catalogRetryTimer = setTimeout(() => {
+        catalogRetryTimer = undefined
+        requestCatalogRefresh({ kind: 'snapshot' })
+      }, 30_000)
+      catalogRetryTimer.unref()
+    }
+    const requestCatalogRefresh = (change: SessionCatalogChange = { kind: 'snapshot' }) => {
+      if (change.kind === 'snapshot') {
+        snapshotRequested = true
+        deltaSessionIDs.clear()
+      } else if (!snapshotRequested) {
+        for (const sessionId of change.sessionIds) deltaSessionIDs.add(sessionId)
+      }
+      catalogDirty = true
+      startCatalogRefresh()
+      catalogRefresh?.catch(scheduleCatalogRetry)
+    }
+    stopWatchingCatalog = catalogEnabled
+      ? options.runtime.client.watchSessionCatalog(requestCatalogRefresh)
+      : () => {}
+    if (catalogEnabled) requestCatalogRefresh()
 
     const handleFrame = async (value: unknown) => {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const frame = value as Record<string, unknown>
         if (frame.v === 1 && frame.type === 'pong') return
+        if (frame.type === 'session.catalog.ack') {
+          const parsed = sessionCatalogAckSchema.safeParse(value)
+          if (!parsed.success || parsed.data.runtime_id !== options.runtime.client.runtimeId
+            || parsed.data.runtime_epoch !== options.runtime.epoch) throw new ProbeError('protocol.invalid')
+          const pending = pendingCatalogAcks.get(parsed.data.request_id)
+          if (pending && pending.count !== parsed.data.payload.session_count) throw new ProbeError('protocol.invalid')
+          pending?.resolve()
+          return
+        }
+        if (frame.type === 'error') {
+          const requestId = typeof frame.request_id === 'string' ? frame.request_id : ''
+          pendingCatalogAcks.get(requestId)?.reject(new ProbeError(String((frame.payload as { code?: unknown } | undefined)?.code ?? 'internal')))
+          return
+        }
         if (frame.v === 1 && frame.type === 'server.draining') {
           socket.close(1012, 'server draining')
           return
@@ -410,6 +557,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     try { await reader }
     finally { clearInterval(heartbeat) }
   } finally {
+    if (catalogRetryTimer) clearTimeout(catalogRetryTimer)
+    stopWatchingCatalog()
     signal.removeEventListener('abort', abortConnection)
     connection.abort()
     queue.close()

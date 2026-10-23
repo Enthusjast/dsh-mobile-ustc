@@ -118,6 +118,8 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
   let relaySocket: any
   let relayFailure: Error | undefined
   const relayReceipts: any[] = []
+  let relayCatalog: any[] = []
+  const relayCatalogSnapshots = new Map<string, any[]>()
   let resolveRelayConnected!: () => void
   let rejectRelayConnected!: (error: Error) => void
   const relayConnected = new Promise<void>((resolve, reject) => {
@@ -146,7 +148,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           relayRuntimeEpoch = proof.runtime_epoch
           const helloDigest = hostHelloDigest([
             'host', runtimeId, relayRuntimeEpoch, '0.2.1-rc.2', 'dsh-cli-integration', '0.0.1', '1',
-            ['command.relay.v1', 'connection.heartbeat.v1'].join('\n'),
+            ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'].join('\n'),
           ])
           const valid = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')).typ === 'dsh-relay-handshake-proof+jwt'
             && proof.iss === installationId && proof.aud === 'urn:dsh-mobile-ustc:realtime'
@@ -158,10 +160,28 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolveRelayConnected()
+        } else if (frame.type === 'session.catalog') {
+          const items = relayCatalogSnapshots.get(frame.request_id) ?? []
+          items.push(...frame.payload.items)
+          relayCatalogSnapshots.set(frame.request_id, items)
+          if (frame.payload.complete) {
+            if (frame.payload.mode === 'snapshot') relayCatalog = items
+            else {
+              const merged = new Map(relayCatalog.map(item => [item.session_id, item]))
+              for (const item of items) merged.set(item.session_id, item)
+              relayCatalog = [...merged.values()]
+            }
+            relayCatalogSnapshots.delete(frame.request_id)
+            socket.send(JSON.stringify({
+              v: 1, type: 'session.catalog.ack', request_id: frame.request_id,
+              runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch,
+              payload: { session_count: items.length, server_time: new Date().toISOString() },
+            }))
+          }
         } else if (frame.type === 'command.receipt') relayReceipts.push(frame)
         else if (frame.type === 'ping') socket.send(JSON.stringify({ v: 1, type: 'pong', payload: { connection_id: relayConnectionId, server_time: new Date().toISOString() } }))
       } catch (error) {
@@ -199,6 +219,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     '        applicationVersion: dsh-cli-integration',
     '        workspaces:',
     '          - id: probe',
+    `            remoteId: ${quote('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')}`,
     `            cwd: ${quote(workspace)}`,
     '        presets: [standard]',
     '        highRiskTools: [bash, pwsh, run_code]',
@@ -269,6 +290,16 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     const sessionId = created.payload.session_id as string
     const existing = await command('session.list', {})
     assert.ok(existing.payload.items.some((item: { session_id: string }) => item.session_id === sessionId))
+    const catalogDeadline = Date.now() + 5000
+    while (Date.now() < catalogDeadline && !relayCatalog.some(item => item.session_id === sessionId)) {
+      if (relayFailure) throw relayFailure
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    const catalogEntry = relayCatalog.find(item => item.session_id === sessionId)
+    assert.ok(catalogEntry, 'DSH session was not synchronized to the host Relay catalog')
+    assert.equal(catalogEntry.workspace_id, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    assert.equal(catalogEntry.state, 'available')
+    assert.ok(catalogEntry.last_persisted_seq >= -1)
 
     const subscriptionBody = () => ({ v: 0, type: 'session.subscribe', request_id: randomUUID(), runtime_epoch: probe.runtime_epoch,
       session_id: sessionId, payload: { max_messages: 20 } })
@@ -378,7 +409,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     assert.ok((await readFile(patchPath, 'utf8')).includes('dsh-m0-test'))
     const cancelled = await command('session.cancel', {}, sessionId)
     assert.deepEqual(cancelled.payload, { accepted: true })
-    t.diagnostic(`Loaded via dsh ${probe.payload.dsh_version}; authenticated local Relay handshake and command routing into the same DSH Agent passed with local fixtures, alongside session sync, bash approval rejection, and ordinary question response.`)
+    t.diagnostic(`Loaded via dsh ${probe.payload.dsh_version}; authenticated local Relay handshake, DSH session catalog metadata, and command routing into the same Agent passed with local fixtures, alongside snapshot sync, bash approval rejection, and ordinary question response.`)
     completed = true
   } finally {
     for (const subscription of subscriptions) {

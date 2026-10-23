@@ -10,11 +10,13 @@ const ajv = new Ajv2020({ allErrors: true, strict: true })
 const schema = await load('../../../contracts/ws/v1/relay.schema.json') as object
 const validate = ajv.compile(schema)
 
-test('WSS relay business-frame schema accepts golden requests and receipts only', async () => {
+test('WSS relay schema accepts command receipts and session catalog goldens', async () => {
   for (const path of [
     '../../../contracts/ws/v1/golden/message-submit.json',
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
     '../../../contracts/ws/v1/golden/host-command-receipt.json',
+    '../../../contracts/ws/v1/golden/host-session-catalog.json',
+    '../../../contracts/ws/v1/golden/host-session-catalog.ack.json',
   ]) {
     const value = await load(path)
     assert.equal(validate(value), true, ajv.errorsText(validate.errors))

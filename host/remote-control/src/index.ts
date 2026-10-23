@@ -28,7 +28,7 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean().default(false),
   runtimeId: z.string().default(''),
   socketPath: z.string().default(''),
-  workspaces: z.array(z.object({ id: z.string().required(), cwd: z.string().required() })).default([]),
+  workspaces: z.array(z.object({ id: z.string().required(), cwd: z.string().required(), remoteId: z.string() })).default([]),
   presets: z.array(String).default([]),
   highRiskTools: z.array(String).default(['bash', 'pwsh', 'run_code']),
   interactionTimeoutMs: z.number().min(100).max(600_000).default(180_000),
