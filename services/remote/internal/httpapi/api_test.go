@@ -21,12 +21,31 @@ type fakeRepository struct {
 	activeDeviceCall int
 	commandCalls     int
 	ticketCalls      int
+	enrollmentCalls  int
+	enrollmentResult store.EnrollmentCreated
+	hostConfirmCalls int
+	hostConfirmJKT   string
 }
 
 func (fake *fakeRepository) Ready(context.Context) error { return fake.readyError }
 func (fake *fakeRepository) ActiveDevice(context.Context, store.UserIdentity, string) (string, error) {
 	fake.activeDeviceCall++
 	return fake.activeDeviceID, fake.activeDeviceErr
+}
+func (fake *fakeRepository) CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error) {
+	fake.enrollmentCalls++
+	return fake.enrollmentResult, nil
+}
+func (fake *fakeRepository) GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error) {
+	return store.EnrollmentInfo{}, errors.New("not implemented")
+}
+func (fake *fakeRepository) ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error) {
+	return store.EnrollmentConfirmation{}, errors.New("not implemented")
+}
+func (fake *fakeRepository) ConfirmEnrollmentHost(_ context.Context, _ store.UserIdentity, thumbprint, enrollmentID, _ string) (store.EnrollmentConfirmation, error) {
+	fake.hostConfirmCalls++
+	fake.hostConfirmJKT = thumbprint
+	return store.EnrollmentConfirmation{EnrollmentID: enrollmentID, State: "approved"}, nil
 }
 func (fake *fakeRepository) RegisterDevice(context.Context, store.DeviceRegistration) (string, error) {
 	return "", errors.New("not implemented")

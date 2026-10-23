@@ -25,6 +25,10 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-
 type Repository interface {
 	Ready(context.Context) error
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
+	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
+	GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error)
+	ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
+	ConfirmEnrollmentHost(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
 	RegisterDevice(context.Context, store.DeviceRegistration) (string, error)
 	RevokeDevice(context.Context, string, string, string) error
 	PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error)
@@ -37,11 +41,16 @@ type Repository interface {
 }
 
 type API struct {
-	database Repository
-	identity *auth.Authenticator
+	database    Repository
+	identity    *auth.Authenticator
+	hostClients map[string]struct{}
 }
 
 type deviceContextKey struct{}
+
+type Config struct {
+	HostClientIDs []string
+}
 
 type deviceRequest struct {
 	Name              string          `json:"name"`
@@ -50,13 +59,43 @@ type deviceRequest struct {
 	ProofPublicJWK    json.RawMessage `json:"proof_public_jwk"`
 }
 
-func New(database Repository, identity *auth.Authenticator) http.Handler {
-	api := &API{database: database, identity: identity}
+type enrollmentRequest struct {
+	RequestID             string          `json:"request_id"`
+	OrganizationID        string          `json:"organization_id"`
+	HostID                string          `json:"host_id,omitempty"`
+	Alias                 string          `json:"alias"`
+	ProfileRef            string          `json:"profile_ref"`
+	DSHVersion            string          `json:"dsh_version"`
+	ApplicationVersion    string          `json:"application_version"`
+	PluginVersion         string          `json:"plugin_version"`
+	ProtocolVersion       int             `json:"protocol_version"`
+	InstallationPublicJWK json.RawMessage `json:"installation_public_jwk"`
+	Code                  string          `json:"code"`
+	WorkspaceRefs         *[]string       `json:"workspace_refs"`
+}
+
+type enrollmentCodeRequest struct {
+	Code string `json:"code"`
+}
+
+func New(database Repository, identity *auth.Authenticator, configs ...Config) http.Handler {
+	api := &API{database: database, identity: identity, hostClients: make(map[string]struct{})}
+	if len(configs) > 0 {
+		for _, id := range configs[0].HostClientIDs {
+			if strings.TrimSpace(id) != "" {
+				api.hostClients[id] = struct{}{}
+			}
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", api.health)
 	mux.HandleFunc("GET /readyz", api.ready)
 	mux.Handle("GET /v1/me", api.authenticated(http.HandlerFunc(api.me)))
 	mux.Handle("POST /v1/devices", api.authenticated(http.HandlerFunc(api.registerDevice)))
+	mux.Handle("POST /v1/enrollments", api.hostAuthenticated(http.HandlerFunc(api.createEnrollment)))
+	mux.Handle("GET /v1/enrollments/{id}", api.protected(http.HandlerFunc(api.getEnrollment)))
+	mux.Handle("POST /v1/enrollments/{id}/confirm", api.protected(http.HandlerFunc(api.confirmEnrollmentUser)))
+	mux.Handle("POST /v1/enrollments/{id}/host-confirm", api.hostAuthenticated(http.HandlerFunc(api.confirmEnrollmentHost)))
 	mux.Handle("DELETE /v1/devices/{id}", api.protected(http.HandlerFunc(api.revokeDevice)))
 	mux.Handle("GET /v1/hosts", api.protected(http.HandlerFunc(api.listHosts)))
 	mux.Handle("GET /v1/runtimes", api.protected(http.HandlerFunc(api.listRuntimes)))
@@ -83,6 +122,109 @@ func (api *API) protected(next http.Handler) http.Handler {
 
 func (api *API) authenticated(next http.Handler) http.Handler {
 	return api.identity.Middleware(next)
+}
+
+func (api *API) hostAuthenticated(next http.Handler) http.Handler {
+	return api.authenticated(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		principal, _ := auth.PrincipalFromContext(request.Context())
+		if _, ok := api.hostClients[principal.ClientID]; !ok {
+			writeError(response, http.StatusForbidden, "access.denied")
+			return
+		}
+		next.ServeHTTP(response, request)
+	}))
+}
+
+func (api *API) createEnrollment(response http.ResponseWriter, request *http.Request) {
+	var input enrollmentRequest
+	if !decodeBody(response, request, &input) || !uuidPattern.MatchString(input.RequestID) ||
+		!uuidPattern.MatchString(input.OrganizationID) || input.WorkspaceRefs == nil ||
+		input.HostID != "" && !uuidPattern.MatchString(input.HostID) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	keyThumbprint, err := auth.PublicP256JWKThumbprintJSON(input.InstallationPublicJWK)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "device.key_invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	if keyThumbprint != principal.ProofKeyJKT {
+		writeError(response, http.StatusForbidden, "access.denied")
+		return
+	}
+	enrollmentInput, _, _, err := store.NormalizeEnrollmentInput(store.EnrollmentInput{
+		Issuer: principal.Issuer, Subject: principal.Subject,
+		RequestID: input.RequestID, OrganizationID: input.OrganizationID, HostID: input.HostID, Alias: input.Alias,
+		ProfileRef: input.ProfileRef, DSHVersion: input.DSHVersion,
+		ApplicationVersion: input.ApplicationVersion, PluginVersion: input.PluginVersion,
+		ProtocolVersion: input.ProtocolVersion, InstallationPublicJWK: input.InstallationPublicJWK,
+		InstallationKeyThumbprint: keyThumbprint, Code: input.Code, WorkspaceRefs: *input.WorkspaceRefs,
+	})
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "enrollment.invalid")
+		return
+	}
+	enrollment, err := api.database.CreateEnrollment(request.Context(), enrollmentInput)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusCreated, enrollment)
+}
+
+func (api *API) getEnrollment(response http.ResponseWriter, request *http.Request) {
+	enrollmentID := request.PathValue("id")
+	if !uuidPattern.MatchString(enrollmentID) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	info, err := api.database.GetEnrollment(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, enrollmentID)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, info)
+}
+
+func (api *API) confirmEnrollmentUser(response http.ResponseWriter, request *http.Request) {
+	api.confirmEnrollment(response, request, false)
+}
+
+func (api *API) confirmEnrollmentHost(response http.ResponseWriter, request *http.Request) {
+	api.confirmEnrollment(response, request, true)
+}
+
+func (api *API) confirmEnrollment(response http.ResponseWriter, request *http.Request, hostConfirmation bool) {
+	enrollmentID := request.PathValue("id")
+	if !uuidPattern.MatchString(enrollmentID) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	var input enrollmentCodeRequest
+	if !decodeBody(response, request, &input) {
+		writeError(response, http.StatusBadRequest, "enrollment.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	var confirmation store.EnrollmentConfirmation
+	var err error
+	if hostConfirmation {
+		confirmation, err = api.database.ConfirmEnrollmentHost(request.Context(),
+			store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject},
+			principal.ProofKeyJKT, enrollmentID, input.Code)
+	} else {
+		deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
+		confirmation, err = api.database.ConfirmEnrollmentUser(request.Context(),
+			store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject},
+			deviceID, enrollmentID, input.Code)
+	}
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, confirmation)
 }
 
 func (api *API) health(response http.ResponseWriter, _ *http.Request) {
@@ -356,6 +498,12 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusForbidden, "access.denied")
 	case errors.Is(err, store.ErrTicketInvalid):
 		writeError(response, http.StatusUnauthorized, "ticket.invalid")
+	case errors.Is(err, store.ErrEnrollmentInvalid):
+		writeError(response, http.StatusForbidden, "access.denied")
+	case errors.Is(err, store.ErrEnrollmentConflict):
+		writeError(response, http.StatusConflict, "enrollment.request_conflict")
+	case errors.Is(err, store.ErrEnrollmentLimit):
+		writeError(response, http.StatusTooManyRequests, "rate.limited")
 	case errors.Is(err, store.ErrGrantInvalid):
 		writeError(response, http.StatusBadRequest, "grant.invalid")
 	case errors.Is(err, store.ErrDatabaseUnavailable):

@@ -92,6 +92,35 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 	if ticket.Code != http.StatusCreated || repo.ticketCalls != 1 || !strings.Contains(ticket.Body.String(), `"ticket"`) {
 		t.Fatalf("active device could not request a scoped Relay ticket: status=%d calls=%d body=%s", ticket.Code, repo.ticketCalls, ticket.Body.String())
 	}
+	hostEnroll := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/enrollments", "proof-jti-mobile-host-enroll-0006", ticket.Header().Get("DPoP-Nonce"), map[string]any{})
+	if hostEnroll.Code != http.StatusForbidden || repo.enrollmentCalls != 0 {
+		t.Fatalf("mobile OAuth client reached host enrollment: status=%d enrollment-calls=%d", hostEnroll.Code, repo.enrollmentCalls)
+	}
+	repo.enrollmentResult = store.EnrollmentCreated{
+		EnrollmentID: "77777777-7777-4777-8777-777777777777", HostID: "11111111-1111-4111-8111-111111111111",
+		InstallationID: "22222222-2222-4222-8222-222222222222", RuntimeID: "55555555-5555-4555-8555-555555555555",
+		RequestID: "66666666-6666-4666-8666-666666666666", ProfileRef: "profile", State: "pending",
+		ExpiresAt: now.Add(5 * time.Minute), Workspaces: []store.EnrollmentWorkspace{},
+	}
+	hostAPI := New(repo, identity, Config{HostClientIDs: []string{"mobile-client"}})
+	createBody := map[string]any{
+		"request_id": "66666666-6666-4666-8666-666666666666", "organization_id": "33333333-3333-4333-8333-333333333333",
+		"alias": "host", "profile_ref": "profile", "dsh_version": "0.2.1-rc.2", "application_version": "1.0",
+		"plugin_version": "1.0", "protocol_version": 1, "installation_public_jwk": proofJWK,
+		"code": base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "workspace_refs": []string{"project"},
+	}
+	created := sendDPoPRequest(t, hostAPI, access, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/enrollments", "proof-jti-host-enroll-0007", hostEnroll.Header().Get("DPoP-Nonce"), createBody)
+	if created.Code != http.StatusCreated || repo.enrollmentCalls != 1 {
+		t.Fatalf("allowlisted DPoP host client could not create enrollment: status=%d calls=%d body=%s", created.Code, repo.enrollmentCalls, created.Body.String())
+	}
+	confirmed := sendDPoPRequest(t, hostAPI, access, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/enrollments/77777777-7777-4777-8777-777777777777/host-confirm",
+		"proof-jti-host-confirm-0008", created.Header().Get("DPoP-Nonce"), map[string]any{"code": createBody["code"]})
+	if confirmed.Code != http.StatusOK || repo.hostConfirmCalls != 1 || repo.hostConfirmJKT != proofJKT {
+		t.Fatalf("host confirmation did not bind to the DPoP installation key: status=%d calls=%d key=%s", confirmed.Code, repo.hostConfirmCalls, repo.hostConfirmJKT)
+	}
 }
 
 func sendDPoPRequest(t *testing.T, handler http.Handler, access string, proofKey *ecdsa.PrivateKey, proofJWK map[string]any, method, uri, jti, nonce string, body ...any) *httptest.ResponseRecorder {

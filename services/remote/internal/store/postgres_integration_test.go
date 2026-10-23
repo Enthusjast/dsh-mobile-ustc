@@ -2,9 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"dsh-mobile-ustc/services/remote/internal/auth"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 )
@@ -66,15 +71,17 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if !ok {
 		t.Fatal("resolve integration test source path")
 	}
-	migrationPath := filepath.Join(filepath.Dir(sourceFile), "../../../../deploy/sql/001_remote_control.up.sql")
-	migration, err := os.ReadFile(migrationPath)
-	if err != nil {
-		_ = migrationConnection.Close(context.Background())
-		t.Fatalf("read PostgreSQL migration: %v", err)
-	}
-	if _, err := migrationConnection.Exec(ctx, string(migration), pgx.QueryExecModeSimpleProtocol); err != nil {
-		_ = migrationConnection.Close(context.Background())
-		t.Fatalf("apply PostgreSQL migration: %v", err)
+	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql"} {
+		migrationPath := filepath.Join(filepath.Dir(sourceFile), "../../../../deploy/sql", name)
+		migration, err := os.ReadFile(migrationPath)
+		if err != nil {
+			_ = migrationConnection.Close(context.Background())
+			t.Fatalf("read PostgreSQL migration %s: %v", name, err)
+		}
+		if _, err := migrationConnection.Exec(ctx, string(migration), pgx.QueryExecModeSimpleProtocol); err != nil {
+			_ = migrationConnection.Close(context.Background())
+			t.Fatalf("apply PostgreSQL migration %s: %v", name, err)
+		}
 	}
 	if err := migrationConnection.Close(context.Background()); err != nil {
 		t.Fatalf("close migration connection: %v", err)
@@ -237,6 +244,103 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := assertChangeCounts(ctx, testDB, 6, 3); err != nil {
 		t.Fatal(err)
 	}
+
+	hostKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationJWK, err := integrationP256JWK(hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationThumbprint, err := auth.PublicP256JWKThumbprintJSON(installationJWK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollmentCodeBytes := make([]byte, 32)
+	if _, err := rand.Read(enrollmentCodeBytes); err != nil {
+		t.Fatal(err)
+	}
+	enrollmentCode := base64.RawURLEncoding.EncodeToString(enrollmentCodeBytes)
+	for index := range enrollmentCodeBytes {
+		enrollmentCodeBytes[index] = 0
+	}
+	enrollmentInput := EnrollmentInput{
+		Issuer: identity.Issuer, Subject: identity.Subject,
+		RequestID: "aaaaaaaa-1111-4111-8111-111111111111", OrganizationID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		Alias: "Second host", ProfileRef: "profile-lab", DSHVersion: "0.2.1-rc.2",
+		ApplicationVersion: "1.0.0", PluginVersion: "0.1.0", ProtocolVersion: 1,
+		InstallationPublicJWK: installationJWK, InstallationKeyThumbprint: installationThumbprint,
+		Code: enrollmentCode, WorkspaceRefs: []string{"project"},
+	}
+	enrollment, err := postgres.CreateEnrollment(ctx, enrollmentInput)
+	if err != nil || enrollment.State != "pending" || len(enrollment.Workspaces) != 1 || enrollment.Workspaces[0].Reference != "project" {
+		t.Fatalf("create enrollment: enrollment=%+v error=%v", enrollment, err)
+	}
+	var storedCodeHash []byte
+	if err := testDB.QueryRowContext(ctx, `select code_hash from enrollments where id = $1`, enrollment.EnrollmentID).Scan(&storedCodeHash); err != nil {
+		t.Fatal(err)
+	}
+	if len(storedCodeHash) != 32 || string(storedCodeHash) == enrollmentCode {
+		t.Fatal("enrollment code was stored in plaintext")
+	}
+	if err := assertChangeCounts(ctx, testDB, 7, 4); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.CreateEnrollment(ctx, enrollmentInput); err != nil {
+		t.Fatalf("idempotent enrollment retry: %v", err)
+	}
+	conflictingEnrollment := enrollmentInput
+	conflictingEnrollment.Alias = "Other host"
+	if _, err := postgres.CreateEnrollment(ctx, conflictingEnrollment); !errors.Is(err, ErrEnrollmentConflict) {
+		t.Fatalf("conflicting enrollment retry error=%v, want ErrEnrollmentConflict", err)
+	}
+	if _, err := postgres.GetEnrollment(ctx, UserIdentity{Issuer: identity.Issuer, Subject: "target-subject"}, enrollment.EnrollmentID); err != nil {
+		t.Fatalf("organization member could not inspect enrollment: %v", err)
+	}
+	if _, err := postgres.GetEnrollment(ctx, UserIdentity{Issuer: identity.Issuer, Subject: "outsider-subject"}, enrollment.EnrollmentID); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("unaffiliated user inspected enrollment: %v", err)
+	}
+	phoneIdentity := UserIdentity{Issuer: identity.Issuer, Subject: "target-subject"}
+	const phoneDeviceID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	wrongCodeBytes := make([]byte, 32)
+	if _, err := rand.Read(wrongCodeBytes); err != nil {
+		t.Fatal(err)
+	}
+	wrongCode := base64.RawURLEncoding.EncodeToString(wrongCodeBytes)
+	for index := range wrongCodeBytes {
+		wrongCodeBytes[index] = 0
+	}
+	if _, err := postgres.ConfirmEnrollmentUser(ctx, phoneIdentity, phoneDeviceID, enrollment.EnrollmentID, wrongCode); !errors.Is(err, ErrEnrollmentInvalid) {
+		t.Fatalf("wrong enrollment code error=%v, want ErrEnrollmentInvalid", err)
+	}
+	partial, err := postgres.ConfirmEnrollmentUser(ctx, phoneIdentity, phoneDeviceID, enrollment.EnrollmentID, enrollmentCode)
+	if err != nil || partial.State != "user_confirmed" {
+		t.Fatalf("phone confirmation: state=%s error=%v", partial.State, err)
+	}
+	if err := assertChangeCounts(ctx, testDB, 8, 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, "wrong-installation-key", enrollment.EnrollmentID, enrollmentCode); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("host confirmation with wrong key error=%v, want ErrAccessDenied", err)
+	}
+	approved, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode)
+	if err != nil || approved.State != "approved" {
+		t.Fatalf("host confirmation: state=%s error=%v", approved.State, err)
+	}
+	if err := assertChangeCounts(ctx, testDB, 11, 8); err != nil {
+		t.Fatal(err)
+	}
+	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
+	if err != nil || len(phoneHosts) != 1 || phoneHosts[0].Alias != "Second host" {
+		t.Fatalf("confirmed phone owner host visibility: hosts=%+v error=%v", phoneHosts, err)
+	}
+	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
+		t.Fatalf("idempotent host confirmation: %v", err)
+	}
+	if err := assertChangeCounts(ctx, testDB, 11, 8); err != nil {
+		t.Fatal(err)
+	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, "proof-jkt-actor")
 	if err != nil || activeDeviceID != deviceID {
 		t.Fatalf("active device lookup: id=%s error=%v", activeDeviceID, err)
@@ -250,7 +354,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 7, 4); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 12, 9); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -269,6 +373,7 @@ func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) {
 		workspaceID    = "77777777-7777-4777-8777-777777777777"
 		sessionID      = "99999999-9999-4999-8999-999999999999"
 		deviceID       = "44444444-4444-4444-8444-444444444444"
+		phoneDeviceID  = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 	)
 	statements := []struct {
 		query string
@@ -277,7 +382,7 @@ func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) {
 		{`insert into orgs (id, slug, name) values ($1, 'test-org', 'Test org'), ($2, 'other-org', 'Other org')`, []any{orgID, otherOrgID}},
 		{`insert into users (id, issuer, subject) values ($1, 'https://id.example.edu', 'owner-subject'), ($2, 'https://id.example.edu', 'target-subject'), ($3, 'https://id.example.edu', 'outsider-subject')`, []any{actorID, targetID, outsiderID}},
 		{`insert into org_memberships (org_id, user_id, role) values ($1, $2, 'member'), ($1, $3, 'member'), ($4, $5, 'member')`, []any{orgID, actorID, targetID, otherOrgID, outsiderID}},
-		{`insert into devices (id, user_id, name, approval_public_jwk, approval_key_thumbprint, proof_public_jwk, proof_key_thumbprint) values ($1, $2, 'owner phone', '{}'::jsonb, 'approval-jkt-actor', '{}'::jsonb, 'proof-jkt-actor')`, []any{deviceID, actorID}},
+		{`insert into devices (id, user_id, name, approval_public_jwk, approval_key_thumbprint, proof_public_jwk, proof_key_thumbprint) values ($1, $2, 'owner phone', '{}'::jsonb, 'approval-jkt-actor', '{}'::jsonb, 'proof-jkt-actor'), ($3, $4, 'target phone', '{}'::jsonb, 'approval-jkt-target', '{}'::jsonb, 'proof-jkt-target')`, []any{deviceID, actorID, phoneDeviceID, targetID}},
 		{`insert into hosts (id, org_id, alias, state) values ($1, $2, 'Test host', 'active')`, []any{hostID, orgID}},
 		{`insert into installations (id, host_id, owner_user_id, public_jwk, public_key_thumbprint) values ($1, $2, $3, '{}'::jsonb, 'installation-jkt')`, []any{installationID, hostID, actorID}},
 		{`insert into runtimes (id, installation_id, profile_ref, protocol_version) values ($1, $2, 'test-profile', 1)`, []any{runtimeID, installationID}},
@@ -320,4 +425,12 @@ func assertChangeCounts(ctx context.Context, database *sql.DB, audits, outbox in
 		return errors.New("audit or outbox row count did not match expected transaction state")
 	}
 	return nil
+}
+
+func integrationP256JWK(key *ecdsa.PrivateKey) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		"kty": "EC", "crv": "P-256",
+		"x": base64.RawURLEncoding.EncodeToString(key.PublicKey.X.FillBytes(make([]byte, 32))),
+		"y": base64.RawURLEncoding.EncodeToString(key.PublicKey.Y.FillBytes(make([]byte, 32))),
+	})
 }

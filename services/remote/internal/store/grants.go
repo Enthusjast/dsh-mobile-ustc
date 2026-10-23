@@ -447,9 +447,13 @@ func writeGrantChange(ctx context.Context, tx *sql.Tx, actorID, deviceID, orgID,
 	if err != nil {
 		return err
 	}
+	var actorDeviceID any
+	if deviceID != "" {
+		actorDeviceID = deviceID
+	}
 	_, err = tx.ExecContext(ctx, `
 		insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, action, result, metadata)
 		values ($1, 'user', $2, $3, $4, $5, 'success', $6::jsonb)`,
-		orgID, actorID, deviceID, runtimeID, action, string(metadata))
+		orgID, actorID, actorDeviceID, runtimeID, action, string(metadata))
 	return err
 }
