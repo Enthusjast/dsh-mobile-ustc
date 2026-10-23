@@ -17,4 +17,6 @@ go test -race ./...
 go build -o /tmp/dsh-remote ./cmd/remote
 ```
 
+The PostgreSQL integration test is opt-in because it creates and drops a uniquely named database. Set `REMOTE_TEST_DATABASE_URL` to a local PostgreSQL admin DSN whose role can create databases, then run `go test ./internal/store -run TestPostgresMigrationGrantLifecycleAndTransactionalOutbox`. It applies the migration and exercises grant writes, scope denial, audit/outbox atomicity, and device revocation in that temporary database.
+
 The migration is a schema baseline only; this repository does not yet apply it automatically. Repository SQL has not been exercised against a live PostgreSQL server. User/org provisioning, enrollment, installation proofs, the OIDC/PKCE client flow, and a shared replay store remain outstanding. The authentication contract and its remaining gates are recorded in [M1 authentication notes](../../docs/m1-authentication.md).
