@@ -195,7 +195,7 @@ func (server *Server) routeSessionContent(ctx context.Context, live *liveConnect
 	}
 	server.mu.Lock()
 	subscription := server.subscriptions[envelope.SubscriptionID]
-	validHost := subscription != nil && subscription.host == live && server.hosts[live.runtimeID] == live && envelope.SessionID == subscription.sessionID
+	validHost := subscription != nil && !live.closing && !subscription.device.closing && subscription.host == live && server.hosts[live.runtimeID] == live && envelope.SessionID == subscription.sessionID
 	server.mu.Unlock()
 	if subscription == nil {
 		// Frames already in flight after cancellation are discarded.
@@ -214,7 +214,7 @@ func (server *Server) routeSessionContent(ctx context.Context, live *liveConnect
 		return
 	}
 	server.mu.Lock()
-	valid := server.subscriptions[subscription.id] == subscription && validateSessionContent(subscription, envelope)
+	valid := !live.closing && !subscription.device.closing && server.subscriptions[subscription.id] == subscription && validateSessionContent(subscription, envelope)
 	server.mu.Unlock()
 	if !valid {
 		server.dropSubscription(ctx, subscription, "protocol.resync_required", true)

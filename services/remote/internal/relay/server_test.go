@@ -185,6 +185,10 @@ func (fake *relayTestStore) AuthorizeRealtimeSessionRead(_ context.Context, tick
 	return nil
 }
 
+func (fake *relayTestStore) InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error) {
+	return nil, nil
+}
+
 func TestDeviceTicketRequiresKeyProofBeforeHelloAndHeartbeat(t *testing.T) {
 	key := relayTestKey(t)
 	publicJWK, thumbprint := relayTestPublicJWK(t, key)

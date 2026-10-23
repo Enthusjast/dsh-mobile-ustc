@@ -49,6 +49,7 @@ type Repository interface {
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
 	AuthorizeRealtimeSessionRead(context.Context, store.TicketRedemption, string) error
+	InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error)
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
@@ -72,6 +73,14 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 
 func (handler *Handler) Drain(ctx context.Context) error {
 	return handler.realtime.Drain(ctx)
+}
+
+func (handler *Handler) ApplyControlEvent(ctx context.Context, event store.ControlEvent) error {
+	return handler.realtime.ApplyControlEvent(ctx, event)
+}
+
+func (handler *Handler) RevalidateConnections(ctx context.Context) error {
+	return handler.realtime.RevalidateConnections(ctx)
 }
 
 type deviceContextKey struct{}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
+	"dsh-mobile-ustc/services/remote/internal/control"
 	"dsh-mobile-ustc/services/remote/internal/httpapi"
 	"dsh-mobile-ustc/services/remote/internal/store"
 )
@@ -43,9 +44,10 @@ func run() error {
 	}
 	defer database.Close()
 
+	handler := httpapi.New(database, verifier, httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS"))})
 	server := &http.Server{
 		Addr:              envOr("REMOTE_LISTEN_ADDR", "127.0.0.1:8080"),
-		Handler:           httpapi.New(database, verifier, httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS"))}),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -54,6 +56,10 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	controlCtx, stopControl := context.WithCancel(ctx)
+	controlDone := make(chan struct{})
+	go func() { defer close(controlDone); control.Run(controlCtx, database, handler) }()
+	defer func() { stopControl(); <-controlDone }()
 	result := make(chan error, 1)
 	go func() { result <- server.ListenAndServe() }()
 	select {

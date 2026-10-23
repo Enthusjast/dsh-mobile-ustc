@@ -99,6 +99,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const root = await mkdtemp(join(cluster, 'clients-'))
   const query = (sql: string) => execFileSync(psql, ['-X', '--dbname', database, '-v', 'ON_ERROR_STOP=1', '-At'], { input: sql, encoding: 'utf8' }).trim()
   const signingKey = key(), installationKey = key(), phoneKey = key(), approvalKey = key(), outsiderKey = key(), outsiderApprovalKey = key()
+  const siblingKey = key(), siblingApprovalKey = key()
   const orgId = randomUUID(), ownerId = randomUUID(), phoneUserId = randomUUID(), outsiderId = randomUUID()
   const jwks = createServer((req, res) => {
     if (req.url !== '/jwks') { res.writeHead(404).end(); return }
@@ -159,6 +160,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   const owner = client('owner', 'fixture-host', installationKey)
   const phone = client('phone', 'fixture-phone', phoneKey)
+  const siblingPhone = client('phone', 'fixture-phone', siblingKey)
   const outsider = client('outsider', 'fixture-phone', outsiderKey)
   const register = (api: typeof phone, proofKey: ReturnType<typeof key>, approval: ReturnType<typeof key>, subject: string) => api('POST', '/v1/devices', proofJTI => ({
     name: subject, proof_public_jwk: proofKey.jwk, approval_public_jwk: approval.jwk,
@@ -168,6 +170,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     }),
   }), 201)
   const device = await register(phone, phoneKey, approvalKey, 'phone')
+  const siblingDevice = await register(siblingPhone, siblingKey, siblingApprovalKey, 'phone')
   await register(outsider, outsiderKey, outsiderApprovalKey, 'outsider')
   const code = randomBytes(32).toString('base64url')
   const enrollment = await owner('POST', '/v1/enrollments', {
@@ -255,19 +258,24 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
   const validate = new Ajv2020({ strict: true }).compile(schema)
-  const mobileSocket = new WebSocket(origin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', { headers: { authorization: `DSH-Ticket ${ticket.ticket}` }, perMessageDeflate: false, maxPayload: 65_536 })
-  const mobile = new FrameCollector(mobileSocket, value => validate(value))
-  t.after(() => { mobileSocket.terminate() })
-  const relayChallenge = await mobile.wait(frame => frame.type === 'challenge')
-  const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.read.v1']
-  mobile.send({ v: 1, type: 'hello.proof', payload: { device_id: device.device_id, protocols: [1], capabilities: caps,
-    proof: jws(phoneKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
-      iss: device.device_id, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: relayChallenge.payload.challenge_id,
-      connection_id: relayChallenge.payload.connection_id, nonce: relayChallenge.payload.nonce, runtime_id: enrollment.runtime_id,
-      hello_sha256: hostHelloDigest(['device', device.device_id, '1', caps.join('\n')]), iat: now(), jti: randomUUID(),
-    }),
-  } })
-  await mobile.wait(frame => frame.type === 'hello.ok')
+  const connectPhone = async (api: typeof phone, deviceId: string, proofKey: ReturnType<typeof key>, issued?: typeof ticket) => {
+    const connectionTicket = issued ?? await api('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
+    const socket = new WebSocket(origin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', { headers: { authorization: `DSH-Ticket ${connectionTicket.ticket}` }, perMessageDeflate: false, maxPayload: 65_536 })
+    const collector = new FrameCollector(socket, value => validate(value))
+    t.after(() => { socket.terminate() })
+    const challenge = await collector.wait(frame => frame.type === 'challenge')
+    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.read.v1']
+    collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
+      proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
+        iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
+        connection_id: challenge.payload.connection_id, nonce: challenge.payload.nonce, runtime_id: enrollment.runtime_id,
+        hello_sha256: hostHelloDigest(['device', deviceId, '1', caps.join('\n')]), iat: now(), jti: randomUUID(),
+      }),
+    } })
+    await collector.wait(frame => frame.type === 'hello.ok')
+    return collector
+  }
+  const mobile = await connectPhone(phone, device.device_id, phoneKey, ticket)
   const subscribe = () => {
     const id = randomUUID()
     mobile.send({ v: 1, type: 'session.subscribe', request_id: id, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 30 } })
@@ -319,11 +327,25 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
-  await phone('DELETE', `/v1/runtimes/${enrollment.runtime_id}/grants/${phoneUserId}`)
+  const siblingMobile = await connectPhone(siblingPhone, siblingDevice.device_id, siblingKey)
+  const deviceRevokedAt = Date.now()
+  await phone('DELETE', `/v1/devices/${siblingDevice.device_id}`)
+  await siblingMobile.wait(frame => frame.type === 'access.revoked' && frame.payload.code === 'access.revoked')
+  await until(async () => siblingMobile.closed ? true : undefined, 'idle revoked device socket close', 5000)
+  assert.ok(Date.now() - deviceRevokedAt < 5000, 'idle device revocation exceeded five seconds')
+  assert.equal(mobile.closed, false, 'revoking a sibling device closed the primary phone')
+  const survivingPageId = randomUUID(), survivingPageFrom = mobile.frames.length
+  mobile.send({ ...page, request_id: survivingPageId })
+  await mobile.wait(frame => frame.type === 'session.page.result' && frame.request_id === survivingPageId, survivingPageFrom)
   const revokedFrom = mobile.frames.length
-  await command('message.submit', { mode: 'queue', text: 'Local activity after remote grant revocation' }, sessionId)
-  await mobile.wait(frame => frame.type === 'session.error' && frame.subscription_id === replacement.subscription_id && frame.payload.code === 'access.denied', revokedFrom)
+  const grantRevokedAt = Date.now()
+  await phone('DELETE', `/v1/runtimes/${enrollment.runtime_id}/grants/${phoneUserId}`)
+  await mobile.wait(frame => frame.type === 'access.revoked' && frame.payload.code === 'access.revoked', revokedFrom)
+  await until(async () => mobile.closed ? true : undefined, 'idle revoked grant socket close', 5000)
+  assert.ok(Date.now() - grantRevokedAt < 5000, 'idle grant revocation exceeded five seconds')
   assert.equal(mobile.frames.slice(revokedFrom).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false, 'revoked phone received new session content')
+  await until(async () => query(`select count(*) from control_outbox where published_at is null and topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked')`) === '0' ? true : undefined, 'control outbox acknowledgement')
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
-  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, catalog, snapshots, assistant stream, pagination, idempotency, body-storage boundary and grant revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
+  t.diagnostic(`Idle device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
+  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, catalog, snapshots, assistant stream, pagination, idempotency, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

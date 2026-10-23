@@ -1,0 +1,97 @@
+package relay
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"dsh-mobile-ustc/services/remote/internal/store"
+)
+
+func (server *Server) ApplyControlEvent(ctx context.Context, event store.ControlEvent) error {
+	server.mu.Lock()
+	connections := []*liveConnection{}
+	for _, live := range server.connections {
+		if live.peer.role != "device" || live.connectionID == "" || live.closing {
+			continue
+		}
+		matches := event.Topic == "device.revoked" && event.DeviceID == live.peer.deviceID
+		if event.Topic == "runtime_grant.updated" || event.Topic == "runtime_grant.revoked" {
+			matches = event.RuntimeID == live.runtimeID && event.UserID == live.peer.redemption.UserID && live.peer.redemption.GrantVersion < event.GrantVersion
+		}
+		if matches {
+			live.closing = true
+			connections = append(connections, live)
+		}
+	}
+	server.mu.Unlock()
+	server.closeRevokedConnections(ctx, connections, "access.revoked")
+	return nil
+}
+
+func (server *Server) RevalidateConnections(ctx context.Context) error {
+	server.mu.Lock()
+	connections := []*liveConnection{}
+	for _, live := range server.connections {
+		if live.connectionID != "" && !live.closing {
+			connections = append(connections, live)
+		}
+	}
+	server.mu.Unlock()
+	invalid := []*liveConnection{}
+	for start := 0; start < len(connections); start += 128 {
+		end := min(start+128, len(connections))
+		leases := make([]store.RealtimeConnectionLease, 0, end-start)
+		byID := make(map[string]*liveConnection, end-start)
+		for _, live := range connections[start:end] {
+			lease := store.RealtimeConnectionLease{Role: live.peer.role, ConnectionID: live.connectionID, RuntimeID: live.runtimeID}
+			if live.peer.role == "installation" {
+				if !live.peer.installation.ExpiresAt.After(time.Now()) {
+					invalid = append(invalid, live)
+					continue
+				}
+				lease.InstallationID, lease.RuntimeEpoch, lease.KeyVersion = &live.peer.installation.InstallationID, &live.runtimeEpoch, live.peer.installation.KeyVersion
+			} else {
+				ticket := &live.peer.redemption
+				lease.UserID, lease.DeviceID, lease.DeviceKeyVersion = &ticket.UserID, &ticket.DeviceID, ticket.DeviceKeyVersion
+				lease.GrantVersion, lease.ProofKeyThumbprint, lease.Scope = ticket.GrantVersion, ticket.ProofKeyThumbprint, ticket.Scope
+			}
+			leases = append(leases, lease)
+			byID[live.connectionID] = live
+		}
+		ids, err := server.database.InvalidRealtimeConnectionLeases(ctx, leases)
+		if err != nil {
+			// An expired check deadline must not extend access. Notifications get a
+			// separate short deadline; sockets close even when writes fail.
+			server.closeRevokedConnections(context.Background(), connections, "internal")
+			return err
+		}
+		for _, id := range ids {
+			if live := byID[id]; live != nil {
+				invalid = append(invalid, live)
+			}
+		}
+	}
+	server.closeRevokedConnections(ctx, invalid, "access.revoked")
+	return nil
+}
+
+func (server *Server) closeRevokedConnections(parent context.Context, connections []*liveConnection, code string) {
+	server.mu.Lock()
+	for _, live := range connections {
+		live.closing = true
+	}
+	server.mu.Unlock()
+	ctx, cancel := context.WithTimeout(parent, 250*time.Millisecond)
+	defer cancel()
+	var writes sync.WaitGroup
+	for _, live := range connections {
+		writes.Add(1)
+		go func(live *liveConnection) {
+			defer writes.Done()
+			_ = live.sendJSON(ctx, map[string]any{"v": 1, "type": "access.revoked", "payload": map[string]string{"code": code}})
+			_ = live.conn.CloseNow()
+		}(live)
+	}
+	writes.Wait()
+}

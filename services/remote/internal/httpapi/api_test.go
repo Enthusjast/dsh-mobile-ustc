@@ -120,6 +120,10 @@ func (fake *fakeRepository) AuthorizeRealtimeSessionRead(context.Context, store.
 	return nil
 }
 
+func (fake *fakeRepository) InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error) {
+	return nil, nil
+}
+
 func (fake *fakeRepository) DetachRuntimeConnection(context.Context, string, string, string, string) error {
 	return nil
 }

@@ -57,6 +57,7 @@ type Repository interface {
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
 	AuthorizeRealtimeSessionRead(context.Context, store.TicketRedemption, string) error
+	InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error)
 }
 
 type Server struct {
@@ -258,7 +259,7 @@ func capabilitySet(values []string) map[string]struct{} {
 func (server *Server) bindDevice(live *liveConnection, redemption store.TicketRedemption, connectionID string, capabilities []string) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.draining || server.connections[live.conn] != live {
+	if server.draining || live.closing || server.connections[live.conn] != live {
 		return false
 	}
 	live.peer.redemption = redemption
@@ -282,7 +283,7 @@ func (server *Server) bindDevice(live *liveConnection, redemption store.TicketRe
 
 func (server *Server) bindHost(live *liveConnection, connection store.RuntimeConnection, capabilities []string) bool {
 	server.mu.Lock()
-	if server.draining || server.connections[live.conn] != live {
+	if server.draining || live.closing || server.connections[live.conn] != live {
 		server.mu.Unlock()
 		return false
 	}
@@ -307,7 +308,11 @@ func (server *Server) bindHost(live *liveConnection, connection store.RuntimeCon
 func (server *Server) hostForRuntime(runtimeID string) *liveConnection {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	return server.hosts[runtimeID]
+	host := server.hosts[runtimeID]
+	if host != nil && host.closing {
+		return nil
+	}
+	return host
 }
 
 func (server *Server) devicesForRuntime(runtimeID, deviceID string) []*liveConnection {
@@ -317,7 +322,9 @@ func (server *Server) devicesForRuntime(runtimeID, deviceID string) []*liveConne
 	connections := byDevice[deviceID]
 	result := make([]*liveConnection, 0, len(connections))
 	for connection := range connections {
-		result = append(result, connection)
+		if !connection.closing {
+			result = append(result, connection)
+		}
 	}
 	return result
 }

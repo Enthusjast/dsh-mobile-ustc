@@ -535,6 +535,52 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.AuthorizeRealtimeSessionRead(ctx, messageTicketRedemption, relaySessionID); err != nil {
 		t.Fatalf("active workspace read grant denied: %v", err)
 	}
+	deviceConnectionID := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	deviceLease := RealtimeConnectionLease{
+		Role: "device", ConnectionID: deviceConnectionID, RuntimeID: enrollment.RuntimeID,
+		UserID: &messageTicketRedemption.UserID, DeviceID: &messageTicketRedemption.DeviceID,
+		DeviceKeyVersion: messageTicketRedemption.DeviceKeyVersion, ProofKeyThumbprint: messageTicketRedemption.ProofKeyThumbprint,
+		GrantVersion: messageTicketRedemption.GrantVersion, Scope: messageTicketRedemption.Scope,
+	}
+	hostLease := RealtimeConnectionLease{
+		Role: "installation", ConnectionID: replacement.ConnectionID, RuntimeID: enrollment.RuntimeID,
+		RuntimeEpoch: &replacement.RuntimeEpoch, InstallationID: &enrollment.InstallationID, KeyVersion: 1,
+	}
+	assertConnectionLeases(t, ctx, postgres, []RealtimeConnectionLease{deviceLease, hostLease})
+	for _, variant := range []string{"device-key", "proof-key", "grant-version", "scope", "user", "host-key", "epoch", "connection"} {
+		deviceVariant, hostVariant := deviceLease, hostLease
+		otherID := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+		want := deviceConnectionID
+		switch variant {
+		case "device-key":
+			deviceVariant.DeviceKeyVersion++
+		case "proof-key":
+			deviceVariant.ProofKeyThumbprint = "other-key"
+		case "grant-version":
+			deviceVariant.GrantVersion++
+		case "scope":
+			deviceVariant.Scope.Workspaces = []string{otherID}
+		case "user":
+			deviceVariant.UserID = &otherID
+		case "host-key":
+			hostVariant.KeyVersion++
+			want = hostVariant.ConnectionID
+		case "epoch":
+			hostVariant.RuntimeEpoch = &otherID
+			want = hostVariant.ConnectionID
+		case "connection":
+			hostVariant.ConnectionID = connection.ConnectionID
+			want = hostVariant.ConnectionID
+		}
+		assertConnectionLeases(t, ctx, postgres, []RealtimeConnectionLease{deviceVariant, hostVariant}, want)
+	}
+	if _, err := testDB.ExecContext(ctx, `update runtime_grants set expires_at = clock_timestamp() - interval '1 second' where runtime_id = $1 and user_id = $2`, enrollment.RuntimeID, messageTicketRedemption.UserID); err != nil {
+		t.Fatal(err)
+	}
+	assertConnectionLeases(t, ctx, postgres, []RealtimeConnectionLease{deviceLease, hostLease}, deviceConnectionID)
+	if _, err := testDB.ExecContext(ctx, `update runtime_grants set expires_at = null where runtime_id = $1 and user_id = $2`, enrollment.RuntimeID, messageTicketRedemption.UserID); err != nil {
+		t.Fatal(err)
+	}
 	for _, variant := range []string{"missing-action", "empty-resources", "wrong-device-key", "wrong-runtime", "wrong-grant-version"} {
 		ticket := messageTicketRedemption
 		switch variant {
@@ -600,6 +646,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.AuthorizeRealtimeSessionRead(ctx, messageTicketRedemption, relaySessionID); !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("session content survived a grant-version change: %v", err)
 	}
+	assertConnectionLeases(t, ctx, postgres, []RealtimeConnectionLease{deviceLease, hostLease}, deviceConnectionID)
 	staleReceipt := commandReceipt
 	staleReceipt.ConnectionID = connection.ConnectionID
 	staleReceipt.State = "settled"
@@ -621,6 +668,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.TouchRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); !errors.Is(err, ErrRuntimeConnectionStale) {
 		t.Fatalf("runtime connection survived installation-key rotation: %v", err)
 	}
+	assertConnectionLeases(t, ctx, postgres, []RealtimeConnectionLease{deviceLease, hostLease}, deviceConnectionID, hostLease.ConnectionID)
 	if err := postgres.DetachRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); err != nil {
 		t.Fatalf("detach replacement runtime connection: %v", err)
 	}
@@ -662,6 +710,60 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}
 	if err := assertChangeCounts(ctx, testDB, 30, 9); err != nil {
 		t.Fatal(err)
+	}
+	pending, err := postgres.PendingControlEvents(ctx, 128)
+	if err != nil || len(pending) == 0 {
+		t.Fatalf("read transactional control events: count=%d error=%v", len(pending), err)
+	}
+	seenDevice, seenUpdate, seenRevoke := false, false, false
+	for _, event := range pending {
+		switch event.Topic {
+		case "device.revoked":
+			seenDevice = event.DeviceID == deviceID
+		case "runtime_grant.updated":
+			seenUpdate = true
+		case "runtime_grant.revoked":
+			seenRevoke = true
+		default:
+			t.Fatalf("unhandled topic was consumed: %s", event.Topic)
+		}
+		for range 2 {
+			if err := postgres.MarkControlEventPublished(ctx, event.ID); err != nil {
+				t.Fatalf("idempotent event acknowledgement: %v", err)
+			}
+		}
+	}
+	if !seenDevice || !seenUpdate || !seenRevoke {
+		t.Fatalf("missing routing metadata: device=%t update=%t revoke=%t", seenDevice, seenUpdate, seenRevoke)
+	}
+	if remaining, err := postgres.PendingControlEvents(ctx, 128); err != nil || len(remaining) != 0 {
+		t.Fatalf("acknowledged events replayed: count=%d error=%v", len(remaining), err)
+	}
+	var published, unrelatedPending int
+	if err := testDB.QueryRowContext(ctx, `select count(*) filter (where published_at is not null), count(*) filter (where published_at is null) from control_outbox`).Scan(&published, &unrelatedPending); err != nil {
+		t.Fatal(err)
+	}
+	if published != len(pending) || unrelatedPending != 9-len(pending) {
+		t.Fatalf("publication affected unrelated topics: published=%d pending=%d", published, unrelatedPending)
+	}
+}
+
+func assertConnectionLeases(t *testing.T, ctx context.Context, postgres *Postgres, leases []RealtimeConnectionLease, want ...string) {
+	t.Helper()
+	invalid, err := postgres.InvalidRealtimeConnectionLeases(ctx, leases)
+	if err != nil || len(invalid) != len(want) {
+		t.Fatalf("invalid connection leases=%v, want %v; error=%v", invalid, want, err)
+	}
+	for _, id := range want {
+		found := false
+		for _, actual := range invalid {
+			if actual == id {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing invalid connection %s in %v", id, invalid)
+		}
 	}
 }
 
