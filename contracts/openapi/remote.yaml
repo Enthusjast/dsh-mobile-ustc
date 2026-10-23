@@ -144,6 +144,50 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes/{id}/grants/{user_id}:
+    put:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuntimeGrantInput' }
+      responses:
+        '200':
+          description: Grant is created or updated. Runtime owners can delegate only within their own scope; owner scopes include grant.manage. Organization admins may assign owner grants.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GrantUpdated' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+    delete:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Grant revocation is idempotent and transactionally records audit and outbox events.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GrantRevoked' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/commands/{id}:
     get:
       parameters:
@@ -272,6 +316,60 @@ components:
           required: [revoked]
           properties:
             revoked: { const: true }
+    RuntimeGrantInput:
+      type: object
+      additionalProperties: false
+      required: [role, scope]
+      properties:
+        role: { enum: [viewer, operator, owner] }
+        scope: { $ref: '#/components/schemas/GrantScope' }
+        expires_at: { type: [string, 'null'], format: date-time }
+    GrantScope:
+      type: object
+      additionalProperties: false
+      required: [actions, workspaces, sessions]
+      properties:
+        actions:
+          type: array
+          uniqueItems: true
+          maxItems: 12
+          items:
+            enum: [host.list, session.list, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download, grant.manage]
+        workspaces:
+          type: array
+          uniqueItems: true
+          maxItems: 256
+          items: { type: string, format: uuid }
+        sessions:
+          type: array
+          uniqueItems: true
+          maxItems: 256
+          items: { type: string, format: uuid }
+    GrantUpdated:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [grant_version]
+          properties:
+            grant_version: { type: integer, minimum: 1 }
+    GrantRevoked:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [revoked, grant_version]
+          properties:
+            revoked: { const: true }
+            grant_version: { type: integer, minimum: 1 }
     Host:
       type: object
       additionalProperties: false

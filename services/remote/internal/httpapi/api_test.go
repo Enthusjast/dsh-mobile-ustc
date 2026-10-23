@@ -14,19 +14,30 @@ import (
 )
 
 type fakeRepository struct {
-	readyError error
-	listCalls  int
+	readyError       error
+	listCalls        int
+	activeDeviceID   string
+	activeDeviceErr  error
+	activeDeviceCall int
+	commandCalls     int
 }
 
 func (fake *fakeRepository) Ready(context.Context) error { return fake.readyError }
 func (fake *fakeRepository) ActiveDevice(context.Context, store.UserIdentity, string) (string, error) {
-	return "device-1", nil
+	fake.activeDeviceCall++
+	return fake.activeDeviceID, fake.activeDeviceErr
 }
 func (fake *fakeRepository) RegisterDevice(context.Context, store.DeviceRegistration) (string, error) {
 	return "", errors.New("not implemented")
 }
 func (fake *fakeRepository) RevokeDevice(context.Context, string, string, string) error {
 	return errors.New("not implemented")
+}
+func (fake *fakeRepository) PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error) {
+	return 1, nil
+}
+func (fake *fakeRepository) RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string) (int64, error) {
+	return 2, nil
 }
 func (fake *fakeRepository) ListHosts(context.Context, store.UserIdentity) ([]store.Host, error) {
 	fake.listCalls++
@@ -39,6 +50,7 @@ func (fake *fakeRepository) ListSessions(context.Context, store.UserIdentity, st
 	return []store.Session{}, nil
 }
 func (fake *fakeRepository) CommandStatus(context.Context, store.UserIdentity, string, string) (store.CommandStatus, error) {
+	fake.commandCalls++
 	return store.CommandStatus{}, errors.New("not implemented")
 }
 
@@ -114,6 +126,30 @@ func TestDeviceDecoderRejectsUnknownDuplicateAndOversizedJSON(t *testing.T) {
 	} {
 		if decode(input.body, input.contentType) {
 			t.Fatal("invalid device request was accepted")
+		}
+	}
+}
+
+func TestGrantDecoderRequiresExplicitScopeArraysAndRejectsUnknownMembers(t *testing.T) {
+	decode := func(body string) bool {
+		request := httptest.NewRequest(http.MethodPut, "/v1/runtimes/44444444-4444-4444-8444-444444444444/grants/55555555-5555-4555-8555-555555555555", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		_, ok := decodeRuntimeGrantBody(response, request)
+		return ok
+	}
+	if !decode(`{"role":"viewer","scope":{"actions":["host.list"],"workspaces":[],"sessions":[]}}`) {
+		t.Fatal("valid grant request rejected")
+	}
+	for _, body := range []string{
+		`{"role":"viewer","scope":{"actions":["host.list"],"sessions":[]}}`,
+		`{"role":"viewer","scope":{"actions":["host.list"],"workspaces":null,"sessions":[]}}`,
+		`{"role":"viewer","scope":{"actions":["host.list"],"workspaces":[],"sessions":[],"all":true}}`,
+		`{"role":"viewer","scope":{"actions":["host.list"],"workspaces":[],"sessions":[]},"unknown":true}`,
+		`{"role":"viewer","role":"owner","scope":{"actions":[],"workspaces":[],"sessions":[]}}`,
+	} {
+		if decode(body) {
+			t.Fatalf("invalid grant request accepted: %s", body)
 		}
 	}
 }

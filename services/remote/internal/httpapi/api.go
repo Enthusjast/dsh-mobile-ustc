@@ -27,6 +27,8 @@ type Repository interface {
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
 	RegisterDevice(context.Context, store.DeviceRegistration) (string, error)
 	RevokeDevice(context.Context, string, string, string) error
+	PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error)
+	RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string) (int64, error)
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
@@ -58,6 +60,8 @@ func New(database Repository, identity *auth.Authenticator) http.Handler {
 	mux.Handle("GET /v1/hosts", api.protected(http.HandlerFunc(api.listHosts)))
 	mux.Handle("GET /v1/runtimes", api.protected(http.HandlerFunc(api.listRuntimes)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions", api.protected(http.HandlerFunc(api.listSessions)))
+	mux.Handle("PUT /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.putRuntimeGrant)))
+	mux.Handle("DELETE /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.revokeRuntimeGrant)))
 	mux.Handle("GET /v1/commands/{id}", api.protected(http.HandlerFunc(api.commandStatus)))
 	return mux
 }
@@ -219,6 +223,79 @@ func (api *API) commandStatus(response http.ResponseWriter, request *http.Reques
 	writeData(response, http.StatusOK, status)
 }
 
+func (api *API) putRuntimeGrant(response http.ResponseWriter, request *http.Request) {
+	runtimeID := request.PathValue("id")
+	targetUserID := request.PathValue("user_id")
+	if !uuidPattern.MatchString(runtimeID) || !uuidPattern.MatchString(targetUserID) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	input, ok := decodeRuntimeGrantBody(response, request)
+	if !ok {
+		writeError(response, http.StatusBadRequest, "grant.invalid")
+		return
+	}
+	input, err := store.NormalizeRuntimeGrantInput(input, time.Now())
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "grant.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
+	version, err := api.database.PutRuntimeGrant(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, deviceID, runtimeID, targetUserID, input)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, map[string]any{"grant_version": version})
+}
+
+func (api *API) revokeRuntimeGrant(response http.ResponseWriter, request *http.Request) {
+	runtimeID := request.PathValue("id")
+	targetUserID := request.PathValue("user_id")
+	if !uuidPattern.MatchString(runtimeID) || !uuidPattern.MatchString(targetUserID) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
+	version, err := api.database.RevokeRuntimeGrant(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, deviceID, runtimeID, targetUserID)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, map[string]any{"revoked": true, "grant_version": version})
+}
+
+func decodeRuntimeGrantBody(response http.ResponseWriter, request *http.Request) (store.RuntimeGrantInput, bool) {
+	var envelope struct {
+		Role      string          `json:"role"`
+		Scope     json.RawMessage `json:"scope"`
+		ExpiresAt *time.Time      `json:"expires_at,omitempty"`
+	}
+	if !decodeBody(response, request, &envelope) || len(envelope.Scope) == 0 || auth.ValidateJSONObject(envelope.Scope) != nil {
+		return store.RuntimeGrantInput{}, false
+	}
+	var scope struct {
+		Actions    *[]string `json:"actions"`
+		Workspaces *[]string `json:"workspaces"`
+		Sessions   *[]string `json:"sessions"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(envelope.Scope))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&scope); err != nil || scope.Actions == nil || scope.Workspaces == nil || scope.Sessions == nil {
+		return store.RuntimeGrantInput{}, false
+	}
+	var trailing any
+	if !errors.Is(decoder.Decode(&trailing), io.EOF) {
+		return store.RuntimeGrantInput{}, false
+	}
+	return store.RuntimeGrantInput{
+		Role: envelope.Role, Scope: store.GrantScope{Actions: *scope.Actions, Workspaces: *scope.Workspaces, Sessions: *scope.Sessions},
+		ExpiresAt: envelope.ExpiresAt,
+	}, true
+}
+
 func decodeBody(response http.ResponseWriter, request *http.Request, target any) bool {
 	if !strings.EqualFold(strings.TrimSpace(strings.Split(request.Header.Get("Content-Type"), ";")[0]), "application/json") {
 		return false
@@ -240,6 +317,10 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrIdentityNotProvisioned), errors.Is(err, store.ErrDeviceNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")
+	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrGrantNotFound):
+		writeError(response, http.StatusForbidden, "access.denied")
+	case errors.Is(err, store.ErrGrantInvalid):
+		writeError(response, http.StatusBadRequest, "grant.invalid")
 	case errors.Is(err, store.ErrDatabaseUnavailable):
 		writeError(response, http.StatusServiceUnavailable, "internal")
 	default:
