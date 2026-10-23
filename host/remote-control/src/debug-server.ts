@@ -63,16 +63,29 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
   catch { throw new ProbeError('protocol.invalid') }
 }
 
-/** Unix socket only; the private owning directory provides the local access boundary. */
-export async function startDebugServer(socketPath: string, runtime: ProbeRuntime) {
-  if (process.platform === 'win32' || !isAbsolute(socketPath) || Buffer.byteLength(socketPath) > 100) {
+/** Validate the local IPC namespace and keep each Windows pipe bound to one runtime identity. */
+export function validateSocketPath(socketPath: string, platform = process.platform): void {
+  if (platform === 'win32') {
+    if (!/^\\\\\.\\pipe\\dsh-mobile-ustc-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(socketPath)) {
+      throw new Error('Windows M0 debug requires a per-runtime named pipe under \\\\.\\pipe\\dsh-mobile-ustc-<runtimeId>')
+    }
+    return
+  }
+  if (!isAbsolute(socketPath) || Buffer.byteLength(socketPath) > 100) {
     throw new Error('M0 debug requires an absolute Unix socket path of at most 100 bytes')
   }
-  const parent = dirname(socketPath)
-  await mkdir(parent, { recursive: true, mode: 0o700 })
-  const stat = await lstat(parent)
-  if (!stat.isDirectory() || stat.uid !== process.getuid!() || (stat.mode & 0o077) !== 0 || await realpath(parent) !== resolve(parent)) {
-    throw new Error('M0 debug socket directory must be private (0700), owned by the current user, and contain no symlinks')
+}
+
+export async function startDebugServer(socketPath: string, runtime: ProbeRuntime) {
+  validateSocketPath(socketPath)
+  const windowsPipe = process.platform === 'win32'
+  if (!windowsPipe) {
+    const parent = dirname(socketPath)
+    await mkdir(parent, { recursive: true, mode: 0o700 })
+    const stat = await lstat(parent)
+    if (!stat.isDirectory() || stat.uid !== process.getuid!() || (stat.mode & 0o077) !== 0 || await realpath(parent) !== resolve(parent)) {
+      throw new Error('M0 debug socket directory must be private (0700), owned by the current user, and contain no symlinks')
+    }
   }
   const sockets = new Set<Socket>()
   const operations = new Set<AbortController>()
@@ -88,7 +101,9 @@ export async function startDebugServer(socketPath: string, runtime: ProbeRuntime
       if (request.headers.origin !== undefined) throw new ProbeError('access.denied')
       if (request.method === 'GET' && request.url === '/m0/probe') {
         writer.push({ v: 0, type: 'probe', runtime_epoch: runtime.epoch, payload: {
-          runtime_id: runtime.client.runtimeId, transport: 'local-unix-socket', dsh_version: '0.2.1-rc.2', plugin_version: '0.0.1',
+          runtime_id: runtime.client.runtimeId,
+          transport: process.platform === 'win32' ? 'windows-named-pipe' : 'local-unix-socket',
+          dsh_version: '0.2.1-rc.2', plugin_version: '0.0.1',
           capabilities: ['session.list', 'session.create', 'message.text', 'session.cancel', 'session.snapshot', 'session.page', 'assistant.stream', 'local.approval', 'local.question'],
           max_frame_bytes: MAX_FRAME_BYTES, max_queue_bytes: MAX_QUEUE_BYTES,
         } })
@@ -113,9 +128,11 @@ export async function startDebugServer(socketPath: string, runtime: ProbeRuntime
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)) })
   await new Promise<void>((accept, reject) => {
     server.once('error', reject)
-    server.listen(socketPath, () => { server.off('error', reject); accept() })
+    const onListen = () => { server.off('error', reject); accept() }
+    if (windowsPipe) server.listen({ path: socketPath, readableAll: false, writableAll: false }, onListen)
+    else server.listen(socketPath, onListen)
   })
-  await chmod(socketPath, 0o600)
+  if (!windowsPipe) await chmod(socketPath, 0o600)
   return {
     async close() {
       runtime.close()

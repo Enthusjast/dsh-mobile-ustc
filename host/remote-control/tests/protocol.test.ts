@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { Command, encodeFrames, MAX_FRAME_BYTES, parseCommand } from '../src/protocol.js'
 import { mobileSessionId } from '../src/dsh-client.js'
 import { projectChunk, projectEvent, projectStream } from '../src/projection.js'
+import { validateSocketPath } from '../src/debug-server.js'
 import { z } from 'zod'
 
 test('strict local protocol rejects extra fields, native identifiers, wrong versions and whitespace prompts', () => {
@@ -47,4 +48,14 @@ test('display projection strips configuration, metadata and provider replay cred
   const finish = { type: 'finish', reason: 'stop', replayState: { credential: 'sensitive' } }
   assert.deepEqual(projectChunk(finish), { type: 'finish', reason: 'stop' })
   assert.ok(!JSON.stringify(projectStream([{ type: 'chunk', time: 1, chunk: finish }])).includes('sensitive'))
+})
+
+test('local IPC paths are bound to private Unix sockets or one runtime-scoped Windows pipe', () => {
+  assert.doesNotThrow(() => validateSocketPath('/run/user/1000/dsh/probe.sock', 'linux'))
+  assert.doesNotThrow(() => validateSocketPath('/tmp/dsh-mobile.sock', 'darwin'))
+  assert.doesNotThrow(() => validateSocketPath('\\\\.\\pipe\\dsh-mobile-ustc-44444444-4444-4444-8444-444444444444', 'win32'))
+  for (const path of ['/tmp/dsh.sock', '127.0.0.1:3030', '\\\\.\\pipe\\other-service']) {
+    assert.throws(() => validateSocketPath(path, 'win32'))
+  }
+  assert.throws(() => validateSocketPath('relative.sock', 'linux'))
 })
