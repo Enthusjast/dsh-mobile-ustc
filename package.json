@@ -1,0 +1,23 @@
+{
+  "name": "dsh-mobile-ustc",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.15.0 <25" },
+  "workspaces": ["host/remote-control"],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "contracts": "tsx tools/generate-m0-contract.ts",
+    "contracts:check": "tsx tools/generate-m0-contract.ts --check",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx --test host/remote-control/tests/*.test.ts",
+    "verify": "npm run contracts:check && npm run check && npm run build && npm test"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2",
+    "@types/node": "24.10.1",
+    "ajv": "8.17.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "zod": "4.4.3"
+  }
+}
