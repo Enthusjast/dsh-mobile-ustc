@@ -43,6 +43,8 @@ type relayTestStore struct {
 	catalogReplace     bool
 	catalogItems       []store.SessionCatalogItem
 	catalogErr         error
+	readCalls          int
+	readErr            error
 }
 
 func (fake *relayTestStore) PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error) {
@@ -163,6 +165,22 @@ func (fake *relayTestStore) SyncRealtimeSessionCatalog(_ context.Context, connec
 		if err != nil || mapped != item.SessionID {
 			return store.ErrSessionCatalogInvalid
 		}
+	}
+	return nil
+}
+
+func (fake *relayTestStore) AuthorizeRealtimeSessionRead(_ context.Context, ticket store.TicketRedemption, sessionID string) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.readCalls++
+	if fake.readErr != nil {
+		return fake.readErr
+	}
+	if fake.leaseErr != nil {
+		return fake.leaseErr
+	}
+	if !slices.Contains(ticket.Scope.Actions, "session.read") || !slices.Contains(ticket.Scope.Sessions, sessionID) {
+		return store.ErrAccessDenied
 	}
 	return nil
 }
@@ -629,7 +647,7 @@ func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, instal
 	hello := hostHandshakePayload{
 		RuntimeID: runtimeID, RuntimeEpoch: runtimeEpoch,
 		DSHVersion: "0.2.1-rc.2", ApplicationVersion: "1.0.0", PluginVersion: "0.1.0",
-		ProtocolVersion: 1, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1"},
+		ProtocolVersion: 1, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1", "session.read.v1"},
 	}
 	normalized, err := normalizeHostHello(hello)
 	if err != nil {
@@ -661,7 +679,7 @@ func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, tick
 	}
 	challenge := readChallenge(t, connection, "device")
 	hello := deviceHandshakePayload{
-		DeviceID: ticket.DeviceID, Protocols: []int{1}, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1"},
+		DeviceID: ticket.DeviceID, Protocols: []int{1}, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1", "session.read.v1"},
 	}
 	normalized, err := normalizeDeviceHello(hello, ticket.DeviceID)
 	if err != nil {
@@ -747,16 +765,18 @@ type testChallenge struct {
 }
 
 type testEnvelope struct {
-	V             int            `json:"v"`
-	Type          string         `json:"type"`
-	RequestID     string         `json:"request_id"`
-	RuntimeID     string         `json:"runtime_id"`
-	RuntimeEpoch  string         `json:"runtime_epoch"`
-	SessionID     string         `json:"session_id"`
-	DeviceID      string         `json:"device_id"`
-	UserID        string         `json:"user_id"`
-	PayloadSHA256 string         `json:"payload_sha256"`
-	Payload       map[string]any `json:"payload"`
+	V              int            `json:"v"`
+	Type           string         `json:"type"`
+	RequestID      string         `json:"request_id"`
+	RuntimeID      string         `json:"runtime_id"`
+	RuntimeEpoch   string         `json:"runtime_epoch"`
+	SessionID      string         `json:"session_id"`
+	DeviceID       string         `json:"device_id"`
+	UserID         string         `json:"user_id"`
+	PayloadSHA256  string         `json:"payload_sha256"`
+	SubscriptionID string         `json:"subscription_id"`
+	SyncID         string         `json:"sync_id"`
+	Payload        map[string]any `json:"payload"`
 }
 
 func readChallenge(t *testing.T, connection *websocket.Conn, role string) testChallenge {

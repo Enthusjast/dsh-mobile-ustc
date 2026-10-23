@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dsh-mobile-ustc.invalid/contracts/ws/v1/relay.schema.json",
-  "title": "DSH Mobile Relay frames implemented in the M1 session-catalog increment",
-  "description": "Strict frame schemas for challenge proof, heartbeat, text command routing, host session-catalog synchronization, and bounded protocol errors. Session content subscriptions remain unimplemented.",
+  "title": "DSH Mobile Relay frames with session reads",
+  "description": "Strict challenge, heartbeat, text command, host catalog and scoped session read frames. Read routing uses per-connection subscription IDs and host-generated sync IDs. Fragmented projected payloads are at most 2 MiB.",
   "oneOf": [
     { "$ref": "#/$defs/challenge" },
     { "$ref": "#/$defs/deviceHelloProof" },
@@ -20,7 +20,23 @@
     { "$ref": "#/$defs/error" },
     { "$ref": "#/$defs/accessRevoked" },
     { "$ref": "#/$defs/runtimeChanged" },
-    { "$ref": "#/$defs/serverDraining" }
+    { "$ref": "#/$defs/serverDraining" },
+    {"$ref": "#/$defs/deviceSessionSubscribe"},
+    {"$ref": "#/$defs/hostSessionSubscribe"},
+    {"$ref": "#/$defs/sessionUnsubscribe"},
+    {"$ref": "#/$defs/sessionPage"},
+    {"$ref": "#/$defs/sessionSubscribed"},
+    {"$ref": "#/$defs/sessionUnsubscribed"},
+    {"$ref": "#/$defs/sessionSnapshot"},
+    {"$ref": "#/$defs/sessionEvent"},
+    {"$ref": "#/$defs/sessionPageResult"},
+    {"$ref": "#/$defs/sessionCheckpoint"},
+    {"$ref": "#/$defs/assistantStart"},
+    {"$ref": "#/$defs/assistantChunk"},
+    {"$ref": "#/$defs/assistantEnd"},
+    {"$ref": "#/$defs/sessionFragment"},
+    {"$ref": "#/$defs/sessionError"},
+    {"$ref": "#/$defs/sessionClosed"}
   ],
   "$defs": {
     "uuid": {
@@ -276,6 +292,405 @@
     "error": {
       "type": "object", "additionalProperties": false, "required": ["v", "type", "payload"],
       "properties": { "v": { "const": 1 }, "type": { "const": "error" }, "request_id": { "$ref": "#/$defs/uuid" }, "runtime_id": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" }, "payload": { "type": "object", "additionalProperties": false, "required": ["code"], "properties": { "code": { "type": "string" } } } }
+    },
+    "deviceSessionSubscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "session_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.subscribe"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "payload": {"type": "object", "additionalProperties": false, "required": [], "properties": {"max_messages": {"type": "integer", "minimum": 1, "maximum": 100}}}
+      }
+    },
+    "hostSessionSubscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.subscribe"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_messages"],
+          "properties": {"max_messages": {"type": "integer", "minimum": 1, "maximum": 100}}
+        }
+      }
+    },
+    "sessionUnsubscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.unsubscribe"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {"type": "object", "additionalProperties": false, "required": [], "properties": {}}
+      }
+    },
+    "sessionPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.page"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sync_id", "through_seq", "before_seq"],
+          "properties": {
+            "sync_id": {"$ref": "#/$defs/uuid"},
+            "through_seq": {"type": "integer", "minimum": -1, "maximum": 9007199254740991},
+            "before_seq": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "max_messages": {"type": "integer", "minimum": 1, "maximum": 100}
+          }
+        }
+      }
+    },
+    "sessionSubscribed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.subscribed"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {"type": "object", "additionalProperties": false, "required": [], "properties": {}}
+      }
+    },
+    "sessionUnsubscribed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.unsubscribed"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {"type": "object", "additionalProperties": false, "required": [], "properties": {}}
+      }
+    },
+    "sessionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["native_seq", "time", "type", "data"],
+      "properties": {
+        "native_seq": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "time": {"type": "number"},
+        "type": {"type": "string", "minLength": 1},
+        "data": {"type": "object"},
+        "surface_op": {},
+        "source_event_seqs": {}
+      }
+    },
+    "sessionSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.snapshot"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cursor", "has_more", "records", "assistant"],
+          "properties": {
+            "cursor": {"type": "integer", "minimum": -1, "maximum": 9007199254740991},
+            "has_more": {"type": "boolean"},
+            "records": {"type": "array", "items": {"$ref": "#/$defs/sessionRecord"}},
+            "assistant": {"type": ["object", "null"]}
+          }
+        },
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "sessionEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.event"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {"$ref": "#/$defs/sessionRecord"},
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "sessionPageResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.page.result"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["records", "has_more", "through_seq"],
+          "properties": {
+            "records": {"type": "array", "items": {"$ref": "#/$defs/sessionRecord"}},
+            "has_more": {"type": "boolean"},
+            "through_seq": {"type": "integer", "minimum": -1, "maximum": 9007199254740991}
+          }
+        },
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "sessionCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.checkpoint"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state", "through_seq"],
+              "properties": {"state": {"const": "persisted"}, "through_seq": {"type": "integer", "minimum": -1, "maximum": 9007199254740991}}
+            },
+            {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"enum": ["unavailable", "failed"]}}}
+          ]
+        },
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "assistantStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "assistant.start"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "attemptId", "revision", "startedAfterSeq", "turn", "step"],
+          "properties": {
+            "type": {"const": "start"},
+            "attemptId": {"type": "string", "minLength": 1},
+            "revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "startedAfterSeq": {"type": "integer", "minimum": -1, "maximum": 9007199254740991},
+            "turn": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "step": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+          }
+        },
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "assistantChunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "assistant.chunk"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "attemptId", "revision", "index", "time", "chunk"],
+          "properties": {
+            "type": {"const": "chunk"},
+            "attemptId": {"type": "string", "minLength": 1},
+            "revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "index": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "time": {"type": "number"},
+            "chunk": {"type": "object"}
+          }
+        },
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "assistantEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "assistant.end"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "attemptId", "revision", "index", "outcome"],
+          "properties": {
+            "type": {"const": "end"},
+            "attemptId": {"type": "string", "minLength": 1},
+            "revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "index": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+            "outcome": {
+              "oneOf": [
+                {"type": "object", "additionalProperties": false, "required": ["kind"], "properties": {"kind": {"const": "abandoned"}}},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "eventType", "seq"],
+                  "properties": {
+                    "kind": {"const": "committed"},
+                    "eventType": {"enum": ["assistant/message", "assistant/attempt"]},
+                    "seq": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "sessionFragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.fragment"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "fragment_id", "index", "count", "data"],
+          "properties": {
+            "type": {
+              "enum": ["session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result"]
+            },
+            "fragment_id": {"$ref": "#/$defs/uuid"},
+            "index": {"type": "integer", "minimum": 0, "maximum": 51},
+            "count": {"type": "integer", "minimum": 2, "maximum": 52},
+            "data": {"type": "string", "minLength": 4, "maxLength": 54616, "pattern": "^[A-Za-z0-9+/]+={0,2}$"}
+          }
+        },
+        "sync_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "sessionError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.error"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code"],
+          "properties": {
+            "code": {
+              "enum": [
+                "session.not_found",
+                "runtime.changed",
+                "access.denied",
+                "protocol.snapshot_too_large",
+                "protocol.resync_required",
+                "rate.limited",
+                "internal"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "sessionClosed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload"],
+      "properties": {
+        "v": {"const": 1},
+        "type": {"const": "session.closed"},
+        "request_id": {"$ref": "#/$defs/uuid"},
+        "runtime_id": {"$ref": "#/$defs/uuid"},
+        "runtime_epoch": {"$ref": "#/$defs/uuid"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "subscription_id": {"$ref": "#/$defs/uuid"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code"],
+          "properties": {
+            "code": {
+              "enum": [
+                "session.not_found",
+                "runtime.changed",
+                "access.denied",
+                "protocol.snapshot_too_large",
+                "protocol.resync_required",
+                "rate.limited",
+                "internal"
+              ]
+            }
+          }
+        }
+      }
     }
   }
 }

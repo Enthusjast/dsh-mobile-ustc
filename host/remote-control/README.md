@@ -64,8 +64,10 @@ curl --unix-socket /tmp/dsh-remote-private/probe.sock http://localhost/m0/probe
 
 默认数据库路径是 Linux 的 `$XDG_STATE_HOME`（否则 `~/.local/state`）、macOS 的 `~/Library/Application Support` 或 Windows 的 `%LOCALAPPDATA%` 下按 runtimeId 隔离的目录；可用 `commandJournalPath` 指定绝对路径。POSIX 目录必须是当前用户拥有的 0700 目录，数据库和 `.key` 文件为 0600。Windows 路径限制在当前用户的 `%LOCALAPPDATA%`，依赖该目录继承的用户 ACL，仍需 Windows 实机检查。AES 密钥与数据库位于同一受保护目录，因此复制整个目录仍包含解密密钥；M1 还需把密钥包装进平台安全存储。当前本机调试协议使用 `local` 用户 / 设备标识；Relay 接入后必须由已验证的 user_id/device_id 作为日志分区键。
 
-SQLite 使用 Node.js v24 的 `node:sqlite` 同步 API；该 Node 版本将模块标记为 Release Candidate，且同步数据库操作会短暂占用事件循环。单条正文和事务均有界；构建及 DSH CLI 集成验证以仓库锁定的 Node 24 runtime 为准。[Node.js v24 SQLite 文档](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)。主机 Relay 仅接受经签名握手后的文本 queue / steer 帧，校验服务端提供的规范化摘要，以验证后的 user_id/device_id 分区写入命令日志，并发送 host_accepted、dispatching、agent_queued 等回执。agent_queued 仍等待 DSH 会话持久化检查点。主机同时通过 `session.catalog.v1` 发布会话目录元数据；目录包含确定性 session UUID、原生 DSH ID、可选控制面 workspace UUID、状态和持久化位置，不包含正文、标题或本机路径。插件在连接建立及会话增删时发布完整快照，运行状态和消息活动变化使用增量更新；离开允许工作区的会话会被标记为不可用并清除 workspace 映射。
+SQLite 使用 Node.js v24 的 `node:sqlite` 同步 API；该 Node 版本将模块标记为 Release Candidate，且同步数据库操作会短暂占用事件循环。单条正文和事务均有界；构建及 DSH CLI 集成验证以仓库锁定的 Node 24 runtime 为准。[Node.js v24 SQLite 文档](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)。主机 Relay 接受经签名握手后的文本 queue / steer 帧，校验服务端提供的规范化摘要，以验证后的 user_id/device_id 分区写入命令日志，并发送 host_accepted、dispatching、agent_queued 等回执。agent_queued 仍等待 DSH 会话持久化检查点。主机同时通过 `session.catalog.v1` 发布会话目录元数据；目录包含确定性 session UUID、原生 DSH ID、可选控制面 workspace UUID、状态和持久化位置，不包含正文、标题或本机路径。插件在连接建立及会话增删时发布完整快照，运行状态和消息活动变化使用增量更新；离开允许工作区的会话会被标记为不可用并清除 workspace 映射。
 
 若授权按 workspace 限定，workspace 配置必须带 `remoteId`，其值为主机登记返回的 workspace UUID；缺少映射时该会话不会匹配 workspace grant。session grant 可按 session UUID 单独限定。
 
-DSH CLI 0.2.1-rc.2 集成测试使用临时 P-256 密钥和本机回环 WSS 协议对端，证明签名握手、命令入队和回执状态进入同一个 DSH Agent。它没有启动 Go Relay、PostgreSQL、学校身份服务或生产密钥库；这些组合仍需单独验收。
+DSH CLI 0.2.1-rc.2 集成测试使用临时 P-256 密钥和本机回环 WSS 协议对端，证明签名握手、命令入队和回执、WSS 快照、固定切点分页、assistant 增量与替换同步代次均使用同一个 DSH Agent；内容帧按共享 JSON Schema 校验。它没有启动 Go Relay、PostgreSQL、学校身份服务或生产密钥库；这些组合仍需单独验收。
+
+Relay 双方协商 `session.read.v1` 后，可打开按连接隔离的会话订阅。主机发送带 `subscription_id` / `sync_id` 的快照、原生事件、持久化检查点和 assistant 流，分页引用仍打开的固定快照。取消订阅只释放 follower，不中断 Agent；断线后重新订阅。正文投影最大 2 MiB，超过 64 KiB 信封时按字节分片。每订阅 / 整个主机连接的待发队列分别限制为 3 MiB / 12 MiB，超限后中止 follower 并要求重同步。读取仍依赖 Relay 每帧核对 `session.read` 及当前授权范围。协议、限制和待完成项见 [会话读取说明](../../docs/session-read-protocol.md)。

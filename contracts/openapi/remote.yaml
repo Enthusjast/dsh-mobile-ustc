@@ -360,12 +360,18 @@ paths:
         and stores no session body, title,
         workspace path, or event content. Missing sessions become unavailable; disconnect marks the
         runtime's sessions unavailable until the next catalog snapshot. Request IDs are idempotent per
-        device; a changed digest returns command.request_conflict. Only ping, message.submit,
-        command.receipt, and host session.catalog frames are accepted; session snapshots, streaming,
-        approval, and question routing are not enabled. Host catalogs require `session.catalog.v1`;
-        peers must negotiate `command.relay.v1` to exchange message
-        and receipt frames. Application heartbeats are limited to one per second and message
-        submits to 20 per second per socket. Each socket has a bounded outbound queue. Device
+        device; a changed digest returns command.request_conflict. Both peers may also negotiate
+        `session.read.v1` for session.subscribe/unsubscribe/page and host snapshot/event/checkpoint,
+        assistant.start/chunk/end, and page-result frames. An explicit session.read action is required
+        in both ticket and current runtime grant. Relay creates a per-connection subscription_id;
+        host creates sync_id and enforces fixed-cursor pagination. Each content frame rechecks the
+        current host connection, device key, grant version, and session/workspace scope. Projected
+        payloads larger than one frame use ordered session.fragment frames, limited to 2 MiB before
+        base64 encoding. Session bodies remain transient. Approval/question routing is not enabled.
+        Host catalogs require `session.catalog.v1`; peers must negotiate `command.relay.v1` to exchange
+        message and receipt frames. Application heartbeats are limited to one per second; message
+        submits and read operations share 20 requests per second per socket. Subscriptions are limited
+        to 16 per device socket and 32 per host connection. Each socket has a bounded outbound queue. Device
         connections expire within five minutes; host connections expire with their host credential.
         Frame JSON Schemas and golden messages are in `contracts/ws/v1`. Never log Authorization
         headers on this route.
@@ -520,7 +526,7 @@ components:
           uniqueItems: true
           maxItems: 12
           items:
-            enum: [host.list, session.list, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download, grant.manage]
+            enum: [host.list, session.list, session.read, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download, grant.manage]
         workspaces:
           type: array
           uniqueItems: true
@@ -574,7 +580,7 @@ components:
           uniqueItems: true
           maxItems: 11
           items:
-            enum: [host.list, session.list, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download]
+            enum: [host.list, session.list, session.read, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download]
         workspaces:
           type: array
           uniqueItems: true

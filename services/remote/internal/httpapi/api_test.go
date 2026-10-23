@@ -116,6 +116,10 @@ func (fake *fakeRepository) SyncRealtimeSessionCatalog(context.Context, store.Ru
 	return nil
 }
 
+func (fake *fakeRepository) AuthorizeRealtimeSessionRead(context.Context, store.TicketRedemption, string) error {
+	return nil
+}
+
 func (fake *fakeRepository) DetachRuntimeConnection(context.Context, string, string, string, string) error {
 	return nil
 }

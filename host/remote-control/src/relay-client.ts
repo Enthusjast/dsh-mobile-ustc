@@ -6,13 +6,14 @@ import type { CommandOwner, CommandState } from './command-journal.js'
 import type { SessionCatalogChange, SessionCatalogItem } from './dsh-client.js'
 import { parseCommand, ProbeError, type Command } from './protocol.js'
 import type { CommandStateObserver } from './runtime.js'
+import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
 const PROTOCOL = 'dsh.remote.v1'
 const PROOF_TYPE = 'dsh-relay-handshake-proof+jwt'
 const AUDIENCE = 'urn:dsh-mobile-ustc:realtime'
-const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'] as const
+const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'] as const
 const requiredCapabilities = ['command.relay.v1', 'connection.heartbeat.v1'] as const
 const uuid = z.uuid()
 const nonEmptyText = z.string().min(1).max(32_768).regex(/\S/).refine(text => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text))
@@ -103,6 +104,7 @@ export interface HostRelayOptions {
       watchSessionCatalog(onChange: (change: SessionCatalogChange) => void): () => void
     }
     dispatch(command: Command, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
+    follow: SessionReaderRuntime['follow']
   }
   credentials: HostCredentialProvider
   dshVersion: string
@@ -210,7 +212,11 @@ function sendFrame(socket: RelaySocket, value: unknown): Promise<void> {
   if (Buffer.byteLength(encoded) > MAX_FRAME_BYTES || socket.readyState !== 1 || socket.bufferedAmount + Buffer.byteLength(encoded) > MAX_BUFFERED_BYTES) {
     return Promise.reject(new ProbeError('protocol.resync_required'))
   }
-  return new Promise((resolve, reject) => socket.send(encoded, error => error ? reject(error) : resolve()))
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { socket.terminate(); reject(new ProbeError('protocol.resync_required')) }, 5000)
+    timer.unref()
+    socket.send(encoded, error => { clearTimeout(timer); if (error) reject(error); else resolve() })
+  })
 }
 
 function splitSessionCatalog(mode: 'snapshot' | 'delta', runtimeId: string, runtimeEpoch: string, snapshotId: string, items: SessionCatalogItem[]): SessionCatalogItem[][] {
@@ -373,6 +379,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   const connection = new AbortController()
   let stopWatchingCatalog = () => {}
   let catalogRetryTimer: NodeJS.Timeout | undefined
+  let sessions: RelaySessions | undefined
   const abortConnection = () => {
     connection.abort()
     socket.terminate()
@@ -413,6 +420,11 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     }
 
     const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
+    if (ack.data.payload.capabilities.includes('session.read.v1')) sessions = new RelaySessions({
+      epoch: options.runtime.epoch, client: options.runtime.client,
+      follow: (command, signal) => options.runtime.follow(command, signal),
+      dispatch: (command, signal) => options.runtime.dispatch(command, signal, { userId: 'relay-read', deviceId: 'relay-read' }),
+    }, frame => sendFrame(socket, frame))
     const pendingCatalogAcks = new Map<string, { count: number; resolve(): void; reject(error: Error): void }>()
     let catalogRefresh: Promise<void> | undefined
     let catalogDirty = false
@@ -523,6 +535,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
           socket.close(1012, 'server draining')
           return
         }
+        if (sessions?.handle(value)) return
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
         const command = makeCommand(forwarded)
         const owner: CommandOwner = { userId: forwarded.user_id, deviceId: forwarded.device_id }
@@ -557,6 +570,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     try { await reader }
     finally { clearInterval(heartbeat) }
   } finally {
+    sessions?.close()
     if (catalogRetryTimer) clearTimeout(catalogRetryTimer)
     stopWatchingCatalog()
     signal.removeEventListener('abort', abortConnection)

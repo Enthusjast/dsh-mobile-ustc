@@ -41,7 +41,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1", "session.read.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -56,17 +56,19 @@ type Repository interface {
 	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
+	AuthorizeRealtimeSessionRead(context.Context, store.TicketRedemption, string) error
 }
 
 type Server struct {
-	database     Repository
-	mu           sync.Mutex
-	connections  map[*websocket.Conn]*liveConnection
-	hosts        map[string]*liveConnection
-	devices      map[string]map[string]map[*liveConnection]struct{}
-	active       sync.WaitGroup
-	draining     bool
-	catalogBytes int
+	database      Repository
+	mu            sync.Mutex
+	connections   map[*websocket.Conn]*liveConnection
+	hosts         map[string]*liveConnection
+	devices       map[string]map[string]map[*liveConnection]struct{}
+	active        sync.WaitGroup
+	draining      bool
+	catalogBytes  int
+	subscriptions map[string]*sessionSubscription
 }
 
 type liveConnection struct {
@@ -87,6 +89,8 @@ type liveConnection struct {
 	catalogNextIndex   int
 	catalogBytes       int
 	catalogItems       []store.SessionCatalogItem
+	subscriptions      map[string]*sessionSubscription
+	closing            bool // Protected by Server.mu; prevents admission during unregister.
 }
 
 type outboundFrame struct {
@@ -103,16 +107,18 @@ type peer struct {
 }
 
 type wireEnvelope struct {
-	V             int             `json:"v"`
-	Type          string          `json:"type"`
-	RequestID     string          `json:"request_id,omitempty"`
-	RuntimeID     string          `json:"runtime_id,omitempty"`
-	RuntimeEpoch  string          `json:"runtime_epoch,omitempty"`
-	SessionID     string          `json:"session_id,omitempty"`
-	DeviceID      string          `json:"device_id,omitempty"`
-	UserID        string          `json:"user_id,omitempty"`
-	PayloadSHA256 string          `json:"payload_sha256,omitempty"`
-	Payload       json.RawMessage `json:"payload"`
+	V              int             `json:"v"`
+	Type           string          `json:"type"`
+	RequestID      string          `json:"request_id,omitempty"`
+	RuntimeID      string          `json:"runtime_id,omitempty"`
+	RuntimeEpoch   string          `json:"runtime_epoch,omitempty"`
+	SessionID      string          `json:"session_id,omitempty"`
+	DeviceID       string          `json:"device_id,omitempty"`
+	UserID         string          `json:"user_id,omitempty"`
+	PayloadSHA256  string          `json:"payload_sha256,omitempty"`
+	SubscriptionID string          `json:"subscription_id,omitempty"`
+	SyncID         string          `json:"sync_id,omitempty"`
+	Payload        json.RawMessage `json:"payload"`
 }
 
 type deviceHandshakePayload struct {
@@ -181,6 +187,7 @@ func New(database Repository) *Server {
 	return &Server{
 		database: database, connections: make(map[*websocket.Conn]*liveConnection),
 		hosts: make(map[string]*liveConnection), devices: make(map[string]map[string]map[*liveConnection]struct{}),
+		subscriptions: make(map[string]*sessionSubscription),
 	}
 }
 
@@ -364,6 +371,7 @@ func (server *Server) registerConnection(connection *websocket.Conn, identity pe
 }
 
 func (server *Server) unregisterConnection(live *liveConnection) {
+	server.closeConnectionSubscriptions(live)
 	server.mu.Lock()
 	delete(server.connections, live.conn)
 	server.catalogBytes -= live.catalogBytes
@@ -799,6 +807,29 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeCommandReceipt(parent, live, host, envelope)
+		case "session.subscribe", "session.unsubscribe", "session.page":
+			if live.peer.role != "device" {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				closePolicy(connection, "operation denied")
+				return
+			}
+			now := time.Now()
+			if live.commandWindowStart.IsZero() || now.Sub(live.commandWindowStart) >= time.Second {
+				live.commandWindowStart, live.commandWindowCount = now, 0
+			}
+			live.commandWindowCount++
+			if live.commandWindowCount > commandsPerSecond {
+				server.sendProtocolError(parent, live, "rate.limited", &envelope)
+				continue
+			}
+			server.routeSessionRead(parent, live, envelope)
+		case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "session.fragment", "session.error", "session.closed":
+			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				closePolicy(connection, "operation denied")
+				return
+			}
+			server.routeSessionContent(parent, live, envelope)
 		case "session.catalog":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
@@ -821,7 +852,7 @@ func (server *Server) routeSessionCatalog(parent context.Context, live *liveConn
 	}
 	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
 		envelope.RuntimeEpoch != live.runtimeEpoch || envelope.SessionID != "" || envelope.DeviceID != "" ||
-		envelope.UserID != "" || envelope.PayloadSHA256 != "" || len(data) > maxFrameBytes {
+		envelope.UserID != "" || envelope.PayloadSHA256 != "" || envelope.SubscriptionID != "" || envelope.SyncID != "" || len(data) > maxFrameBytes {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
@@ -925,7 +956,7 @@ func (server *Server) routeMessageSubmit(parent context.Context, live *liveConne
 	}
 	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
 		!uuidPattern.MatchString(envelope.SessionID) || envelope.RuntimeEpoch != "" ||
-		envelope.DeviceID != "" || envelope.UserID != "" || envelope.PayloadSHA256 != "" {
+		envelope.DeviceID != "" || envelope.UserID != "" || envelope.PayloadSHA256 != "" || envelope.SubscriptionID != "" || envelope.SyncID != "" {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
@@ -1000,7 +1031,7 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 	}
 	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
 		envelope.RuntimeEpoch != live.runtimeEpoch || !uuidPattern.MatchString(envelope.SessionID) ||
-		!uuidPattern.MatchString(envelope.DeviceID) || envelope.UserID != "" || envelope.PayloadSHA256 != "" {
+		!uuidPattern.MatchString(envelope.DeviceID) || envelope.UserID != "" || envelope.PayloadSHA256 != "" || envelope.SubscriptionID != "" || envelope.SyncID != "" {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
@@ -1247,7 +1278,7 @@ func decodeEnvelope(data []byte, expectedType string) (wireEnvelope, error) {
 
 func frameHasNoRoutingFields(envelope wireEnvelope) bool {
 	return envelope.RequestID == "" && envelope.RuntimeID == "" && envelope.RuntimeEpoch == "" &&
-		envelope.SessionID == "" && envelope.DeviceID == "" && envelope.UserID == "" && envelope.PayloadSHA256 == ""
+		envelope.SessionID == "" && envelope.DeviceID == "" && envelope.UserID == "" && envelope.PayloadSHA256 == "" && envelope.SubscriptionID == "" && envelope.SyncID == ""
 }
 
 func decodePayload(data []byte, target any) error {

@@ -29,14 +29,15 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
 test('host hello digest matches the Go length-prefixed protocol golden', () => {
   assert.equal(hostHelloDigest([
     'host', runtimeId, runtimeEpoch, '0.2.1-rc.2', '1.2.3', '0.0.1', '1',
-    ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'].join('\n'),
-  ]), 'dR6VN0kayU_d0sHLIYNLHe97lBZ9n9pQhKfwTM4gR8c')
+    ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'].join('\n'),
+  ]), 'KqX421D9M-eqBOTeVlI-JV7yZsETOsjMgxk-cWUzb84')
 })
 
 test('Relay shutdown does not wait on a credential provider that ignores cancellation', async () => {
   const runtime = {
     epoch: runtimeEpoch,
     client: { runtimeId, async sessionCatalog() { return [] }, watchSessionCatalog() { return () => {} } },
+    async *follow() {},
     async dispatch() { throw new Error('unused') },
   }
   const relay = startHostRelay({
@@ -97,14 +98,14 @@ test('Relay host client proves the installation key and routes only digest-match
             && claims.iss === installationId && claims.aud === 'urn:dsh-mobile-ustc:realtime'
             && claims.challenge_id === challengeId && claims.connection_id === connectionId
             && claims.nonce === nonce && claims.runtime_id === runtimeId && claims.runtime_epoch === runtimeEpoch
-            && claims.hello_sha256 === 'dR6VN0kayU_d0sHLIYNLHe97lBZ9n9pQhKfwTM4gR8c'
+            && claims.hello_sha256 === 'KqX421D9M-eqBOTeVlI-JV7yZsETOsjMgxk-cWUzb84'
             && verify('sha256', Buffer.from(signingInput), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
           if (!valid) return reject(new Error('host hello proof did not match the challenge'))
           helloClaims = claims
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: connectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: runtimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolve()
@@ -141,6 +142,7 @@ test('Relay host client proves the installation key and routes only digest-match
       },
       watchSessionCatalog(onChange: (change: SessionCatalogChange) => void) { catalogChanged = onChange; return () => { catalogChanged = undefined } },
     },
+    async *follow() {},
     async dispatch(command: unknown, signal: AbortSignal, owner: unknown, observe?: (state: 'host_accepted' | 'dispatching' | 'agent_queued') => void | Promise<void>) {
       signal.throwIfAborted()
       routed.push({ command, owner })

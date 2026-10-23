@@ -12,6 +12,7 @@ import { createServer, request } from 'node:http'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { PersistentCommandJournal } from '../src/command-journal.js'
 import { hostHelloDigest, relayPayloadDigest } from '../src/relay-client.js'
+import { Ajv2020 } from 'ajv/dist/2020.js'
 
 const WebSocketServer = createRequire(import.meta.url)('ws').WebSocketServer as new (options: object) => any
 
@@ -21,6 +22,7 @@ const dshBin = join(dshPackage, 'lib/bin.js')
 const pluginEntry = resolve('host/remote-control/lib/index.js')
 const modelFixture = fileURLToPath(new URL('./fixtures/dsh-local-model.mjs', import.meta.url))
 const RESPONSE = 'DSH local integration fixture response'
+const relayValidator = new Ajv2020({ strict: true }).compile(JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8')))
 
 function requestFrames(socketPath: string, method: string, path: string, body?: unknown) {
   return new Promise<{ status: number; frames: any[] }>((accept, reject) => {
@@ -118,6 +120,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
   let relaySocket: any
   let relayFailure: Error | undefined
   const relayReceipts: any[] = []
+  const relaySessionFrames: any[] = []
   let relayCatalog: any[] = []
   const relayCatalogSnapshots = new Map<string, any[]>()
   let resolveRelayConnected!: () => void
@@ -148,7 +151,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           relayRuntimeEpoch = proof.runtime_epoch
           const helloDigest = hostHelloDigest([
             'host', runtimeId, relayRuntimeEpoch, '0.2.1-rc.2', 'dsh-cli-integration', '0.0.1', '1',
-            ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'].join('\n'),
+            ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'].join('\n'),
           ])
           const valid = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')).typ === 'dsh-relay-handshake-proof+jwt'
             && proof.iss === installationId && proof.aud === 'urn:dsh-mobile-ustc:realtime'
@@ -160,7 +163,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolveRelayConnected()
@@ -183,6 +186,10 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
             }))
           }
         } else if (frame.type === 'command.receipt') relayReceipts.push(frame)
+        else if (frame.subscription_id) {
+          assert.equal(relayValidator(frame), true, JSON.stringify(relayValidator.errors))
+          relaySessionFrames.push(frame)
+        }
         else if (frame.type === 'ping') socket.send(JSON.stringify({ v: 1, type: 'pong', payload: { connection_id: relayConnectionId, server_time: new Date().toISOString() } }))
       } catch (error) {
         relayFailure = error instanceof Error ? error : new Error(String(error))
@@ -301,6 +308,26 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     assert.equal(catalogEntry.state, 'available')
     assert.ok(catalogEntry.last_persisted_seq >= -1)
 
+    const remoteSubscriptionId = randomUUID()
+    const remoteSubscribe = {
+      v: 1, type: 'session.subscribe', request_id: randomUUID(), runtime_id: runtimeId, runtime_epoch: probe.runtime_epoch,
+      session_id: sessionId, subscription_id: remoteSubscriptionId, payload: { max_messages: 20 },
+    }
+    const waitForRelaySessionFrame = async (predicate: (frame: any) => boolean) => {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        if (relayFailure) throw relayFailure
+        const frame = relaySessionFrames.find(predicate)
+        if (frame) return frame
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      throw new Error('DSH WSS session read timed out')
+    }
+    relaySocket.send(JSON.stringify(remoteSubscribe))
+    const relaySnapshot = await waitForRelaySessionFrame(frame => frame.type === 'session.snapshot')
+    assert.equal(relaySnapshot.subscription_id, remoteSubscriptionId)
+    assert.ok(relaySnapshot.sync_id)
+
     const subscriptionBody = () => ({ v: 0, type: 'session.subscribe', request_id: randomUUID(), runtime_epoch: probe.runtime_epoch,
       session_id: sessionId, payload: { max_messages: 20 } })
     const firstSubscription = await startSubscription(socketPath, subscriptionBody())
@@ -351,6 +378,25 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     }
     assert.ok(relayReceipts.filter(receipt => receipt.request_id === remoteRequestId)
       .every(receipt => receipt.payload.payload_sha256 === relayFrame.payload_sha256))
+
+    await waitForRelaySessionFrame(frame => frame.type === 'assistant.chunk')
+    const relayMessage = await waitForRelaySessionFrame(frame => frame.type === 'session.event' && frame.payload.type === 'assistant/message')
+    assert.ok(JSON.stringify(relayMessage.payload).includes(RESPONSE))
+    assert.equal(relayMessage.sync_id, relaySnapshot.sync_id)
+    const remotePageId = randomUUID()
+    relaySocket.send(JSON.stringify({ ...remoteSubscribe, type: 'session.page', request_id: remotePageId, payload: {
+      sync_id: relaySnapshot.sync_id, through_seq: relaySnapshot.payload.cursor, before_seq: relaySnapshot.payload.cursor + 1, max_messages: 20,
+    } }))
+    const relayPage = await waitForRelaySessionFrame(frame => frame.type === 'session.page.result' && frame.request_id === remotePageId)
+    assert.equal(relayPage.payload.through_seq, relaySnapshot.payload.cursor)
+    assert.equal(relayPage.sync_id, relaySnapshot.sync_id)
+    relaySocket.send(JSON.stringify({ ...remoteSubscribe, type: 'session.unsubscribe', payload: {} }))
+    const nextRemoteSubscribe = { ...remoteSubscribe, request_id: randomUUID(), subscription_id: randomUUID() }
+    relaySocket.send(JSON.stringify(nextRemoteSubscribe))
+    const relayReplacement = await waitForRelaySessionFrame(frame => frame.type === 'session.snapshot' && frame.subscription_id === nextRemoteSubscribe.subscription_id)
+    assert.notEqual(relayReplacement.sync_id, relaySnapshot.sync_id)
+    assert.ok(relayReplacement.payload.records.some((record: any) => record.type === 'assistant/message' && JSON.stringify(record.data).includes(RESPONSE)))
+    relaySocket.send(JSON.stringify({ ...nextRemoteSubscribe, type: 'session.unsubscribe', payload: {} }))
 
     firstSubscription.reader.close()
     firstSubscription.response.destroy()
@@ -409,7 +455,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     assert.ok((await readFile(patchPath, 'utf8')).includes('dsh-m0-test'))
     const cancelled = await command('session.cancel', {}, sessionId)
     assert.deepEqual(cancelled.payload, { accepted: true })
-    t.diagnostic(`Loaded via dsh ${probe.payload.dsh_version}; authenticated local Relay handshake, DSH session catalog metadata, and command routing into the same Agent passed with local fixtures, alongside snapshot sync, bash approval rejection, and ordinary question response.`)
+    t.diagnostic(`Loaded via dsh ${probe.payload.dsh_version}; authenticated local Relay handshake, catalog, WSS snapshot/history/assistant streams, and command routing into the same Agent passed with local fixtures, alongside bash approval rejection and ordinary question response.`)
     completed = true
   } finally {
     for (const subscription of subscriptions) {

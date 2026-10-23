@@ -519,7 +519,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("restore runtime session catalog: %v", err)
 	}
-	messageScope := GrantScope{Actions: []string{"message.submit"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
+	messageScope := GrantScope{Actions: []string{"message.submit", "session.read"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
 	messageTicket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, enrollment.RuntimeID, messageScope)
 	if err != nil {
 		t.Fatalf("issue message ticket: %v", err)
@@ -531,6 +531,27 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	messageTicketRedemption, err = postgres.ConsumeRealtimeTicket(ctx, messageTicket.Token)
 	if err != nil {
 		t.Fatalf("consume message ticket: %v", err)
+	}
+	if err := postgres.AuthorizeRealtimeSessionRead(ctx, messageTicketRedemption, relaySessionID); err != nil {
+		t.Fatalf("active workspace read grant denied: %v", err)
+	}
+	for _, variant := range []string{"missing-action", "empty-resources", "wrong-device-key", "wrong-runtime", "wrong-grant-version"} {
+		ticket := messageTicketRedemption
+		switch variant {
+		case "missing-action":
+			ticket.Scope.Actions = []string{"message.submit"}
+		case "empty-resources":
+			ticket.Scope.Workspaces = []string{}
+		case "wrong-device-key":
+			ticket.DeviceKeyVersion++
+		case "wrong-runtime":
+			ticket.RuntimeID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+		case "wrong-grant-version":
+			ticket.GrantVersion++
+		}
+		if err := postgres.AuthorizeRealtimeSessionRead(ctx, ticket, relaySessionID); !errors.Is(err, ErrAccessDenied) {
+			t.Fatalf("session read accepted %s: %v", variant, err)
+		}
 	}
 	messageDigest := sha256.Sum256([]byte("canonical relay message body"))
 	messageDigestHex := hex.EncodeToString(messageDigest[:])
@@ -575,6 +596,9 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}
 	if err := postgres.ValidateRealtimeLease(ctx, messageTicketRedemption); !errors.Is(err, ErrTicketInvalid) {
 		t.Fatalf("realtime lease survived a grant-version change: %v", err)
+	}
+	if err := postgres.AuthorizeRealtimeSessionRead(ctx, messageTicketRedemption, relaySessionID); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("session content survived a grant-version change: %v", err)
 	}
 	staleReceipt := commandReceipt
 	staleReceipt.ConnectionID = connection.ConnectionID
