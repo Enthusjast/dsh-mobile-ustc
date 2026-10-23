@@ -1,11 +1,13 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 
 class LocalModel extends LlmAdapter {
   constructor() {
     super()
     this.approvalToolIssued = false
     this.questionToolIssued = false
+    this.cancelWaitIssued = false
   }
 
   providerInfo(provider) { return { id: provider, name: 'Local DSH integration fixture' } }
@@ -18,6 +20,16 @@ class LocalModel extends LlmAdapter {
       .filter(part => part.type === 'text')
       .map(part => part.text)
       .join('\n')
+    if (!this.cancelWaitIssued && userText.includes('REMOTE_CANCEL_WAIT')) {
+      this.cancelWaitIssued = true
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Cancelable model call is waiting' }
+      await delay(30_000, undefined, { signal: options.signal })
+      options.signal?.throwIfAborted()
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Unexpected uncanceled completion' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
     if (!this.approvalToolIssued && userText.includes('M0_APPROVAL_DENY')) {
       this.approvalToolIssued = true
       const args = JSON.stringify({ description: 'Create the local denial sentinel file', command: 'printf unauthorized > approval-denied.txt' })

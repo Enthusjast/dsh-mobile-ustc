@@ -6,6 +6,7 @@ import { DshClient, mobileSessionId } from '../src/dsh-client.js'
 import { SessionSync } from '../src/session-sync.js'
 import { parseCommand } from '../src/protocol.js'
 import { ProbeRuntime } from '../src/runtime.js'
+import { MemoryCommandJournal } from '../src/command-journal.js'
 import type { InteractionRouter } from '../src/interaction-router.js'
 
 test('current-process controller creates, continues and checkpoints the same Agent, then follows a gap-free log', async () => {
@@ -143,4 +144,27 @@ test('in-epoch concurrent retries are serialized and conflicts cannot dispatch a
   await assert.rejects(runtime.dispatch({ ...command, runtime_epoch: randomUUID() }, new AbortController().signal), /runtime.changed/)
   runtime.close()
   await assert.rejects(runtime.dispatch(command, new AbortController().signal), /runtime.offline/)
+})
+
+test('a settled cancellation retries without executing again and cannot move to another runtime epoch', async () => {
+  let cancels = 0
+  const client = { runtimeId: randomUUID(), resolve: async () => 'native', cancel() { cancels++; return { accepted: true } } } as unknown as DshClient
+  const interactions = { close() {} } as InteractionRouter
+  const journal = new MemoryCommandJournal(client.runtimeId)
+  const runtime = new ProbeRuntime(client, interactions, journal)
+  const command = parseCommand({ v: 0, type: 'session.cancel', request_id: randomUUID(), runtime_epoch: runtime.epoch, session_id: randomUUID(), payload: {} })
+  const signal = new AbortController().signal
+  const firstStates: string[] = [], retryStates: string[] = []
+  const first = await runtime.dispatch(command, signal, undefined, state => { firstStates.push(state) })
+  const retry = await runtime.dispatch(command, signal, undefined, state => { retryStates.push(state) })
+  assert.deepEqual(first, retry)
+  assert.equal(cancels, 1)
+  assert.deepEqual(firstStates, ['host_accepted', 'dispatching', 'settled'])
+  assert.deepEqual(retryStates, ['host_accepted', 'settled'])
+  runtime.close()
+  const restarted = new ProbeRuntime(client, interactions, journal)
+  await assert.rejects(restarted.dispatch(command, signal), /runtime.changed/)
+  await assert.rejects(restarted.dispatch({ ...command, runtime_epoch: restarted.epoch }, signal), /command.request_conflict/)
+  assert.equal(cancels, 1)
+  restarted.close()
 })

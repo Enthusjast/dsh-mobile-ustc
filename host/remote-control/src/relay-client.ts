@@ -13,7 +13,7 @@ const MAX_BUFFERED_BYTES = 512 * 1024
 const PROTOCOL = 'dsh.remote.v1'
 const PROOF_TYPE = 'dsh-relay-handshake-proof+jwt'
 const AUDIENCE = 'urn:dsh-mobile-ustc:realtime'
-const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'] as const
+const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.read.v1'] as const
 const requiredCapabilities = ['command.relay.v1', 'connection.heartbeat.v1'] as const
 const uuid = z.uuid()
 const nonEmptyText = z.string().min(1).max(32_768).regex(/\S/).refine(text => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text))
@@ -70,6 +70,9 @@ const submitSchema = z.strictObject({
     content: z.array(z.strictObject({ type: z.literal('text'), text: nonEmptyText })).min(1).max(16),
   }),
 })
+const cancelSchema = submitSchema.extend({ type: z.literal('session.cancel'), payload: z.strictObject({}) })
+const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, cancelSchema])
+type ForwardedCommand = z.infer<typeof forwardedCommandSchema>
 const catalogItemSchema = z.strictObject({
   session_id: uuid,
   dsh_session_id: z.string().min(1).refine(value => Buffer.byteLength(value) <= 2048 && !value.includes('\0')),
@@ -318,19 +321,21 @@ async function proofForHello(
   return `${signingInput}.${Buffer.from(signature).toString('base64url')}`
 }
 
-function parseForwarded(data: unknown, runtimeId: string, runtimeEpoch: string): z.infer<typeof submitSchema> {
-  const parsed = submitSchema.safeParse(data)
+function parseForwarded(data: unknown, runtimeId: string, runtimeEpoch: string): ForwardedCommand {
+  const parsed = forwardedCommandSchema.safeParse(data)
   if (!parsed.success || parsed.data.runtime_id !== runtimeId || parsed.data.runtime_epoch !== runtimeEpoch
-    || forwardedDigest(parsed.data.session_id, parsed.data.payload) !== parsed.data.payload_sha256) {
+    || (parsed.data.type === 'session.cancel'
+      ? relayCancelDigest(parsed.data.session_id, parsed.data.runtime_epoch)
+      : forwardedDigest(parsed.data.session_id, parsed.data.payload)) !== parsed.data.payload_sha256) {
     throw new ProbeError('protocol.invalid')
   }
   return parsed.data
 }
 
-function makeCommand(frame: z.infer<typeof submitSchema>): Command {
+function makeCommand(frame: ForwardedCommand): Command {
   return parseCommand({
     v: 0,
-    type: 'message.submit',
+    type: frame.type,
     request_id: frame.request_id,
     runtime_epoch: frame.runtime_epoch,
     session_id: frame.session_id,
@@ -537,6 +542,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         }
         if (sessions?.handle(value)) return
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
+        if (forwarded.type === 'session.cancel' && !ack.data.payload.capabilities.includes('session.cancel.v1')) throw new ProbeError('protocol.unsupported')
         const command = makeCommand(forwarded)
         const owner: CommandOwner = { userId: forwarded.user_id, deviceId: forwarded.device_id }
         const observe: CommandStateObserver = async (state: CommandState) => {
@@ -638,4 +644,8 @@ export function startHostRelay(options: HostRelayOptions) {
 
 export function relayPayloadDigest(sessionId: string, payload: z.infer<typeof submitSchema>['payload']): string {
   return forwardedDigest(sessionId, payload)
+}
+
+export function relayCancelDigest(sessionId: string, runtimeEpoch: string): string {
+  return createHash('sha256').update(JSON.stringify(jcs({ type: 'session.cancel', runtime_epoch: runtimeEpoch, session_id: sessionId, payload: {} }))).digest('hex')
 }

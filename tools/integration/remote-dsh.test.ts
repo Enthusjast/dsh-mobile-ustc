@@ -10,7 +10,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
-import { hostHelloDigest, relayPayloadDigest } from '../../host/remote-control/src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest } from '../../host/remote-control/src/relay-client.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -253,7 +253,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available') ? true : undefined
   }, 'host catalog in PostgreSQL')
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
-  const scope = { actions: ['message.submit', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
+  const scope = { actions: ['message.submit', 'session.cancel', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
   await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
@@ -264,7 +264,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const collector = new FrameCollector(socket, value => validate(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.read.v1']
+    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -322,8 +322,36 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     session_id: sessionId, subscription_id: opening.subscription_id, payload: {} })
   await mobile.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === opening.subscription_id)
 
+  const cancelableFrom = mobile.frames.length, cancelableRequest = randomUUID()
+  const cancelMarker = `REMOTE_CANCEL_WAIT_${randomUUID()}`
+  mobile.send({ ...submit, request_id: cancelableRequest, payload: { mode: 'queue', content: [{ type: 'text', text: cancelMarker }] } })
+  await mobile.wait(frame => frame.type === 'assistant.chunk' && JSON.stringify(frame.payload).includes('Cancelable model call is waiting'), cancelableFrom)
+  const cancelId = randomUUID(), cancelAt = Date.now()
+  const cancel = { v: 1, type: 'session.cancel', request_id: cancelId, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: sessionId, payload: {} }
+  const staleCancelId = randomUUID()
+  mobile.send({ ...cancel, request_id: staleCancelId, runtime_epoch: randomUUID() })
+  await mobile.wait(frame => frame.type === 'error' && frame.request_id === staleCancelId && frame.payload.code === 'runtime.changed')
+  mobile.send(cancel)
+  for (const state of ['received', 'host_accepted', 'dispatching', 'settled']) {
+    const receipt = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === cancelId && frame.payload.state === state)
+    assert.equal(receipt.payload.payload_sha256, relayCancelDigest(sessionId, probe.runtime_epoch))
+  }
+  const canceledTurn = await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'turn/end', cancelableFrom)
+  const cancelLatency = Date.now() - cancelAt
+  assert.ok(cancelLatency < 5000, 'remote cancel did not interrupt the held model call')
+  assert.equal(canceledTurn.payload.data.reason.kind, 'aborted')
+  const partialMessages = mobile.frames.slice(cancelableFrom).filter(frame => frame.type === 'session.event' && frame.payload.type === 'assistant/message')
+  assert.ok(partialMessages.every(frame => frame.payload.data.interrupted === true), 'canceled model call published a non-interrupted message')
+  assert.equal(JSON.stringify(partialMessages).includes('Unexpected uncanceled completion'), false)
+  const cancelRetryFrom = mobile.frames.length
+  mobile.send(cancel)
+  await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === cancelId && frame.payload.state === 'settled', cancelRetryFrom)
+  assert.equal((await phone('GET', `/v1/commands/${cancelId}?device_id=${device.device_id}`)).state, 'settled')
+  assert.equal(query(`select count(*) from commands where request_id='${cancelId}'`), '1')
+  assert.equal(query(`select count(*) from commands where request_id='${staleCancelId}'`), '0')
+
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, 'DSH local integration fixture response', workspace, code, credential.credential, ticket.ticket]) {
+  for (const secret of [marker, cancelMarker, 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
@@ -347,5 +375,6 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await until(async () => query(`select count(*) from control_outbox where published_at is null and topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked')`) === '0' ? true : undefined, 'control outbox acknowledgement')
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   t.diagnostic(`Idle device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
-  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, catalog, snapshots, assistant stream, pagination, idempotency, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
+  t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
+  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, catalog, snapshots, assistant stream, pagination, idempotency, cancellation, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

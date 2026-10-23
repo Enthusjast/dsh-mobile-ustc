@@ -127,7 +127,7 @@ func (fake *fakeRepository) InvalidRealtimeConnectionLeases(context.Context, []s
 func (fake *fakeRepository) DetachRuntimeConnection(context.Context, string, string, string, string) error {
 	return nil
 }
-func (fake *fakeRepository) RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error) {
+func (fake *fakeRepository) RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error) {
 	return store.CommandStatus{}, nil
 }
 func (fake *fakeRepository) RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error) {

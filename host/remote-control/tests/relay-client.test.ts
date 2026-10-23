@@ -4,7 +4,7 @@ import { createHash, createPrivateKey, generateKeyPairSync, sign, verify } from 
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
-import { hostHelloDigest, relayPayloadDigest, startHostRelay } from '../src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, startHostRelay } from '../src/relay-client.js'
 import { mobileSessionId, type SessionCatalogChange } from '../src/dsh-client.js'
 
 const ws = createRequire(import.meta.url)('ws') as { WebSocketServer: new (options: object) => any }
@@ -29,8 +29,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
 test('host hello digest matches the Go length-prefixed protocol golden', () => {
   assert.equal(hostHelloDigest([
     'host', runtimeId, runtimeEpoch, '0.2.1-rc.2', '1.2.3', '0.0.1', '1',
-    ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'].join('\n'),
-  ]), 'KqX421D9M-eqBOTeVlI-JV7yZsETOsjMgxk-cWUzb84')
+    ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.read.v1'].join('\n'),
+  ]), 'vZRHT5B3AZhNqILsgn_AYW81SArwNJdjyHT0V5ZvsNg')
 })
 
 test('Relay shutdown does not wait on a credential provider that ignores cancellation', async () => {
@@ -98,14 +98,14 @@ test('Relay host client proves the installation key and routes only digest-match
             && claims.iss === installationId && claims.aud === 'urn:dsh-mobile-ustc:realtime'
             && claims.challenge_id === challengeId && claims.connection_id === connectionId
             && claims.nonce === nonce && claims.runtime_id === runtimeId && claims.runtime_epoch === runtimeEpoch
-            && claims.hello_sha256 === 'KqX421D9M-eqBOTeVlI-JV7yZsETOsjMgxk-cWUzb84'
+            && claims.hello_sha256 === 'vZRHT5B3AZhNqILsgn_AYW81SArwNJdjyHT0V5ZvsNg'
             && verify('sha256', Buffer.from(signingInput), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
           if (!valid) return reject(new Error('host hello proof did not match the challenge'))
           helloClaims = claims
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: connectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: runtimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.catalog.v1', 'session.read.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolve()
@@ -143,12 +143,12 @@ test('Relay host client proves the installation key and routes only digest-match
       watchSessionCatalog(onChange: (change: SessionCatalogChange) => void) { catalogChanged = onChange; return () => { catalogChanged = undefined } },
     },
     async *follow() {},
-    async dispatch(command: unknown, signal: AbortSignal, owner: unknown, observe?: (state: 'host_accepted' | 'dispatching' | 'agent_queued') => void | Promise<void>) {
+    async dispatch(command: unknown, signal: AbortSignal, owner: unknown, observe?: (state: 'host_accepted' | 'dispatching' | 'agent_queued' | 'settled') => void | Promise<void>) {
       signal.throwIfAborted()
       routed.push({ command, owner })
       await observe?.('host_accepted')
       await observe?.('dispatching')
-      await observe?.('agent_queued')
+      await observe?.((command as { type: string }).type === 'session.cancel' ? 'settled' : 'agent_queued')
     },
   }
   const relay = startHostRelay({
@@ -182,9 +182,14 @@ test('Relay host client proves the installation key and routes only digest-match
     assert.ok(received.filter(frame => (frame as { type?: string }).type === 'command.receipt')
       .every((frame: any) => frame.payload.payload_sha256 === forwarded.payload_sha256))
 
+    const cancelId = 'bbbbbbbb-1111-4111-8111-111111111111'
+    relaySocket.send(JSON.stringify({ ...forwarded, type: 'session.cancel', request_id: cancelId, payload: {}, payload_sha256: relayCancelDigest(sessionId, runtimeEpoch) }))
+    await waitFor(() => routed.length === 2)
+    assert.deepEqual(routed[1]?.command, { v: 0, type: 'session.cancel', request_id: cancelId, runtime_epoch: runtimeEpoch, session_id: sessionId, payload: {} })
+
     relaySocket.send(JSON.stringify({ ...forwarded, payload_sha256: createHash('sha256').update('tampered').digest('hex') }))
     await waitFor(() => relaySocket.readyState !== 1)
-    assert.equal(routed.length, 1)
+    assert.equal(routed.length, 2)
   } finally {
     await relay.close()
   }

@@ -14,6 +14,8 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   for (const path of [
     '../../../contracts/ws/v1/golden/message-submit.json',
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
+    '../../../contracts/ws/v1/golden/session-cancel.json',
+    '../../../contracts/ws/v1/golden/session-cancel.forwarded.json',
     '../../../contracts/ws/v1/golden/host-command-receipt.json',
     '../../../contracts/ws/v1/golden/host-session-catalog.json',
     '../../../contracts/ws/v1/golden/host-session-catalog.ack.json',
@@ -37,6 +39,12 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   const body = canonicalValue({ type: 'message.submit', session_id: forwarded.session_id, payload: forwarded.payload })
   const digest = createHash('sha256').update(JSON.stringify(body)).digest('hex')
   assert.equal(forwarded.payload_sha256, digest)
+  const cancel = await load('../../../contracts/ws/v1/golden/session-cancel.forwarded.json') as Record<string, unknown>
+  assert.equal(cancel.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: cancel.type, runtime_epoch: cancel.runtime_epoch, session_id: cancel.session_id, payload: {} }))).digest('hex'))
+  const deviceCancel = await load('../../../contracts/ws/v1/golden/session-cancel.json') as Record<string, unknown>
+  const { runtime_epoch: _epoch, ...missingEpoch } = deviceCancel
+  assert.equal(validate(missingEpoch), false)
+  assert.equal(validate({ ...deviceCancel, payload: { all: true } }), false)
 })
 
 function canonicalValue(value: unknown): unknown {

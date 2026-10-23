@@ -27,7 +27,7 @@ type RelayCommandReceipt struct {
 
 var commandTransitions = map[string]map[string]struct{}{
 	"received":        {"host_accepted": {}, "rejected": {}, "outcome_unknown": {}},
-	"host_accepted":   {"dispatching": {}, "agent_queued": {}, "rejected": {}, "outcome_unknown": {}},
+	"host_accepted":   {"dispatching": {}, "agent_queued": {}, "settled": {}, "rejected": {}, "outcome_unknown": {}},
 	"dispatching":     {"agent_queued": {}, "settled": {}, "rejected": {}, "outcome_unknown": {}},
 	"agent_queued":    {"observed": {}, "settled": {}, "outcome_unknown": {}},
 	"observed":        {"settled": {}, "outcome_unknown": {}},
@@ -40,13 +40,16 @@ var relayReceiptStates = map[string]struct{}{
 }
 
 // RecordRealtimeCommand persists status and a digest; the request body remains transient.
-func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket TicketRedemption, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
+func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket TicketRedemption, commandType, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
+	if commandType != "message.submit" && commandType != "session.cancel" {
+		return CommandStatus{}, ErrGrantInvalid
+	}
 	if !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) ||
 		!grantUUIDPattern.MatchString(ticket.RuntimeID) || !grantUUIDPattern.MatchString(requestID) ||
 		!grantUUIDPattern.MatchString(sessionID) || !validSHA256Hex(payloadSHA256) {
 		return CommandStatus{}, ErrGrantInvalid
 	}
-	if !slices.Contains(ticket.Scope.Actions, "message.submit") {
+	if !slices.Contains(ticket.Scope.Actions, commandType) {
 		return CommandStatus{}, ErrAccessDenied
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})

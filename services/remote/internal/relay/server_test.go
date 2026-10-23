@@ -103,10 +103,10 @@ func (fake *relayTestStore) DetachRuntimeConnection(_ context.Context, installat
 	return nil
 }
 
-func (fake *relayTestStore) RecordRealtimeCommand(_ context.Context, _ store.TicketRedemption, requestID, sessionID, digest string) (store.CommandStatus, error) {
+func (fake *relayTestStore) RecordRealtimeCommand(_ context.Context, ticket store.TicketRedemption, commandType, requestID, sessionID, digest string) (store.CommandStatus, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if !slices.Contains(fake.ticket.Scope.Actions, "message.submit") || !slices.Contains(fake.ticket.Scope.Sessions, sessionID) {
+	if !slices.Contains(ticket.Scope.Actions, commandType) || !slices.Contains(ticket.Scope.Sessions, sessionID) {
 		return store.CommandStatus{}, store.ErrAccessDenied
 	}
 	if fake.commands == nil {
@@ -638,7 +638,7 @@ func TestMessageSubmitRoutesToHostAndPersistsCommandReceipts(t *testing.T) {
 	}
 }
 
-func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, installationID, runtimeID, runtimeEpoch string) *websocket.Conn {
+func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, installationID, runtimeID, runtimeEpoch string, capabilities ...string) *websocket.Conn {
 	t.Helper()
 	connection, _, err := websocket.Dial(context.Background(), wsURL(serverURL), &websocket.DialOptions{
 		HTTPHeader:   http.Header{"Authorization": []string{"DSH-Host " + strings.Repeat("H", 43)}},
@@ -647,11 +647,14 @@ func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, instal
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(capabilities) == 0 {
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.catalog.v1", "session.read.v1"}
+	}
 	challenge := readChallenge(t, connection, "installation")
 	hello := hostHandshakePayload{
 		RuntimeID: runtimeID, RuntimeEpoch: runtimeEpoch,
 		DSHVersion: "0.2.1-rc.2", ApplicationVersion: "1.0.0", PluginVersion: "0.1.0",
-		ProtocolVersion: 1, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1", "session.read.v1"},
+		ProtocolVersion: 1, Capabilities: capabilities,
 	}
 	normalized, err := normalizeHostHello(hello)
 	if err != nil {
@@ -672,7 +675,7 @@ func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, instal
 	return connection
 }
 
-func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, ticket store.TicketRedemption, runtimeID string) *websocket.Conn {
+func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, ticket store.TicketRedemption, runtimeID string, capabilities ...string) *websocket.Conn {
 	t.Helper()
 	connection, _, err := websocket.Dial(context.Background(), wsURL(serverURL), &websocket.DialOptions{
 		HTTPHeader:   http.Header{"Authorization": []string{"DSH-Ticket " + strings.Repeat("T", 43)}},
@@ -681,9 +684,12 @@ func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, tick
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(capabilities) == 0 {
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.read.v1"}
+	}
 	challenge := readChallenge(t, connection, "device")
 	hello := deviceHandshakePayload{
-		DeviceID: ticket.DeviceID, Protocols: []int{1}, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1", "session.read.v1"},
+		DeviceID: ticket.DeviceID, Protocols: []int{1}, Capabilities: capabilities,
 	}
 	normalized, err := normalizeDeviceHello(hello, ticket.DeviceID)
 	if err != nil {

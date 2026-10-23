@@ -41,7 +41,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.catalog.v1", "session.read.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "session.cancel.v1", "session.catalog.v1", "session.read.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -52,7 +52,7 @@ type Repository interface {
 	AttachRuntimeConnection(context.Context, store.RuntimeConnectionInput) (store.RuntimeConnection, error)
 	TouchRuntimeConnection(context.Context, string, string, string, string) error
 	DetachRuntimeConnection(context.Context, string, string, string, string) error
-	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
+	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error)
 	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
@@ -786,7 +786,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			}) != nil {
 				return
 			}
-		case "message.submit":
+		case "message.submit", "session.cancel":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				closePolicy(connection, "operation denied")
@@ -806,7 +806,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				server.sendProtocolError(parent, live, "rate.limited", &envelope)
 				continue
 			}
-			server.routeMessageSubmit(parent, live, envelope)
+			server.routeSessionCommand(parent, live, envelope)
 		case "command.receipt":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
@@ -956,29 +956,52 @@ func (server *Server) routeSessionCatalog(parent context.Context, live *liveConn
 	})
 }
 
-func (server *Server) routeMessageSubmit(parent context.Context, live *liveConnection, envelope wireEnvelope) {
-	if !live.supports("command.relay.v1") {
+func (server *Server) routeSessionCommand(parent context.Context, live *liveConnection, envelope wireEnvelope) {
+	capability := "command.relay.v1"
+	if envelope.Type == "session.cancel" {
+		capability = "session.cancel.v1"
+	}
+	if !live.supports("command.relay.v1") || !live.supports(capability) {
 		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
 		return
 	}
 	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
-		!uuidPattern.MatchString(envelope.SessionID) || envelope.RuntimeEpoch != "" ||
+		!uuidPattern.MatchString(envelope.SessionID) ||
+		(envelope.Type == "message.submit" && envelope.RuntimeEpoch != "") ||
+		(envelope.Type == "session.cancel" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
 		envelope.DeviceID != "" || envelope.UserID != "" || envelope.PayloadSHA256 != "" || envelope.SubscriptionID != "" || envelope.SyncID != "" {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
-	var payload messageSubmitPayload
-	if decodePayload(envelope.Payload, &payload) != nil || normalizeMessageSubmit(payload) != nil {
-		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
-		return
+	var payload any
+	var digest string
+	if envelope.Type == "message.submit" {
+		var submit messageSubmitPayload
+		if decodePayload(envelope.Payload, &submit) != nil || normalizeMessageSubmit(submit) != nil {
+			server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+			return
+		}
+		payload = submit
+		digest, _ = messageSubmitDigest(envelope.SessionID, submit)
+	} else {
+		if decodePayload(envelope.Payload, &struct{}{}) != nil {
+			server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+			return
+		}
+		payload = struct{}{}
+		digest = sessionCancelDigest(envelope.SessionID, envelope.RuntimeEpoch)
 	}
 	host := server.hostForRuntime(live.runtimeID)
 	if host == nil || !host.peer.installation.ExpiresAt.After(time.Now()) {
 		server.sendProtocolError(parent, live, "runtime.offline", &envelope)
 		return
 	}
-	if !host.supports("command.relay.v1") {
+	if !host.supports("command.relay.v1") || !host.supports(capability) {
 		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+		return
+	}
+	if envelope.Type == "session.cancel" && envelope.RuntimeEpoch != host.runtimeEpoch {
+		server.sendProtocolError(parent, live, "runtime.changed", &envelope)
 		return
 	}
 	touchCtx, touchCancel := context.WithTimeout(parent, 3*time.Second)
@@ -990,12 +1013,7 @@ func (server *Server) routeMessageSubmit(parent context.Context, live *liveConne
 		server.sendProtocolError(parent, live, "runtime.offline", &envelope)
 		return
 	}
-	digest, err := messageSubmitDigest(envelope.SessionID, payload)
-	if err != nil {
-		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
-		return
-	}
-	status, err := server.database.RecordRealtimeCommand(parent, live.peer.redemption, envelope.RequestID, envelope.SessionID, digest)
+	status, err := server.database.RecordRealtimeCommand(parent, live.peer.redemption, envelope.Type, envelope.RequestID, envelope.SessionID, digest)
 	if err != nil {
 		server.sendProtocolError(parent, live, commandErrorCode(err), &envelope)
 		return
@@ -1006,7 +1024,7 @@ func (server *Server) routeMessageSubmit(parent context.Context, live *liveConne
 	}
 	if status.State == "received" {
 		forward := map[string]any{
-			"v": 1, "type": "message.submit", "request_id": envelope.RequestID,
+			"v": 1, "type": envelope.Type, "request_id": envelope.RequestID,
 			"runtime_id": live.runtimeID, "runtime_epoch": host.runtimeEpoch, "session_id": envelope.SessionID,
 			"user_id": live.peer.redemption.UserID, "device_id": live.peer.deviceID,
 			"payload_sha256": digest, "payload": payload,
@@ -1159,6 +1177,14 @@ func messageSubmitDigest(sessionID string, payload messageSubmitPayload) (string
 	encoded = append(encoded, `,"type":"message.submit"}`...)
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func sessionCancelDigest(sessionID, runtimeEpoch string) string {
+	// Identifiers are validated UUIDs. Bind cancel retries to their original
+	// runtime so a delayed command cannot stop work after a process restart.
+	encoded := `{"payload":{},"runtime_epoch":"` + runtimeEpoch + `","session_id":"` + sessionID + `","type":"session.cancel"}`
+	digest := sha256.Sum256([]byte(encoded))
+	return hex.EncodeToString(digest[:])
 }
 
 func appendJSONString(output []byte, value string) []byte {

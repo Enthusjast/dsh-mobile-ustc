@@ -519,7 +519,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("restore runtime session catalog: %v", err)
 	}
-	messageScope := GrantScope{Actions: []string{"message.submit", "session.read"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
+	messageScope := GrantScope{Actions: []string{"message.submit", "session.cancel", "session.read"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
 	messageTicket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, enrollment.RuntimeID, messageScope)
 	if err != nil {
 		t.Fatalf("issue message ticket: %v", err)
@@ -602,16 +602,16 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	messageDigest := sha256.Sum256([]byte("canonical relay message body"))
 	messageDigestHex := hex.EncodeToString(messageDigest[:])
 	const relayRequestID = "cccccccc-1111-4111-8111-111111111111"
-	receivedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, relayRequestID, relaySessionID, messageDigestHex)
+	receivedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "message.submit", relayRequestID, relaySessionID, messageDigestHex)
 	if err != nil || receivedCommand.State != "received" || receivedCommand.PayloadSHA256 != messageDigestHex {
 		t.Fatalf("persist message receipt: command=%+v error=%v", receivedCommand, err)
 	}
-	retriedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, relayRequestID, relaySessionID, messageDigestHex)
+	retriedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "message.submit", relayRequestID, relaySessionID, messageDigestHex)
 	if err != nil || retriedCommand.State != "received" {
 		t.Fatalf("idempotent message receipt: command=%+v error=%v", retriedCommand, err)
 	}
 	conflictingDigest := sha256.Sum256([]byte("different relay message body"))
-	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, relayRequestID, relaySessionID, hex.EncodeToString(conflictingDigest[:])); !errors.Is(err, ErrCommandConflict) {
+	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "message.submit", relayRequestID, relaySessionID, hex.EncodeToString(conflictingDigest[:])); !errors.Is(err, ErrCommandConflict) {
 		t.Fatalf("same request ID with another payload error=%v, want ErrCommandConflict", err)
 	}
 	commandReceipt := RelayCommandReceipt{
@@ -633,6 +633,37 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}
 	if _, err := postgres.CommandStatus(ctx, identity, deviceID, relayRequestID); err != nil {
 		t.Fatalf("authorized device could not query command status: %v", err)
+	}
+	const cancelRequestID = "cccccccc-2222-4222-8222-222222222222"
+	cancelDigest := sha256.Sum256([]byte("canonical epoch-bound cancel body"))
+	cancelDigestHex := hex.EncodeToString(cancelDigest[:])
+	noCancel := messageTicketRedemption
+	noCancel.Scope.Actions = []string{"message.submit", "session.read"}
+	if _, err := postgres.RecordRealtimeCommand(ctx, noCancel, "session.cancel", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("cancel accepted without explicit action: %v", err)
+	}
+	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "session.archive", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("unimplemented command type accepted: %v", err)
+	}
+	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "session.cancel", cancelRequestID, relaySessionID, cancelDigestHex); err != nil {
+		t.Fatalf("record cancellation: %v", err)
+	}
+	cancelReceipt := commandReceipt
+	cancelReceipt.RequestID, cancelReceipt.PayloadSHA256, cancelReceipt.State = cancelRequestID, cancelDigestHex, "host_accepted"
+	if _, err := postgres.RecordRealtimeCommandReceipt(ctx, cancelReceipt); err != nil {
+		t.Fatalf("accept cancellation: %v", err)
+	}
+	// The host may reconstruct this transition from an already settled journal
+	// entry after the Relay lost earlier receipts.
+	cancelReceipt.State = "settled"
+	if _, err := postgres.RecordRealtimeCommandReceipt(ctx, cancelReceipt); err != nil {
+		t.Fatalf("settle recovered cancellation: %v", err)
+	}
+	if retry, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "session.cancel", cancelRequestID, relaySessionID, cancelDigestHex); err != nil || retry.State != "settled" {
+		t.Fatalf("cancel retry: status=%+v error=%v", retry, err)
+	}
+	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "message.submit", cancelRequestID, relaySessionID, messageDigestHex); !errors.Is(err, ErrCommandConflict) {
+		t.Fatalf("request ID changed command type: %v", err)
 	}
 	if err := postgres.ValidateRealtimeLease(ctx, messageTicketRedemption); err != nil {
 		t.Fatalf("active message ticket lease was rejected: %v", err)
@@ -682,7 +713,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 29, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 32, 8); err != nil {
 		t.Fatal(err)
 	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
@@ -692,7 +723,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 29, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 32, 8); err != nil {
 		t.Fatal(err)
 	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint)
@@ -708,7 +739,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 30, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 33, 9); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := postgres.PendingControlEvents(ctx, 128)
