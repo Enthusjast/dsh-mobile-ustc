@@ -17,6 +17,14 @@ test('strict local protocol rejects extra fields, native identifiers, wrong vers
     { ...base, type: 'message.submit', session_id: randomUUID(), payload: { mode: 'queue', text: '  \t' } },
     { ...base, type: 'session.model.select', session_id: randomUUID(), payload: { provider: 'unknown', model: 'arbitrary', credentials: 'secret' } },
   ]) assert.throws(() => parseCommand(input), /protocol.invalid/)
+  const blocks = parseCommand({ ...base, type: 'message.submit', session_id: randomUUID(), payload: {
+    mode: 'steer', content: [{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }],
+  } })
+  assert.equal(blocks.type, 'message.submit')
+  for (const payload of [
+    { mode: 'queue', text: 'both shapes', content: [{ type: 'text', text: 'not allowed' }] },
+    { mode: 'queue', content: [{ type: 'image', url: 'file:///etc/passwd' }] },
+  ]) assert.throws(() => parseCommand({ ...base, type: 'message.submit', session_id: randomUUID(), payload }), /protocol.invalid/)
   assert.ok(z.toJSONSchema(Command).oneOf ?? z.toJSONSchema(Command).anyOf)
 })
 

@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { lstat, mkdir, chmod, realpath } from 'node:fs/promises'
+import { lstat, mkdir, chmod, realpath, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Socket } from 'node:net'
 import { encodeFrames, MAX_FRAME_BYTES, MAX_QUEUE_BYTES, parseCommand, ProbeError, type Frame } from './protocol.js'
@@ -132,13 +132,27 @@ export async function startDebugServer(socketPath: string, runtime: ProbeRuntime
     if (windowsPipe) server.listen({ path: socketPath, readableAll: false, writableAll: false }, onListen)
     else server.listen(socketPath, onListen)
   })
-  if (!windowsPipe) await chmod(socketPath, 0o600)
+  let socketIdentity: { dev: number; ino: number } | undefined
+  if (!windowsPipe) {
+    await chmod(socketPath, 0o600)
+    const stat = await lstat(socketPath)
+    if (!stat.isSocket()) throw new Error('M0 debug endpoint did not create a Unix socket')
+    socketIdentity = { dev: stat.dev, ino: stat.ino }
+  }
   return {
     async close() {
       runtime.close()
       for (const operation of operations) operation.abort()
       for (const socket of sockets) socket.destroy()
       await new Promise<void>((accept, reject) => server.close(error => error ? reject(error) : accept()))
+      if (socketIdentity) {
+        try {
+          const current = await lstat(socketPath)
+          if (current.isSocket() && current.dev === socketIdentity.dev && current.ino === socketIdentity.ino) await unlink(socketPath)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
     },
   }
 }

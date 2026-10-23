@@ -88,9 +88,16 @@ export class DshClient {
     })
   }
 
-  async prompt(id: SessionId, requestId: string, mode: 'queue' | 'steer', text: string, signal: AbortSignal) {
+  async prompt(
+    id: SessionId,
+    requestId: string,
+    mode: 'queue' | 'steer',
+    content: string | readonly { type: 'text'; text: string }[],
+    signal: AbortSignal,
+  ) {
     // Native requestId is namespaced away from other desktop/remote input channels.
-    await this.controller.prompt({ sessionId: id, requestId: `m0:${requestId}` as never, mode, content: [{ type: 'text', text }] }, signal)
+    const blocks = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : content
+    await this.controller.prompt({ sessionId: id, requestId: `m0:${requestId}` as never, mode, content: [...blocks] }, signal)
     const checkpoint = await this.checkpoint(id)
     return { native_accepted: true, checkpoint }
   }

@@ -151,27 +151,73 @@
           "const": "message.submit"
         },
         "payload": {
-          "type": "object",
-          "properties": {
-            "mode": {
-              "type": "string",
-              "enum": [
-                "queue",
-                "steer"
-              ]
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "queue",
+                    "steer"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32768,
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "mode",
+                "text"
+              ],
+              "additionalProperties": false
             },
-            "text": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 32768,
-              "pattern": "\\S"
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "queue",
+                    "steer"
+                  ]
+                },
+                "content": {
+                  "minItems": 1,
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "const": "text"
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32768,
+                        "pattern": "\\S"
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "content"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "mode",
-            "text"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       "required": [

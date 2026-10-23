@@ -15,7 +15,10 @@ test('a persisted dispatching message retries after a host context restart witho
   t.after(() => rm(firstHost.directory, { recursive: true, force: true }))
   const signal = new AbortController()
   const journalPath = join(firstHost.directory, 'journal', 'commands.sqlite')
-  const owner = { userId: 'local', deviceId: 'local' }
+  const owner = {
+    userId: '77777777-7777-4777-8777-777777777777',
+    deviceId: '22222222-2222-4222-8222-222222222222',
+  }
   let journal = await PersistentCommandJournal.open(journalPath, firstHost.runtimeId)
   let secondHost: Awaited<ReturnType<typeof host>> | undefined
   let firstHostClosed = false
@@ -32,7 +35,7 @@ test('a persisted dispatching message retries after a host context restart witho
 
     journal.admit(command, owner)
     journal.start(requestId, owner)
-    const original = await client.prompt(native, requestId, 'queue', 'crash-safe retry probe', signal.signal)
+    const original = await client.prompt(native, `${owner.deviceId}:${requestId}`, 'queue', 'crash-safe retry probe', signal.signal)
     assert.equal(original.checkpoint.state, 'persisted')
     await firstAgent.whenIdle()
     journal.close()
@@ -44,9 +47,15 @@ test('a persisted dispatching message retries after a host context restart witho
     const clientAfterRestart = new DshClient(secondHost.ctx, secondHost.runtimeId, [{ id: 'fixture', cwd: secondHost.cwd }], ['fixture'])
     const interactions = { close() {} } as InteractionRouter
     const restarted = new ProbeRuntime(clientAfterRestart, interactions, journal)
-    const retried = await restarted.dispatch({ ...command, runtime_epoch: restarted.epoch }, signal.signal)
+    const receiptStates: string[] = []
+    const retried = await restarted.dispatch({ ...command, runtime_epoch: restarted.epoch }, signal.signal, owner, state => { receiptStates.push(state) })
     assert.equal(retried.type, 'message.submit.result')
     assert.equal((retried.payload as { native_accepted: boolean }).native_accepted, true)
+    assert.deepEqual(receiptStates, ['host_accepted', 'dispatching', 'agent_queued'])
+
+    const replayReceiptStates: string[] = []
+    await restarted.dispatch({ ...command, runtime_epoch: restarted.epoch }, signal.signal, owner, state => { replayReceiptStates.push(state) })
+    assert.deepEqual(replayReceiptStates, ['host_accepted', 'agent_queued'])
 
     const restoredNative = await clientAfterRestart.resolve(created.session_id, signal.signal)
     const restoredAgent = secondHost.ctx.agents.get(restoredNative)!
@@ -54,7 +63,7 @@ test('a persisted dispatching message retries after a host context restart witho
     const messages = restoredAgent.session.snapshotEvents().filter(event => {
       if (event.type !== 'user/message') return false
       const source = event.data.source as unknown as { kind: string; rpcId?: string }
-      return source.kind === 'user' && source.rpcId === `m0:${requestId}`
+      return source.kind === 'user' && source.rpcId === `m0:${owner.deviceId}:${requestId}`
     })
     assert.equal(messages.length, 1)
     assert.equal(journal.get(requestId, owner)?.state, 'agent_queued')
@@ -66,7 +75,7 @@ test('a persisted dispatching message retries after a host context restart witho
     })
     journal.admit(missingSessionCommand, owner)
     journal.start(missingSessionCommand.request_id, owner)
-    await assert.rejects(restarted.dispatch(missingSessionCommand, signal.signal), /session.not_found/)
+    await assert.rejects(restarted.dispatch(missingSessionCommand, signal.signal, owner), /session.not_found/)
     assert.equal(journal.get(missingSessionCommand.request_id, owner)?.state, 'outcome_unknown')
   } finally {
     signal.abort()

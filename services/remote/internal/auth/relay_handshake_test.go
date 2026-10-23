@@ -106,3 +106,14 @@ func TestRelayHelloDigestIsStableAndLengthDelimited(t *testing.T) {
 		t.Fatal("identical normalized hello fields produced different digests")
 	}
 }
+
+func TestRelayHelloDigestMatchesNodeGolden(t *testing.T) {
+	got := RelayHelloDigest(
+		"host", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444",
+		"0.2.1-rc.2", "1.2.3", "0.0.1", "1", "command.relay.v1\nconnection.heartbeat.v1",
+	)
+	const want = "RQfjlKjYAvuc0sWjM4QWNcGqAnErlKBbE_o9x8E2dC8"
+	if got != want {
+		t.Fatalf("relay hello digest=%s, want %s", got, want)
+	}
+}

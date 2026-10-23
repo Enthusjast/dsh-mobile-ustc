@@ -20,6 +20,17 @@ M0 支持工作区白名单内根会话的列表、创建、文本 queue / steer
     highRiskTools: [bash, pwsh, run_code]
 ```
 
+M1 可选配置 `relayUrl` 和真实 `applicationVersion`。启用 Relay 时，插件还需要由发行 / 主机集成提供的 `HostCredentialProvider`；不要把安装私钥写进 DSH YAML。通过 `createRemoteControlPlugin(provider)` 构造 Loader 插件入口，provider 在每次连接前取得短期主机 credential，并用 OS 安全存储中的安装密钥对握手输入签名：
+
+```js
+import { createRemoteControlPlugin } from '/absolute/path/to/dsh-mobile-ustc/host/remote-control/lib/index.js'
+import { hostCredentials } from './os-key-store.js'
+
+export const { name, inject, apply } = createRemoteControlPlugin(hostCredentials)
+```
+
+主插件配置中的 `relayUrl` 可用 HTTPS/WSS 地址；仅回环地址允许明文 HTTP/WS。Relay 连接和本机调试入口共用同一个 `ProbeRuntime`、命令日志与 DSH Agent。安装 credential 获取、OIDC/DPoP 调用及 OS 密钥库适配由宿主集成提供，尚未接入 TokenWorks 发行包。
+
 Windows 的 `socketPath` 形如 `\\.\pipe\dsh-mobile-ustc-<runtimeId>`。Node IPC server 将 `readableAll` 和 `writableAll` 都设为 false。当前 Linux DSH CLI 集成测试覆盖 Unix socket；命名管道访问 ACL 还需在 Windows 的 DSH CLI 测试中验收。
 
 socket 父目录必须归当前用户所有、权限 0700 且不经过符号链接；插件将 socket 权限设为 0600，不覆盖已有监听。`runtimeId` 按安装用户 / profile 单独配置，重启保持不变，每次加载生成新 `runtime_epoch`。关闭或卸载插件会关闭连接、订阅和挂起交互。
@@ -52,4 +63,6 @@ curl --unix-socket /tmp/dsh-remote-private/probe.sock http://localhost/m0/probe
 
 默认数据库路径是 Linux 的 `$XDG_STATE_HOME`（否则 `~/.local/state`）、macOS 的 `~/Library/Application Support` 或 Windows 的 `%LOCALAPPDATA%` 下按 runtimeId 隔离的目录；可用 `commandJournalPath` 指定绝对路径。POSIX 目录必须是当前用户拥有的 0700 目录，数据库和 `.key` 文件为 0600。Windows 路径限制在当前用户的 `%LOCALAPPDATA%`，依赖该目录继承的用户 ACL，仍需 Windows 实机检查。AES 密钥与数据库位于同一受保护目录，因此复制整个目录仍包含解密密钥；M1 还需把密钥包装进平台安全存储。当前本机调试协议使用 `local` 用户 / 设备标识；Relay 接入后必须由已验证的 user_id/device_id 作为日志分区键。
 
-SQLite 使用 Node.js v24 的 `node:sqlite` 同步 API；该 Node 版本将模块标记为 Release Candidate，且同步数据库操作会短暂占用事件循环。单条正文和事务均有界；构建及 DSH CLI 集成验证以仓库锁定的 Node 24 runtime 为准。[Node.js v24 SQLite 文档](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)。本包仍不向 Go 服务发送 `host_accepted / agent_queued` 回执，Relay、服务端状态对账及远程 user/device 身份接入尚未实现。
+SQLite 使用 Node.js v24 的 `node:sqlite` 同步 API；该 Node 版本将模块标记为 Release Candidate，且同步数据库操作会短暂占用事件循环。单条正文和事务均有界；构建及 DSH CLI 集成验证以仓库锁定的 Node 24 runtime 为准。[Node.js v24 SQLite 文档](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)。主机 Relay 仅接受经签名握手后的文本 queue / steer 帧，校验服务端提供的规范化摘要，以验证后的 user_id/device_id 分区写入命令日志，并发送 host_accepted、dispatching、agent_queued 等回执。agent_queued 仍等待 DSH 会话持久化检查点。
+
+DSH CLI 0.2.1-rc.2 集成测试使用临时 P-256 密钥和本机回环 WSS 协议对端，证明签名握手、命令入队和回执状态进入同一个 DSH Agent。它没有启动 Go Relay、PostgreSQL、学校身份服务或生产密钥库；这些组合仍需单独验收。

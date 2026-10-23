@@ -3,14 +3,17 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
-import { randomUUID } from 'node:crypto'
+import { createPrivateKey, generateKeyPairSync, randomUUID, sign, verify } from 'node:crypto'
 import { access, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { request } from 'node:http'
-import { fileURLToPath } from 'node:url'
+import { createServer, request } from 'node:http'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { PersistentCommandJournal } from '../src/command-journal.js'
+import { hostHelloDigest, relayPayloadDigest } from '../src/relay-client.js'
+
+const WebSocketServer = createRequire(import.meta.url)('ws').WebSocketServer as new (options: object) => any
 
 const require = createRequire(import.meta.url)
 const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
@@ -94,6 +97,90 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     : join(root, 'ipc', 'remote.sock')
   await mkdir(workspace)
   const runtimeId = randomUUID()
+  const installationId = randomUUID()
+  const hostCredential = 'R'.repeat(43)
+  const remoteUserId = '77777777-7777-4777-8777-777777777777'
+  const remoteDeviceId = '22222222-2222-4222-8222-222222222222'
+  const remoteRequestId = randomUUID()
+  const { publicKey, privateKey: generatedPrivateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const privateJwk = generatedPrivateKey.export({ format: 'jwk' })
+  const privateKey = createPrivateKey({ key: privateJwk, format: 'jwk' })
+  const relayHttp = createServer()
+  const relayWss = new WebSocketServer({ server: relayHttp })
+  let relayRuntimeEpoch = ''
+  await new Promise<void>(resolve => relayHttp.listen(0, '127.0.0.1', resolve))
+  const relayAddress = relayHttp.address()
+  assert.ok(relayAddress && typeof relayAddress === 'object')
+  const relayUrl = `http://127.0.0.1:${relayAddress.port}`
+  const relayConnectionId = randomUUID()
+  const relayChallengeId = randomUUID()
+  const relayNonce = Buffer.alloc(32, 11).toString('base64url')
+  let relaySocket: any
+  let relayFailure: Error | undefined
+  const relayReceipts: any[] = []
+  let resolveRelayConnected!: () => void
+  let rejectRelayConnected!: (error: Error) => void
+  const relayConnected = new Promise<void>((resolve, reject) => {
+    resolveRelayConnected = resolve
+    rejectRelayConnected = reject
+  })
+  relayWss.on('connection', (socket: any, incoming: any) => {
+    relaySocket = socket
+    if (incoming.headers.authorization !== `DSH-Host ${hostCredential}`) {
+      relayFailure = new Error('DSH plugin did not use the host Authorization scheme')
+      rejectRelayConnected(relayFailure)
+      socket.close()
+      return
+    }
+    socket.send(JSON.stringify({ v: 1, type: 'challenge', payload: {
+      connection_id: relayConnectionId, challenge_id: relayChallengeId, nonce: relayNonce,
+      role: 'installation', expires_at: new Date(Date.now() + 10_000).toISOString(),
+    } }))
+    socket.on('message', (raw: Buffer) => {
+      try {
+        const frame = JSON.parse(raw.toString('utf8'))
+        if (frame.type === 'hello.proof') {
+          const [headerPart, payloadPart, signaturePart] = frame.payload.proof.split('.')
+          const proof = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'))
+          const signingInput = Buffer.from(`${headerPart}.${payloadPart}`)
+          relayRuntimeEpoch = proof.runtime_epoch
+          const helloDigest = hostHelloDigest([
+            'host', runtimeId, relayRuntimeEpoch, '0.2.1-rc.2', 'dsh-cli-integration', '0.0.1', '1',
+            ['command.relay.v1', 'connection.heartbeat.v1'].join('\n'),
+          ])
+          const valid = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')).typ === 'dsh-relay-handshake-proof+jwt'
+            && proof.iss === installationId && proof.aud === 'urn:dsh-mobile-ustc:realtime'
+            && proof.challenge_id === relayChallengeId && proof.connection_id === relayConnectionId
+            && proof.nonce === relayNonce && proof.runtime_id === runtimeId && /^[0-9a-f-]{36}$/i.test(relayRuntimeEpoch)
+            && proof.hello_sha256 === helloDigest
+            && verify('sha256', signingInput, { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
+          if (!valid) throw new Error('DSH plugin hello proof did not bind its runtime and challenge')
+          socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
+            role: 'host', connection_id: relayConnectionId, installation_id: installationId,
+            runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1'], server_time: new Date().toISOString(),
+            heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
+          } }))
+          resolveRelayConnected()
+        } else if (frame.type === 'command.receipt') relayReceipts.push(frame)
+        else if (frame.type === 'ping') socket.send(JSON.stringify({ v: 1, type: 'pong', payload: { connection_id: relayConnectionId, server_time: new Date().toISOString() } }))
+      } catch (error) {
+        relayFailure = error instanceof Error ? error : new Error(String(error))
+        rejectRelayConnected(relayFailure)
+      }
+    })
+  })
+  const pluginWrapperPath = join(root, 'remote-control-relay.mjs')
+  const pluginModuleUrl = pathToFileURL(resolve(pluginEntry)).href
+  const pluginWrapper = [
+    "import { createPrivateKey, sign } from 'node:crypto'",
+    `import { createRemoteControlPlugin } from ${JSON.stringify(pluginModuleUrl)}`,
+    `const privateKey = createPrivateKey({ key: ${JSON.stringify(privateJwk)}, format: 'jwk' })`,
+    `const plugin = createRemoteControlPlugin({ async acquire() { return { installationId: ${JSON.stringify(installationId)}, credential: ${JSON.stringify(hostCredential)}, signer: { sign(input) { return sign('sha256', Buffer.from(input), { key: privateKey, dsaEncoding: 'ieee-p1363' }) } } } } })`,
+    'export const { name, inject, apply } = plugin',
+    '',
+  ].join('\n')
+  await writeFile(pluginWrapperPath, pluginWrapper, { mode: 0o600 })
   const commandJournalPath = join(root, 'state', runtimeId, 'commands.sqlite')
   const patchPath = join(root, 'remote-control.patch.yml')
   const quote = (value: string) => JSON.stringify(value)
@@ -102,12 +189,14 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     '    - id: dsh-m0-model-fixture',
     `      name: ${quote(modelFixture)}`,
     '    - id: ustc-remote-control',
-    `      name: ${quote(pluginEntry)}`,
+    `      name: ${quote(pluginWrapperPath)}`,
     '      config:',
     '        enabled: true',
     `        runtimeId: ${runtimeId}`,
     `        socketPath: ${quote(socketPath)}`,
     `        commandJournalPath: ${quote(commandJournalPath)}`,
+    `        relayUrl: ${quote(relayUrl)}`,
+    '        applicationVersion: dsh-cli-integration',
     '        workspaces:',
     '          - id: probe',
     `            cwd: ${quote(workspace)}`,
@@ -161,6 +250,9 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     }
     assert.ok(probe, `DSH CLI did not open its probe before timeout; ${safeTail(stdout)} ${safeTail(stderr)}`)
     assert.equal(probe.payload.dsh_version, '0.2.1-rc.2')
+    await Promise.race([relayConnected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('DSH plugin Relay handshake timed out')), 3000))])
+    assert.equal(relayRuntimeEpoch, probe.runtime_epoch)
+    assert.equal(relayFailure, undefined)
 
     const command = async (type: string, payload: unknown, sessionId?: string) => {
       const body = { v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch,
@@ -199,6 +291,35 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     }
     assert.ok(JSON.stringify(finalMessage.data).includes(RESPONSE))
     await waitForTurnEnd(firstSubscription.iterator)
+
+    const relayPayload = { mode: 'queue' as const, content: [{ type: 'text' as const, text: 'Reply to the remote DSH relay command.' }] }
+    const relayFrame = {
+      v: 1, type: 'message.submit', request_id: remoteRequestId, runtime_id: runtimeId,
+      runtime_epoch: probe.runtime_epoch, session_id: sessionId, user_id: remoteUserId, device_id: remoteDeviceId,
+      payload_sha256: relayPayloadDigest(sessionId, relayPayload), payload: relayPayload,
+    }
+    relaySocket.send(JSON.stringify(relayFrame))
+    let relayedAssistant: any
+    for (;;) {
+      if (relayFailure) throw relayFailure
+      const value = JSON.parse((await waitForLine(firstSubscription.iterator)).value!)
+      if (value.type === 'session.event' && value.payload.type === 'assistant/message') {
+        relayedAssistant = value.payload
+        break
+      }
+    }
+    assert.ok(JSON.stringify(relayedAssistant.data).includes(RESPONSE))
+    await waitForTurnEnd(firstSubscription.iterator)
+    for (const state of ['host_accepted', 'dispatching', 'agent_queued']) {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline && !relayReceipts.some(receipt => receipt.request_id === remoteRequestId && receipt.payload.state === state)) {
+        if (relayFailure) throw relayFailure
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      assert.ok(relayReceipts.some(receipt => receipt.request_id === remoteRequestId && receipt.payload.state === state), `missing ${state} host receipt`)
+    }
+    assert.ok(relayReceipts.filter(receipt => receipt.request_id === remoteRequestId)
+      .every(receipt => receipt.payload.payload_sha256 === relayFrame.payload_sha256))
 
     firstSubscription.reader.close()
     firstSubscription.response.destroy()
@@ -257,7 +378,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     assert.ok((await readFile(patchPath, 'utf8')).includes('dsh-m0-test'))
     const cancelled = await command('session.cancel', {}, sessionId)
     assert.deepEqual(cancelled.payload, { accepted: true })
-    t.diagnostic(`Loaded via dsh ${probe.payload.dsh_version}; session sync, assistant output, bash approval rejection, and ordinary question response passed with local fixtures.`)
+    t.diagnostic(`Loaded via dsh ${probe.payload.dsh_version}; authenticated local Relay handshake and command routing into the same DSH Agent passed with local fixtures, alongside session sync, bash approval rejection, and ordinary question response.`)
     completed = true
   } finally {
     for (const subscription of subscriptions) {
@@ -288,12 +409,18 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
             assert.equal(record.command, undefined, 'completed command body was not removed after the DSH persistence checkpoint')
             assert.ok(['agent_queued', 'settled'].includes(record.state), `${body.type} has non-final state ${record.state}`)
           }
+          const remoteRecord = journal.get(remoteRequestId, { userId: remoteUserId, deviceId: remoteDeviceId })
+          assert.ok(remoteRecord, 'missing durable journal entry for the remote Relay command')
+          assert.equal(remoteRecord.command, undefined, 'remote command body was not removed after the DSH persistence checkpoint')
+          assert.equal(remoteRecord.state, 'agent_queued')
         } finally { journal.close() }
       }
       if (completed && shutdown !== undefined) t.diagnostic(`DSH CLI exited with ${shutdown.code ?? shutdown.signal} after ${Date.now() - shutdownStarted}ms; the local socket was removed.`)
     } catch (error) {
       shutdownCheck = error instanceof Error ? error : new Error(String(error))
     } finally { await rm(root, { recursive: true, force: true }) }
+    relaySocket?.close()
+    await new Promise<void>(resolve => relayWss.close(() => relayHttp.close(() => resolve())))
     if (shutdownCheck) throw shutdownCheck
   }
 })

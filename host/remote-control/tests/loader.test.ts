@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { request } from 'node:http'
-import { stat } from 'node:fs/promises'
+import { lstat, stat } from 'node:fs/promises'
 import { host } from './harness.js'
 
 export function http(socketPath: string, path: string, body?: unknown): Promise<{ status: number; frames: any[] }> {
@@ -32,7 +32,12 @@ test('built ESM plugin loads through the real Cordis Loader and removes its priv
     const fiber = h.ctx.loader.resolve('remote').fiber!
     h.ctx.loader.remove('remote')
     await fiber.dispose()
+    await fiber.await()
     await h.ctx.loader.await()
-    await assert.rejects(stat(h.socketPath), { code: 'ENOENT' })
+    const leftover = await lstat(h.socketPath).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    })
+    assert.equal(leftover, undefined, `plugin unload left an endpoint behind: ${leftover?.isSocket() ? 'socket' : 'file'} dev=${leftover?.dev} ino=${leftover?.ino}`)
   } finally { await h.close() }
 })

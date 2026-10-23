@@ -10,16 +10,17 @@ const command = <T extends string, P extends z.ZodType>(type: T, payload: P) =>
   z.strictObject({ ...base, type: z.literal(type), payload })
 const sessionCommand = <T extends string, P extends z.ZodType>(type: T, payload: P) =>
   z.strictObject({ ...session, type: z.literal(type), payload })
+const textContent = z.strictObject({ type: z.literal('text'), text: z.string().min(1).max(32_768).regex(/\S/) })
 
 /** M0 local probe protocol. It is deliberately separate from mobile protocol v1. */
 export const Command = z.discriminatedUnion('type', [
   command('session.list', empty),
   command('model.catalog', empty),
   command('session.create', z.strictObject({ workspace: z.string().min(1).max(128), preset: z.string().min(1).max(128) })),
-  sessionCommand('message.submit', z.strictObject({
-    mode: z.enum(['queue', 'steer']),
-    text: z.string().min(1).max(32_768).regex(/\S/),
-  })),
+  sessionCommand('message.submit', z.union([
+    z.strictObject({ mode: z.enum(['queue', 'steer']), text: z.string().min(1).max(32_768).regex(/\S/) }),
+    z.strictObject({ mode: z.enum(['queue', 'steer']), content: z.array(textContent).min(1).max(16) }),
+  ])),
   sessionCommand('session.cancel', empty),
   sessionCommand('session.model.select', z.strictObject({
     provider: z.string().min(1).max(128), model: z.string().min(1).max(128), reasoning_effort: z.string().min(1).max(64).optional(),
