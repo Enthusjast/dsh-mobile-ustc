@@ -15,11 +15,11 @@ EduWork 核心源码已按 `core.lock.json` 检出。发行审计命令 `node .l
 
 ## 已验证
 
-`npm ci --ignore-scripts && npm run verify` 通过干净安装、契约生成检查、TypeScript 严格检查、插件构建及 24 项测试。本机 `dsh --version` 确认为 `0.2.1-rc.2`。CLI 集成测试用独立临时 `DSH_HOME` 启动真实 `dsh` Web profile，加载构建后的插件和一个确定性本地模型插件，完成会话创建、列表、发送、实时 assistant 输出、取消、快照和历史分页；子进程不继承模型 Key 或用户登录状态，模型响应完全来自本地 fixture。进程退出后检查 IPC socket 已清理。
+`npm ci --ignore-scripts && npm run verify` 通过干净安装、契约生成检查、TypeScript 严格检查、插件构建及 24 项测试。本机 `dsh --version` 确认为 `0.2.1-rc.2`。CLI 集成测试用独立临时 `DSH_HOME` 启动真实 `dsh` Web profile，加载构建后的插件和一个确定性本地模型插件，完成会话创建、列表、发送、实时 assistant 输出、取消、快照、历史分页、普通问题应答及一次 Bash 审批拒绝；拒绝后检查哨兵文件未产生。子进程不继承模型 Key 或用户登录状态，模型响应完全来自本地 fixture。进程收到 SIGINT 后退出码为 130，IPC socket 已清理。
 
 其余 Loader 测试用真实 Cordis Loader 与 DSH 0.2.1-rc.2 的 Session、Agent、Session Controller、JSON 存储、Workspace 注册、附件、审批、问题和 Tool Runtime 服务。没有连接真实模型、学校身份或桌面发行包。CLI profile 中会话是在临时 DSH 主机内新建的；它不证明已安装桌面 profile 中的既有会话可见，也不代替 TokenWorks 发行组合验收。
 
-验证覆盖工作区及 preset 白名单、opaque 原生 ID 到 profile UUID 的映射、同一 Agent 继续会话、queue、checkpoint、实时订阅、历史分页、session cursor、实时改名事件、桌面模型目录校验、审批允许 / 拒绝 / 取消 / 超时、普通结构化提问和计划选择、提前返回允许的 listener 无法绕过最终 guard，以及卸载后 socket 和挂起交互清理。M0 协议 v0 的生成式 JSON Schema 与 TS 解析器共享两份 golden 请求和一份拒绝样例。
+Loader 与 DSH CLI 测试共同覆盖工作区及 preset 白名单、opaque 原生 ID 到 profile UUID 的映射、同一 Agent 继续会话、queue、steer、cancel、checkpoint、实时订阅、历史分页、session cursor、实时改名事件、桌面模型目录校验、审批允许 / 拒绝 / 取消 / 超时、普通结构化提问和计划选择、提前返回允许的 listener 无法绕过最终 guard，以及卸载后 socket 和挂起交互清理。M0 协议 v0 的生成式 JSON Schema 与 TS 解析器共享两份 golden 请求和一份拒绝样例。允许一次的工具执行与前置 listener 绕过用真实 DSH Tool Runtime Loader 测试；当前 CLI profile 的端到端 Bash 场景验证拒绝与不执行，尚未验证真实 UI 的 allow_once 路径。
 
 锁定 DSH 的 `follow` 能提供开场快照、固定历史 cursor、durable event 和可选 process-local assistant stream；`page` 接收 DSH 读取地址与 cursor，不接受移动端的 session UUID 直接作为原生 ID。`flush` 的返回值指出持久化 listener 是否参与，因此本原型只报告实际得到的 checkpoint，不伪造持久回执。
 

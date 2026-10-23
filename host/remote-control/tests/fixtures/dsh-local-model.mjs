@@ -1,10 +1,45 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { randomUUID } from 'node:crypto'
 
 class LocalModel extends LlmAdapter {
+  constructor() {
+    super()
+    this.approvalToolIssued = false
+    this.questionToolIssued = false
+  }
+
   providerInfo(provider) { return { id: provider, name: 'Local DSH integration fixture' } }
   async listModels(provider) { return [{ provider, id: 'offline', name: 'Offline fixture' }] }
   async *stream(options) {
     options.signal?.throwIfAborted()
+    const userText = options.messages
+      .filter(message => message.role === 'user')
+      .flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .filter(part => part.type === 'text')
+      .map(part => part.text)
+      .join('\n')
+    if (!this.approvalToolIssued && userText.includes('M0_APPROVAL_DENY')) {
+      this.approvalToolIssued = true
+      const args = JSON.stringify({ description: 'Create the local denial sentinel file', command: 'printf unauthorized > approval-denied.txt' })
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      const id = randomUUID()
+      yield { type: 'tool-call-delta', index: 0, id, name: 'bash', argumentsDelta: args }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'bash', arguments: args } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    if (!this.questionToolIssued && userText.includes('M0_QUESTION_TEST')) {
+      this.questionToolIssued = true
+      const args = JSON.stringify({ questions: [{
+        id: 'm0-choice', question: 'Choose the local DSH fixture answer.', options: [{ label: 'Local answer' }],
+      }] })
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      const id = randomUUID()
+      yield { type: 'tool-call-delta', index: 0, id, name: 'ask_user_question', argumentsDelta: args }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'ask_user_question', arguments: args } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: 'DSH local integration fixture response' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'DSH local integration fixture response' } }
