@@ -58,7 +58,8 @@ export class DshClient {
     const allowed = this.workspaces.find(item => item.id === workspace)
     if (allowed === undefined || !this.presets.includes(preset)) throw new ProbeError('access.denied')
     const result = await this.controller.create({ cwd: allowed.cwd, agentPreset: preset })
-    return { session_id: mobileSessionId(this.runtimeId, result.sessionId) }
+    const id = SessionId(result.sessionId)
+    return { session_id: mobileSessionId(this.runtimeId, result.sessionId), checkpoint: await this.checkpoint(id) }
   }
 
   async modelCatalog() {

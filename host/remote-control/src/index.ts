@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import { DshClient, type Workspace } from './dsh-client.js'
+import { defaultCommandJournalPath, PersistentCommandJournal } from './command-journal.js'
 import { InteractionRouter } from './interaction-router.js'
 import { ProbeRuntime } from './runtime.js'
 import { startDebugServer } from './debug-server.js'
@@ -17,6 +18,7 @@ export interface Config {
   presets?: string[]
   highRiskTools?: string[]
   interactionTimeoutMs?: number
+  commandJournalPath?: string
 }
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(false),
@@ -26,6 +28,7 @@ export const Config: z<Config> = z.object({
   presets: z.array(String).default([]),
   highRiskTools: z.array(String).default(['bash', 'pwsh', 'run_code']),
   interactionTimeoutMs: z.number().min(100).max(600_000).default(180_000),
+  commandJournalPath: z.string().default(''),
 })
 
 /** Opt-in M0 integration into the current Cordis profile; no default export. */
@@ -51,10 +54,22 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     return false
   }
   const client = new DshClient(ctx, options.runtimeId!, workspaces, options.presets!)
-  const interactions = new InteractionRouter(ctx, options.runtimeId!, managed, options.highRiskTools!, options.interactionTimeoutMs!)
-  const runtime = new ProbeRuntime(client, interactions)
   await ctx.effect(async () => {
-    const server = await startDebugServer(options.socketPath!, runtime)
-    return () => server.close()
+    const journalPath = options.commandJournalPath || defaultCommandJournalPath(options.runtimeId!)
+    const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!)
+    let runtime: ProbeRuntime | undefined
+    try {
+      const interactions = new InteractionRouter(ctx, options.runtimeId!, managed, options.highRiskTools!, options.interactionTimeoutMs!)
+      runtime = new ProbeRuntime(client, interactions, journal)
+      const server = await startDebugServer(options.socketPath!, runtime)
+      return async () => {
+        try { await server.close() }
+        finally { journal.close() }
+      }
+    } catch (error) {
+      runtime?.close()
+      journal.close()
+      throw error
+    }
   }, 'remote-control.debug')
 }

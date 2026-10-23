@@ -48,10 +48,11 @@ export class TestModel extends LlmAdapter {
   }
 }
 
-export async function host(options: { probe?: boolean; timeoutMs?: number } = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-mobile-'))
+export async function host(options: { probe?: boolean; timeoutMs?: number; directory?: string; retainDirectory?: boolean; runtimeId?: string } = {}) {
+  const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'dsh-mobile-'))
+  const cleanupDirectory = options.retainDirectory !== true
   const cwd = join(directory, 'workspace')
-  await mkdir(cwd)
+  await mkdir(cwd, { recursive: true })
   const ctx = new Context()
   const errors: unknown[] = []
   ctx.on('agent/error', ({ error }) => { errors.push(error) }, { global: true })
@@ -94,8 +95,8 @@ export async function host(options: { probe?: boolean; timeoutMs?: number } = {}
     ctx.llm.registerAdapter(['fixture'], model)
     const disposePreset = await ctx.agentPresets.register({ id: 'fixture', plugins: [] })
     const socketPath = join(directory, 'debug', 'probe.sock')
-    const runtimeId = randomUUID()
-    const config = { enabled: true, runtimeId, socketPath, workspaces: [{ id: 'fixture', cwd }], presets: ['fixture'], highRiskTools: ['protected'], interactionTimeoutMs: options.timeoutMs ?? 1000 }
+    const runtimeId = options.runtimeId ?? randomUUID()
+    const config = { enabled: true, runtimeId, socketPath, commandJournalPath: join(directory, 'debug', 'commands.sqlite'), workspaces: [{ id: 'fixture', cwd }], presets: ['fixture'], highRiskTools: ['protected'], interactionTimeoutMs: options.timeoutMs ?? 1000 }
     if (options.probe !== false) {
       await ctx.loader.root.update([...rows, { id: 'remote', name: './host/remote-control/lib/index.js', config }])
       await ctx.loader.await()
@@ -105,11 +106,11 @@ export async function host(options: { probe?: boolean; timeoutMs?: number } = {}
     return { ctx, cwd, directory, socketPath, runtimeId, config, errors, model, async close() {
       await disposePreset()
       await ctx.fiber.dispose()
-      await rm(directory, { recursive: true, force: true })
+      if (cleanupDirectory) await rm(directory, { recursive: true, force: true })
     } }
   } catch (error) {
     await ctx.fiber.dispose()
-    await rm(directory, { recursive: true, force: true })
+    if (cleanupDirectory) await rm(directory, { recursive: true, force: true })
     throw error
   }
 }

@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { request } from 'node:http'
 import { fileURLToPath } from 'node:url'
+import { PersistentCommandJournal } from '../src/command-journal.js'
 
 const require = createRequire(import.meta.url)
 const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
@@ -93,6 +94,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     : join(root, 'ipc', 'remote.sock')
   await mkdir(workspace)
   const runtimeId = randomUUID()
+  const commandJournalPath = join(root, 'state', runtimeId, 'commands.sqlite')
   const patchPath = join(root, 'remote-control.patch.yml')
   const quote = (value: string) => JSON.stringify(value)
   const patch = [
@@ -105,6 +107,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     '        enabled: true',
     `        runtimeId: ${runtimeId}`,
     `        socketPath: ${quote(socketPath)}`,
+    `        commandJournalPath: ${quote(commandJournalPath)}`,
     '        workspaces:',
     '          - id: probe',
     `            cwd: ${quote(workspace)}`,
@@ -142,6 +145,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
   child.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-32_768) })
   const exited = once(child, 'exit')
   const subscriptions: Awaited<ReturnType<typeof startSubscription>>[] = []
+  const mutatingRequests: any[] = []
   let completed = false
   try {
     const deadline = Date.now() + 30_000
@@ -161,6 +165,9 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     const command = async (type: string, payload: unknown, sessionId?: string) => {
       const body = { v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch,
         payload, ...(sessionId === undefined ? {} : { session_id: sessionId }) }
+      if (['session.create', 'message.submit', 'session.cancel', 'session.model.select', 'interaction.answer'].includes(type)) {
+        mutatingRequests.push(body)
+      }
       const result = await requestFrames(socketPath, 'POST', '/m0/command', body)
       const frame = result.frames[0]
       if (result.status !== 200 || frame?.type === 'error') throw new Error(`${type} failed: ${frame?.payload?.code ?? result.status}`)
@@ -271,6 +278,17 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
         await lstat(socketPath).then(() => { throw new Error('DSH CLI exited without removing the local socket') }, error => {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
         })
+      }
+      if (completed && shutdown !== undefined) {
+        const journal = await PersistentCommandJournal.open(commandJournalPath, runtimeId)
+        try {
+          for (const body of mutatingRequests) {
+            const record = journal.get(body.request_id, { userId: 'local', deviceId: 'local' })
+            assert.ok(record, `missing durable journal entry for ${body.type}`)
+            assert.equal(record.command, undefined, 'completed command body was not removed after the DSH persistence checkpoint')
+            assert.ok(['agent_queued', 'settled'].includes(record.state), `${body.type} has non-final state ${record.state}`)
+          }
+        } finally { journal.close() }
       }
       if (completed && shutdown !== undefined) t.diagnostic(`DSH CLI exited with ${shutdown.code ?? shutdown.signal} after ${Date.now() - shutdownStarted}ms; the local socket was removed.`)
     } catch (error) {

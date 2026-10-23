@@ -1,8 +1,14 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { DshClient } from './dsh-client.js'
 import type { InteractionRouter } from './interaction-router.js'
+import { commandDigest, MemoryCommandJournal, type CommandJournal, type CommandOwner } from './command-journal.js'
 import { type Command, type Frame, ProbeError } from './protocol.js'
 import { SessionSync } from './session-sync.js'
+
+const localCommandOwner: CommandOwner = { userId: 'local', deviceId: 'local' }
+const definiteRejections = new Set([
+  'access.denied', 'model.not_available', 'protocol.invalid', 'runtime.changed', 'runtime.offline', 'session.not_found',
+])
 
 export class ProbeRuntime {
   readonly epoch = randomUUID()
@@ -11,7 +17,7 @@ export class ProbeRuntime {
   private readonly serial = new Map<string, Promise<unknown>>()
   private closed = false
 
-  constructor(readonly client: DshClient, private readonly interactions: InteractionRouter) {
+  constructor(readonly client: DshClient, private readonly interactions: InteractionRouter, private readonly journal: CommandJournal = new MemoryCommandJournal(client.runtimeId)) {
     this.sync = new SessionSync(client, this.epoch)
   }
 
@@ -20,7 +26,7 @@ export class ProbeRuntime {
     if (command.runtime_epoch !== this.epoch) throw new ProbeError('runtime.changed')
   }
 
-  async dispatch(command: Command, signal: AbortSignal): Promise<Frame> {
+  async dispatch(command: Command, signal: AbortSignal, owner: CommandOwner = localCommandOwner): Promise<Frame> {
     this.check(command)
     signal.throwIfAborted()
     const run = async () => {
@@ -57,19 +63,62 @@ export class ProbeRuntime {
     let payload: unknown
     if (!mutating) payload = await run()
     else {
-      const digest = createHash('sha256').update(JSON.stringify(command)).digest('hex')
-      const existing = this.commands.get(command.request_id)
+      const flightKey = `${owner.userId}\0${owner.deviceId}\0${command.request_id}`
+      const existing = this.commands.get(flightKey)
+      if (existing === undefined && this.commands.size >= 2048) throw new ProbeError('rate.limited')
+      const admission = this.journal.admit(command, owner)
       if (existing) {
-        if (existing.digest !== digest) throw new ProbeError('command.request_conflict')
+        if (existing.digest !== admission.digest) throw new ProbeError('command.request_conflict')
         payload = await existing.result
+      } else if (admission.state === 'rejected') {
+        throw new ProbeError(admission.errorCode ?? 'command.rejected')
+      } else if (admission.state === 'outcome_unknown') {
+        throw new ProbeError('command.outcome_unknown')
+      } else if (admission.state === 'agent_queued' || admission.state === 'settled') {
+        if (admission.result === undefined) throw new ProbeError('journal.integrity_failed')
+        payload = admission.result
+      } else if (admission.state === 'dispatching' && command.type !== 'message.submit') {
+        this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
+        throw new ProbeError('command.outcome_unknown')
       } else {
-        // No eviction: losing an in-epoch mutation record would silently permit replay.
-        if (this.commands.size >= 2048) throw new ProbeError('rate.limited')
+        const recoveringDispatch = admission.state === 'dispatching'
         const key = 'session_id' in command ? command.session_id : command.type
-        const result = (this.serial.get(key) ?? Promise.resolve()).catch(() => {}).then(run)
+        const result = (this.serial.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+          this.check(command)
+          signal.throwIfAborted()
+          this.journal.start(command.request_id, owner)
+          try {
+            const value = await run()
+            const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create'
+            if (checkpointRequired && value !== null && typeof value === 'object'
+              && 'checkpoint' in value && value.checkpoint !== null && typeof value.checkpoint === 'object'
+              && 'state' in value.checkpoint && value.checkpoint.state !== 'persisted') {
+              const uncertain = { ...value, command_state: 'outcome_unknown' }
+              this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
+              return uncertain
+            }
+            if (checkpointRequired && (value === null || typeof value !== 'object' || !('checkpoint' in value)
+              || value.checkpoint === null || typeof value.checkpoint !== 'object' || !('state' in value.checkpoint))) {
+              this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
+              return { command_state: 'outcome_unknown' }
+            }
+            this.journal.complete(command.request_id, owner, command.type === 'message.submit' ? 'agent_queued' : 'settled', value)
+            return value
+          } catch (error) {
+            if (!recoveringDispatch && error instanceof ProbeError && definiteRejections.has(error.code)) {
+              this.journal.fail(command.request_id, owner, 'rejected', error.code)
+            } else {
+              this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
+            }
+            throw error
+          }
+        })
         this.serial.set(key, result)
-        this.commands.set(command.request_id, { digest, result })
-        void result.finally(() => { if (this.serial.get(key) === result) this.serial.delete(key) }).catch(() => {})
+        this.commands.set(flightKey, { digest: admission.digest, result })
+        void result.finally(() => {
+          if (this.serial.get(key) === result) this.serial.delete(key)
+          if (this.commands.get(flightKey)?.result === result) this.commands.delete(flightKey)
+        }).catch(() => {})
         payload = await result
       }
     }
