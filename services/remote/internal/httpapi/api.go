@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
+	"dsh-mobile-ustc/services/remote/internal/relay"
 	"dsh-mobile-ustc/services/remote/internal/store"
 )
 
@@ -36,6 +37,12 @@ type Repository interface {
 	PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error)
 	RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string) (int64, error)
 	IssueRealtimeTicket(context.Context, store.UserIdentity, string, string, store.GrantScope) (store.RealtimeTicket, error)
+	PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
+	ConsumeRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
+	LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error)
+	AttachRuntimeConnection(context.Context, store.RuntimeConnectionInput) (store.RuntimeConnection, error)
+	TouchRuntimeConnection(context.Context, string, string, string, string) error
+	DetachRuntimeConnection(context.Context, string, string, string, string) error
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
@@ -46,6 +53,19 @@ type API struct {
 	database    Repository
 	identity    *auth.Authenticator
 	hostClients map[string]struct{}
+}
+
+type Handler struct {
+	router   http.Handler
+	realtime *relay.Server
+}
+
+func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	handler.router.ServeHTTP(response, request)
+}
+
+func (handler *Handler) Drain(ctx context.Context) error {
+	return handler.realtime.Drain(ctx)
 }
 
 type deviceContextKey struct{}
@@ -85,7 +105,7 @@ type hostCredentialExchangeRequest struct {
 	Proof       string `json:"proof"`
 }
 
-func New(database Repository, identity *auth.Authenticator, configs ...Config) http.Handler {
+func New(database Repository, identity *auth.Authenticator, configs ...Config) *Handler {
 	api := &API{database: database, identity: identity, hostClients: make(map[string]struct{})}
 	if len(configs) > 0 {
 		for _, id := range configs[0].HostClientIDs {
@@ -112,8 +132,10 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) h
 	mux.Handle("PUT /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.putRuntimeGrant)))
 	mux.Handle("DELETE /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.revokeRuntimeGrant)))
 	mux.Handle("POST /v1/realtime/tickets", api.protected(http.HandlerFunc(api.issueRealtimeTicket)))
+	realtime := relay.New(database)
+	mux.Handle("GET /v1/realtime", realtime)
 	mux.Handle("GET /v1/commands/{id}", api.protected(http.HandlerFunc(api.commandStatus)))
-	return mux
+	return &Handler{router: mux, realtime: realtime}
 }
 
 func (api *API) protected(next http.Handler) http.Handler {

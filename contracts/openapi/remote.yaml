@@ -314,7 +314,7 @@ paths:
             schema: { $ref: '#/components/schemas/RealtimeTicketRequest' }
       responses:
         '201':
-          description: Issues a 30-second one-use ticket bound to the active device, runtime grant version, and requested scope. Only the ticket hash is stored.
+          description: Issues a 30-second one-use ticket bound to the active device key version, runtime grant version, and requested scope. Only the ticket hash is stored.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:
@@ -323,6 +323,35 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/realtime:
+    get:
+      security: []
+      description: >-
+        WebSocket upgrade endpoint. Send `Authorization: DSH-Ticket <ticket>` for a mobile device or
+        `Authorization: DSH-Host <credential>` for an installation. After upgrade the server issues a
+        15-second one-use challenge. A mobile ticket is consumed atomically only after the registered
+        device proves its key, so possession of the ticket alone cannot burn it. `hello.ok` is sent only after a signature by the registered P-256
+        key. Device `hello.proof` binds device_id, protocols, and capabilities; host `hello.proof` binds
+        runtime_id, runtime_epoch, DSH/application/plugin versions, protocol_version, and capabilities.
+        Both ES256 proofs bind the challenge_id, nonce, connection_id, audience, and normalized hello
+        digest. `hello_sha256` is base64url(SHA-256(domain || length-prefixed UTF-8 fields)); the domain
+        is `dsh-mobile-ustc/relay-hello/v1` followed by NUL. Device fields are role, device_id, sorted
+        comma-separated protocol numbers, and sorted newline-separated capabilities. Host fields are
+        role, runtime_id, runtime_epoch, dsh_version, application_version, plugin_version,
+        protocol_version, and newline-separated sorted capabilities. Prefix each field with its
+        four-byte big-endian byte length. Proofs use typ dsh-relay-handshake-proof+jwt, alg ES256,
+        and exact claims iss, aud, challenge_id, connection_id, nonce, runtime_id, iat, and jti; host
+        proofs also include runtime_epoch and hello_sha256. Heartbeats are text frames shaped as
+        `{"v":1,"type":"ping","payload":{}}` and receive a pong with connection_id and server_time.
+        The endpoint currently supports heartbeat frames only; business frame routing is not enabled.
+        Application heartbeat frames are rate limited to one per second. Device connections expire
+        within five minutes; host connections expire with their host credential. Never log
+        Authorization headers on this route.
+      responses:
+        '101': { description: WebSocket upgraded; client must answer the challenge before hello.ok is sent. Subprotocol dsh.remote.v1 is required. }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
   /v1/commands/{id}:
     get:

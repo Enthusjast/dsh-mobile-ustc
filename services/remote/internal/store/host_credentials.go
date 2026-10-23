@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -36,6 +37,7 @@ type HostConnectionCredential struct {
 type HostCredentialIdentity struct {
 	InstallationID string
 	KeyThumbprint  string
+	PublicJWK      []byte
 	KeyVersion     int64
 	ExpiresAt      time.Time
 }
@@ -250,7 +252,23 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 // registered key binding. A Relay must still issue and verify a fresh signed
 // connection challenge before accepting the socket.
 func (postgres *Postgres) ValidateHostConnectionCredential(ctx context.Context, credential, proofKeyJKT string) (HostCredentialIdentity, error) {
-	if !keyThumbprintPattern.MatchString(proofKeyJKT) || len(credential) != 43 {
+	if !keyThumbprintPattern.MatchString(proofKeyJKT) {
+		return HostCredentialIdentity{}, ErrHostCredentialInvalid
+	}
+	result, err := postgres.LookupHostConnectionCredential(ctx, credential)
+	if err != nil {
+		return HostCredentialIdentity{}, err
+	}
+	if subtle.ConstantTimeCompare([]byte(result.KeyThumbprint), []byte(proofKeyJKT)) != 1 {
+		return HostCredentialIdentity{}, ErrHostCredentialInvalid
+	}
+	return result, nil
+}
+
+// LookupHostConnectionCredential resolves an opaque host token to its active
+// registered key. The caller must challenge that key before trusting it.
+func (postgres *Postgres) LookupHostConnectionCredential(ctx context.Context, credential string) (HostCredentialIdentity, error) {
+	if len(credential) != 43 {
 		return HostCredentialIdentity{}, ErrHostCredentialInvalid
 	}
 	decoded, err := base64.RawURLEncoding.Strict().DecodeString(credential)
@@ -263,13 +281,13 @@ func (postgres *Postgres) ValidateHostConnectionCredential(ctx context.Context, 
 	digest := sha256.Sum256([]byte(credential))
 	var result HostCredentialIdentity
 	err = postgres.DB.QueryRowContext(ctx, `
-		select i.id::text, i.public_key_thumbprint, i.key_version, c.expires_at
+		select i.id::text, i.public_key_thumbprint, i.public_jwk, i.key_version, c.expires_at
 		from host_connection_credentials c
 		join installations i on i.id = c.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
 		where c.token_sha256 = $1 and c.revoked_at is null and c.expires_at > clock_timestamp()
-		  and c.key_version = i.key_version and i.public_key_thumbprint = $2`, digest[:], proofKeyJKT).
-		Scan(&result.InstallationID, &result.KeyThumbprint, &result.KeyVersion, &result.ExpiresAt)
+		  and c.key_version = i.key_version`, digest[:]).
+		Scan(&result.InstallationID, &result.KeyThumbprint, &result.PublicJWK, &result.KeyVersion, &result.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HostCredentialIdentity{}, ErrHostCredentialInvalid
 	}

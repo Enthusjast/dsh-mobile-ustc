@@ -72,7 +72,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if !ok {
 		t.Fatal("resolve integration test source path")
 	}
-	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql", "003_host_credentials.up.sql"} {
+	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql", "003_host_credentials.up.sql", "004_realtime_handshake.up.sql"} {
 		migrationPath := filepath.Join(filepath.Dir(sourceFile), "../../../../deploy/sql", name)
 		migration, err := os.ReadFile(migrationPath)
 		if err != nil {
@@ -94,7 +94,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 		t.Fatalf("ping isolated test database: %v", err)
 	}
 	postgres := &Postgres{DB: testDB}
-	seedGrantFixture(t, ctx, testDB)
+	deviceProofThumbprint := seedGrantFixture(t, ctx, testDB)
 	identity := UserIdentity{Issuer: "https://id.example.edu", Subject: "owner-subject"}
 	const (
 		deviceID  = "44444444-4444-4444-8444-444444444444"
@@ -221,10 +221,39 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if len(storedTicketHash) != 32 || string(storedTicketHash) == ticket.Token {
 		t.Fatal("database did not store only the SHA-256 ticket digest")
 	}
+	ticketDigest := sha256.Sum256([]byte(ticket.Token))
+	if string(storedTicketHash) != string(ticketDigest[:]) {
+		t.Fatal("ticket database digest does not match the returned token")
+	}
+	var ticketDeviceKeyVersion int64
+	var ticketProofThumbprint string
+	if err := testDB.QueryRowContext(ctx, `select device_key_version, proof_key_thumbprint from realtime_tickets where token_sha256 = $1`, ticketDigest[:]).
+		Scan(&ticketDeviceKeyVersion, &ticketProofThumbprint); err != nil {
+		t.Fatal(err)
+	}
+	if ticketDeviceKeyVersion != 1 || ticketProofThumbprint != deviceProofThumbprint {
+		t.Fatalf("ticket was not bound to the current device key: version=%d thumbprint=%s", ticketDeviceKeyVersion, ticketProofThumbprint)
+	}
+	preparedTicket, err := postgres.PrepareRealtimeTicket(ctx, ticket.Token)
+	if err != nil || preparedTicket.DeviceID != deviceID || !preparedTicket.ConsumedAt.IsZero() {
+		t.Fatalf("prepare realtime ticket without consuming it: redemption=%+v error=%v", preparedTicket, err)
+	}
+	var pendingConsumption sql.NullTime
+	if err := testDB.QueryRowContext(ctx, `select consumed_at from realtime_tickets where token_sha256 = $1`, ticketDigest[:]).Scan(&pendingConsumption); err != nil {
+		t.Fatal(err)
+	}
+	if pendingConsumption.Valid {
+		t.Fatal("ticket preparation consumed the ticket before the device proof")
+	}
 	redemption, err := postgres.ConsumeRealtimeTicket(ctx, ticket.Token)
 	if err != nil || redemption.UserID != "22222222-2222-4222-8222-222222222222" || redemption.DeviceID != deviceID ||
-		redemption.RuntimeID != runtimeID || redemption.GrantVersion != ticket.GrantVersion || !redemption.ConsumedAt.After(time.Time{}) {
+		redemption.RuntimeID != runtimeID || redemption.GrantVersion != ticket.GrantVersion ||
+		redemption.ProofKeyThumbprint != deviceProofThumbprint || !redemption.ConsumedAt.After(time.Time{}) {
 		t.Fatalf("consume realtime ticket: redemption=%+v error=%v", redemption, err)
+	}
+	redemptionThumbprint, err := auth.PublicP256JWKThumbprintJSON(redemption.ProofPublicJWK)
+	if err != nil || redemptionThumbprint != deviceProofThumbprint {
+		t.Fatalf("ticket redemption did not return the bound public key: thumbprint=%s error=%v", redemptionThumbprint, err)
 	}
 	if err := assertChangeCounts(ctx, testDB, 5, 3); err != nil {
 		t.Fatal(err)
@@ -243,6 +272,19 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 		t.Fatalf("ticket survived a grant version change: %v", err)
 	}
 	if err := assertChangeCounts(ctx, testDB, 6, 3); err != nil {
+		t.Fatal(err)
+	}
+	staleKeyTicket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, runtimeID, ticketScope)
+	if err != nil {
+		t.Fatalf("issue ticket for stale-device-key check: %v", err)
+	}
+	if _, err := testDB.ExecContext(ctx, `update devices set key_version = key_version + 1 where id = $1`, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.ConsumeRealtimeTicket(ctx, staleKeyTicket.Token); !errors.Is(err, ErrTicketInvalid) {
+		t.Fatalf("ticket survived a device-key version change: %v", err)
+	}
+	if err := assertChangeCounts(ctx, testDB, 7, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -285,7 +327,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if len(storedCodeHash) != 32 || string(storedCodeHash) == enrollmentCode {
 		t.Fatal("enrollment code was stored in plaintext")
 	}
-	if err := assertChangeCounts(ctx, testDB, 7, 4); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 8, 4); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := postgres.CreateEnrollment(ctx, enrollmentInput); err != nil {
@@ -319,7 +361,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err != nil || partial.State != "user_confirmed" {
 		t.Fatalf("phone confirmation: state=%s error=%v", partial.State, err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 8, 5); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 9, 5); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, "wrong-installation-key", enrollment.EnrollmentID, enrollmentCode); !errors.Is(err, ErrAccessDenied) {
@@ -329,7 +371,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err != nil || approved.State != "approved" {
 		t.Fatalf("host confirmation: state=%s error=%v", approved.State, err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 11, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 12, 8); err != nil {
 		t.Fatal(err)
 	}
 	challenge, err := postgres.CreateHostCredentialChallenge(ctx, identity, installationThumbprint)
@@ -401,6 +443,37 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ExchangeHostCredential(ctx, identity, installationThumbprint, challenge.ChallengeID, hostProof); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("replayed installation challenge error=%v, want ErrHostCredentialInvalid", err)
 	}
+	connection, err := postgres.AttachRuntimeConnection(ctx, RuntimeConnectionInput{
+		InstallationID: enrollment.InstallationID, KeyVersion: 1, RuntimeID: enrollment.RuntimeID,
+		RuntimeEpoch: "99999999-9999-4999-8999-999999999999", ConnectionID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		DSHVersion: "0.2.1-rc.2", ApplicationVersion: "1.0.0", PluginVersion: "0.1.0", ProtocolVersion: 1,
+	})
+	if err != nil || connection.RuntimeID != enrollment.RuntimeID {
+		t.Fatalf("attach installation runtime: connection=%+v error=%v", connection, err)
+	}
+	replacement, err := postgres.AttachRuntimeConnection(ctx, RuntimeConnectionInput{
+		InstallationID: enrollment.InstallationID, KeyVersion: 1, RuntimeID: enrollment.RuntimeID,
+		RuntimeEpoch: connection.RuntimeEpoch, ConnectionID: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+		DSHVersion: "0.2.1-rc.2", ApplicationVersion: "1.0.0", PluginVersion: "0.1.0", ProtocolVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("replace runtime connection: %v", err)
+	}
+	if err := postgres.TouchRuntimeConnection(ctx, connection.InstallationID, connection.RuntimeID, connection.RuntimeEpoch, connection.ConnectionID); !errors.Is(err, ErrRuntimeConnectionStale) {
+		t.Fatalf("superseded runtime connection touch=%v, want ErrRuntimeConnectionStale", err)
+	}
+	if err := postgres.DetachRuntimeConnection(ctx, connection.InstallationID, connection.RuntimeID, connection.RuntimeEpoch, connection.ConnectionID); err != nil {
+		t.Fatalf("stale runtime connection detach: %v", err)
+	}
+	if err := postgres.TouchRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); err != nil {
+		t.Fatalf("replacement runtime connection touch: %v", err)
+	}
+	if err := postgres.DetachRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); err != nil {
+		t.Fatalf("detach replacement runtime connection: %v", err)
+	}
+	if err := postgres.TouchRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); !errors.Is(err, ErrRuntimeConnectionStale) {
+		t.Fatalf("detached runtime connection touch=%v, want ErrRuntimeConnectionStale", err)
+	}
 	if _, err := testDB.ExecContext(ctx, `update installations set key_version = key_version + 1 where id = $1`, enrollment.InstallationID); err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +484,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 16, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 19, 8); err != nil {
 		t.Fatal(err)
 	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
@@ -421,23 +494,23 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 16, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 19, 8); err != nil {
 		t.Fatal(err)
 	}
-	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, "proof-jkt-actor")
+	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint)
 	if err != nil || activeDeviceID != deviceID {
 		t.Fatalf("active device lookup: id=%s error=%v", activeDeviceID, err)
 	}
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("revoke device: %v", err)
 	}
-	if _, err := postgres.ActiveDevice(ctx, identity, "proof-jkt-actor"); !errors.Is(err, ErrDeviceNotFound) {
+	if _, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint); !errors.Is(err, ErrDeviceNotFound) {
 		t.Fatalf("revoked device remained active: %v", err)
 	}
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 17, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 20, 9); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -466,7 +539,7 @@ func integrationHostCredentialProof(t *testing.T, key *ecdsa.PrivateKey, challen
 	return input + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
-func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) {
+func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) string {
 	t.Helper()
 	const (
 		orgID          = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -482,6 +555,18 @@ func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) {
 		deviceID       = "44444444-4444-4444-8444-444444444444"
 		phoneDeviceID  = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 	)
+	deviceProofKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceProofJWK, err := integrationP256JWK(deviceProofKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceProofThumbprint, err := auth.PublicP256JWKThumbprintJSON(deviceProofJWK)
+	if err != nil {
+		t.Fatal(err)
+	}
 	statements := []struct {
 		query string
 		args  []any
@@ -489,7 +574,7 @@ func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) {
 		{`insert into orgs (id, slug, name) values ($1, 'test-org', 'Test org'), ($2, 'other-org', 'Other org')`, []any{orgID, otherOrgID}},
 		{`insert into users (id, issuer, subject) values ($1, 'https://id.example.edu', 'owner-subject'), ($2, 'https://id.example.edu', 'target-subject'), ($3, 'https://id.example.edu', 'outsider-subject')`, []any{actorID, targetID, outsiderID}},
 		{`insert into org_memberships (org_id, user_id, role) values ($1, $2, 'member'), ($1, $3, 'member'), ($4, $5, 'member')`, []any{orgID, actorID, targetID, otherOrgID, outsiderID}},
-		{`insert into devices (id, user_id, name, approval_public_jwk, approval_key_thumbprint, proof_public_jwk, proof_key_thumbprint) values ($1, $2, 'owner phone', '{}'::jsonb, 'approval-jkt-actor', '{}'::jsonb, 'proof-jkt-actor'), ($3, $4, 'target phone', '{}'::jsonb, 'approval-jkt-target', '{}'::jsonb, 'proof-jkt-target')`, []any{deviceID, actorID, phoneDeviceID, targetID}},
+		{`insert into devices (id, user_id, name, approval_public_jwk, approval_key_thumbprint, proof_public_jwk, proof_key_thumbprint) values ($1, $2, 'owner phone', '{}'::jsonb, 'approval-jkt-actor', $5::jsonb, $6), ($3, $4, 'target phone', '{}'::jsonb, 'approval-jkt-target', '{}'::jsonb, 'proof-jkt-target')`, []any{deviceID, actorID, phoneDeviceID, targetID, deviceProofJWK, deviceProofThumbprint}},
 		{`insert into hosts (id, org_id, alias, state) values ($1, $2, 'Test host', 'active')`, []any{hostID, orgID}},
 		{`insert into installations (id, host_id, owner_user_id, public_jwk, public_key_thumbprint) values ($1, $2, $3, '{}'::jsonb, 'installation-jkt')`, []any{installationID, hostID, actorID}},
 		{`insert into runtimes (id, installation_id, profile_ref, protocol_version) values ($1, $2, 'test-profile', 1)`, []any{runtimeID, installationID}},
@@ -504,6 +589,7 @@ func seedGrantFixture(t *testing.T, ctx context.Context, database *sql.DB) {
 			t.Fatalf("seed PostgreSQL integration fixture: %v", err)
 		}
 	}
+	return deviceProofThumbprint
 }
 
 func assertGrantState(ctx context.Context, database *sql.DB, runtimeID, userID string, version int64, role string, revoked bool) error {

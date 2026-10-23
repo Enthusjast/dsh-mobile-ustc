@@ -22,13 +22,16 @@ type RealtimeTicket struct {
 }
 
 type TicketRedemption struct {
-	UserID       string     `json:"user_id"`
-	DeviceID     string     `json:"device_id"`
-	RuntimeID    string     `json:"runtime_id"`
-	GrantVersion int64      `json:"grant_version"`
-	Scope        GrantScope `json:"scope"`
-	ExpiresAt    time.Time  `json:"expires_at"`
-	ConsumedAt   time.Time  `json:"consumed_at"`
+	UserID             string     `json:"user_id"`
+	DeviceID           string     `json:"device_id"`
+	DeviceKeyVersion   int64      `json:"-"`
+	ProofKeyThumbprint string     `json:"-"`
+	ProofPublicJWK     []byte     `json:"-"`
+	RuntimeID          string     `json:"runtime_id"`
+	GrantVersion       int64      `json:"grant_version"`
+	Scope              GrantScope `json:"scope"`
+	ExpiresAt          time.Time  `json:"expires_at"`
+	ConsumedAt         time.Time  `json:"consumed_at"`
 }
 
 func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity UserIdentity, deviceID, runtimeID string, requestedScope GrantScope) (RealtimeTicket, error) {
@@ -42,10 +45,12 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 		return RealtimeTicket{}, err
 	}
 	var registeredDevice string
+	var deviceKeyVersion int64
+	var proofKeyThumbprint string
 	err = transaction.QueryRowContext(ctx, `
-		select id::text from devices
+		select id::text, key_version, proof_key_thumbprint from devices
 		where id = $1 and user_id = $2 and revoked_at is null
-		for share`, deviceID, userID).Scan(&registeredDevice)
+		for share`, deviceID, userID).Scan(&registeredDevice, &deviceKeyVersion, &proofKeyThumbprint)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RealtimeTicket{}, ErrDeviceNotFound
 	}
@@ -117,9 +122,9 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 	}
 	var expiresAt time.Time
 	if err := transaction.QueryRowContext(ctx, `
-		insert into realtime_tickets (token_sha256, user_id, device_id, runtime_id, grant_version, scope, expires_at)
-		values ($1, $2, $3, $4, $5, $6::jsonb, clock_timestamp() + interval '30 seconds')
-		returning expires_at`, digest[:], userID, deviceID, runtimeID, grantVersion, string(scopeJSON)).Scan(&expiresAt); err != nil {
+		insert into realtime_tickets (token_sha256, user_id, device_id, device_key_version, proof_key_thumbprint, runtime_id, grant_version, scope, expires_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, clock_timestamp() + interval '30 seconds')
+		returning expires_at`, digest[:], userID, deviceID, deviceKeyVersion, proofKeyThumbprint, runtimeID, grantVersion, string(scopeJSON)).Scan(&expiresAt); err != nil {
 		return RealtimeTicket{}, ErrDatabaseUnavailable
 	}
 	metadata, _ := json.Marshal(map[string]any{"device_id": deviceID, "runtime_id": runtimeID, "grant_version": grantVersion, "expires_at": expiresAt})
@@ -134,80 +139,64 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 	return RealtimeTicket{Token: token, RuntimeID: runtimeID, GrantVersion: grantVersion, Scope: scope, ExpiresAt: expiresAt}, nil
 }
 
-// ConsumeRealtimeTicket is for the future Relay handshake. The bearer ticket is
-// only one factor; the Relay must still challenge the bound device key.
-func (postgres *Postgres) ConsumeRealtimeTicket(ctx context.Context, token string) (TicketRedemption, error) {
+func realtimeTicketDigest(token string) ([]byte, error) {
 	if len(token) != 43 {
-		return TicketRedemption{}, ErrTicketInvalid
+		return nil, ErrTicketInvalid
 	}
-	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(token)
 	if err != nil || len(decoded) != 32 || base64.RawURLEncoding.EncodeToString(decoded) != token {
-		return TicketRedemption{}, ErrTicketInvalid
+		return nil, ErrTicketInvalid
 	}
 	for index := range decoded {
 		decoded[index] = 0
 	}
 	digest := sha256.Sum256([]byte(token))
+	return digest[:], nil
+}
+
+// PrepareRealtimeTicket validates a ticket and returns its registered device
+// key without consuming it. The Relay verifies the fresh key proof first, then
+// calls ConsumeRealtimeTicket to recheck current access and claim the ticket.
+func (postgres *Postgres) PrepareRealtimeTicket(ctx context.Context, token string) (TicketRedemption, error) {
+	digest, err := realtimeTicketDigest(token)
+	if err != nil {
+		return TicketRedemption{}, err
+	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return TicketRedemption{}, ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
-	var redemption TicketRedemption
-	var scopeJSON []byte
-	var consumedAt sql.NullTime
-	var ticketCurrent bool
-	err = transaction.QueryRowContext(ctx, `
-		select t.user_id::text, t.device_id::text, t.runtime_id::text, t.grant_version,
-		       t.scope, t.expires_at, t.consumed_at, t.expires_at > clock_timestamp()
-		from realtime_tickets t where t.token_sha256 = $1 for update`, digest[:]).
-		Scan(&redemption.UserID, &redemption.DeviceID, &redemption.RuntimeID, &redemption.GrantVersion,
-			&scopeJSON, &redemption.ExpiresAt, &consumedAt, &ticketCurrent)
-	if errors.Is(err, sql.ErrNoRows) {
-		return TicketRedemption{}, ErrTicketInvalid
+	redemption, err := loadRealtimeTicket(ctx, transaction, digest, false)
+	if err != nil {
+		return TicketRedemption{}, err
 	}
+	if err := transaction.Commit(); err != nil {
+		return TicketRedemption{}, ErrDatabaseUnavailable
+	}
+	return redemption, nil
+}
+
+// ConsumeRealtimeTicket atomically claims a ticket after the Relay has verified
+// the challenge proof. The active device key and grant are rechecked here.
+func (postgres *Postgres) ConsumeRealtimeTicket(ctx context.Context, token string) (TicketRedemption, error) {
+	digest, err := realtimeTicketDigest(token)
+	if err != nil {
+		return TicketRedemption{}, err
+	}
+	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return TicketRedemption{}, ErrDatabaseUnavailable
 	}
-	if consumedAt.Valid || !ticketCurrent {
-		return TicketRedemption{}, ErrTicketInvalid
-	}
-	if err := json.Unmarshal(scopeJSON, &redemption.Scope); err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
-	}
-	var currentScopeJSON []byte
-	err = transaction.QueryRowContext(ctx, `
-		select g.scope from users u
-		join devices d on d.user_id = u.id and d.id = $2 and d.revoked_at is null
-		join org_memberships m on m.user_id = u.id
-		join hosts h on h.org_id = m.org_id and h.state = 'active'
-		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null
-		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
-		where u.id = $1 and u.status = 'active' and g.revoked_at is null
-		  and (g.expires_at is null or g.expires_at > now())
-		for share of u, d, m, h, i, r, g`,
-		redemption.UserID, redemption.DeviceID, redemption.RuntimeID, redemption.GrantVersion).Scan(&currentScopeJSON)
-	if errors.Is(err, sql.ErrNoRows) {
-		return TicketRedemption{}, ErrTicketInvalid
-	}
+	defer transaction.Rollback()
+	redemption, err := loadRealtimeTicket(ctx, transaction, digest, true)
 	if err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
-	}
-	var currentScope GrantScope
-	if err := json.Unmarshal(currentScopeJSON, &currentScope); err != nil || !grantScopeSubset(redemption.Scope, currentScope) {
-		return TicketRedemption{}, ErrTicketInvalid
-	}
-	if err := validateGrantResources(ctx, transaction, redemption.RuntimeID, redemption.Scope); err != nil {
-		if errors.Is(err, ErrGrantInvalid) {
-			return TicketRedemption{}, ErrTicketInvalid
-		}
 		return TicketRedemption{}, err
 	}
 	err = transaction.QueryRowContext(ctx, `
-		update realtime_tickets set consumed_at = now()
+		update realtime_tickets set consumed_at = clock_timestamp()
 		where token_sha256 = $1 and consumed_at is null and expires_at > clock_timestamp()
-		returning consumed_at`, digest[:]).Scan(&redemption.ConsumedAt)
+		returning consumed_at`, digest).Scan(&redemption.ConsumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TicketRedemption{}, ErrTicketInvalid
 	}
@@ -222,6 +211,70 @@ func (postgres *Postgres) ConsumeRealtimeTicket(ctx context.Context, token strin
 	}
 	if err := transaction.Commit(); err != nil {
 		return TicketRedemption{}, ErrDatabaseUnavailable
+	}
+	return redemption, nil
+}
+
+func loadRealtimeTicket(ctx context.Context, transaction *sql.Tx, digest []byte, forUpdate bool) (TicketRedemption, error) {
+	var redemption TicketRedemption
+	var scopeJSON []byte
+	var consumedAt sql.NullTime
+	var ticketCurrent bool
+	lockClause := " for share"
+	if forUpdate {
+		lockClause = " for update"
+	}
+	err := transaction.QueryRowContext(ctx, `
+		select t.user_id::text, t.device_id::text, t.device_key_version, t.proof_key_thumbprint,
+		       t.runtime_id::text, t.grant_version,
+		       t.scope, t.expires_at, t.consumed_at, t.expires_at > clock_timestamp()
+		from realtime_tickets t where t.token_sha256 = $1`+lockClause, digest).
+		Scan(&redemption.UserID, &redemption.DeviceID, &redemption.DeviceKeyVersion, &redemption.ProofKeyThumbprint,
+			&redemption.RuntimeID, &redemption.GrantVersion,
+			&scopeJSON, &redemption.ExpiresAt, &consumedAt, &ticketCurrent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TicketRedemption{}, ErrTicketInvalid
+	}
+	if err != nil {
+		return TicketRedemption{}, ErrDatabaseUnavailable
+	}
+	if consumedAt.Valid || !ticketCurrent {
+		return TicketRedemption{}, ErrTicketInvalid
+	}
+	if err := json.Unmarshal(scopeJSON, &redemption.Scope); err != nil {
+		return TicketRedemption{}, ErrDatabaseUnavailable
+	}
+	var currentScopeJSON, proofPublicJWK []byte
+	err = transaction.QueryRowContext(ctx, `
+		select g.scope, d.proof_public_jwk from users u
+		join devices d on d.user_id = u.id and d.id = $2 and d.revoked_at is null
+		join org_memberships m on m.user_id = u.id
+		join hosts h on h.org_id = m.org_id and h.state = 'active'
+		join installations i on i.host_id = h.id and i.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null
+		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
+		where u.id = $1 and u.status = 'active' and g.revoked_at is null
+		  and (g.expires_at is null or g.expires_at > now())
+		  and d.key_version = $5 and d.proof_key_thumbprint = $6
+		for share of u, d, m, h, i, r, g`,
+		redemption.UserID, redemption.DeviceID, redemption.RuntimeID, redemption.GrantVersion,
+		redemption.DeviceKeyVersion, redemption.ProofKeyThumbprint).Scan(&currentScopeJSON, &proofPublicJWK)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TicketRedemption{}, ErrTicketInvalid
+	}
+	if err != nil {
+		return TicketRedemption{}, ErrDatabaseUnavailable
+	}
+	var currentScope GrantScope
+	if err := json.Unmarshal(currentScopeJSON, &currentScope); err != nil || !grantScopeSubset(redemption.Scope, currentScope) {
+		return TicketRedemption{}, ErrTicketInvalid
+	}
+	redemption.ProofPublicJWK = proofPublicJWK
+	if err := validateGrantResources(ctx, transaction, redemption.RuntimeID, redemption.Scope); err != nil {
+		if errors.Is(err, ErrGrantInvalid) {
+			return TicketRedemption{}, ErrTicketInvalid
+		}
+		return TicketRedemption{}, err
 	}
 	return redemption, nil
 }
