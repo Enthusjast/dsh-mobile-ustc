@@ -204,7 +204,7 @@ func (postgres *Postgres) ListHosts(ctx context.Context, identity UserIdentity) 
 		          )
 		      ))
 	  )
-		order by h.alias, h.id`, identity.Issuer, identity.Subject)
+		order by h.alias, h.id::text`, identity.Issuer, identity.Subject)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
 	}
@@ -246,7 +246,7 @@ func (postgres *Postgres) ListRuntimes(ctx context.Context, identity UserIdentit
 		          )
 		      ))
 	  )
-		order by h.id, r.id`, identity.Issuer, identity.Subject)
+		order by h.id::text, r.id::text`, identity.Issuer, identity.Subject)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
 	}

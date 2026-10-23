@@ -138,7 +138,7 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 		})
 		if _, err := transaction.ExecContext(ctx, `
 			insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, session_id, action, result, metadata)
-			values ($1, 'device', $2, $2, $3, $4, 'command.received', 'success', $5::jsonb)`,
+			values ($1, 'device', $2::uuid::text, $2, $3, $4, 'command.received', 'success', $5::jsonb)`,
 			orgID, ticket.DeviceID, ticket.RuntimeID, sessionID, string(metadata)); err != nil {
 			return CommandStatus{}, ErrDatabaseUnavailable
 		}
@@ -277,7 +277,7 @@ func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket
 	metadata, _ := json.Marshal(map[string]any{"request_id": requestID, "payload_sha256": payloadSHA256, "state": status.State})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (actor_type, actor_id, device_id, runtime_id, session_id, action, result, metadata)
-		values ('device', $1, $1, $2, $3, 'command.outcome_unknown', 'unknown', $4::jsonb)`,
+		values ('device', $1::uuid::text, $1, $2, $3, 'command.outcome_unknown', 'unknown', $4::jsonb)`,
 		ticket.DeviceID, ticket.RuntimeID, sessionID, string(metadata)); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}

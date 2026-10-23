@@ -130,7 +130,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 	metadata, _ := json.Marshal(map[string]any{"device_id": deviceID, "runtime_id": runtimeID, "grant_version": grantVersion, "expires_at": expiresAt})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, action, result, metadata)
-		values ($1, 'device', $2, $2, $3, 'realtime.ticket.issue', 'success', $4::jsonb)`, orgID, deviceID, runtimeID, string(metadata)); err != nil {
+		values ($1, 'device', $2::uuid::text, $2, $3, 'realtime.ticket.issue', 'success', $4::jsonb)`, orgID, deviceID, runtimeID, string(metadata)); err != nil {
 		return RealtimeTicket{}, ErrDatabaseUnavailable
 	}
 	if err := transaction.Commit(); err != nil {
@@ -206,7 +206,7 @@ func (postgres *Postgres) ConsumeRealtimeTicket(ctx context.Context, token strin
 	metadata, _ := json.Marshal(map[string]any{"runtime_id": redemption.RuntimeID, "grant_version": redemption.GrantVersion})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (actor_type, actor_id, device_id, runtime_id, action, result, metadata)
-		values ('device', $1, $1, $2, 'realtime.ticket.consume', 'success', $3::jsonb)`, redemption.DeviceID, redemption.RuntimeID, string(metadata)); err != nil {
+		values ('device', $1::uuid::text, $1, $2, 'realtime.ticket.consume', 'success', $3::jsonb)`, redemption.DeviceID, redemption.RuntimeID, string(metadata)); err != nil {
 		return TicketRedemption{}, ErrDatabaseUnavailable
 	}
 	if err := transaction.Commit(); err != nil {

@@ -634,7 +634,7 @@ func loadEnrollmentForUpdate(ctx context.Context, transaction *sql.Tx, enrollmen
 	var row enrollmentRow
 	err := transaction.QueryRowContext(ctx, `
 		select e.id::text, e.host_id::text, e.installation_id::text, e.runtime_id::text,
-		       e.requested_by::text, h.org_id::text, e.state, e.code_hash, e.expires_at > clock_timestamp(),
+		       e.requested_by::text, h.org_id::text, e.state, e.code_hash, e.expires_at <= clock_timestamp(),
 	       e.expires_at, e.user_confirmed_by::text, e.user_confirmed_at, e.host_confirmed_at,
 	       i.owner_user_id::text, i.public_key_thumbprint
 		from enrollments e
