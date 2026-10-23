@@ -71,3 +71,5 @@ SQLite 使用 Node.js v24 的 `node:sqlite` 同步 API；该 Node 版本将模�
 DSH CLI 0.2.1-rc.2 集成测试使用临时 P-256 密钥和本机回环 WSS 协议对端，证明签名握手、命令入队和回执、WSS 快照、固定切点分页、assistant 增量与替换同步代次均使用同一个 DSH Agent；内容帧按共享 JSON Schema 校验。它没有启动 Go Relay、PostgreSQL、学校身份服务或生产密钥库；这些组合仍需单独验收。
 
 Relay 双方协商 `session.read.v1` 后，可打开按连接隔离的会话订阅。主机发送带 `subscription_id` / `sync_id` 的快照、原生事件、持久化检查点和 assistant 流，分页引用仍打开的固定快照。取消订阅只释放 follower，不中断 Agent；断线后重新订阅。正文投影最大 2 MiB，超过 64 KiB 信封时按字节分片。每订阅 / 整个主机连接的待发队列分别限制为 3 MiB / 12 MiB，超限后中止 follower 并要求重同步。读取仍依赖 Relay 每帧核对 `session.read` 及当前授权范围。协议、限制和待完成项见 [会话读取说明](../../docs/session-read-protocol.md)。
+
+另运行 `npm run test:remote-dsh` 可启动真实 Go 服务、隔离 PostgreSQL 和同一本机 npm DSH，验证完整的登记、双端绑定、密钥证明、目录、聊天读取与撤权链路。该测试已通过；身份、模型和密钥 provider 使用本地夹具，学校 IdP、Android 和生产密钥库仍待验收。运行条件及数据边界见 [联合测试记录](../../docs/go-dsh-integration.md)。

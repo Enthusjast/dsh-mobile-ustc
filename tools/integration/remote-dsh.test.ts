@@ -1,0 +1,329 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawn, execFileSync } from 'node:child_process'
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto'
+import { once } from 'node:events'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { createServer, request } from 'node:http'
+import { createServer as createTCPServer } from 'node:net'
+import { createRequire } from 'node:module'
+import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { Ajv2020 } from 'ajv/dist/2020.js'
+import { hostHelloDigest, relayPayloadDigest } from '../../host/remote-control/src/relay-client.js'
+
+const require = createRequire(import.meta.url)
+const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
+const now = () => Math.floor(Date.now() / 1000)
+const hash = (input: string) => createHash('sha256').update(input).digest('base64url')
+const key = () => {
+  const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const jwk = pair.publicKey.export({ format: 'jwk' })
+  const jkt = hash(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y }))
+  return { ...pair, jwk, jkt }
+}
+function jws(privateKey: KeyObject, header: object, claims: object): string {
+  const input = [header, claims].map(value => Buffer.from(JSON.stringify(value)).toString('base64url')).join('.')
+  return `${input}.${sign('sha256', Buffer.from(input), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`
+}
+
+async function until<Value>(read: () => Promise<Value | undefined>, label: string, timeout = 10_000): Promise<Value> {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    const value = await read()
+    if (value !== undefined) return value
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`Timed out: ${label}`)
+}
+
+async function startProcess(binary: string, args: string[], env: NodeJS.ProcessEnv) {
+  const child = spawn(binary, args, { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let tail = ''
+  for (const stream of [child.stdout, child.stderr]) stream.setEncoding('utf8').on('data', text => { tail = (tail + text).slice(-4096) })
+  const exited = once(child, 'exit') as Promise<[number | null, NodeJS.Signals | null]>
+  void exited.catch(() => {})
+  await once(child, 'spawn')
+  return {
+    child, exited,
+    check() { if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Child process exited: ${tail}`) },
+    async stop(signal: NodeJS.Signals) {
+      if (child.exitCode === null && child.signalCode === null) child.kill(signal)
+      let timer: NodeJS.Timeout | undefined
+      try {
+        return await Promise.race([exited, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Child process failed graceful shutdown')) }, 5000)
+        })])
+      } finally { if (timer) clearTimeout(timer) }
+    },
+  }
+}
+
+class FrameCollector {
+  readonly frames: any[] = []
+  failure: Error | undefined
+  closed = false
+  constructor(readonly socket: any, validate: (value: unknown) => boolean) {
+    socket.on('message', (raw: Buffer) => {
+      try {
+        assert.ok(raw.length <= 65_536)
+        const frame = JSON.parse(raw.toString('utf8'))
+        assert.equal(validate(frame), true, `Relay emitted invalid ${String(frame.type)} frame`)
+        this.frames.push(frame)
+        if (this.frames.length > 4096) throw new Error('Integration frame queue exceeded budget')
+      } catch (error) { this.failure = error instanceof Error ? error : new Error('Invalid frame') }
+    })
+    socket.on('error', (error: Error) => { this.failure = error })
+    socket.on('close', () => { this.closed = true })
+  }
+  send(value: object) { this.socket.send(JSON.stringify(value)) }
+  wait(predicate: (frame: any) => boolean, from = 0) {
+    return until(async () => {
+      if (this.failure) throw this.failure
+      const frame = this.frames.slice(from).find(predicate)
+      if (frame) return frame
+      if (this.closed) throw new Error('Relay socket closed before expected frame')
+      return undefined
+    }, 'Relay frame')
+  }
+}
+
+test('real Go service and npm DSH share authorized sessions through PostgreSQL and signed peers', { timeout: 90_000 }, async t => {
+  const cluster = process.env.REMOTE_TEST_CLUSTER_ROOT
+  const database = process.env.REMOTE_TEST_DATABASE_URL
+  const psql = process.env.REMOTE_TEST_PSQL
+  const pgDump = process.env.REMOTE_TEST_PG_DUMP
+  const serviceBin = process.env.REMOTE_TEST_SERVICE_BIN
+  assert.ok(cluster && database && psql && pgDump && serviceBin, 'Use npm run test:remote-dsh to create an isolated cluster')
+  assert.ok(database.startsWith(`host=${cluster} `), 'Only the disposable Unix-socket cluster is allowed')
+  const root = await mkdtemp(join(cluster, 'clients-'))
+  const query = (sql: string) => execFileSync(psql, ['-X', '--dbname', database, '-v', 'ON_ERROR_STOP=1', '-At'], { input: sql, encoding: 'utf8' }).trim()
+  const signingKey = key(), installationKey = key(), phoneKey = key(), approvalKey = key(), outsiderKey = key(), outsiderApprovalKey = key()
+  const orgId = randomUUID(), ownerId = randomUUID(), phoneUserId = randomUUID(), outsiderId = randomUUID()
+  const jwks = createServer((req, res) => {
+    if (req.url !== '/jwks') { res.writeHead(404).end(); return }
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ keys: [{ ...signingKey.jwk, kid: 'integration-key', alg: 'ES256', use: 'sig' }] }))
+  })
+  await new Promise<void>(accept => jwks.listen(0, '127.0.0.1', accept))
+  t.after(() => new Promise<void>(accept => jwks.close(() => accept())))
+  const jwksAddress = jwks.address()
+  assert.ok(jwksAddress && typeof jwksAddress === 'object')
+  const issuer = `http://127.0.0.1:${jwksAddress.port}`
+  query(`insert into orgs(id,slug,name) values ('${orgId}','integration','Integration');
+    insert into users(id,issuer,subject) values ('${ownerId}','${issuer}','owner'),('${phoneUserId}','${issuer}','phone'),('${outsiderId}','${issuer}','outsider');
+    insert into org_memberships(org_id,user_id,role) values ('${orgId}','${ownerId}','member'),('${orgId}','${phoneUserId}','member'),('${orgId}','${outsiderId}','member');`)
+  const reserved = createTCPServer()
+  await new Promise<void>(accept => reserved.listen(0, '127.0.0.1', accept))
+  const address = reserved.address()
+  assert.ok(address && typeof address === 'object')
+  await new Promise<void>(accept => reserved.close(() => accept()))
+  const origin = `http://127.0.0.1:${address.port}`
+  const service = await startProcess(serviceBin, [], {
+    PATH: process.env.PATH ?? '', REMOTE_ISSUER: issuer, REMOTE_JWKS_URL: `${issuer}/jwks`, REMOTE_AUDIENCE: 'urn:dsh-e2e',
+    REMOTE_CLIENT_IDS: 'fixture-host,fixture-phone', REMOTE_HOST_CLIENT_IDS: 'fixture-host', REMOTE_REQUIRED_SCOPES: 'remote.access',
+    REMOTE_PUBLIC_ORIGIN: origin, REMOTE_DATABASE_URL: database, REMOTE_LISTEN_ADDR: `127.0.0.1:${address.port}`,
+  })
+  t.after(async () => { const [code] = await service.stop('SIGTERM'); assert.equal(code, 0, 'Go service did not drain cleanly') })
+  await until(async () => {
+    service.check()
+    try { if ((await fetch(`${origin}/readyz`, { signal: AbortSignal.timeout(500) })).status === 204) return true } catch {}
+    return undefined
+  }, 'Go readiness')
+
+  const client = (subject: string, clientId: string, proofKey: ReturnType<typeof key>) => {
+    const token = jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
+      iss: issuer, sub: subject, aud: 'urn:dsh-e2e', client_id: clientId, jti: randomUUID(), iat: now(), exp: now() + 300,
+      scope: 'remote.access', cnf: { jkt: proofKey.jkt },
+    })
+    let nonce = ''
+    return async (method: string, path: string, body?: object | ((proofJTI: string) => object), expected = 200) => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const proofJTI = randomUUID()
+        const proof = jws(proofKey.privateKey, { typ: 'dpop+jwt', alg: 'ES256', jwk: proofKey.jwk }, {
+          htm: method, htu: origin + path.split('?')[0], ath: hash(token), jti: proofJTI, iat: now(), nonce,
+        })
+        const requestBody = typeof body === 'function' ? body(proofJTI) : body
+        const response = await fetch(origin + path, {
+          method, headers: { authorization: `DPoP ${token}`, dpop: proof, ...(requestBody === undefined ? {} : { 'content-type': 'application/json' }) },
+          ...(requestBody === undefined ? {} : { body: JSON.stringify(requestBody) }), signal: AbortSignal.timeout(5000),
+        })
+        nonce = response.headers.get('dpop-nonce') ?? nonce
+        const result = await response.json() as any
+        if (attempt === 0 && response.status === 401 && response.headers.get('www-authenticate')?.includes('use_dpop_nonce')) continue
+        assert.equal(response.status, expected, `${method} ${path}: ${String(result.error?.code ?? 'unexpected status')}`)
+        return result.data
+      }
+      throw new Error('DPoP nonce retry was rejected')
+    }
+  }
+  const owner = client('owner', 'fixture-host', installationKey)
+  const phone = client('phone', 'fixture-phone', phoneKey)
+  const outsider = client('outsider', 'fixture-phone', outsiderKey)
+  const register = (api: typeof phone, proofKey: ReturnType<typeof key>, approval: ReturnType<typeof key>, subject: string) => api('POST', '/v1/devices', proofJTI => ({
+    name: subject, proof_public_jwk: proofKey.jwk, approval_public_jwk: approval.jwk,
+    approval_proof: jws(approval.privateKey, { alg: 'ES256', typ: 'dsh-device-registration-proof+jwt' }, {
+      iss: issuer, sub: subject, aud: 'urn:dsh-mobile-ustc:device-registration', iat: now(), jti: randomUUID(),
+      approval_key_jkt: approval.jkt, proof_key_jkt: proofKey.jkt, device_name_sha256: hash(subject), dpop_jti: proofJTI,
+    }),
+  }), 201)
+  const device = await register(phone, phoneKey, approvalKey, 'phone')
+  await register(outsider, outsiderKey, outsiderApprovalKey, 'outsider')
+  const code = randomBytes(32).toString('base64url')
+  const enrollment = await owner('POST', '/v1/enrollments', {
+    request_id: randomUUID(), organization_id: orgId, alias: 'DSH integration', profile_ref: 'e2e', dsh_version: '0.2.1-rc.2',
+    application_version: 'dsh-go-integration', plugin_version: '0.0.1', protocol_version: 1,
+    installation_public_jwk: installationKey.jwk, code, workspace_refs: ['e2e-workspace'],
+  }, 201)
+  const partial = await phone('POST', `/v1/enrollments/${enrollment.enrollment_id}/confirm`, { code })
+  assert.equal(partial.state, 'user_confirmed')
+  assert.equal(partial.host_confirmed, false)
+  const active = await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code })
+  assert.equal(active.state, 'approved')
+  assert.equal(active.host_confirmed, true)
+  assert.equal(active.user_confirmed, true)
+  assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
+  const challenge = await owner('POST', '/v1/host-credentials/challenges', undefined, 201)
+  const credential = await owner('POST', '/v1/host-credentials', {
+    challenge_id: challenge.challenge_id,
+    proof: jws(installationKey.privateKey, { alg: 'ES256', typ: 'dsh-host-credential-proof+jwt' }, {
+      iss: enrollment.installation_id, aud: challenge.audience, challenge_id: challenge.challenge_id, nonce: challenge.challenge, iat: now(), jti: randomUUID(),
+    }),
+  }, 201)
+
+  const workspace = join(root, 'workspace'), socketPath = join(root, 'ipc', 'host.sock')
+  await mkdir(workspace)
+  const plugin = pathToFileURL(resolve('host/remote-control/lib/index.js')).href
+  const wrapper = join(root, 'plugin.mjs')
+  await writeFile(wrapper, [
+    "import { createPrivateKey, sign } from 'node:crypto'",
+    `import { createRemoteControlPlugin } from ${JSON.stringify(plugin)}`,
+    `const privateKey = createPrivateKey({format:'jwk',key:${JSON.stringify(installationKey.privateKey.export({ format: 'jwk' }))}})`,
+    `const plugin = createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(enrollment.installation_id)},credential:${JSON.stringify(credential.credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}}}}})`,
+    'export const {name,inject,apply}=plugin', '',
+  ].join('\n'), { mode: 0o600 })
+  const patch = join(root, 'host.patch.yml')
+  await writeFile(patch, [
+    '- insert:', '    - id: local-model', `      name: ${JSON.stringify(resolve('host/remote-control/tests/fixtures/dsh-local-model.mjs'))}`,
+    '    - id: remote-control', `      name: ${JSON.stringify(wrapper)}`, '      config:', '        enabled: true',
+    `        runtimeId: ${enrollment.runtime_id}`, `        socketPath: ${JSON.stringify(socketPath)}`,
+    `        relayUrl: ${JSON.stringify(origin)}`, '        applicationVersion: dsh-go-integration',
+    `        commandJournalPath: ${JSON.stringify(join(root, 'journal', 'commands.sqlite'))}`,
+    '        workspaces:', '          - id: probe', `            remoteId: ${enrollment.workspaces[0].workspace_id}`, `            cwd: ${JSON.stringify(workspace)}`,
+    '        presets: [standard]', '        highRiskTools: [bash, pwsh, run_code]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
+  ].join('\n'), { mode: 0o600 })
+  const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
+  const dsh = await startProcess(process.execPath, [join(dshPackage, 'lib/bin.js'), '--profile', 'remote-e2e', '--from-default-profile', 'web', '--patch', patch,
+    '--host', '127.0.0.1', '--port', '0', '--no-open'], {
+    PATH: process.env.PATH ?? '', DSH_HOME: join(root, 'dsh-home'), DSH_TELEMETRY_DISABLED: '1', NO_COLOR: '1', TMPDIR: root,
+  })
+  t.after(async () => { await dsh.stop('SIGINT') })
+  const local = (method: string, path: string, body?: object) => new Promise<any>((accept, reject) => {
+    const req = request({ socketPath, method, path, headers: { 'content-type': 'application/json' } }, response => {
+      const buffers: Buffer[] = []
+      response.on('data', chunk => buffers.push(Buffer.from(chunk)))
+      response.on('error', reject)
+      response.on('end', () => {
+        try {
+          const frames = Buffer.concat(buffers).toString('utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+          assert.equal(response.statusCode, 200, `DSH local command: ${String(frames[0]?.payload?.code)}`)
+          accept(frames[0])
+        } catch (error) { reject(error) }
+      })
+    })
+    req.on('error', reject)
+    req.setTimeout(5000, () => req.destroy(new Error('DSH IPC timed out')))
+    req.end(body === undefined ? undefined : JSON.stringify(body))
+  })
+  const probe = await until(async () => {
+    dsh.check()
+    try { return await local('GET', '/m0/probe') } catch { return undefined }
+  }, 'DSH readiness', 30_000)
+  assert.equal(probe.payload.dsh_version, '0.2.1-rc.2')
+  const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {
+    v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId === undefined ? {} : { session_id: sessionId }),
+  })
+  const created = await command('session.create', { workspace: 'probe', preset: 'standard' })
+  const sessionId = created.payload.session_id
+  await until(async () => {
+    const directory = await phone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)
+    return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available') ? true : undefined
+  }, 'host catalog in PostgreSQL')
+  assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
+  const scope = { actions: ['message.submit', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
+  await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
+  const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
+  const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
+  const validate = new Ajv2020({ strict: true }).compile(schema)
+  const mobileSocket = new WebSocket(origin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', { headers: { authorization: `DSH-Ticket ${ticket.ticket}` }, perMessageDeflate: false, maxPayload: 65_536 })
+  const mobile = new FrameCollector(mobileSocket, value => validate(value))
+  t.after(() => { mobileSocket.terminate() })
+  const relayChallenge = await mobile.wait(frame => frame.type === 'challenge')
+  const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'session.read.v1']
+  mobile.send({ v: 1, type: 'hello.proof', payload: { device_id: device.device_id, protocols: [1], capabilities: caps,
+    proof: jws(phoneKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
+      iss: device.device_id, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: relayChallenge.payload.challenge_id,
+      connection_id: relayChallenge.payload.connection_id, nonce: relayChallenge.payload.nonce, runtime_id: enrollment.runtime_id,
+      hello_sha256: hostHelloDigest(['device', device.device_id, '1', caps.join('\n')]), iat: now(), jti: randomUUID(),
+    }),
+  } })
+  await mobile.wait(frame => frame.type === 'hello.ok')
+  const subscribe = () => {
+    const id = randomUUID()
+    mobile.send({ v: 1, type: 'session.subscribe', request_id: id, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 30 } })
+    return id
+  }
+  const subscriptionRequest = subscribe()
+  const opening = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === subscriptionRequest)
+  const requestId = randomUUID(), marker = `REMOTE_DSH_E2E_${randomUUID()}`
+  const payload = { mode: 'queue' as const, content: [{ type: 'text' as const, text: marker }] }
+  const submit = { v: 1, type: 'message.submit', request_id: requestId, runtime_id: enrollment.runtime_id, session_id: sessionId, payload }
+  mobile.send(submit)
+  for (const state of ['received', 'host_accepted', 'dispatching', 'agent_queued']) {
+    const receipt = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === state)
+    assert.equal(receipt.payload.payload_sha256, relayPayloadDigest(sessionId, payload))
+  }
+  await mobile.wait(frame => frame.type === 'assistant.chunk' && frame.subscription_id === opening.subscription_id)
+  await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'assistant/message')
+  const settled = await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'turn/end')
+  const status = await phone('GET', `/v1/commands/${requestId}?device_id=${device.device_id}`)
+  assert.equal(status.state, 'agent_queued')
+  assert.equal(status.payload_sha256, relayPayloadDigest(sessionId, payload))
+  const retryFrom = mobile.frames.length
+  mobile.send(submit)
+  await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', retryFrom)
+  mobile.send({ ...submit, payload: { ...payload, content: [{ type: 'text', text: 'changed content' }] } })
+  await mobile.wait(frame => frame.type === 'error' && frame.request_id === requestId && frame.payload.code === 'command.request_conflict')
+
+  const replacementRequest = subscribe()
+  const replacement = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === replacementRequest)
+  assert.notEqual(replacement.sync_id, opening.sync_id)
+  assert.ok(replacement.payload.cursor >= settled.payload.native_seq)
+  assert.equal(replacement.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1, 'retry duplicated the native DSH message')
+  const pageRequest = randomUUID()
+  const page = { v: 1, type: 'session.page', request_id: pageRequest, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+    session_id: sessionId, subscription_id: replacement.subscription_id, payload: { sync_id: replacement.sync_id, through_seq: replacement.payload.cursor, before_seq: replacement.payload.cursor + 1, max_messages: 30 } }
+  mobile.send(page)
+  const history = await mobile.wait(frame => frame.type === 'session.page.result' && frame.request_id === pageRequest)
+  assert.ok(JSON.stringify(history.payload.records).includes(marker))
+  assert.equal(history.payload.through_seq, replacement.payload.cursor)
+  const badPageId = randomUUID()
+  mobile.send({ ...page, request_id: badPageId, payload: { ...page.payload, through_seq: replacement.payload.cursor - 1, before_seq: replacement.payload.cursor } })
+  await mobile.wait(frame => frame.type === 'session.error' && frame.request_id === badPageId && frame.payload.code === 'protocol.resync_required')
+  mobile.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+    session_id: sessionId, subscription_id: opening.subscription_id, payload: {} })
+  await mobile.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === opening.subscription_id)
+
+  const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+  for (const secret of [marker, 'DSH local integration fixture response', workspace, code, credential.credential, ticket.ticket]) {
+    assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
+  }
+  assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
+  await phone('DELETE', `/v1/runtimes/${enrollment.runtime_id}/grants/${phoneUserId}`)
+  const revokedFrom = mobile.frames.length
+  await command('message.submit', { mode: 'queue', text: 'Local activity after remote grant revocation' }, sessionId)
+  await mobile.wait(frame => frame.type === 'session.error' && frame.subscription_id === replacement.subscription_id && frame.payload.code === 'access.denied', revokedFrom)
+  assert.equal(mobile.frames.slice(revokedFrom).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false, 'revoked phone received new session content')
+  await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
+  t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, catalog, snapshots, assistant stream, pagination, idempotency, body-storage boundary and grant revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
+})

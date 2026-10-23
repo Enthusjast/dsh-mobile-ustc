@@ -10,7 +10,8 @@
     "contracts:check": "tsx tools/generate-m0-contract.ts --check",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "tsx --test host/remote-control/tests/*.test.ts",
-    "verify": "npm run contracts:check && npm run check && npm run build && npm test"
+    "verify": "npm run contracts:check && npm run check && npm run build && npm test",
+    "test:remote-dsh": "python3 tools/integration/run_remote_dsh.py"
   },
   "devDependencies": {
     "@deepseek-ai/dsh": "0.2.1-rc.2",
