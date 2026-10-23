@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +34,9 @@ type relayTestStore struct {
 	attachErr          error
 	touchCalls         int
 	detached           chan store.RuntimeConnection
+	commands           map[string]store.CommandStatus
+	leaseCalls         int
+	leaseErr           error
 }
 
 func (fake *relayTestStore) PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error) {
@@ -47,6 +51,13 @@ func (fake *relayTestStore) ConsumeRealtimeTicket(context.Context, string) (stor
 	defer fake.mu.Unlock()
 	fake.ticketConsumeCalls++
 	return fake.ticket, fake.ticketErr
+}
+
+func (fake *relayTestStore) ValidateRealtimeLease(context.Context, store.TicketRedemption) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.leaseCalls++
+	return fake.leaseErr
 }
 
 func (fake *relayTestStore) LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error) {
@@ -82,6 +93,52 @@ func (fake *relayTestStore) DetachRuntimeConnection(_ context.Context, installat
 		ConnectionID: connectionID,
 	}
 	return nil
+}
+
+func (fake *relayTestStore) RecordRealtimeCommand(_ context.Context, _ store.TicketRedemption, requestID, sessionID, digest string) (store.CommandStatus, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if !slices.Contains(fake.ticket.Scope.Actions, "message.submit") || !slices.Contains(fake.ticket.Scope.Sessions, sessionID) {
+		return store.CommandStatus{}, store.ErrAccessDenied
+	}
+	if fake.commands == nil {
+		fake.commands = make(map[string]store.CommandStatus)
+	}
+	if previous, ok := fake.commands[requestID]; ok {
+		if previous.SessionID != sessionID || previous.PayloadSHA256 != digest {
+			return store.CommandStatus{}, store.ErrCommandConflict
+		}
+		return previous, nil
+	}
+	status := store.CommandStatus{RequestID: requestID, SessionID: sessionID, State: "received", PayloadSHA256: digest, UpdatedAt: time.Now()}
+	fake.commands[requestID] = status
+	return status, nil
+}
+
+func (fake *relayTestStore) RecordRealtimeCommandReceipt(_ context.Context, receipt store.RelayCommandReceipt) (store.CommandStatus, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	status, ok := fake.commands[receipt.RequestID]
+	if !ok || status.SessionID != receipt.SessionID || status.PayloadSHA256 != receipt.PayloadSHA256 {
+		return store.CommandStatus{}, store.ErrCommandTransition
+	}
+	status.State = receipt.State
+	status.UpdatedAt = time.Now()
+	fake.commands[receipt.RequestID] = status
+	return status, nil
+}
+
+func (fake *relayTestStore) MarkRealtimeCommandUnknown(_ context.Context, _ store.TicketRedemption, requestID, sessionID, digest string) (store.CommandStatus, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	status, ok := fake.commands[requestID]
+	if !ok || status.SessionID != sessionID || status.PayloadSHA256 != digest {
+		return store.CommandStatus{}, store.ErrCommandTransition
+	}
+	status.State = "outcome_unknown"
+	status.UpdatedAt = time.Now()
+	fake.commands[requestID] = status
+	return status, nil
 }
 
 func TestDeviceTicketRequiresKeyProofBeforeHelloAndHeartbeat(t *testing.T) {
@@ -286,6 +343,192 @@ func TestHostHandshakeBindsHelloAndPersistsRuntimeConnection(t *testing.T) {
 	}
 }
 
+func TestMessageSubmitRoutesToHostAndPersistsCommandReceipts(t *testing.T) {
+	deviceKey := relayTestKey(t)
+	deviceJWK, deviceThumbprint := relayTestPublicJWK(t, deviceKey)
+	hostKey := relayTestKey(t)
+	hostJWK, hostThumbprint := relayTestPublicJWK(t, hostKey)
+	const (
+		deviceID       = "22222222-2222-4222-8222-222222222222"
+		installationID = "11111111-1111-4111-8111-111111111111"
+		runtimeID      = "33333333-3333-4333-8333-333333333333"
+		runtimeEpoch   = "44444444-4444-4444-8444-444444444444"
+		sessionID      = "55555555-5555-4555-8555-555555555555"
+		requestID      = "66666666-6666-4666-8666-666666666666"
+	)
+	fake := &relayTestStore{
+		ticket: store.TicketRedemption{
+			UserID: "77777777-7777-4777-8777-777777777777", DeviceID: deviceID,
+			DeviceKeyVersion: 1, ProofKeyThumbprint: deviceThumbprint, ProofPublicJWK: deviceJWK,
+			RuntimeID: runtimeID, GrantVersion: 2,
+			Scope:     store.GrantScope{Actions: []string{"message.submit"}, Workspaces: []string{}, Sessions: []string{sessionID}},
+			ExpiresAt: time.Now().Add(30 * time.Second),
+		},
+		hostCredential: store.HostCredentialIdentity{
+			InstallationID: installationID, KeyThumbprint: hostThumbprint, PublicJWK: hostJWK,
+			KeyVersion: 1, ExpiresAt: time.Now().Add(5 * time.Minute),
+		},
+		detached: make(chan store.RuntimeConnection, 1),
+	}
+	server := httptest.NewServer(New(fake))
+	t.Cleanup(server.Close)
+	hostConnection := dialRelayHost(t, server.URL, hostKey, installationID, runtimeID, runtimeEpoch)
+	t.Cleanup(func() { _ = hostConnection.CloseNow() })
+	deviceConnection := dialRelayDevice(t, server.URL, deviceKey, fake.ticket, runtimeID)
+	t.Cleanup(func() { _ = deviceConnection.CloseNow() })
+
+	payload := messageSubmitPayload{Mode: "queue", Content: []messageContent{{Type: "text", Text: "continue the current task"}}}
+	digest, err := messageSubmitDigest(sessionID, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit := map[string]any{
+		"v": 1, "type": "message.submit", "request_id": requestID,
+		"runtime_id": runtimeID, "session_id": sessionID, "payload": payload,
+	}
+	writeWireFrame(t, deviceConnection, submit)
+	forwarded := readEnvelope(t, hostConnection)
+	if forwarded.Type != "message.submit" || forwarded.RequestID != requestID ||
+		forwarded.RuntimeID != runtimeID || forwarded.SessionID != sessionID ||
+		forwarded.DeviceID != deviceID || forwarded.UserID != fake.ticket.UserID ||
+		forwarded.PayloadSHA256 != digest {
+		t.Fatalf("invalid host command frame: %+v", forwarded)
+	}
+	if received := readEnvelope(t, deviceConnection); received.Type != "command.receipt" || received.Payload["state"] != "received" {
+		t.Fatalf("expected transient received receipt, got %+v", received)
+	}
+
+	writeWireFrame(t, hostConnection, map[string]any{
+		"v": 1, "type": "command.receipt", "request_id": requestID,
+		"runtime_id": runtimeID, "runtime_epoch": runtimeEpoch, "session_id": sessionID,
+		"device_id": deviceID,
+		"payload":   map[string]any{"state": "host_accepted", "payload_sha256": digest},
+	})
+	accepted := readEnvelope(t, deviceConnection)
+	if accepted.Type != "command.receipt" || accepted.Payload["state"] != "host_accepted" ||
+		accepted.Payload["payload_sha256"] != digest {
+		t.Fatalf("host receipt did not reach the originating device: %+v", accepted)
+	}
+
+	writeWireFrame(t, deviceConnection, submit)
+	duplicate := readEnvelope(t, deviceConnection)
+	if duplicate.Type != "command.receipt" || duplicate.Payload["state"] != "host_accepted" {
+		t.Fatalf("idempotent retry did not return stored status: %+v", duplicate)
+	}
+	conflictPayload := messageSubmitPayload{Mode: "queue", Content: []messageContent{{Type: "text", Text: "different body"}}}
+	writeWireFrame(t, deviceConnection, map[string]any{
+		"v": 1, "type": "message.submit", "request_id": requestID,
+		"runtime_id": runtimeID, "session_id": sessionID, "payload": conflictPayload,
+	})
+	conflict := readEnvelope(t, deviceConnection)
+	if conflict.Type != "error" || conflict.Payload["code"] != "command.request_conflict" {
+		t.Fatalf("same request ID with different content was not rejected: %+v", conflict)
+	}
+	writeWireFrame(t, deviceConnection, map[string]any{
+		"v": 1, "type": "message.submit", "request_id": "88888888-8888-4888-8888-888888888888",
+		"runtime_id": runtimeID, "session_id": "99999999-9999-4999-8999-999999999999", "payload": payload,
+	})
+	denied := readEnvelope(t, deviceConnection)
+	if denied.Type != "error" || denied.Payload["code"] != "access.denied" {
+		t.Fatalf("out-of-scope session was not denied: %+v", denied)
+	}
+	fake.mu.Lock()
+	leaseCalls := fake.leaseCalls
+	fake.leaseErr = store.ErrTicketInvalid
+	fake.mu.Unlock()
+	if leaseCalls < 3 {
+		t.Fatalf("active device lease was not rechecked before scoped receipts: %d checks", leaseCalls)
+	}
+	writeWireFrame(t, hostConnection, map[string]any{
+		"v": 1, "type": "command.receipt", "request_id": requestID,
+		"runtime_id": runtimeID, "runtime_epoch": runtimeEpoch, "session_id": sessionID,
+		"device_id": deviceID,
+		"payload":   map[string]any{"state": "agent_queued", "payload_sha256": digest},
+	})
+	revoked := readEnvelope(t, deviceConnection)
+	if revoked.Type != "access.revoked" {
+		t.Fatalf("revoked device received scoped command data: %+v", revoked)
+	}
+}
+
+func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, installationID, runtimeID, runtimeEpoch string) *websocket.Conn {
+	t.Helper()
+	connection, _, err := websocket.Dial(context.Background(), wsURL(serverURL), &websocket.DialOptions{
+		HTTPHeader:   http.Header{"Authorization": []string{"DSH-Host " + strings.Repeat("H", 43)}},
+		Subprotocols: []string{protocolName},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := readChallenge(t, connection, "installation")
+	hello := hostHandshakePayload{
+		RuntimeID: runtimeID, RuntimeEpoch: runtimeEpoch,
+		DSHVersion: "0.2.1-rc.2", ApplicationVersion: "1.0.0", PluginVersion: "0.1.0",
+		ProtocolVersion: 1, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1"},
+	}
+	normalized, err := normalizeHostHello(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello.Proof = relaySign(t, key, map[string]any{
+		"iss": installationID, "aud": auth.RelayHandshakeAudience,
+		"challenge_id": challenge.ChallengeID, "connection_id": challenge.ConnectionID,
+		"nonce": challenge.Nonce, "runtime_id": normalized.RuntimeID,
+		"runtime_epoch": normalized.RuntimeEpoch, "hello_sha256": normalized.digest(),
+		"iat": time.Now().Unix(), "jti": "host-relay-routing-proof-000001",
+	})
+	writeEnvelope(t, connection, "hello.proof", hello)
+	ack := readEnvelope(t, connection)
+	if ack.Type != "hello.ok" || ack.Payload["role"] != "host" || ack.Payload["installation_id"] != installationID {
+		t.Fatalf("host socket did not authenticate: %+v", ack)
+	}
+	return connection
+}
+
+func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, ticket store.TicketRedemption, runtimeID string) *websocket.Conn {
+	t.Helper()
+	connection, _, err := websocket.Dial(context.Background(), wsURL(serverURL), &websocket.DialOptions{
+		HTTPHeader:   http.Header{"Authorization": []string{"DSH-Ticket " + strings.Repeat("T", 43)}},
+		Subprotocols: []string{protocolName},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := readChallenge(t, connection, "device")
+	hello := deviceHandshakePayload{
+		DeviceID: ticket.DeviceID, Protocols: []int{1}, Capabilities: []string{"command.relay.v1", "connection.heartbeat.v1"},
+	}
+	normalized, err := normalizeDeviceHello(hello, ticket.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello.Proof = relaySign(t, key, map[string]any{
+		"iss": ticket.DeviceID, "aud": auth.RelayHandshakeAudience,
+		"challenge_id": challenge.ChallengeID, "connection_id": challenge.ConnectionID,
+		"nonce": challenge.Nonce, "runtime_id": runtimeID, "hello_sha256": normalized.digest(),
+		"iat": time.Now().Unix(), "jti": "device-relay-routing-proof-0001",
+	})
+	writeEnvelope(t, connection, "hello.proof", hello)
+	ack := readEnvelope(t, connection)
+	if ack.Type != "hello.ok" || ack.Payload["role"] != "device" || ack.Payload["runtime_id"] != runtimeID {
+		t.Fatalf("device socket did not authenticate: %+v", ack)
+	}
+	return connection
+}
+
+func writeWireFrame(t *testing.T, connection *websocket.Conn, frame map[string]any) {
+	t.Helper()
+	data, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := connection.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRealtimeEndpointRejectsTicketInQuery(t *testing.T) {
 	server := httptest.NewServer(New(&relayTestStore{}))
 	t.Cleanup(server.Close)
@@ -339,9 +582,16 @@ type testChallenge struct {
 }
 
 type testEnvelope struct {
-	V       int            `json:"v"`
-	Type    string         `json:"type"`
-	Payload map[string]any `json:"payload"`
+	V             int            `json:"v"`
+	Type          string         `json:"type"`
+	RequestID     string         `json:"request_id"`
+	RuntimeID     string         `json:"runtime_id"`
+	RuntimeEpoch  string         `json:"runtime_epoch"`
+	SessionID     string         `json:"session_id"`
+	DeviceID      string         `json:"device_id"`
+	UserID        string         `json:"user_id"`
+	PayloadSHA256 string         `json:"payload_sha256"`
+	Payload       map[string]any `json:"payload"`
 }
 
 func readChallenge(t *testing.T, connection *websocket.Conn, role string) testChallenge {

@@ -14,34 +14,34 @@ import (
 )
 
 type fakeRepository struct {
-	readyError        error
-	listCalls         int
-	activeDeviceID    string
-	activeDeviceErr   error
-	activeDeviceCall  int
-	commandCalls      int
-	ticketCalls       int
-	enrollmentCalls   int
-	enrollmentResult  store.EnrollmentCreated
-	hostConfirmCalls  int
-	hostConfirmJKT    string
-	challengeCalls    int
-	challengeJKT      string
-	challengeResult   store.HostCredentialChallenge
-	credentialCalls   int
-	credentialJKT     string
-	credentialID      string
-	credentialProof   string
-	credentialResult  store.HostConnectionCredential
-	relayTicket       store.TicketRedemption
+	readyError              error
+	listCalls               int
+	activeDeviceID          string
+	activeDeviceErr         error
+	activeDeviceCall        int
+	commandCalls            int
+	ticketCalls             int
+	enrollmentCalls         int
+	enrollmentResult        store.EnrollmentCreated
+	hostConfirmCalls        int
+	hostConfirmJKT          string
+	challengeCalls          int
+	challengeJKT            string
+	challengeResult         store.HostCredentialChallenge
+	credentialCalls         int
+	credentialJKT           string
+	credentialID            string
+	credentialProof         string
+	credentialResult        store.HostConnectionCredential
+	relayTicket             store.TicketRedemption
 	relayTicketPrepareCalls int
 	relayTicketConsumeCalls int
-	relayTicketErr    error
-	hostCredential    store.HostCredentialIdentity
-	hostCredentialErr error
-	runtimeConnection store.RuntimeConnection
-	runtimeConnectErr error
-	runtimeTouchErr   error
+	relayTicketErr          error
+	hostCredential          store.HostCredentialIdentity
+	hostCredentialErr       error
+	runtimeConnection       store.RuntimeConnection
+	runtimeConnectErr       error
+	runtimeTouchErr         error
 }
 
 func (fake *fakeRepository) Ready(context.Context) error { return fake.readyError }
@@ -100,6 +100,9 @@ func (fake *fakeRepository) ConsumeRealtimeTicket(context.Context, string) (stor
 	fake.relayTicketConsumeCalls++
 	return fake.relayTicket, fake.relayTicketErr
 }
+func (fake *fakeRepository) ValidateRealtimeLease(context.Context, store.TicketRedemption) error {
+	return nil
+}
 func (fake *fakeRepository) LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error) {
 	return fake.hostCredential, fake.hostCredentialErr
 }
@@ -111,6 +114,15 @@ func (fake *fakeRepository) TouchRuntimeConnection(context.Context, string, stri
 }
 func (fake *fakeRepository) DetachRuntimeConnection(context.Context, string, string, string, string) error {
 	return nil
+}
+func (fake *fakeRepository) RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error) {
+	return store.CommandStatus{}, nil
+}
+func (fake *fakeRepository) RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error) {
+	return store.CommandStatus{}, nil
+}
+func (fake *fakeRepository) MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error) {
+	return store.CommandStatus{}, nil
 }
 func (fake *fakeRepository) ListHosts(context.Context, store.UserIdentity) ([]store.Host, error) {
 	fake.listCalls++

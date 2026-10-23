@@ -459,23 +459,92 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replace runtime connection: %v", err)
 	}
+	var relaySessionID string
+	if err := testDB.QueryRowContext(ctx, `
+		insert into sessions (runtime_id, workspace_id, dsh_session_id)
+		values ($1, $2, 'relay-session') returning id::text`, enrollment.RuntimeID, enrollment.Workspaces[0].ID).Scan(&relaySessionID); err != nil {
+		t.Fatal(err)
+	}
+	messageScope := GrantScope{Actions: []string{"message.submit"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
+	messageTicket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, enrollment.RuntimeID, messageScope)
+	if err != nil {
+		t.Fatalf("issue message ticket: %v", err)
+	}
+	messageTicketRedemption, err := postgres.PrepareRealtimeTicket(ctx, messageTicket.Token)
+	if err != nil {
+		t.Fatalf("prepare message ticket: %v", err)
+	}
+	messageTicketRedemption, err = postgres.ConsumeRealtimeTicket(ctx, messageTicket.Token)
+	if err != nil {
+		t.Fatalf("consume message ticket: %v", err)
+	}
+	messageDigest := sha256.Sum256([]byte("canonical relay message body"))
+	messageDigestHex := hex.EncodeToString(messageDigest[:])
+	const relayRequestID = "cccccccc-1111-4111-8111-111111111111"
+	receivedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, relayRequestID, relaySessionID, messageDigestHex)
+	if err != nil || receivedCommand.State != "received" || receivedCommand.PayloadSHA256 != messageDigestHex {
+		t.Fatalf("persist message receipt: command=%+v error=%v", receivedCommand, err)
+	}
+	retriedCommand, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, relayRequestID, relaySessionID, messageDigestHex)
+	if err != nil || retriedCommand.State != "received" {
+		t.Fatalf("idempotent message receipt: command=%+v error=%v", retriedCommand, err)
+	}
+	conflictingDigest := sha256.Sum256([]byte("different relay message body"))
+	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, relayRequestID, relaySessionID, hex.EncodeToString(conflictingDigest[:])); !errors.Is(err, ErrCommandConflict) {
+		t.Fatalf("same request ID with another payload error=%v, want ErrCommandConflict", err)
+	}
+	commandReceipt := RelayCommandReceipt{
+		InstallationID: enrollment.InstallationID, KeyVersion: 1, RuntimeID: enrollment.RuntimeID,
+		RuntimeEpoch: replacement.RuntimeEpoch, ConnectionID: replacement.ConnectionID, DeviceID: deviceID,
+		RequestID: relayRequestID, SessionID: relaySessionID, PayloadSHA256: messageDigestHex, State: "host_accepted",
+	}
+	acceptedCommand, err := postgres.RecordRealtimeCommandReceipt(ctx, commandReceipt)
+	if err != nil || acceptedCommand.State != "host_accepted" {
+		t.Fatalf("persist host_accepted receipt: status=%+v error=%v", acceptedCommand, err)
+	}
+	if _, err := postgres.RecordRealtimeCommandReceipt(ctx, commandReceipt); err != nil {
+		t.Fatalf("idempotent host_accepted receipt: %v", err)
+	}
+	commandReceipt.State = "agent_queued"
+	queuedCommand, err := postgres.RecordRealtimeCommandReceipt(ctx, commandReceipt)
+	if err != nil || queuedCommand.State != "agent_queued" {
+		t.Fatalf("persist agent_queued receipt: status=%+v error=%v", queuedCommand, err)
+	}
+	if _, err := postgres.CommandStatus(ctx, identity, deviceID, relayRequestID); err != nil {
+		t.Fatalf("authorized device could not query command status: %v", err)
+	}
+	if err := postgres.ValidateRealtimeLease(ctx, messageTicketRedemption); err != nil {
+		t.Fatalf("active message ticket lease was rejected: %v", err)
+	}
+	if _, err := testDB.ExecContext(ctx, `update runtime_grants set grant_version = grant_version + 1 where runtime_id = $1 and user_id = $2`, enrollment.RuntimeID, "22222222-2222-4222-8222-222222222222"); err != nil {
+		t.Fatal(err)
+	}
+	if err := postgres.ValidateRealtimeLease(ctx, messageTicketRedemption); !errors.Is(err, ErrTicketInvalid) {
+		t.Fatalf("realtime lease survived a grant-version change: %v", err)
+	}
+	staleReceipt := commandReceipt
+	staleReceipt.ConnectionID = connection.ConnectionID
+	staleReceipt.State = "settled"
+	if _, err := postgres.RecordRealtimeCommandReceipt(ctx, staleReceipt); !errors.Is(err, ErrRuntimeConnectionStale) {
+		t.Fatalf("superseded host connection receipt=%v, want ErrRuntimeConnectionStale", err)
+	}
 	if err := postgres.TouchRuntimeConnection(ctx, connection.InstallationID, connection.RuntimeID, connection.RuntimeEpoch, connection.ConnectionID); !errors.Is(err, ErrRuntimeConnectionStale) {
 		t.Fatalf("superseded runtime connection touch=%v, want ErrRuntimeConnectionStale", err)
 	}
 	if err := postgres.DetachRuntimeConnection(ctx, connection.InstallationID, connection.RuntimeID, connection.RuntimeEpoch, connection.ConnectionID); err != nil {
 		t.Fatalf("stale runtime connection detach: %v", err)
 	}
-	if err := postgres.TouchRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); err != nil {
-		t.Fatalf("replacement runtime connection touch: %v", err)
+	if _, err := testDB.ExecContext(ctx, `update installations set key_version = key_version + 1 where id = $1`, enrollment.InstallationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := postgres.TouchRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); !errors.Is(err, ErrRuntimeConnectionStale) {
+		t.Fatalf("runtime connection survived installation-key rotation: %v", err)
 	}
 	if err := postgres.DetachRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); err != nil {
 		t.Fatalf("detach replacement runtime connection: %v", err)
 	}
 	if err := postgres.TouchRuntimeConnection(ctx, replacement.InstallationID, replacement.RuntimeID, replacement.RuntimeEpoch, replacement.ConnectionID); !errors.Is(err, ErrRuntimeConnectionStale) {
 		t.Fatalf("detached runtime connection touch=%v, want ErrRuntimeConnectionStale", err)
-	}
-	if _, err := testDB.ExecContext(ctx, `update installations set key_version = key_version + 1 where id = $1`, enrollment.InstallationID); err != nil {
-		t.Fatal(err)
 	}
 	staleProof := integrationHostCredentialProof(t, hostKey, staleChallenge)
 	if _, err := postgres.ExchangeHostCredential(ctx, identity, installationThumbprint, staleChallenge.ChallengeID, staleProof); !errors.Is(err, ErrHostCredentialInvalid) {
@@ -484,7 +553,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 19, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 24, 8); err != nil {
 		t.Fatal(err)
 	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
@@ -494,7 +563,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 19, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 24, 8); err != nil {
 		t.Fatal(err)
 	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint)
@@ -510,7 +579,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 20, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 25, 9); err != nil {
 		t.Fatal(err)
 	}
 }

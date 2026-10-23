@@ -215,6 +215,50 @@ func (postgres *Postgres) ConsumeRealtimeTicket(ctx context.Context, token strin
 	return redemption, nil
 }
 
+// ValidateRealtimeLease rechecks the device key and exact grant version for an
+// established socket before sending a command receipt or another scoped frame.
+func (postgres *Postgres) ValidateRealtimeLease(ctx context.Context, ticket TicketRedemption) error {
+	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	defer transaction.Rollback()
+	var currentScopeJSON []byte
+	err = transaction.QueryRowContext(ctx, `
+		select g.scope from users u
+		join devices d on d.user_id = u.id and d.id = $2 and d.revoked_at is null
+		join org_memberships m on m.user_id = u.id
+		join hosts h on h.org_id = m.org_id and h.state = 'active'
+		join installations i on i.host_id = h.id and i.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null
+		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
+		where u.id = $1 and u.status = 'active' and d.key_version = $5 and d.proof_key_thumbprint = $6
+		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > clock_timestamp())
+		for share of u, d, m, h, i, r, g`,
+		ticket.UserID, ticket.DeviceID, ticket.RuntimeID, ticket.GrantVersion,
+		ticket.DeviceKeyVersion, ticket.ProofKeyThumbprint).Scan(&currentScopeJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTicketInvalid
+	}
+	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	var currentScope GrantScope
+	if json.Unmarshal(currentScopeJSON, &currentScope) != nil || !grantScopeSubset(ticket.Scope, currentScope) {
+		return ErrTicketInvalid
+	}
+	if err := validateGrantResources(ctx, transaction, ticket.RuntimeID, ticket.Scope); err != nil {
+		if errors.Is(err, ErrGrantInvalid) || errors.Is(err, ErrAccessDenied) {
+			return ErrTicketInvalid
+		}
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrDatabaseUnavailable
+	}
+	return nil
+}
+
 func loadRealtimeTicket(ctx context.Context, transaction *sql.Tx, digest []byte, forUpdate bool) (TicketRedemption, error) {
 	var redemption TicketRedemption
 	var scopeJSON []byte

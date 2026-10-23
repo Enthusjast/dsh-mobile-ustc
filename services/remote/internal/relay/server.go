@@ -3,10 +3,13 @@ package relay
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"sort"
@@ -15,6 +18,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/store"
@@ -22,33 +26,63 @@ import (
 )
 
 const (
-	protocolName         = "dsh.remote.v1"
-	maxFrameBytes        = 64 << 10
-	handshakeTimeout     = 15 * time.Second
-	connectionIdleTime   = 45 * time.Second
-	deviceConnectionLife = 5 * time.Minute
-	closeHandshakeGrace  = 250 * time.Millisecond
-	heartbeatSeconds     = 20
+	protocolName          = "dsh.remote.v1"
+	maxFrameBytes         = 64 << 10
+	maxMobileCommandFrame = maxFrameBytes - 1024
+	handshakeTimeout      = 15 * time.Second
+	connectionIdleTime    = 45 * time.Second
+	deviceConnectionLife  = 5 * time.Minute
+	closeHandshakeGrace   = 250 * time.Millisecond
+	heartbeatSeconds      = 20
+	commandsPerSecond     = 20
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1"}
+var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
 	PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
 	ConsumeRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
+	ValidateRealtimeLease(context.Context, store.TicketRedemption) error
 	LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error)
 	AttachRuntimeConnection(context.Context, store.RuntimeConnectionInput) (store.RuntimeConnection, error)
 	TouchRuntimeConnection(context.Context, string, string, string, string) error
 	DetachRuntimeConnection(context.Context, string, string, string, string) error
+	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
+	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
+	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 }
 
 type Server struct {
 	database    Repository
 	mu          sync.Mutex
-	connections map[*websocket.Conn]struct{}
+	connections map[*websocket.Conn]*liveConnection
+	hosts       map[string]*liveConnection
+	devices     map[string]map[string]map[*liveConnection]struct{}
 	active      sync.WaitGroup
 	draining    bool
+}
+
+type liveConnection struct {
+	conn               *websocket.Conn
+	peer               peer
+	connectionID       string
+	runtimeID          string
+	runtimeEpoch       string
+	capabilities       map[string]struct{}
+	sendQueue          chan outboundFrame
+	done               chan struct{}
+	stopOnce           sync.Once
+	lastHeartbeat      time.Time
+	commandWindowStart time.Time
+	commandWindowCount int
+}
+
+type outboundFrame struct {
+	body   []byte
+	result chan error
 }
 
 type peer struct {
@@ -60,9 +94,16 @@ type peer struct {
 }
 
 type wireEnvelope struct {
-	V       int             `json:"v"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	V             int             `json:"v"`
+	Type          string          `json:"type"`
+	RequestID     string          `json:"request_id,omitempty"`
+	RuntimeID     string          `json:"runtime_id,omitempty"`
+	RuntimeEpoch  string          `json:"runtime_epoch,omitempty"`
+	SessionID     string          `json:"session_id,omitempty"`
+	DeviceID      string          `json:"device_id,omitempty"`
+	UserID        string          `json:"user_id,omitempty"`
+	PayloadSHA256 string          `json:"payload_sha256,omitempty"`
+	Payload       json.RawMessage `json:"payload"`
 }
 
 type deviceHandshakePayload struct {
@@ -99,8 +140,163 @@ type normalizedHostHello struct {
 	Capabilities       []string `json:"capabilities"`
 }
 
+type messageContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type messageSubmitPayload struct {
+	Mode    string           `json:"mode"`
+	Content []messageContent `json:"content"`
+}
+
+type commandReceiptPayload struct {
+	State         string `json:"state"`
+	PayloadSHA256 string `json:"payload_sha256"`
+}
+
+type normalizedMessageSubmit struct {
+	Type      string               `json:"type"`
+	SessionID string               `json:"session_id"`
+	Payload   messageSubmitPayload `json:"payload"`
+}
+
 func New(database Repository) *Server {
-	return &Server{database: database, connections: make(map[*websocket.Conn]struct{})}
+	return &Server{
+		database: database, connections: make(map[*websocket.Conn]*liveConnection),
+		hosts: make(map[string]*liveConnection), devices: make(map[string]map[string]map[*liveConnection]struct{}),
+	}
+}
+
+func (live *liveConnection) writeLoop() {
+	for {
+		select {
+		case <-live.done:
+			return
+		case frame := <-live.sendQueue:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := live.conn.Write(ctx, websocket.MessageText, frame.body)
+			cancel()
+			frame.result <- err
+			if err != nil {
+				_ = live.conn.CloseNow()
+				live.stop()
+				return
+			}
+		}
+	}
+}
+
+func (live *liveConnection) stop() {
+	live.stopOnce.Do(func() { close(live.done) })
+}
+
+func (live *liveConnection) sendJSON(ctx context.Context, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if len(data) > maxFrameBytes {
+		return errors.New("relay: outgoing frame exceeds limit")
+	}
+	frame := outboundFrame{body: data, result: make(chan error, 1)}
+	select {
+	case <-live.done:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	case live.sendQueue <- frame:
+	default:
+		return errRelayQueueFull
+	}
+	select {
+	case err := <-frame.result:
+		return err
+	case <-live.done:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (live *liveConnection) supports(capability string) bool {
+	_, ok := live.capabilities[capability]
+	return ok
+}
+
+func capabilitySet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func (server *Server) bindDevice(live *liveConnection, redemption store.TicketRedemption, connectionID string, capabilities []string) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.draining || server.connections[live.conn] != live {
+		return false
+	}
+	live.peer.redemption = redemption
+	live.peer.deviceID = redemption.DeviceID
+	live.runtimeID = redemption.RuntimeID
+	live.connectionID = connectionID
+	live.capabilities = capabilitySet(capabilities)
+	byDevice := server.devices[live.runtimeID]
+	if byDevice == nil {
+		byDevice = make(map[string]map[*liveConnection]struct{})
+		server.devices[live.runtimeID] = byDevice
+	}
+	connections := byDevice[live.peer.deviceID]
+	if connections == nil {
+		connections = make(map[*liveConnection]struct{})
+		byDevice[live.peer.deviceID] = connections
+	}
+	connections[live] = struct{}{}
+	return true
+}
+
+func (server *Server) bindHost(live *liveConnection, connection store.RuntimeConnection, capabilities []string) bool {
+	server.mu.Lock()
+	if server.draining || server.connections[live.conn] != live {
+		server.mu.Unlock()
+		return false
+	}
+	previous := server.hosts[connection.RuntimeID]
+	server.hosts[connection.RuntimeID] = live
+	live.runtimeID = connection.RuntimeID
+	live.runtimeEpoch = connection.RuntimeEpoch
+	live.connectionID = connection.ConnectionID
+	live.capabilities = capabilitySet(capabilities)
+	server.mu.Unlock()
+	if previous != nil && previous != live {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = previous.sendJSON(ctx, map[string]any{
+			"v": 1, "type": "runtime.changed", "payload": map[string]string{"runtime_id": connection.RuntimeID},
+		})
+		cancel()
+		_ = previous.conn.CloseNow()
+	}
+	return true
+}
+
+func (server *Server) hostForRuntime(runtimeID string) *liveConnection {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.hosts[runtimeID]
+}
+
+func (server *Server) devicesForRuntime(runtimeID, deviceID string) []*liveConnection {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	byDevice := server.devices[runtimeID]
+	connections := byDevice[deviceID]
+	result := make([]*liveConnection, 0, len(connections))
+	for connection := range connections {
+		result = append(result, connection)
+	}
+	return result
 }
 
 func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -122,35 +318,55 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	connection.SetReadLimit(maxFrameBytes)
-	if !server.registerConnection(connection) {
+	live, registered := server.registerConnection(connection, peer)
+	if !registered {
 		closePolicy(connection, "server draining")
 		_ = connection.CloseNow()
 		return
 	}
-	defer server.unregisterConnection(connection)
+	defer server.unregisterConnection(live)
 	defer connection.Close(websocket.StatusNormalClosure, "connection closed")
 	if connection.Subprotocol() != protocolName {
 		closePolicy(connection, "protocol required")
 		return
 	}
-	server.runHandshake(request.Context(), connection, peer)
+	server.runHandshake(request.Context(), live)
 }
 
-func (server *Server) registerConnection(connection *websocket.Conn) bool {
+func (server *Server) registerConnection(connection *websocket.Conn, identity peer) (*liveConnection, bool) {
 	server.mu.Lock()
-	defer server.mu.Unlock()
 	if server.draining {
-		return false
+		server.mu.Unlock()
+		return nil, false
 	}
+	live := &liveConnection{conn: connection, peer: identity, sendQueue: make(chan outboundFrame, 16), done: make(chan struct{})}
 	server.active.Add(1)
-	server.connections[connection] = struct{}{}
-	return true
+	server.connections[connection] = live
+	server.mu.Unlock()
+	go live.writeLoop()
+	return live, true
 }
 
-func (server *Server) unregisterConnection(connection *websocket.Conn) {
+func (server *Server) unregisterConnection(live *liveConnection) {
 	server.mu.Lock()
-	delete(server.connections, connection)
+	delete(server.connections, live.conn)
+	if live.peer.role == "host" && server.hosts[live.runtimeID] == live {
+		delete(server.hosts, live.runtimeID)
+	}
+	if live.peer.role == "device" {
+		byDevice := server.devices[live.runtimeID]
+		if byDevice != nil {
+			delete(byDevice[live.peer.deviceID], live)
+			if len(byDevice[live.peer.deviceID]) == 0 {
+				delete(byDevice, live.peer.deviceID)
+			}
+			if len(byDevice) == 0 {
+				delete(server.devices, live.runtimeID)
+			}
+		}
+	}
 	server.mu.Unlock()
+	live.stop()
 	server.active.Done()
 }
 
@@ -159,19 +375,20 @@ func (server *Server) unregisterConnection(connection *websocket.Conn) {
 func (server *Server) Drain(ctx context.Context) error {
 	server.mu.Lock()
 	server.draining = true
-	connections := make([]*websocket.Conn, 0, len(server.connections))
-	for connection := range server.connections {
+	connections := make([]*liveConnection, 0, len(server.connections))
+	for _, connection := range server.connections {
 		connections = append(connections, connection)
 	}
 	server.mu.Unlock()
 	for _, connection := range connections {
-		go func(connection *websocket.Conn) {
+		go func(connection *liveConnection) {
 			writeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			_ = writeJSON(writeCtx, connection, map[string]any{
+			_ = connection.sendJSON(writeCtx, map[string]any{
 				"v": 1, "type": "server.draining", "payload": map[string]string{"reason": "server_draining"},
 			})
 			cancel()
-			_ = connection.CloseNow()
+			_ = connection.conn.CloseNow()
+			connection.stop()
 		}(connection)
 	}
 	done := make(chan struct{})
@@ -229,7 +446,9 @@ func (server *Server) writeAuthenticationError(response http.ResponseWriter, err
 	}
 }
 
-func (server *Server) runHandshake(parent context.Context, connection *websocket.Conn, peer peer) {
+func (server *Server) runHandshake(parent context.Context, live *liveConnection) {
+	connection := live.conn
+	peer := live.peer
 	connectionID, err := randomUUID()
 	if err != nil {
 		closePolicy(connection, "handshake unavailable")
@@ -282,13 +501,15 @@ func (server *Server) runHandshake(parent context.Context, connection *websocket
 		return
 	}
 	if peer.role == "device" {
-		server.finishDeviceHandshake(parent, connection, peer, connectionID, challengeID, nonce, envelope)
+		server.finishDeviceHandshake(parent, live, connectionID, challengeID, nonce, envelope)
 		return
 	}
-	server.finishHostHandshake(parent, connection, peer, connectionID, challengeID, nonce, envelope)
+	server.finishHostHandshake(parent, live, connectionID, challengeID, nonce, envelope)
 }
 
-func (server *Server) finishDeviceHandshake(parent context.Context, connection *websocket.Conn, peer peer, connectionID, challengeID, nonce string, envelope wireEnvelope) {
+func (server *Server) finishDeviceHandshake(parent context.Context, live *liveConnection, connectionID, challengeID, nonce string, envelope wireEnvelope) {
+	connection := live.conn
+	peer := live.peer
 	var payload deviceHandshakePayload
 	if decodePayload(envelope.Payload, &payload) != nil {
 		closePolicy(connection, "handshake rejected")
@@ -330,19 +551,24 @@ func (server *Server) finishDeviceHandshake(parent context.Context, connection *
 	leaseExpiresAt := time.Now().UTC().Add(deviceConnectionLife)
 	leaseCtx, cancel := context.WithDeadline(parent, leaseExpiresAt)
 	defer cancel()
+	accepted := intersectCapabilities(hello.Capabilities, supportedCapabilities)
 	if writeJSON(leaseCtx, connection, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "device", "connection_id": connectionID,
 			"device_id": redemption.DeviceID, "runtime_id": redemption.RuntimeID,
 			"grant_version": redemption.GrantVersion, "scope": redemption.Scope,
-			"protocols": []int{1}, "capabilities": intersectCapabilities(hello.Capabilities, []string{"connection.heartbeat.v1"}),
+			"protocols": []int{1}, "capabilities": accepted,
 			"server_time": time.Now().UTC(), "heartbeat_seconds": heartbeatSeconds,
 			"max_frame_bytes": maxFrameBytes, "lease_expires_at": leaseExpiresAt,
 		},
 	}) != nil {
 		return
 	}
-	server.runHeartbeat(leaseCtx, connection, connectionID, nil)
+	if !server.bindDevice(live, redemption, connectionID, accepted) {
+		closePolicy(connection, "server draining")
+		return
+	}
+	server.runHeartbeat(leaseCtx, live, nil)
 }
 
 func normalizeDeviceHello(payload deviceHandshakePayload, authenticatedDeviceID string) (normalizedDeviceHello, error) {
@@ -391,7 +617,9 @@ func containsInt(values []int, want int) bool {
 	return false
 }
 
-func (server *Server) finishHostHandshake(parent context.Context, connection *websocket.Conn, peer peer, connectionID, challengeID, nonce string, envelope wireEnvelope) {
+func (server *Server) finishHostHandshake(parent context.Context, live *liveConnection, connectionID, challengeID, nonce string, envelope wireEnvelope) {
+	connection := live.conn
+	peer := live.peer
 	var payload hostHandshakePayload
 	if decodePayload(envelope.Payload, &payload) != nil {
 		closePolicy(connection, "handshake rejected")
@@ -442,7 +670,7 @@ func (server *Server) finishHostHandshake(parent context.Context, connection *we
 		closePolicy(connection, "credential expired")
 		return
 	}
-	accepted := intersectCapabilities(hello.Capabilities, []string{"connection.heartbeat.v1"})
+	accepted := intersectCapabilities(hello.Capabilities, supportedCapabilities)
 	if writeJSON(leaseCtx, connection, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "host", "connection_id": connectionID,
@@ -455,11 +683,15 @@ func (server *Server) finishHostHandshake(parent context.Context, connection *we
 	}) != nil {
 		return
 	}
-	server.runHeartbeat(leaseCtx, connection, connectionID, &registered)
+	if !server.bindHost(live, registered, accepted) {
+		closePolicy(connection, "server draining")
+		return
+	}
+	server.runHeartbeat(leaseCtx, live, &registered)
 }
 
-func (server *Server) runHeartbeat(parent context.Context, connection *websocket.Conn, connectionID string, host *store.RuntimeConnection) {
-	var lastHeartbeat time.Time
+func (server *Server) runHeartbeat(parent context.Context, live *liveConnection, host *store.RuntimeConnection) {
+	connection := live.conn
 	for {
 		readCtx, cancel := context.WithTimeout(parent, connectionIdleTime)
 		messageType, data, err := connection.Read(readCtx)
@@ -471,38 +703,285 @@ func (server *Server) runHeartbeat(parent context.Context, connection *websocket
 			closePolicy(connection, "invalid frame")
 			return
 		}
-		envelope, err := decodeEnvelope(data, "ping")
-		var payload struct{}
-		if err != nil || decodePayload(envelope.Payload, &payload) != nil {
-			writeErrorFrame(parent, connection, "protocol.invalid")
+		envelope, err := decodeWireFrame(data)
+		if err != nil {
+			server.sendProtocolError(parent, live, "protocol.invalid", nil)
 			closePolicy(connection, "invalid frame")
 			return
 		}
-		now := time.Now()
-		if !lastHeartbeat.IsZero() && now.Sub(lastHeartbeat) < time.Second {
-			writeErrorFrame(parent, connection, "rate.limited")
-			closePolicy(connection, "heartbeat rate exceeded")
-			return
-		}
-		lastHeartbeat = now
-		if host != nil {
-			touchCtx, touchCancel := context.WithTimeout(parent, 3*time.Second)
-			err = server.database.TouchRuntimeConnection(touchCtx,
-				host.InstallationID, host.RuntimeID, host.RuntimeEpoch, host.ConnectionID)
-			touchCancel()
-			if err != nil {
-				closePolicy(connection, "runtime connection expired")
+		switch envelope.Type {
+		case "ping":
+			if !frameHasNoRoutingFields(envelope) {
+				server.sendProtocolError(parent, live, "protocol.invalid", nil)
+				closePolicy(connection, "invalid heartbeat")
 				return
 			}
-		}
-		if writeJSON(parent, connection, map[string]any{
-			"v": 1, "type": "pong", "payload": map[string]any{
-				"connection_id": connectionID, "server_time": now.UTC(),
-			},
-		}) != nil {
+			var empty struct{}
+			if decodePayload(envelope.Payload, &empty) != nil {
+				server.sendProtocolError(parent, live, "protocol.invalid", nil)
+				closePolicy(connection, "invalid heartbeat")
+				return
+			}
+			now := time.Now()
+			if !live.lastHeartbeat.IsZero() && now.Sub(live.lastHeartbeat) < time.Second {
+				server.sendProtocolError(parent, live, "rate.limited", nil)
+				closePolicy(connection, "heartbeat rate exceeded")
+				return
+			}
+			live.lastHeartbeat = now
+			if host != nil {
+				touchCtx, touchCancel := context.WithTimeout(parent, 3*time.Second)
+				err = server.database.TouchRuntimeConnection(touchCtx,
+					host.InstallationID, host.RuntimeID, host.RuntimeEpoch, host.ConnectionID)
+				touchCancel()
+				if err != nil {
+					closePolicy(connection, "runtime connection expired")
+					return
+				}
+			}
+			if live.sendJSON(parent, map[string]any{
+				"v": 1, "type": "pong", "payload": map[string]any{
+					"connection_id": live.connectionID, "server_time": now.UTC(),
+				},
+			}) != nil {
+				return
+			}
+		case "message.submit":
+			if live.peer.role != "device" {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				closePolicy(connection, "operation denied")
+				return
+			}
+			if len(data) > maxMobileCommandFrame {
+				server.sendProtocolError(parent, live, "protocol.frame_too_large", &envelope)
+				continue
+			}
+			now := time.Now()
+			if live.commandWindowStart.IsZero() || now.Sub(live.commandWindowStart) >= time.Second {
+				live.commandWindowStart = now
+				live.commandWindowCount = 0
+			}
+			live.commandWindowCount++
+			if live.commandWindowCount > commandsPerSecond {
+				server.sendProtocolError(parent, live, "rate.limited", &envelope)
+				continue
+			}
+			server.routeMessageSubmit(parent, live, envelope)
+		case "command.receipt":
+			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				closePolicy(connection, "operation denied")
+				return
+			}
+			server.routeCommandReceipt(parent, live, host, envelope)
+		default:
+			server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+			closePolicy(connection, "unsupported frame")
 			return
 		}
 	}
+}
+
+func (server *Server) routeMessageSubmit(parent context.Context, live *liveConnection, envelope wireEnvelope) {
+	if !live.supports("command.relay.v1") {
+		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+		return
+	}
+	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
+		!uuidPattern.MatchString(envelope.SessionID) || envelope.RuntimeEpoch != "" ||
+		envelope.DeviceID != "" || envelope.UserID != "" || envelope.PayloadSHA256 != "" {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	var payload messageSubmitPayload
+	if decodePayload(envelope.Payload, &payload) != nil || normalizeMessageSubmit(payload) != nil {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	host := server.hostForRuntime(live.runtimeID)
+	if host == nil || !host.peer.installation.ExpiresAt.After(time.Now()) {
+		server.sendProtocolError(parent, live, "runtime.offline", &envelope)
+		return
+	}
+	if !host.supports("command.relay.v1") {
+		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+		return
+	}
+	touchCtx, touchCancel := context.WithTimeout(parent, 3*time.Second)
+	err := server.database.TouchRuntimeConnection(touchCtx,
+		host.peer.installation.InstallationID, host.runtimeID, host.runtimeEpoch, host.connectionID)
+	touchCancel()
+	if err != nil {
+		_ = host.conn.CloseNow()
+		server.sendProtocolError(parent, live, "runtime.offline", &envelope)
+		return
+	}
+	digest, err := messageSubmitDigest(envelope.SessionID, payload)
+	if err != nil {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	status, err := server.database.RecordRealtimeCommand(parent, live.peer.redemption, envelope.RequestID, envelope.SessionID, digest)
+	if err != nil {
+		server.sendProtocolError(parent, live, commandErrorCode(err), &envelope)
+		return
+	}
+	if err := server.database.ValidateRealtimeLease(parent, live.peer.redemption); err != nil {
+		server.revokeDeviceConnection(parent, live, err)
+		return
+	}
+	if status.State == "received" {
+		forward := map[string]any{
+			"v": 1, "type": "message.submit", "request_id": envelope.RequestID,
+			"runtime_id": live.runtimeID, "runtime_epoch": host.runtimeEpoch, "session_id": envelope.SessionID,
+			"user_id": live.peer.redemption.UserID, "device_id": live.peer.deviceID,
+			"payload_sha256": digest, "payload": payload,
+		}
+		sendCtx, cancel := context.WithTimeout(parent, 2*time.Second)
+		err := host.sendJSON(sendCtx, forward)
+		cancel()
+		if err != nil {
+			if errors.Is(err, errRelayQueueFull) {
+				server.sendProtocolError(parent, live, "rate.limited", &envelope)
+				return
+			}
+			unknown, markErr := server.database.MarkRealtimeCommandUnknown(parent, live.peer.redemption, envelope.RequestID, envelope.SessionID, digest)
+			if markErr == nil {
+				_ = server.sendCommandReceipt(parent, live, unknown, host.runtimeEpoch)
+			} else {
+				server.sendProtocolError(parent, live, "command.outcome_unknown", &envelope)
+			}
+			return
+		}
+	}
+	_ = server.sendCommandReceipt(parent, live, status, host.runtimeEpoch)
+}
+
+func (server *Server) routeCommandReceipt(parent context.Context, live *liveConnection, host *store.RuntimeConnection, envelope wireEnvelope) {
+	if !live.supports("command.relay.v1") {
+		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+		return
+	}
+	if !uuidPattern.MatchString(envelope.RequestID) || envelope.RuntimeID != live.runtimeID ||
+		envelope.RuntimeEpoch != live.runtimeEpoch || !uuidPattern.MatchString(envelope.SessionID) ||
+		!uuidPattern.MatchString(envelope.DeviceID) || envelope.UserID != "" || envelope.PayloadSHA256 != "" {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	var payload commandReceiptPayload
+	if decodePayload(envelope.Payload, &payload) != nil || !validSHA256Hex(payload.PayloadSHA256) {
+		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+		return
+	}
+	status, err := server.database.RecordRealtimeCommandReceipt(parent, store.RelayCommandReceipt{
+		InstallationID: host.InstallationID, KeyVersion: live.peer.installation.KeyVersion,
+		RuntimeID: live.runtimeID, RuntimeEpoch: live.runtimeEpoch, ConnectionID: live.connectionID,
+		DeviceID: envelope.DeviceID, RequestID: envelope.RequestID, SessionID: envelope.SessionID,
+		PayloadSHA256: payload.PayloadSHA256, State: payload.State,
+	})
+	if err != nil {
+		server.sendProtocolError(parent, live, commandErrorCode(err), &envelope)
+		return
+	}
+	for _, device := range server.devicesForRuntime(live.runtimeID, envelope.DeviceID) {
+		if err := server.sendCommandReceipt(parent, device, status, live.runtimeEpoch); err != nil {
+			_ = device.conn.CloseNow()
+		}
+	}
+}
+
+func (server *Server) sendCommandReceipt(ctx context.Context, live *liveConnection, status store.CommandStatus, runtimeEpoch string) error {
+	if live.peer.role == "device" {
+		if err := server.database.ValidateRealtimeLease(ctx, live.peer.redemption); err != nil {
+			server.revokeDeviceConnection(ctx, live, err)
+			return err
+		}
+	}
+	return live.sendJSON(ctx, map[string]any{
+		"v": 1, "type": "command.receipt", "request_id": status.RequestID,
+		"runtime_id": live.runtimeID, "session_id": status.SessionID,
+		"runtime_epoch": runtimeEpoch,
+		"payload": map[string]any{
+			"state": status.State, "payload_sha256": status.PayloadSHA256, "updated_at": status.UpdatedAt,
+		},
+	})
+}
+
+func (server *Server) revokeDeviceConnection(ctx context.Context, live *liveConnection, cause error) {
+	code := "access.revoked"
+	if errors.Is(cause, store.ErrDatabaseUnavailable) {
+		code = "internal"
+	}
+	_ = live.sendJSON(ctx, map[string]any{"v": 1, "type": "access.revoked", "payload": map[string]string{"code": code}})
+	_ = live.conn.CloseNow()
+}
+
+func (server *Server) sendProtocolError(ctx context.Context, live *liveConnection, code string, request *wireEnvelope) {
+	frame := map[string]any{"v": 1, "type": "error", "payload": map[string]string{"code": code}}
+	if request != nil {
+		frame["request_id"] = request.RequestID
+		if request.RuntimeID != "" {
+			frame["runtime_id"] = request.RuntimeID
+		}
+		if request.SessionID != "" {
+			frame["session_id"] = request.SessionID
+		}
+	}
+	_ = live.sendJSON(ctx, frame)
+}
+
+func commandErrorCode(err error) string {
+	switch {
+	case errors.Is(err, store.ErrCommandConflict):
+		return "command.request_conflict"
+	case errors.Is(err, store.ErrRuntimeConnectionStale):
+		return "runtime.changed"
+	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrTicketInvalid):
+		return "access.denied"
+	case errors.Is(err, store.ErrDatabaseUnavailable):
+		return "internal"
+	case errors.Is(err, store.ErrGrantInvalid):
+		return "grant.invalid"
+	case errors.Is(err, store.ErrCommandTransition):
+		return "protocol.invalid"
+	default:
+		return "internal"
+	}
+}
+
+func normalizeMessageSubmit(payload messageSubmitPayload) error {
+	if payload.Mode != "queue" && payload.Mode != "steer" || len(payload.Content) == 0 || len(payload.Content) > 16 {
+		return errors.New("relay: invalid message submit payload")
+	}
+	for _, item := range payload.Content {
+		if item.Type != "text" || len(item.Text) == 0 || utf8.RuneCountInString(item.Text) > 32_768 || strings.TrimSpace(item.Text) == "" {
+			return errors.New("relay: invalid text content")
+		}
+		for _, char := range item.Text {
+			if unicode.IsControl(char) && char != '\n' && char != '\t' && char != '\r' {
+				return errors.New("relay: control character in text")
+			}
+		}
+	}
+	return nil
+}
+
+func messageSubmitDigest(sessionID string, payload messageSubmitPayload) (string, error) {
+	normalized := normalizedMessageSubmit{Type: "message.submit", SessionID: sessionID, Payload: payload}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }
 
 func normalizeHostHello(payload hostHandshakePayload) (normalizedHostHello, error) {
@@ -562,17 +1041,30 @@ func intersectCapabilities(requested, supported []string) []string {
 	return result
 }
 
-func decodeEnvelope(data []byte, expectedType string) (wireEnvelope, error) {
+func decodeWireFrame(data []byte) (wireEnvelope, error) {
 	var envelope wireEnvelope
 	if auth.ValidateJSONObject(data) != nil {
 		return wireEnvelope{}, errors.New("relay: invalid JSON envelope")
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil || envelope.V != 1 || envelope.Type != expectedType || len(envelope.Payload) == 0 {
+	if err := decoder.Decode(&envelope); err != nil || envelope.V != 1 || envelope.Type == "" || len(envelope.Payload) == 0 {
 		return wireEnvelope{}, errors.New("relay: invalid protocol envelope")
 	}
 	return envelope, nil
+}
+
+func decodeEnvelope(data []byte, expectedType string) (wireEnvelope, error) {
+	envelope, err := decodeWireFrame(data)
+	if err != nil || envelope.Type != expectedType || !frameHasNoRoutingFields(envelope) {
+		return wireEnvelope{}, errors.New("relay: invalid protocol envelope")
+	}
+	return envelope, nil
+}
+
+func frameHasNoRoutingFields(envelope wireEnvelope) bool {
+	return envelope.RequestID == "" && envelope.RuntimeID == "" && envelope.RuntimeEpoch == "" &&
+		envelope.SessionID == "" && envelope.DeviceID == "" && envelope.UserID == "" && envelope.PayloadSHA256 == ""
 }
 
 func decodePayload(data []byte, target any) error {

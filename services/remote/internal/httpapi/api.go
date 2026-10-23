@@ -39,10 +39,14 @@ type Repository interface {
 	IssueRealtimeTicket(context.Context, store.UserIdentity, string, string, store.GrantScope) (store.RealtimeTicket, error)
 	PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
 	ConsumeRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
+	ValidateRealtimeLease(context.Context, store.TicketRedemption) error
 	LookupHostConnectionCredential(context.Context, string) (store.HostCredentialIdentity, error)
 	AttachRuntimeConnection(context.Context, store.RuntimeConnectionInput) (store.RuntimeConnection, error)
 	TouchRuntimeConnection(context.Context, string, string, string, string) error
 	DetachRuntimeConnection(context.Context, string, string, string, string) error
+	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
+	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
+	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)

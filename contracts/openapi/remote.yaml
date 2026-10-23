@@ -344,10 +344,23 @@ paths:
         and exact claims iss, aud, challenge_id, connection_id, nonce, runtime_id, iat, and jti; host
         proofs also include runtime_epoch and hello_sha256. Heartbeats are text frames shaped as
         `{"v":1,"type":"ping","payload":{}}` and receive a pong with connection_id and server_time.
-        The endpoint currently supports heartbeat frames only; business frame routing is not enabled.
-        Application heartbeat frames are rate limited to one per second. Device connections expire
-        within five minutes; host connections expire with their host credential. Never log
-        Authorization headers on this route.
+        Devices may send a v=1 `message.submit` frame with request_id, runtime_id, session_id, and
+        payload {mode: queue|steer, content: [{type: text, text: ...}]}. Text content is bounded to
+        32,768 Unicode characters per block and 16 blocks per frame; the complete UTF-8 frame is
+        limited to 64 KiB. Each submission rechecks device key version, current
+        grant version, message.submit action, and session/workspace scope. PostgreSQL stores only the
+        command ID/session/state and canonical payload digest. The host receives the request ID,
+        digest, and authenticated user/device IDs, then returns v=1 `command.receipt` frames with the
+        device_id, state, and matching digest. Receipts advance through the host_accepted/agent_queued
+        state machine and persist without storing message bodies. Request IDs are idempotent per
+        device; a changed digest returns command.request_conflict. Only ping, message.submit, and
+        command.receipt frames are accepted; session snapshots, streaming, approval, and question
+        routing are not enabled. Both peers must negotiate `command.relay.v1` to exchange message
+        and receipt frames. Application heartbeats are limited to one per second and message
+        submits to 20 per second per socket. Each socket has a bounded outbound queue. Device
+        connections expire within five minutes; host connections expire with their host credential.
+        Frame JSON Schemas and golden messages are in `contracts/ws/v1`. Never log Authorization
+        headers on this route.
       responses:
         '101': { description: WebSocket upgraded; client must answer the challenge before hello.ok is sent. Subprotocol dsh.remote.v1 is required. }
         '400': { $ref: '#/components/responses/Error' }

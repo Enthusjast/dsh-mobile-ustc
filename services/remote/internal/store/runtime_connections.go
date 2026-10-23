@@ -72,10 +72,10 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 	if _, err := transaction.ExecContext(ctx, `
 		update runtimes
 		set epoch = $1, connection_id = $2, dsh_version = $3, application_version = $4,
-		    plugin_version = $5, last_seen_at = clock_timestamp()
+		    plugin_version = $5, last_seen_at = clock_timestamp(), connection_key_version = $8
 		where id = $6 and installation_id = $7 and revoked_at is null`,
 		input.RuntimeEpoch, input.ConnectionID, input.DSHVersion, input.ApplicationVersion,
-		input.PluginVersion, input.RuntimeID, input.InstallationID); err != nil {
+		input.PluginVersion, input.RuntimeID, input.InstallationID, input.KeyVersion); err != nil {
 		return RuntimeConnection{}, ErrDatabaseUnavailable
 	}
 	metadata, _ := json.Marshal(map[string]any{
@@ -104,7 +104,7 @@ func (postgres *Postgres) TouchRuntimeConnection(ctx context.Context, installati
 		from installations i, hosts h
 		where r.id = $1 and r.installation_id = $2 and r.epoch = $3 and r.connection_id = $4
 		  and r.revoked_at is null and i.id = r.installation_id and i.revoked_at is null
-		  and h.id = i.host_id and h.state = 'active'`,
+		  and r.connection_key_version = i.key_version and h.id = i.host_id and h.state = 'active'`,
 		runtimeID, installationID, runtimeEpoch, connectionID)
 	if err != nil {
 		return ErrDatabaseUnavailable
@@ -121,7 +121,7 @@ func (postgres *Postgres) TouchRuntimeConnection(ctx context.Context, installati
 
 func (postgres *Postgres) DetachRuntimeConnection(ctx context.Context, installationID, runtimeID, runtimeEpoch, connectionID string) error {
 	_, err := postgres.DB.ExecContext(ctx, `
-		update runtimes r set connection_id = null, last_seen_at = null
+		update runtimes r set connection_id = null, connection_key_version = null, last_seen_at = null
 		where r.id = $1 and r.installation_id = $2 and r.epoch = $3 and r.connection_id = $4`,
 		runtimeID, installationID, runtimeEpoch, connectionID)
 	if err != nil {

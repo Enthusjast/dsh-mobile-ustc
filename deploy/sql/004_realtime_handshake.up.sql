@@ -19,6 +19,12 @@ alter table realtime_tickets
     add constraint realtime_tickets_device_key_version_positive check (device_key_version > 0),
     add constraint realtime_tickets_thumbprint_length check (length(proof_key_thumbprint) = 43);
 
-alter table runtimes add column connection_id uuid;
+alter table runtimes
+    add column connection_id uuid,
+    add column connection_key_version bigint,
+    add constraint runtime_connection_key_version_consistency check (
+        (connection_id is null and connection_key_version is null)
+        or (connection_id is not null and connection_key_version > 0)
+    );
 create unique index runtimes_connection_id_unique on runtimes (connection_id)
     where connection_id is not null;
