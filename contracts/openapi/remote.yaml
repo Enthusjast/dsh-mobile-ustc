@@ -232,7 +232,7 @@ paths:
     get:
       responses:
         '200':
-          description: Runtimes visible through active grants.
+          description: Runtimes visible through active grants, including the current user's organization, role and exact grant scope/version. This directory snapshot is not a credential; ticket issuance and operations recheck authority.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:
@@ -898,17 +898,28 @@ components:
       properties:
         id: { type: string, format: uuid }
         host_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
         dsh_version: { type: string }
         application_version: { type: string }
         plugin_version: { type: string }
         protocol_version: { type: integer, minimum: 1 }
         last_seen_at: { type: string, format: date-time }
+        access:
+          type: object
+          additionalProperties: false
+          required: [role, grant_version, scope]
+          properties:
+            role: { enum: [viewer, operator, owner] }
+            grant_version: { type: integer, minimum: 1, maximum: 9007199254740991 }
+            scope: { $ref: '#/components/schemas/GrantScope' }
+            expires_at: { type: string, format: date-time }
     Session:
       type: object
       additionalProperties: false
       required: [session_id, state, last_persisted_seq, updated_at]
       properties:
         session_id: { type: string, format: uuid }
+        workspace_id: { type: [string, 'null'], format: uuid, description: Opaque registered workspace UUID; never a filesystem path. Null means only an explicit session grant can cover this session. }
         state: { enum: [available, running, archived, unavailable] }
         last_persisted_seq: { type: integer, minimum: -1 }
         updated_at: { type: string, format: date-time }

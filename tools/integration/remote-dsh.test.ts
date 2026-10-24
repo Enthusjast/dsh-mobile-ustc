@@ -242,6 +242,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(active.host_confirmed, true)
   assert.equal(active.user_confirmed, true)
   assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
+  const runtimeAccess = (await phone('GET', '/v1/runtimes')).items.find((runtime: any) => runtime.id === enrollment.runtime_id)
+  assert.equal(runtimeAccess.organization_id, orgId)
+  assert.equal(runtimeAccess.access.role, 'owner')
+  assert.ok(runtimeAccess.access.grant_version >= 1)
+  assert.ok(runtimeAccess.access.scope.actions.includes('session.read'))
+  assert.ok(runtimeAccess.access.scope.workspaces.includes(enrollment.workspaces[0].workspace_id))
   const challenge = await owner('POST', '/v1/host-credentials/challenges', undefined, 201)
   const credential = await owner('POST', '/v1/host-credentials', {
     challenge_id: challenge.challenge_id,
@@ -372,7 +378,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(creationStatus.workspace_id, creation.payload.workspace_id)
   await until(async () => {
     const directory = await phone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)
-    return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available') ? true : undefined
+    return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available' && item.workspace_id === enrollment.workspaces[0].workspace_id) ? true : undefined
   }, 'created session in PostgreSQL directory')
   const unrelatedTicket = await phone('POST', '/v1/realtime/tickets', {
     runtime_id: enrollment.runtime_id, scope: { actions: ['message.submit'], workspaces: [enrollment.workspaces[1].workspace_id], sessions: [] },

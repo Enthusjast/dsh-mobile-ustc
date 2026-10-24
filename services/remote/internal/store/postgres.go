@@ -33,18 +33,29 @@ type Host struct {
 }
 
 type Runtime struct {
-	ID                 string     `json:"id"`
-	HostID             string     `json:"host_id"`
-	DSHVersion         string     `json:"dsh_version,omitempty"`
-	ApplicationVersion string     `json:"application_version,omitempty"`
-	PluginVersion      string     `json:"plugin_version,omitempty"`
-	ProtocolVersion    int        `json:"protocol_version"`
-	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
+	ID                 string         `json:"id"`
+	HostID             string         `json:"host_id"`
+	OrganizationID     string         `json:"organization_id,omitempty"`
+	DSHVersion         string         `json:"dsh_version,omitempty"`
+	ApplicationVersion string         `json:"application_version,omitempty"`
+	PluginVersion      string         `json:"plugin_version,omitempty"`
+	ProtocolVersion    int            `json:"protocol_version"`
+	LastSeenAt         *time.Time     `json:"last_seen_at,omitempty"`
+	Access             *RuntimeAccess `json:"access,omitempty"`
+}
+
+// RuntimeAccess is the current user's directory snapshot, not a credential.
+// Ticket issuance and every operation independently recheck current authority.
+type RuntimeAccess struct {
+	Role         string     `json:"role"`
+	GrantVersion int64      `json:"grant_version"`
+	Scope        GrantScope `json:"scope"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
 
 type Session struct {
 	RuntimeID        string    `json:"-"`
-	WorkspaceID      *string   `json:"-"`
+	WorkspaceID      *string   `json:"workspace_id"`
 	ID               string    `json:"session_id"`
 	State            string    `json:"state"`
 	LastPersistedSeq int64     `json:"last_persisted_seq"`
@@ -230,7 +241,8 @@ func (postgres *Postgres) ListRuntimes(ctx context.Context, identity UserIdentit
 	rows, err := postgres.DB.QueryContext(ctx, `
 		select distinct r.id::text, h.id::text, coalesce(r.dsh_version, ''),
 		       coalesce(r.application_version, ''), coalesce(r.plugin_version, ''),
-		       r.protocol_version, r.last_seen_at
+		       r.protocol_version, r.last_seen_at, h.org_id::text,
+		       g.role, g.grant_version, g.scope, g.expires_at
 		from users u
 		join org_memberships m on m.user_id = u.id
 		join hosts h on h.org_id = m.org_id and h.state = 'active'
@@ -257,10 +269,22 @@ func (postgres *Postgres) ListRuntimes(ctx context.Context, identity UserIdentit
 	runtimes := make([]Runtime, 0)
 	for rows.Next() {
 		var runtime Runtime
+		var access RuntimeAccess
+		var scopeJSON []byte
 		if err := rows.Scan(&runtime.ID, &runtime.HostID, &runtime.DSHVersion, &runtime.ApplicationVersion,
-			&runtime.PluginVersion, &runtime.ProtocolVersion, &runtime.LastSeenAt); err != nil {
+			&runtime.PluginVersion, &runtime.ProtocolVersion, &runtime.LastSeenAt, &runtime.OrganizationID,
+			&access.Role, &access.GrantVersion, &scopeJSON, &access.ExpiresAt); err != nil {
 			return nil, ErrDatabaseUnavailable
 		}
+		if access.GrantVersion < 1 || access.GrantVersion > 9_007_199_254_740_991 || json.Unmarshal(scopeJSON, &access.Scope) != nil {
+			return nil, ErrDatabaseUnavailable
+		}
+		normalized, err := NormalizeRuntimeGrantInput(RuntimeGrantInput{Role: access.Role, Scope: access.Scope}, time.Time{})
+		if err != nil {
+			return nil, ErrDatabaseUnavailable
+		}
+		access.Scope = normalized.Scope
+		runtime.Access = &access
 		runtimes = append(runtimes, runtime)
 	}
 	if err := rows.Err(); err != nil {
