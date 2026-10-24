@@ -54,6 +54,11 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val bindingPreviews = AtomicInteger()
     val bindingWrites = AtomicInteger()
     val bindingStatusReads = AtomicInteger()
+    val commandWrites = AtomicInteger()
+    val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
+    @Volatile var chatMode = false
+    @Volatile var runtimeOffline = false
+    @Volatile var dropNextCommandReply = false
     @Volatile var bindingMode = false
     @Volatile var bindingUserConfirmed = false
     @Volatile var bindingHostConfirmed = false
@@ -65,7 +70,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val bindingApproved get() = bindingUserConfirmed && bindingHostConfirmed
     @Volatile var allowSessionRead = true
     @Volatile var holdSessions = false
-    private val directoryScope get() = RelayScope(if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list"), emptyList(), listOf(sessionId))
+    private val directoryScope get() = RelayScope((if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list")) +
+        if (chatMode) listOf("message.submit", "command.status", "session.cancel") else emptyList(), emptyList(), listOf(sessionId))
     private val currentRelay = AtomicReference<WebSocket?>()
     @Volatile var relayProofReceived = false
     private var relayScope: RelayScope? = null
@@ -206,6 +212,10 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                             "session.subscribe" -> {
                                 require(frame.string("runtime_id") == runtimeId && frame.string("session_id") == sessionId && sessionId in subscribedScope.sessions)
                                 val requestId = frame.string("request_id")
+                                if (runtimeOffline) {
+                                    webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "error".json(), "request_id" to requestId.json(), "runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "payload" to jsonObject("code" to "runtime.offline".json()))).canonicalText())
+                                    return
+                                }
                                 send(webSocket, "session.subscribed", requestId, jsonObject())
                                 send(webSocket, "session.snapshot", requestId, jsonObject("cursor" to 2L.json(), "has_more" to JsonBoolean(true), "records" to JsonArray(listOf(user(2, "电脑当前消息"))), "assistant" to jsonObject("revision" to 0L.json())))
                                 send(webSocket, "session.checkpoint", requestId, jsonObject("state" to "persisted".json(), "through_seq" to 2L.json()))
@@ -217,6 +227,19 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 send(webSocket, "session.page.result", frame.string("request_id"), jsonObject("records" to JsonArray(listOf(user(0, "最早的消息"), user(1, "更早的消息"))), "has_more" to JsonBoolean(false), "through_seq" to 2L.json()))
                                 return
                             }
+                            "message.submit", "session.cancel" -> {
+                                require(chatMode && frame.string("runtime_id") == runtimeId && frame.string("session_id") == sessionId)
+                                val intent = cn.edu.ustc.dsh.command.CommandIntent.parse(frame)
+                                require(intent.kind.wire in subscribedScope.actions)
+                                commandWrites.incrementAndGet()
+                                val state = if (intent.kind == cn.edu.ustc.dsh.command.CommandKind.MESSAGE) "agent_queued" else "settled"
+                                val status = jsonObject("request_id" to intent.requestId.json(), "session_id" to sessionId.json(), "state" to state.json(), "payload_sha256" to intent.digest.json(), "updated_at" to java.time.Instant.now().toString().json())
+                                commandStatuses[intent.requestId] = status
+                                if (dropNextCommandReply) { dropNextCommandReply = false; webSocket.close(1001, "fixture response lost"); return }
+                                webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "command.receipt".json(), "request_id" to intent.requestId.json(), "runtime_id" to runtimeId.json(), "runtime_epoch" to epoch.json(), "session_id" to sessionId.json(),
+                                    "payload" to JsonObject(status.fields.filterKeys { it in setOf("state", "payload_sha256", "updated_at") }))).canonicalText())
+                                return
+                            }
                         }
                         require(frame.string("type") == "hello.proof")
                         val proof = JWSObject.parse(payload.string("proof"))
@@ -224,12 +247,14 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         val claims = JsonDocument.parse(proof.payload.toBytes()).root
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
-                        require(claims.string("hello_sha256") == DeviceHello(deviceId, listOf("connection.heartbeat.v1", "session.read.v1")).digest())
+                        val capabilities = payload.array("capabilities").map { (it as JsonString).value }
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "command.relay.v1", "session.cancel.v1") })
+                        require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
                         relayProofReceived = true
                         webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
                             "role" to "device".json(), "connection_id" to connectionId.json(), "device_id" to deviceId.json(), "runtime_id" to "55555555-5555-4555-8555-555555555555".json(),
                             "grant_version" to 7L.json(), "scope" to subscribedScope.json(), "protocols" to JsonArray(listOf(1L.json())),
-                            "capabilities" to JsonArray(listOf("connection.heartbeat.v1".json(), "session.read.v1".json())), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(),
+                            "capabilities" to JsonArray(capabilities.map(String::json)), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(),
                             "server_time" to java.time.Instant.now().toString().json(), "lease_expires_at" to java.time.Instant.ofEpochMilli(leaseExpires).toString().json()))).canonicalText())
                     } catch (_: Exception) { failure.set("native Relay proof validation failed"); webSocket.cancel() }
                 }
@@ -278,6 +303,11 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (path.startsWith("/v1/commands/")) {
+            require(chatMode && request.requestUrl!!.queryParameter("device_id") == deviceId)
+            val status = commandStatuses[path.substringAfterLast('/')]
+            return if (status != null) resourceResponse(data(status)) else resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        }
         if (bindingMode && path.startsWith("/v1/enrollments/")) {
             require(path.startsWith("/v1/enrollments/$bindingId"))
             fun denied() = resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
@@ -311,7 +341,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val body = JsonDocument.parse(request.body.readByteArray()).root
             require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
             relayScope = RelayScope.parse(body.obj("scope"))
-            require(relayScope!!.actions == setOf("session.read"))
+            require("session.read" in relayScope!!.actions && relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "command.status") })
             relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
             relayAccessExpiresAt = claims.integer("exp") * 1000
             ticketRequests.incrementAndGet()
@@ -330,7 +360,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         require(path == "/v1/runtimes")
         if (bindingMode && (!bindingApproved || bindingConfirmedElsewhere)) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
         return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
-            "access" to jsonObject("role" to (if (bindingMode) "owner" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+            "access" to jsonObject("role" to (if (bindingMode) "owner" else if (chatMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
     }
 
     fun bindingDetails(): JsonObject = jsonObject("enrollment_id" to bindingId.json(), "request_id" to "99999999-9999-4999-8999-999999999999".json(), "organization_id" to organizationId.json(),

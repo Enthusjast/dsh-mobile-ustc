@@ -9,6 +9,8 @@ import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.keystore.*
 import cn.edu.ustc.dsh.network.*
+import cn.edu.ustc.dsh.command.*
+import cn.edu.ustc.dsh.data.SqlCommandJournal
 import cn.edu.ustc.dsh.protocol.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -35,6 +37,7 @@ data class HomeState(
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
+    val outbox: CommandOutboxState? = null, val commandError: String? = null, val submitting: Boolean = false, val composerRevision: Long = 0,
 )
 
 internal class LoginEnvironment(
@@ -76,6 +79,9 @@ class LoginController internal constructor(private val context: Context, private
     private var readerJob: Job? = null
     private var reader: SessionReader? = null
     private var desired: Pair<String, String?>? = null
+    private var commandJournal: SqlCommandJournal? = null
+    private var commandCollector: Job? = null
+    private var commandJob: Job? = null
     private var binding: HostBindingFlow? = null
     private var bindingCollector: Job? = null
     private var bindingGeneration = 0L
@@ -453,7 +459,20 @@ class LoginController internal constructor(private val context: Context, private
                 RuntimeRow(access.id, access.hostId, access.dshVersion, names[access.hostId] ?: "已授权的电脑", access)
             }
             val oldAccess = mutable.value.runtimes.firstOrNull { it.id == desired?.first }?.access
+            val removedRead = mutable.value.runtimes.filter { old ->
+                old.access?.scope?.actions?.contains("session.read") == true && items.firstOrNull { it.id == old.id }?.access?.scope?.actions?.contains("session.read") != true
+            }.map { it.id }
             mutable.value = mutable.value.copy(runtimes = items, error = null)
+            if (removedRead.isNotEmpty()) {
+                val saved = checkpoint!!
+                val owner = CommandOwner(saved.accountId, saved.organizationId, configuration!!.fingerprint, saved.userId, saved.deviceId!!)
+                if (mutable.value.selectedRuntimeId in removedRead) {
+                    retireNavigation(false)
+                    mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, reader = null, outbox = null, commandError = null, submitting = false)
+                }
+                for (runtime in removedRead) persistence.revokeCommands(owner, runtime, stamp)
+                current(stamp)
+            }
             val selection = desired
             if (selection != null) {
                 val entry = items.firstOrNull { it.id == selection.first }?.access
@@ -472,7 +491,10 @@ class LoginController internal constructor(private val context: Context, private
 
     private fun retireNavigation(keepDesired: Boolean) {
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
+        commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
         reader?.close(); reader = null
+        commandJournal?.close(); commandJournal = null
+        mutable.value = mutable.value.copy(outbox = null, commandError = null, submitting = false)
         if (!keepDesired) desired = null
     }
     fun foreground(active: Boolean) {
@@ -481,7 +503,8 @@ class LoginController internal constructor(private val context: Context, private
         binding?.foreground(active)
         if (!active) {
             retireNavigation(true)
-            mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null), loadingSessions = false, binding = binding?.state?.value)
+            mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null), loadingSessions = false, binding = binding?.state?.value,
+                outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1)
         } else if (mutable.value.phase == HomePhase.READY && binding == null) {
             if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
             else desired?.let { navigateRuntime(it.first, it.second) }
@@ -523,22 +546,74 @@ class LoginController internal constructor(private val context: Context, private
         val runtimeId = mutable.value.selectedRuntimeId ?: return
         val runtime = mutable.value.runtimes.firstOrNull { it.id == runtimeId }?.access ?: return
         val selected = mutable.value.sessions.firstOrNull { it.id == id } ?: return
-        val allowed = selected.readScope(runtime) ?: return
+        val allowed = selected.viewScope(runtime) ?: return
         desired = runtimeId to id
         if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
         retireNavigation(true)
         val stamp = generation; val view = navigationGeneration
-        val opened = api!!.reader(checkpoint!!.deviceId!!, runtimeId, id, allowed, scope)
-        reader = opened
-        mutable.value = mutable.value.copy(selectedSessionId = id, reader = SessionReadState(SessionReadPhase.CONNECTING), sessionError = null)
-        readerJob = scope.launch {
+        val resource = api!!
+        val saved = checkpoint!!
+        val owner = CommandOwner(saved.accountId, saved.organizationId, configuration!!.fingerprint, saved.userId, saved.deviceId!!)
+        mutable.value = mutable.value.copy(selectedSessionId = id, reader = SessionReadState(SessionReadPhase.CONNECTING), sessionError = null, outbox = null, commandError = null, submitting = false)
+        navigation {
+            var database: SqlCommandJournal? = null
+            try {
+                try { withContext(NonCancellable) { database = persistence.commands(owner, stamp) } }
+                catch (error: Exception) {
+                    current(stamp); if (view != navigationGeneration) return@navigation
+                    mutable.value = mutable.value.copy(commandError = if (error is CommandDataException) error.code else "data.unavailable")
+                }
+                current(stamp); if (view != navigationGeneration) return@navigation
+                val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope)
+                    else resource.reader(saved.deviceId!!, runtimeId, id, runtime.scope!!.readSession(id, selected.workspaceId), scope)
+                commandJournal = database; database = null; reader = opened
+                opened.commands?.let { commands -> commandCollector = scope.launch {
+                    commands.state.collect { outbox ->
+                        if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(outbox = outbox)
+                    }
+                } }
+                readerJob = scope.launch {
             opened.state.collect { state ->
                 if (generation != stamp || view != navigationGeneration || !foreground) return@collect
                 mutable.value = mutable.value.copy(reader = state)
                 if (state.phase == SessionReadPhase.AUTH_REQUIRED && mutable.value.phase == HomePhase.READY) renew()
                 else if (state.phase == SessionReadPhase.REVOKED && mutable.value.phase == HomePhase.READY) refresh()
             }
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp && navigationGeneration == view) mutable.value = mutable.value.copy(reader = SessionReadState(SessionReadPhase.ERROR, error = code(error)))
+            } finally { database?.close() }
         }
+    }
+    fun submitMessage(mode: String, text: String, sendNow: Boolean = true) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.submitting) return
+        val opened = reader ?: return
+        if (opened.state.value.phase in setOf(SessionReadPhase.AUTH_REQUIRED, SessionReadPhase.REVOKED, SessionReadPhase.CLOSED)) return
+        val commands = opened.commands ?: return
+        val stamp = generation; val view = navigationGeneration
+        mutable.value = mutable.value.copy(submitting = true, commandError = null)
+        commandJob = scope.launch {
+            try {
+                commands.submit(mode, text, sendNow)
+                current(stamp); if (view != navigationGeneration) return@launch
+                mutable.value = mutable.value.copy(composerRevision = mutable.value.composerRevision + 1)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = if (error is CommandDataException) error.code else "command.invalid") }
+            finally { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(submitting = false) }
+        }
+    }
+    fun sendPending(id: String) { reader?.commands?.sendPending(id) }
+    fun queryCommands() { reader?.commands?.query() }
+    fun cancelSession(expectedEpoch: String) {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        val commands = reader?.commands ?: return
+        if (reader?.state?.value?.runtimeEpoch != expectedEpoch) return
+        val stamp = generation; val view = navigationGeneration
+        commandJob = scope.launch { try { commands.cancel(expectedEpoch) } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = "command.cancel_unconfirmed")
+        } }
     }
     fun loadOlder() = reader?.loadOlder()
     fun retryRead() = reader?.retry()
@@ -548,7 +623,7 @@ class LoginController internal constructor(private val context: Context, private
         val runtime = mutable.value.selectedRuntimeId ?: return
         if (mutable.value.selectedSessionId != null) {
             retireNavigation(false); desired = runtime to null
-            mutable.value = mutable.value.copy(selectedSessionId = null, reader = null)
+            mutable.value = mutable.value.copy(selectedSessionId = null, reader = null, outbox = null, commandError = null, submitting = false)
         } else {
             retireNavigation(false)
             mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, sessions = emptyList(), reader = null, loadingSessions = false, sessionError = null)
@@ -633,6 +708,7 @@ class LoginController internal constructor(private val context: Context, private
         mutable.value = mutable.value.copy(binding = null, pendingBindingId = resume)
     }
     private fun code(error: Exception): String = when (error) {
+        is CommandDataException -> error.code
         is LoginException -> "login.${error.failure.name.lowercase()}"
         is RemoteRequestException -> error.code
         is DeviceCryptoException -> "device.${error.failure.name.lowercase()}"
@@ -658,6 +734,10 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun retryRead() = login.retryRead()
     fun refreshSessions() = login.refreshSessions()
     fun back() = login.back()
+    fun submitMessage(mode: String, text: String, sendNow: Boolean = true) = login.submitMessage(mode, text, sendNow)
+    fun sendPending(id: String) = login.sendPending(id)
+    fun queryCommands() = login.queryCommands()
+    fun cancelSession(epoch: String) = login.cancelSession(epoch)
     fun openBinding() = login.openBinding()
     fun previewBinding(id: String, code: String) = login.previewBinding(id, code)
     fun confirmBinding() = login.confirmBinding()

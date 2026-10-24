@@ -29,7 +29,8 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
         HostBindingScreen(bindingState, state.subject, model::previewBinding, model::queryBinding, model::confirmBinding, model::refreshBinding, model::enterAnotherBinding, model::closeBinding, onCancel)
     } else if (state.phase == HomePhase.READY && state.selectedRuntimeId != null) {
         BackHandler { model.back() }
-        SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel)
+        SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
+            model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession)
     } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding)
 }
 

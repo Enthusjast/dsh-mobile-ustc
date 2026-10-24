@@ -3,6 +3,8 @@ package cn.edu.ustc.dsh.mobile
 import android.annotation.SuppressLint
 import android.content.Context
 import cn.edu.ustc.dsh.auth.*
+import cn.edu.ustc.dsh.data.SqlCommandJournal
+import cn.edu.ustc.dsh.command.CommandOwner
 import cn.edu.ustc.dsh.keystore.*
 import cn.edu.ustc.dsh.protocol.Contract
 import kotlinx.coroutines.*
@@ -26,6 +28,7 @@ internal class PendingKeyLedger(private val context: Context, private val name: 
     }
     @SuppressLint("UseKtx")
     fun delete(reference: ScopeReference) {
+        SqlCommandJournal.eraseAccount(context, reference.account, reference.organization)
         DeviceKeyStore(context).use { owner -> DeviceKeyPurpose.entries.forEach { owner.delete(reference.scope(), it, 1) } }
         val values = entries(); values -= reference.encoded
         check(preferences().edit().putStringSet("scopes", values).commit())
@@ -98,6 +101,12 @@ internal class AccountPersistence(private val context: Context, slot: String, pr
         val clear = checkpoint.authenticatedStorageBytes()
         try { revision = vault.save(checkpoint.accountId, checkpoint.organizationId, checkpoint.session.deploymentFingerprint, clear, revision) }
         finally { clear.fill(0) }
+    }
+    suspend fun commands(owner: CommandOwner, stamp: Long): SqlCommandJournal = transaction(stamp) {
+        SqlCommandJournal.open(context, owner)
+    }
+    suspend fun revokeCommands(owner: CommandOwner, runtime: String, stamp: Long) = transaction(stamp) {
+        SqlCommandJournal.open(context, owner).use { journal -> runBlocking { journal.revokeRuntime(runtime) } }
     }
 
     suspend fun clear(stamp: Long, extra: ScopeReference?) = transaction(stamp) {
