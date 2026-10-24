@@ -62,7 +62,7 @@ curl --unix-socket /tmp/dsh-remote-private/probe.sock http://localhost/m0/probe
 
 Relay 双方协商 `question.blocking.v1` 后，普通阻塞式问题和计划确认随会话订阅发送待答快照。回答须绑定会话与 epoch、具备 `question.answer` 权限，并经加密命令日志记录；多设备只能完成一次，重试返回持久结果。问题回答不能应答工具审批。协议与阻塞式问题限制见 [问题应答说明](../../docs/question-protocol.md)。
 
-签名审批已加入独立的 JCS 上下文绑定、ES256 JWS 验证和 Go / TypeScript 共享样例。目前只完成密码学基础，尚未接入一次性审批状态、当前权限 / 认证强度和最终 guard；不声明可远程签名批准工具。字段、边界与后续接入要求见 [审批签名记录](../../docs/approval-signatures.md)。
+签名审批已加入 JCS 上下文绑定、ES256 JWS 验证、Go / TypeScript 共享样例，以及加密的一次性主机审批日志。日志使用 SQLite schema 2，自动迁移旧命令记录；已用本机 DSH guard 夹具验证事务消费、竞争、重启和失败关闭。真实权限 / 认证强度提供器、回调 / guard 生产接线和远程审批传输仍未接入，不声明可远程签名批准工具。字段和生命周期见 [审批签名记录](../../docs/approval-signatures.md) 与 [主机审批日志](../../docs/approval-journal.md)。
 
 每个 runtime 使用独立 SQLite WAL 命令日志。修改命令在调用 DSH 前先提交 `host_accepted`；`session.create` 在创建结果 flush 成功后才返回确定结果，`message.submit` 在 DSH 接受且 `sessions.flush()` 持久检查点成功后记录 `agent_queued`，其它已完成操作记为 `settled`。日志以 request_id 和规范化操作摘要去重；同 ID 不同内容返回冲突。消息重试复用 DSH 原生 requestId，可在插件重启后再次提交并避免重复插入；其它处于 dispatching 的操作标为 `outcome_unknown`，不会自动重放。数据库保存 AES-256-GCM 加密的命令 / 结果正文，收到持久确认后清除命令正文；请求摘要和状态保留。最多保留 100,000 条幂等记录及 4,096 条未完成正文，达到上限后拒绝新修改，不淘汰旧 request_id。
 

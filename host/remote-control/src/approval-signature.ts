@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { calculateJwkThumbprint, compactVerify, importJWK, type JWK } from 'jose'
 import { z } from 'zod'
 import { canonicalObject, parseSigningObject } from './canonical.js'
-import { ApprovalDecision, approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, APPROVAL_CLOCK_SKEW_MS, MAX_DECISION_AGE_MS } from './approval-contract.js'
+import { ApprovalDecision, approvalBinding, approvalDecisionCurrent, approvalKeyID, APPROVAL_JWS_TYPE } from './approval-contract.js'
 
 const invalid = () => new Error('approval: invalid signed decision')
 const publicKey = z.strictObject({
@@ -46,10 +46,7 @@ export async function verifyApprovalDecision(compact: string, registered: Regist
       if (decision[field] !== context[field]) throw invalid()
     }
     if (!equal(Buffer.from(decision.binding_sha256), Buffer.from(binding.sha256)) || decision.user_id !== registered.user_id || decision.device_id !== registered.device_id || decision.key_version !== registered.key_version) throw invalid()
-    const created = Date.parse(context.created_at), deadline = Date.parse(context.expires_at)
-    const issued = Date.parse(decision.issued_at), expires = Date.parse(decision.expires_at)
-    if (created > now + APPROVAL_CLOCK_SKEW_MS || deadline <= now || issued > now + APPROVAL_CLOCK_SKEW_MS || issued < now - MAX_DECISION_AGE_MS ||
-      issued < created - APPROVAL_CLOCK_SKEW_MS || expires <= now || expires <= issued || expires > deadline) throw invalid()
+    if (!approvalDecisionCurrent(context, decision, now)) throw invalid()
     return { claims: decision, canonical_payload: Buffer.from(verified.payload), payload_sha256: createHash('sha256').update(verified.payload).digest('hex') }
   } catch { throw invalid() }
 }

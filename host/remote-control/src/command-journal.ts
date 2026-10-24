@@ -4,11 +4,13 @@ import { DatabaseSync } from 'node:sqlite'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { ProbeError, type Command } from './protocol.js'
+import { PersistentApprovalJournal, migrateApprovalJournal } from './approval-journal.js'
+import { encryptJournalBytes, decryptJournalBytes, type Ciphertext } from './journal-crypto.js'
 
 export const MAX_JOURNAL_COMMANDS = 100_000
 const MAX_PENDING_JOURNAL_COMMANDS = 4096
 const MAX_COMMAND_BYTES = 64 * 1024
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 const RUNTIME_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export type CommandState = 'host_accepted' | 'dispatching' | 'agent_queued' | 'settled' | 'rejected' | 'outcome_unknown'
@@ -29,7 +31,6 @@ export interface CommandJournal {
   close(): void
 }
 
-type Ciphertext = { nonce: Buffer; ciphertext: Buffer; tag: Buffer }
 type JournalRow = {
   user_id: string
   payload_sha256: string
@@ -98,23 +99,16 @@ export function defaultCommandJournalPath(runtimeId: string): string {
 }
 
 function encrypt(key: Buffer, runtimeId: string, owner: CommandOwner, requestId: string, kind: 'command' | 'result', digest: string, value: unknown): Ciphertext {
-  const nonce = randomBytes(12)
-  const cipher = createCipheriv('aes-256-gcm', key, nonce)
-  cipher.setAAD(aad(runtimeId, owner, requestId, kind, digest))
   const plaintext = Buffer.from(JSON.stringify(value) ?? 'null', 'utf8')
-  let ciphertext: Buffer
-  try { ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]) }
+  try { return encryptJournalBytes(key, aad(runtimeId, owner, requestId, kind, digest), plaintext) }
   finally { plaintext.fill(0) }
-  return { nonce, ciphertext, tag: cipher.getAuthTag() }
 }
 
 function decrypt<T>(key: Buffer, runtimeId: string, owner: CommandOwner, requestId: string, kind: 'command' | 'result', digest: string, value: Ciphertext): T {
   try {
-    const decipher = createDecipheriv('aes-256-gcm', key, value.nonce)
-    decipher.setAAD(aad(runtimeId, owner, requestId, kind, digest))
-    decipher.setAuthTag(value.tag)
-    const cleartext = Buffer.concat([decipher.update(value.ciphertext), decipher.final()]).toString('utf8')
-    return JSON.parse(cleartext) as T
+    const cleartext = decryptJournalBytes(key, aad(runtimeId, owner, requestId, kind, digest), value)
+    try { return JSON.parse(cleartext.toString('utf8')) as T }
+    finally { cleartext.fill(0) }
   } catch {
     throw new ProbeError('journal.integrity_failed')
   }
@@ -224,6 +218,7 @@ function transitionAllowed(from: CommandState, to: CommandState): boolean {
  * metadata retains the request hash and delivery state for idempotency.
  */
 export class PersistentCommandJournal implements CommandJournal {
+  private approvalLog: PersistentApprovalJournal | undefined
   private constructor(private readonly database: DatabaseSync, private readonly key: Buffer, private readonly runtimeId: string) {}
 
   static async open(path: string, runtimeId: string): Promise<PersistentCommandJournal> {
@@ -291,10 +286,10 @@ export class PersistentCommandJournal implements CommandJournal {
             ciphertext BLOB NOT NULL,
             tag BLOB NOT NULL CHECK (length(tag) = 16)
           ) STRICT;
-          PRAGMA user_version = ${SCHEMA_VERSION};
+          PRAGMA user_version = 1;
           COMMIT;
         `)
-      } else if (version !== SCHEMA_VERSION) {
+      } else if (version !== 1 && version !== SCHEMA_VERSION) {
         throw new Error(`unsupported command journal schema version: ${String(version)}`)
       }
       database.exec('BEGIN IMMEDIATE')
@@ -303,6 +298,7 @@ export class PersistentCommandJournal implements CommandJournal {
         if (check === undefined) {
           const existingCommands = database.prepare('SELECT COUNT(*) AS count FROM commands').get()?.count
           if (typeof existingCommands !== 'number' || existingCommands !== 0) throw new ProbeError('journal.integrity_failed')
+          if (database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='approval_records'").get() && database.prepare('SELECT COUNT(*) AS count FROM approval_records').get()?.count !== 0) throw new ProbeError('journal.integrity_failed')
           const encrypted = encryptKeyCheck(key, runtimeId)
           database.prepare('INSERT INTO journal_meta (id, nonce, ciphertext, tag) VALUES (1, ?, ?, ?)')
             .run(encrypted.nonce, encrypted.ciphertext, encrypted.tag)
@@ -316,6 +312,7 @@ export class PersistentCommandJournal implements CommandJournal {
         try { database.exec('ROLLBACK') } catch { /* Preserve the key validation error. */ }
         throw error
       }
+      migrateApprovalJournal(database)
       return new PersistentCommandJournal(database, key, runtimeId)
     } catch (error) {
       if (database?.isOpen) {
@@ -327,6 +324,12 @@ export class PersistentCommandJournal implements CommandJournal {
       key.fill(0)
       throw error
     }
+  }
+
+  approvals(epoch: string, now: () => number = Date.now): PersistentApprovalJournal {
+    if (this.approvalLog && this.approvalLog.epoch !== epoch) throw new Error('approval journal already owns another epoch')
+    this.approvalLog ??= PersistentApprovalJournal.attach(this.database, this.key, this.runtimeId, epoch, now)
+    return this.approvalLog
   }
 
   admit(command: Command, owner: CommandOwner): JournalAdmission {
@@ -429,10 +432,10 @@ export class PersistentCommandJournal implements CommandJournal {
 
   close(): void {
     if (!this.database.isOpen) return
-    try { this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)') }
+    try { this.approvalLog?.close() }
     finally {
-      this.database.close()
-      this.key.fill(0)
+      try { this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)') }
+      finally { this.database.close(); this.key.fill(0) }
     }
   }
 

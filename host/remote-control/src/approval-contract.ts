@@ -49,3 +49,10 @@ export function approvalBinding(value: unknown): { context: ApprovalContext; can
 }
 
 export function approvalKeyID(deviceId: string, keyVersion: number): string { return `dsh-approval/${deviceId}/${keyVersion}` }
+
+export function approvalDecisionCurrent(context: ApprovalContext, decision: ApprovalDecision, now: number): boolean {
+  const created = Date.parse(context.created_at), deadline = Date.parse(context.expires_at)
+  const issued = Date.parse(decision.issued_at), expires = Date.parse(decision.expires_at)
+  return created <= now + APPROVAL_CLOCK_SKEW_MS && deadline > now && issued <= now + APPROVAL_CLOCK_SKEW_MS && issued >= now - MAX_DECISION_AGE_MS &&
+    issued >= created - APPROVAL_CLOCK_SKEW_MS && expires > now && expires > issued && expires <= deadline
+}
