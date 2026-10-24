@@ -52,6 +52,7 @@ dependencies {
     implementation(project(":core:auth"))
     implementation(project(":core:network"))
     implementation(project(":core:keystore"))
+    implementation(project(":core:data"))
     implementation(project(":core:ui"))
     implementation(libs.activity.compose)
     implementation(libs.activity.ktx)

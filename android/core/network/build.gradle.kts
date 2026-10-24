@@ -16,6 +16,7 @@ kotlin { jvmToolchain(17) }
 dependencies {
     api(project(":core:auth"))
     api(project(":core:session"))
+    api(project(":core:command"))
     implementation(libs.okhttp)
     api(libs.coroutines.core)
     testImplementation(libs.junit)
