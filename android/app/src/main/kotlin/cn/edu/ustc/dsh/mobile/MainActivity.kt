@@ -39,6 +39,7 @@ class MainActivity : FragmentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 model.state.collect { state ->
+                    if (state.authenticationId == null && prompt != null) { prompt?.cancelAuthentication(); prompt = null }
                     state.browser?.let { browser ->
                         model.browserOpened(browser.id)
                         try { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(this@MainActivity, browser.uri) }

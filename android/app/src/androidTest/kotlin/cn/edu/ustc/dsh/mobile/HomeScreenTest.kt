@@ -84,6 +84,36 @@ class HomeScreenTest {
         rule.runOnIdle { assertEquals(1, requests) }
     }
 
+    @Test fun retainedAccountOffersExplicitReauthenticationAndExit() {
+        var logins = 0; var exits = 0
+        rule.setContent {
+            DshTheme { HomeScreen(HomeState(HomePhase.REAUTHENTICATE, "https://id.example.edu", subject = "verified-school-user"), { logins++ }, {}, {}, {}, { exits++ }) }
+        }
+        rule.onNodeWithText("重新登录此账号").performScrollTo().performClick()
+        rule.onNodeWithText("退出本机登录").performScrollTo().performClick()
+        rule.runOnIdle { assertEquals(1, logins); assertEquals(1, exits) }
+    }
+
+    @Test fun recoveryErrorExposesADistinctRetryAction() {
+        var retries = 0
+        rule.setContent {
+            DshTheme { HomeScreen(HomeState(HomePhase.RECOVERY_ERROR, "https://id.example.edu", "vault.locked"), { retries++ }, {}, {}, {}, {}) }
+        }
+        rule.onNodeWithText("重试恢复").performScrollTo().performClick()
+        rule.runOnIdle { assertEquals(1, retries) }
+        rule.onNodeWithText("确认并登记设备").assertDoesNotExist()
+    }
+
+    @Test fun uncertainEnrollmentKeepsTheOriginalNameForAnExactRetry() {
+        var submitted: String? = null
+        rule.setContent {
+            DshTheme { HomeScreen(HomeState(HomePhase.ENROLL, "https://id.example.edu", deviceName = "原登记手机"), {}, { submitted = it }, {}, {}, {}) }
+        }
+        rule.onNodeWithText("原登记手机").assertIsNotEnabled()
+        rule.onNodeWithText("确认并登记设备").performScrollTo().performClick()
+        rule.runOnIdle { assertEquals("原登记手机", submitted) }
+    }
+
     private fun save(name: String) {
         // Only public synthetic state in this test host, never the secure live activity.
         val bitmap = rule.onRoot().captureToImage().asAndroidBitmap()

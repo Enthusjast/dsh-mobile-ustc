@@ -38,6 +38,7 @@ android {
         versionName = "0.1.0-dev"
         manifestPlaceholders["appAuthRedirectScheme"] = "cn.edu.ustc.dsh.mobile"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments["accountFixture"] = providers.gradleProperty("accountFixture").orElse("false").get()
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -64,5 +65,8 @@ dependencies {
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.okhttp.mockwebserver)
+    androidTestImplementation(libs.okhttp.tls)
+    androidTestImplementation(libs.nimbus.jose)
     debugImplementation(libs.compose.ui.test.manifest)
 }

@@ -2,7 +2,6 @@ package cn.edu.ustc.dsh.mobile
 
 import android.content.Context
 import android.net.Uri
-import android.annotation.SuppressLint
 import androidx.core.net.toUri
 import androidx.biometric.BiometricPrompt
 import androidx.lifecycle.ViewModel
@@ -23,7 +22,7 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, RECONCILING, REGISTRATION_UNKNOWN, READY }
+enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, RECOVERING, RECOVERY_ERROR, REAUTHENTICATE, RENEWING, CLEARING, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, RECONCILING, REGISTRATION_UNKNOWN, READY }
 class BrowserLaunch(val id: Long, val uri: Uri)
 class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<DeviceRegistrationProof>)
 data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String)
@@ -31,55 +30,28 @@ data class HomeState(
     val phase: HomePhase = HomePhase.LOADING, val issuer: String = "", val error: String? = null,
     val subject: String = "", val deviceId: String = "", val runtimes: List<RuntimeRow> = emptyList(),
     val browser: BrowserLaunch? = null, val biometric: BiometricLaunch? = null, val authenticationId: Long? = null,
-    val securitySetupRequired: Boolean = false,
-    val refreshing: Boolean = false,
+    val securitySetupRequired: Boolean = false, val refreshing: Boolean = false, val deviceName: String? = null,
 )
 
-private class ScopeReference(val account: String, val organization: String) {
-    val encoded: String get() = "$account|$organization"
-    fun scope() = DeviceKeyScope(account, organization)
-}
-
-/** Public cleanup metadata only. No verifier, state, nonce, code, JWT or user subject is persisted. */
-private class PendingKeyLedger(private val context: Context) {
-    private val lock = Any()
-    private fun preferences() = context.getSharedPreferences("pending_device_keys", Context.MODE_PRIVATE)
-    @SuppressLint("UseKtx") // The checked commit result is required before key creation.
-    fun add(reference: ScopeReference) = synchronized(lock) {
-        val entries = preferences().getStringSet("scopes", emptySet())!!.toMutableSet()
-        check(entries.size < 16)
-        entries += reference.encoded
-        check(preferences().edit().putStringSet("scopes", entries).commit())
-    }
-    @SuppressLint("UseKtx") // Keep the durable commit result visible to recovery.
-    fun remove(reference: ScopeReference) = synchronized(lock) {
-        val entries = preferences().getStringSet("scopes", emptySet())!!.toMutableSet()
-        entries -= reference.encoded
-        check(preferences().edit().putStringSet("scopes", entries).commit())
-    }
-    fun recover() {
-        val values = synchronized(lock) { preferences().getStringSet("scopes", emptySet())!!.toList() }
-        check(values.size <= 16)
-        values.forEach { value ->
-            val ids = value.split('|'); check(ids.size == 2)
-            val reference = ScopeReference(Contract.uuid(ids[0]), Contract.uuid(ids[1]))
-            delete(reference)
-        }
-    }
-    fun delete(reference: ScopeReference) {
-        DeviceKeyStore(context).use { owner -> DeviceKeyPurpose.entries.forEach { owner.delete(reference.scope(), it, 1) } }
-        remove(reference)
-    }
-}
+internal class LoginEnvironment(
+    val configuration: () -> ByteArray,
+    val storageSlot: String = "active",
+    val ledgerName: String = "pending_device_keys",
+    val now: () -> Long = System::currentTimeMillis,
+    val refreshLeadMillis: Long = 30_000,
+    val minimumValidityMillis: Long = 60_000,
+)
 
 @Singleton
-class LoginController @Inject constructor(@param:ApplicationContext private val context: Context, private val http: LoginHttp) {
+class LoginController internal constructor(private val context: Context, private val http: LoginHttp, private val environment: LoginEnvironment) : AutoCloseable {
+    @Inject constructor(@ApplicationContext context: Context, http: LoginHttp) : this(context, http, LoginEnvironment({ context.assets.open("deployment.json").use { it.readBytes() } }))
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val ledger = PendingKeyLedger(context)
     private val mutable = MutableStateFlow(HomeState())
     val state: StateFlow<HomeState> = mutable.asStateFlow()
+    @Volatile private var generation = 0L
+    private val persistence = AccountPersistence(context, environment.storageSlot, environment.ledgerName) { it == generation && scope.isActive }
     private var configuration: LoginConfiguration? = null
-    private var generation = 0L
     private var nextAuthenticationId = 0L
     private var job: Job? = null
     private var deadline: Job? = null
@@ -87,134 +59,242 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
     private var owner: DeviceKeyStore? = null
     private var proof: DeviceKeyHandle? = null
     private var approval: DeviceKeyHandle? = null
+    private var checkpoint: AccountCheckpoint? = null
     private var pending: PendingLogin? = null
     private var session: LoginSession? = null
-    private var account: ServiceAccountIdentity? = null
     private var api: RemoteApi? = null
     private var registration: RemoteApi.RegistrationRequest? = null
     private var operation: AuthenticatedKeyOperation<DeviceRegistrationProof>? = null
+    private var cleanupPending = false
+    private enum class Source { BROWSER, CACHE, REFRESH }
 
     init {
-        scope.launch {
-            try {
-                configuration = withContext(Dispatchers.IO) {
-                    ledger.recover()
-                    val bytes = context.assets.open("deployment.json").use { it.readBytes() }
-                    LoginConfiguration.parse(bytes)
-                }
-                mutable.value = HomeState(HomePhase.SIGNED_OUT, configuration!!.issuer)
-            } catch (_: FileNotFoundException) { mutable.value = HomeState(HomePhase.UNCONFIGURED) }
-            catch (_: Exception) { mutable.value = HomeState(HomePhase.INVALID_CONFIGURATION) }
+        work {
+            try { configuration = withContext(Dispatchers.IO) { LoginConfiguration.parse(environment.configuration()) } }
+            catch (_: FileNotFoundException) { mutable.value = HomeState(HomePhase.UNCONFIGURED); return@work }
+            catch (_: Exception) { mutable.value = HomeState(HomePhase.INVALID_CONFIGURATION); return@work }
+            restore(generation)
         }
+    }
+
+    private fun work(block: suspend CoroutineScope.() -> Unit) {
+        // Assign before execution: an immediate failure can start cleanup as another task.
+        val next = scope.launch(start = CoroutineStart.LAZY, block = block)
+        job = next
+        next.start()
+    }
+
+    private fun current(stamp: Long) { if (generation != stamp || !scope.isActive) throw CancellationException() }
+    private fun now() = environment.now()
+
+    /** Capture returned owners inside NonCancellable so cancellation cannot drop an unclosed key owner. */
+    private suspend fun open(stamp: Long, action: suspend () -> OpenAccount?): Boolean {
+        var opened: OpenAccount? = null
+        try {
+            withContext(NonCancellable) { opened = action() }
+            current(stamp)
+            val result = opened ?: return false
+            owner?.close()
+            reference = result.reference; owner = result.owner; proof = result.proof; approval = result.approval
+            checkpoint = result.checkpoint
+            opened = null
+            return true
+        } finally { opened?.close() }
+    }
+
+    private suspend fun persist(next: AccountCheckpoint, stamp: Long) {
+        persistence.save(next, stamp)
+        current(stamp)
+        checkpoint = next
+    }
+
+    private suspend fun restore(stamp: Long) {
+        val config = configuration ?: return
+        mutable.value = HomeState(HomePhase.RECOVERING, config.issuer)
+        try {
+            if (!open(stamp) { persistence.load(config, stamp, now()) }) {
+                mutable.value = HomeState(HomePhase.SIGNED_OUT, config.issuer)
+                return
+            }
+            val saved = checkpoint!!
+            if (saved.refresh != RefreshCheckpoint.READY) { showReauthentication("login.reauthentication"); return }
+            val discovery = http.discovery(config)
+            val verified = try { TokenVerifier.revalidateStored(saved.session, config, http.keys(discovery), now()) }
+            catch (error: LoginException) {
+                if (saved.session.hasRefreshToken()) {
+                    if (renewCredential(stamp, discovery)) install(session!!, Source.REFRESH, stamp)
+                    return
+                }
+                requireReauthentication(stamp, "login.reauthentication")
+                return
+            }
+            install(verified, Source.CACHE, stamp)
+        } catch (error: CancellationException) { throw error }
+        catch (error: Exception) { handle(error, stamp) }
     }
 
     fun login() {
         val config = configuration ?: return
-        if (mutable.value.phase != HomePhase.SIGNED_OUT) return
-        val stamp = ++generation
+        if (mutable.value.phase == HomePhase.RECOVERY_ERROR) {
+            if (cleanupPending) { clearAccount(null); return }
+            val stamp = fence(closeKeys = true)
+            checkpoint = null
+            work { restore(stamp) }
+            return
+        }
+        if (mutable.value.phase !in setOf(HomePhase.SIGNED_OUT, HomePhase.REAUTHENTICATE)) return
+        val saved = checkpoint
+        val stamp = fence(closeKeys = false)
         mutable.value = HomeState(HomePhase.STARTING, config.issuer)
-        job = scope.launch {
-            var createdOwner: DeviceKeyStore? = null
-            val createdReference = ScopeReference(UUID.randomUUID().toString(), config.organizationId)
-            var transferred = false
+        work {
             try {
-                val discovery = http.discovery(config)
-                val key = withContext(NonCancellable + Dispatchers.IO) {
-                    ledger.add(createdReference)
-                    DeviceKeyStore(context).also { createdOwner = it }.create(createdReference.scope(), DeviceKeyPurpose.PROOF, 1)
+                if (saved != null) {
+                    // A cancelled/restarted browser reauthentication must not resume an old rotating grant.
+                    persist(saved.requireReauthentication(now()), stamp)
+                    if (proof == null) open(stamp) { persistence.load(config, stamp, now()) }
                 }
-                if (generation != stamp) return@launch
-                owner = createdOwner; reference = createdReference; proof = key; transferred = true
-                val attempt = PendingLogin(discovery, key.thumbprint, System.currentTimeMillis())
+                val discovery = http.discovery(config)
+                if (saved == null) {
+                    val local = ScopeReference(UUID.randomUUID().toString(), config.organizationId)
+                    open(stamp) { persistence.createProof(local, stamp) }
+                }
+                current(stamp)
+                val attempt = PendingLogin(discovery, proof!!.thumbprint, now())
                 pending = attempt
-                // AppAuth builds the browser request from validated discovery endpoints.
-                // The verifier stays in this process; only the public request URI leaves it.
                 val browserRequest = AuthorizationRequest.Builder(
                     AuthorizationServiceConfiguration(discovery.authorizationEndpoint.toUri(), discovery.tokenEndpoint.toUri()),
                     config.clientId, ResponseTypeValues.CODE, config.redirectUri.toUri(),
                 ).setScopes(config.scopes).setState(attempt.state).setNonce(attempt.nonce)
                     .setCodeVerifier(attempt.verifierForAuthorizationRequest(), attempt.codeChallenge, "S256")
-                    .setAdditionalParameters(mapOf("resource" to config.resource, "dpop_jkt" to key.thumbprint)).build()
+                    .setAdditionalParameters(mapOf("resource" to config.resource, "dpop_jkt" to proof!!.thumbprint)).build()
                 mutable.value = HomeState(HomePhase.BROWSER, config.issuer, browser = BrowserLaunch(stamp, browserRequest.toUri()))
-                deadline = scope.launch { delay(600_000); if (generation == stamp && pending != null) fail("login.expired") }
+                deadline = scope.launch { delay(600_000); if (generation == stamp && pending != null) browserFailed("login.expired") }
             } catch (error: CancellationException) { throw error }
-            catch (error: Exception) { if (generation == stamp) fail(code(error)) }
-            finally {
-                if (!transferred) withContext(NonCancellable + Dispatchers.IO) {
-                    createdOwner?.close(); runCatching { ledger.delete(createdReference) }
+            catch (error: Exception) { if (generation == stamp) browserFailed(code(error)) }
+        }
+    }
+
+    fun browserOpened(id: Long) { if (mutable.value.browser?.id == id) mutable.value = mutable.value.copy(browser = null) }
+    fun browserUnavailable() { if (pending != null) browserFailed("login.browser_unavailable") }
+
+    fun callback(uri: String) {
+        val attempt = pending ?: return
+        val stamp = generation
+        val exchange = try { attempt.acceptCallback(uri, now()) }
+        catch (error: LoginException) {
+            if (error.failure in setOf(LoginFailure.INVALID_RESPONSE, LoginFailure.IDENTITY)) mutable.value = mutable.value.copy(error = "login.invalid_callback")
+            else browserFailed(code(error))
+            return
+        }
+        pending = null; deadline?.cancel()
+        mutable.value = mutable.value.copy(phase = HomePhase.EXCHANGING, browser = null, error = null)
+        work {
+            try {
+                val signer = proof!!.proofSigner()
+                val raw = http.tokenEndpoint(attempt.discovery, signer).exchange(exchange)
+                val verified = TokenVerifier.authorizationCodeResponse(raw, exchange, http.keys(attempt.discovery), now())
+                current(stamp)
+                val old = checkpoint
+                if (old != null && verified.subject != old.session.subject) { browserFailed("login.account_mismatch"); return@work }
+                install(verified, Source.BROWSER, stamp)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp) {
+                    if (checkpoint != null && session != null) handle(error, stamp)
+                    else if (authorityLost(error)) clearAccount(code(error)) else browserFailed(code(error))
                 }
             }
         }
     }
 
-    fun browserOpened(id: Long) { if (mutable.value.browser?.id == id) mutable.value = mutable.value.copy(browser = null) }
-    fun browserUnavailable() { if (pending != null) fail("login.browser_unavailable") }
+    private suspend fun install(verified: LoginSession, source: Source, stamp: Long) {
+        val config = configuration!!
+        val resource = http.resource(config, verified, proof!!.proofSigner())
+        val identity = resource.me()
+        current(stamp)
+        val saved = checkpoint
+        if (saved != null && identity.userId != saved.userId) throw RemoteRequestException("auth.identity_mismatch")
+        val next = when (source) {
+            Source.BROWSER -> saved?.authorized(verified, identity.userId, now()) ?: AccountCheckpoint.create(reference!!.account, config, identity.userId, verified, now())
+            Source.CACHE -> saved!!.revalidated(verified, identity.userId, now())
+            Source.REFRESH -> saved!!
+        }
+        session = verified; api = resource
+        try { persist(next, stamp) }
+        catch (error: VaultException) {
+            // A new phone may still need the user's secure-lock setup. Never POST enrollment until saved.
+            if (saved == null && source == Source.BROWSER && error.failure == VaultFailure.LOCK_REQUIRED) {
+                checkpoint = next
+                showEnrollment(code(error), setup = true)
+                scheduleRenewal(stamp, verified)
+                return
+            }
+            throw error
+        }
+        reconcileAccount(stamp)
+    }
 
-    fun callback(uri: String) {
-        val attempt = pending ?: return
-        val stamp = generation
-        val exchange = try { attempt.acceptCallback(uri, System.currentTimeMillis()) }
-        catch (error: LoginException) {
-            if (error.failure in setOf(LoginFailure.INVALID_RESPONSE, LoginFailure.IDENTITY)) mutable.value = mutable.value.copy(error = "login.invalid_callback")
-            else fail(code(error))
-            return
+    private suspend fun reconcileAccount(stamp: Long) {
+        current(stamp)
+        val saved = checkpoint!!
+        val key = approval
+        if (key != null) {
+            val device = api!!.currentDevice(PublicProofKey(key.publicJwk))
+            current(stamp)
+            if (device != null) {
+                persist(saved.deviceAccepted(device.deviceId, device.keyVersion, now()), stamp)
+                mutable.value = HomeState(HomePhase.READY, session!!.issuer, subject = session!!.subject, deviceId = device.deviceId)
+                scheduleRenewal(stamp, session!!)
+                fetchDirectory(stamp)
+                return
+            }
         }
-        pending = null; deadline?.cancel()
-        mutable.value = mutable.value.copy(phase = HomePhase.EXCHANGING, browser = null, error = null)
-        job = scope.launch {
-            try {
-                val signer = proof!!.proofSigner()
-                val verified = withContext(Dispatchers.IO) {
-                    val response = http.tokenEndpoint(attempt.discovery, signer).exchange(exchange)
-                    TokenVerifier.authorizationCodeResponse(response, exchange, http.keys(attempt.discovery), System.currentTimeMillis())
-                }
-                val resource = http.resource(configuration!!, verified, signer)
-                val mappedAccount = resource.me()
-                if (generation != stamp) return@launch
-                session = verified; account = mappedAccount; api = resource
-                mutable.value = HomeState(HomePhase.ENROLL, verified.issuer, subject = verified.subject)
-                deadline = scope.launch {
-                    delay((verified.accessExpiresAt - System.currentTimeMillis()).coerceAtLeast(1))
-                    if (generation == stamp && session === verified) fail("login.expired")
-                }
-            } catch (error: CancellationException) { throw error }
-            catch (error: Exception) { if (generation == stamp) fail(code(error)) }
-        }
+        persist(saved.enrollmentNotFound(now()), stamp)
+        showEnrollment()
+        scheduleRenewal(stamp, session!!)
+    }
+
+    private fun showEnrollment(error: String? = null, setup: Boolean = false) {
+        mutable.value = HomeState(HomePhase.ENROLL, configuration!!.issuer, error, subject = checkpoint!!.session.subject,
+            securitySetupRequired = setup, deviceName = checkpoint!!.deviceName)
     }
 
     fun register(name: String) {
         if (mutable.value.phase == HomePhase.REGISTRATION_UNKNOWN) {
             val stamp = generation
             mutable.value = mutable.value.copy(phase = HomePhase.RECONCILING, error = null)
-            job = scope.launch { reconcileRegistration(stamp) }
+            work { try { reconcileAccount(stamp) } catch (error: CancellationException) { throw error } catch (error: Exception) { registrationUnknown(error, stamp) } }
             return
         }
         if (mutable.value.phase != HomePhase.ENROLL) return
+        if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
         val stamp = generation
         mutable.value = mutable.value.copy(phase = HomePhase.PREPARING, error = null, securitySetupRequired = false)
-        job = scope.launch {
+        work {
             try {
-                val localKey = withContext(Dispatchers.IO) {
-                    approval ?: owner!!.create(reference!!.scope(), DeviceKeyPurpose.APPROVAL, 1)
-                }
-                if (generation != stamp) { localKey.close(); return@launch }
-                approval = localKey
-                val publicKey = PublicProofKey(localKey.publicJwk)
-                val existing = api!!.currentDevice(publicKey)
-                if (generation != stamp) return@launch
-                if (existing != null) { registered(existing); return@launch }
-                val request = api!!.prepareRegistration(publicKey, name.trim())
-                if (generation != stamp) { request.cancel(); return@launch }
+                // The credential record exists before any enrollment effect. Reuse an interrupted local key creation.
+                persist(checkpoint!!, stamp)
+                val local = approval ?: persistence.approval(owner!!, reference!!, stamp)
+                current(stamp); approval = local
+                persist(checkpoint!!.withApprovalKey(local.thumbprint, now()), stamp)
+                val existing = api!!.currentDevice(PublicProofKey(local.publicJwk))
+                current(stamp)
+                if (existing != null) { reconcileAccount(stamp); return@work }
+                if (checkpoint!!.enrollment != EnrollmentCheckpoint.PENDING) persist(checkpoint!!.enrollmentNotFound(now()), stamp)
+                val actualName = checkpoint!!.deviceName ?: name.trim()
+                val request = api!!.prepareRegistration(PublicProofKey(local.publicJwk), actualName)
+                current(stamp)
                 registration = request
-                operation = withContext(Dispatchers.Default) { localKey.beginRegistration(request.signatureRequest) }
-                val authenticationId = ++nextAuthenticationId
-                mutable.value = mutable.value.copy(phase = HomePhase.AUTHENTICATING, authenticationId = authenticationId, biometric = BiometricLaunch(authenticationId, operation!!))
+                operation = withContext(Dispatchers.Default) { local.beginRegistration(request.signatureRequest) }
+                current(stamp)
+                val id = ++nextAuthenticationId
+                mutable.value = mutable.value.copy(phase = HomePhase.AUTHENTICATING, authenticationId = id, biometric = BiometricLaunch(id, operation!!), deviceName = actualName)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 if (generation == stamp) {
-                    if (authorityLost(error)) fail(code(error))
-                    else mutable.value = mutable.value.copy(phase = HomePhase.ENROLL, error = code(error),
-                        securitySetupRequired = error is DeviceCryptoException && error.failure in setOf(DeviceCryptoFailure.LOCK_REQUIRED, DeviceCryptoFailure.BIOMETRIC_REQUIRED))
+                    discardRegistration()
+                    if (authorityLost(error)) clearAccount(code(error))
+                    else showEnrollment(code(error), setup = error is DeviceCryptoException && error.failure in setOf(DeviceCryptoFailure.LOCK_REQUIRED, DeviceCryptoFailure.BIOMETRIC_REQUIRED) || error is VaultException && error.failure == VaultFailure.LOCK_REQUIRED)
                 }
             }
         }
@@ -228,115 +308,176 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
         if (runCatching { result.cryptoObject?.signature === active.cryptoObject.signature }.getOrDefault(false).not()) return
         val stamp = generation
         operation = null; registration = null
+        val name = mutable.value.deviceName!!
         mutable.value = mutable.value.copy(phase = HomePhase.REGISTERING, biometric = null, authenticationId = null)
-        job = scope.launch {
-            var submitted = false
+        work {
+            var posted = false
             try {
                 val signed = withContext(Dispatchers.Default) { active.finish(result) }
-                if (generation != stamp) return@launch
-                submitted = true
+                current(stamp)
+                persist(checkpoint!!.beginEnrollment(name, now()), stamp)
+                current(stamp); posted = true
                 val device = request.submit(signed)
-                if (generation != stamp) return@launch
-                registered(device)
+                current(stamp)
+                persist(checkpoint!!.deviceAccepted(device.deviceId, device.keyVersion, now()), stamp)
+                reconcileAccount(stamp)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 if (generation == stamp) {
-                    if (authorityLost(error)) fail(code(error))
-                    else if (submitted) reconcileRegistration(stamp)
-                    else mutable.value = mutable.value.copy(phase = HomePhase.ENROLL, error = code(error))
+                    if (authorityLost(error)) clearAccount(code(error))
+                    else if (posted) {
+                        mutable.value = mutable.value.copy(phase = HomePhase.RECONCILING)
+                        try { reconcileAccount(stamp) } catch (cancelled: CancellationException) { throw cancelled } catch (failure: Exception) { registrationUnknown(failure, stamp) }
+                    } else showEnrollment(code(error))
                 }
-            }
-            finally { active.close(); request.cancel() }
+            } finally { active.close(); request.cancel() }
         }
     }
 
-    private fun registered(device: RegisteredDevice) {
-        mutable.value = mutable.value.copy(phase = HomePhase.READY, deviceId = device.deviceId, error = null)
-        refresh()
-    }
-
-    private suspend fun reconcileRegistration(stamp: Long) {
-        mutable.value = mutable.value.copy(phase = HomePhase.RECONCILING, error = null)
-        try {
-            val device = api!!.currentDevice(PublicProofKey(approval!!.publicJwk))
-            if (generation != stamp) return
-            if (device != null) registered(device)
-            else mutable.value = mutable.value.copy(phase = HomePhase.ENROLL, error = "device.registration_not_found")
-        } catch (error: CancellationException) { throw error }
-        catch (error: Exception) {
-            if (generation == stamp) {
-                if (authorityLost(error)) fail(code(error))
-                else mutable.value = mutable.value.copy(phase = HomePhase.REGISTRATION_UNKNOWN, error = "device.registration_unknown")
-            }
-        }
+    private fun registrationUnknown(error: Exception, stamp: Long) {
+        if (generation != stamp) return
+        if (authorityLost(error)) clearAccount(code(error))
+        else mutable.value = HomeState(HomePhase.REGISTRATION_UNKNOWN, configuration!!.issuer, "device.registration_unknown", subject = checkpoint!!.session.subject, deviceName = checkpoint!!.deviceName)
     }
 
     fun authenticationCancelled(id: Long) {
         if (mutable.value.authenticationId != id) return
         discardRegistration()
-        if (mutable.value.phase == HomePhase.AUTHENTICATING) mutable.value = mutable.value.copy(phase = HomePhase.ENROLL, biometric = null, authenticationId = null, error = "login.authentication_cancelled")
+        if (mutable.value.phase == HomePhase.AUTHENTICATING) showEnrollment("login.authentication_cancelled")
+    }
+    private fun discardRegistration() { operation?.close(); registration?.cancel(); operation = null; registration = null }
+
+    private fun scheduleRenewal(stamp: Long, verified: LoginSession) {
+        deadline?.cancel()
+        deadline = scope.launch {
+            delay((verified.accessExpiresAt - now() - environment.refreshLeadMillis).coerceAtLeast(1000))
+            if (generation == stamp && session === verified) renew()
+        }
+    }
+    private fun renew() {
+        if (checkpoint == null || session == null) return
+        val stamp = fence(closeKeys = false)
+        mutable.value = HomeState(HomePhase.RENEWING, configuration!!.issuer, subject = checkpoint!!.session.subject)
+        work {
+            try { if (renewCredential(stamp)) install(session!!, Source.REFRESH, stamp) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { handle(error, stamp) }
+        }
     }
 
-    private fun discardRegistration() {
-        operation?.close(); registration?.cancel(); operation = null; registration = null
+    private suspend fun renewCredential(stamp: Long, known: OidcDiscovery? = null): Boolean {
+        val config = configuration!!
+        val saved = checkpoint!!
+        if (saved.refresh != RefreshCheckpoint.READY || !saved.session.hasRefreshToken()) { requireReauthentication(stamp, "login.reauthentication"); return false }
+        val discovery = known ?: http.discovery(config)
+        persist(saved.beginRefresh(now()), stamp)
+        val refreshing = checkpoint!!
+        try {
+            val requested = now()
+            val raw = http.tokenEndpoint(discovery, proof!!.proofSigner()).refresh(refreshing.session)
+            val verified = TokenVerifier.refreshResponse(raw, refreshing.session, config, http.keys(discovery), requested, now())
+            current(stamp)
+            persist(refreshing.refreshed(verified, now()), stamp)
+            session = verified
+            return true
+        } catch (error: CancellationException) { throw error }
+        catch (error: Exception) {
+            current(stamp)
+            // The durable marker already prevents replay if this follow-up write also fails.
+            runCatching { persist(refreshing.requireReauthentication(now()), stamp) }
+            showReauthentication("login.reauthentication")
+            return false
+        }
+    }
+
+    private suspend fun requireReauthentication(stamp: Long, error: String) {
+        checkpoint?.let { persist(it.requireReauthentication(now()), stamp) }
+        current(stamp); showReauthentication(error)
+    }
+    private fun showReauthentication(error: String?) {
+        deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
+        session = null; api = null
+        mutable.value = HomeState(HomePhase.REAUTHENTICATE, configuration!!.issuer, error, subject = checkpoint?.session?.subject ?: "")
+    }
+    private fun browserFailed(error: String) {
+        if (checkpoint == null) clearAccount(error)
+        else { fence(closeKeys = false); showReauthentication(error) }
     }
 
     fun refresh() {
         if (mutable.value.phase != HomePhase.READY || mutable.value.refreshing) return
+        if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
         val stamp = generation
+        work { try { fetchDirectory(stamp) } catch (error: CancellationException) { throw error } catch (error: Exception) { handle(error, stamp) } }
+    }
+    private suspend fun fetchDirectory(stamp: Long) {
         mutable.value = mutable.value.copy(refreshing = true)
-        job = scope.launch {
-            try {
-                val mappedAccount = api!!.me()
-                if (generation != stamp) return@launch
-                account = mappedAccount
-                val hosts = api!!.hosts()
-                if (hosts["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
-                val names = hosts.obj("data").array("items").associate { item ->
-                    val host = item as? JsonObject ?: throw RemoteRequestException("network.invalid_response")
-                    Contract.uuid(host.string("id")) to Contract.boundedText(host.string("alias"), 160)
-                }
-                val response = api!!.runtimes()
-                if (generation != stamp) return@launch
-                if (response["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
-                val items = response.obj("data").array("items").map { item ->
-                    val row = item as? JsonObject ?: throw RemoteRequestException("network.invalid_response")
-                    val hostId = Contract.uuid(row.string("host_id"))
-                    val version = (row.fields["dsh_version"] as? JsonString)?.value ?: ""
-                    if (version.isNotEmpty()) Contract.boundedText(version, 128)
-                    RuntimeRow(Contract.uuid(row.string("id")), hostId, version, names[hostId] ?: "已授权的电脑")
-                }
-                mutable.value = mutable.value.copy(runtimes = items, error = null)
-            } catch (error: CancellationException) { throw error }
-            catch (error: Exception) {
-                if (generation == stamp) {
-                    if (authorityLost(error)) fail(code(error))
-                    else mutable.value = mutable.value.copy(error = code(error), runtimes = if (code(error) == "access.denied") emptyList() else mutable.value.runtimes)
-                }
+        try {
+            val resource = api!!
+            val identity = resource.me()
+            current(stamp)
+            if (identity.userId != checkpoint!!.userId) throw RemoteRequestException("auth.identity_mismatch")
+            val hosts = resource.hosts()
+            current(stamp)
+            if (hosts["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+            val names = hosts.obj("data").array("items").associate { item ->
+                val host = item as? JsonObject ?: throw RemoteRequestException("network.invalid_response")
+                Contract.uuid(host.string("id")) to Contract.boundedText(host.string("alias"), 160)
             }
-            finally { if (generation == stamp) mutable.value = mutable.value.copy(refreshing = false) }
-        }
+            val response = resource.runtimes()
+            current(stamp)
+            if (response["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+            val items = response.obj("data").array("items").map { item ->
+                val row = item as? JsonObject ?: throw RemoteRequestException("network.invalid_response")
+                val hostId = Contract.uuid(row.string("host_id"))
+                val version = (row.fields["dsh_version"] as? JsonString)?.value ?: ""
+                if (version.isNotEmpty()) Contract.boundedText(version, 128)
+                RuntimeRow(Contract.uuid(row.string("id")), hostId, version, names[hostId] ?: "已授权的电脑")
+            }
+            mutable.value = mutable.value.copy(runtimes = items, error = null)
+        } finally { if (generation == stamp) mutable.value = mutable.value.copy(refreshing = false) }
     }
 
-    fun cancel() { fail(null) }
-    private fun fail(error: String?) {
-        generation++; job?.cancel(); deadline?.cancel(); pending?.cancel(); discardRegistration()
-        owner?.close()
+    private fun fence(closeKeys: Boolean): Long {
+        generation++; job?.cancel(); deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
+        if (closeKeys) { owner?.close(); owner = null; proof = null; approval = null; api = null; session = null }
+        return generation
+    }
+    fun cancel() { clearAccount(null) }
+    private fun clearAccount(error: String?) {
         val old = reference
-        owner = null; reference = null; proof = null; approval = null; pending = null; session = null; account = null; api = null
-        mutable.value = HomeState(HomePhase.SIGNED_OUT, configuration?.issuer ?: "", error)
-        if (old != null) scope.launch(Dispatchers.IO) { runCatching { ledger.delete(old) } }
+        val stamp = fence(closeKeys = true)
+        cleanupPending = true
+        mutable.value = HomeState(HomePhase.CLEARING, configuration?.issuer ?: "")
+        work {
+            try {
+                persistence.clear(stamp, old)
+                current(stamp)
+                cleanupPending = false; checkpoint = null; reference = null
+                mutable.value = HomeState(HomePhase.SIGNED_OUT, configuration?.issuer ?: "", error)
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) { if (generation == stamp) mutable.value = HomeState(HomePhase.RECOVERY_ERROR, configuration?.issuer ?: "", "account.cleanup_failed") }
+        }
+    }
+    private fun handle(error: Exception, stamp: Long) {
+        if (generation != stamp) return
+        deadline?.cancel()
+        if (authorityLost(error)) clearAccount(code(error))
+        else { session = null; api = null; discardRegistration(); mutable.value = HomeState(HomePhase.RECOVERY_ERROR, configuration?.issuer ?: "", code(error)) }
     }
     private fun authorityLost(error: Exception): Boolean =
-        (error is LoginException && error.failure in setOf(LoginFailure.EXPIRED, LoginFailure.IDENTITY)) ||
-            (error is RemoteRequestException && error.code in setOf("auth.expired", "auth.identity_mismatch", "access.organization_missing", "access.denied", "access.revoked", "device.invalid"))
+        error is LoginException && error.failure == LoginFailure.IDENTITY ||
+            error is RemoteRequestException && error.code in setOf("auth.identity_mismatch", "access.organization_missing", "access.denied", "access.revoked", "device.invalid")
     private fun code(error: Exception): String = when (error) {
         is LoginException -> "login.${error.failure.name.lowercase()}"
         is RemoteRequestException -> error.code
         is DeviceCryptoException -> "device.${error.failure.name.lowercase()}"
         is DeviceProofException -> "auth.proof_invalid"
+        is VaultException -> "vault.${error.failure.name.lowercase()}"
         else -> "network.unavailable"
     }
+    /** Process/owner disposal preserves durable credentials; explicit local exit uses cancel(). */
+    override fun close() { fence(closeKeys = true); scope.cancel() }
 }
 
 @HiltViewModel

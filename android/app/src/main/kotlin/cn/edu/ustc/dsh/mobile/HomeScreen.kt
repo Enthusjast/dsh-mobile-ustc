@@ -28,7 +28,8 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
 @Composable
 fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("${Build.MANUFACTURER} ${Build.MODEL}".trim()) }
-    val nameValid = name.trim().isNotEmpty() && name.trim().toByteArray(Charsets.UTF_8).size <= 160 && name.none { it < ' ' || it == '\u007f' }
+    val displayName = state.deviceName ?: name
+    val nameValid = displayName.trim().isNotEmpty() && displayName.trim().toByteArray(Charsets.UTF_8).size <= 160 && displayName.none { it < ' ' || it == '\u007f' }
     Scaffold { insets ->
         Box(Modifier.fillMaxSize().padding(insets).imePadding(), contentAlignment = Alignment.TopCenter) {
             Column(Modifier.widthIn(max = 600.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 32.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -58,13 +59,22 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                                 Text(state.issuer, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Button(onLogin, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("使用学校账号登录") }
                             }
+                            HomePhase.REAUTHENTICATE -> {
+                                Text("重新验证学校账号后，继续使用此设备的原有登记。", style = MaterialTheme.typography.bodyLarge)
+                                SelectionContainer { Text(state.subject, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                Button(onLogin, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新登录此账号") }
+                            }
+                            HomePhase.RECOVERY_ERROR -> {
+                                Text(if (state.error == "account.cleanup_failed") "本机登录尚未清理完成，请重试退出。" else "暂时无法恢复本机登录。请解锁设备并检查网络后重试。", style = MaterialTheme.typography.bodyLarge)
+                                Button(onLogin, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.error == "account.cleanup_failed") "重试退出" else "重试恢复") }
+                            }
                             HomePhase.ENROLL -> {
                                 Text("账号已验证。为这部手机登记独立密钥后，即可查看获授权的电脑。", style = MaterialTheme.typography.bodyLarge)
                                 SelectionContainer { Text(state.subject, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("设备名称") },
-                                    supportingText = { Text(if (nameValid) "便于在账号中识别这部设备" else "请输入名称，或将名称缩短后重试") },
-                                    isError = !nameValid, singleLine = true, modifier = Modifier.fillMaxWidth())
-                                Button({ onRegister(name) }, enabled = nameValid, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认并登记设备") }
+                                OutlinedTextField(value = displayName, onValueChange = { name = it }, label = { Text("设备名称") },
+                                    supportingText = { Text(if (state.deviceName != null) "继续核对原设备登记" else if (nameValid) "便于在账号中识别这部设备" else "请输入名称，或将名称缩短后重试") },
+                                    enabled = state.deviceName == null, isError = !nameValid, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                Button({ onRegister(displayName) }, enabled = nameValid, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认并登记设备") }
                                 if (state.securitySetupRequired) OutlinedButton(onSecuritySettings, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("前往安全设置") }
                             }
                             HomePhase.READY -> {
@@ -74,13 +84,16 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                             }
                             HomePhase.REGISTRATION_UNKNOWN -> {
                                 Text("尚未核对设备登记结果。请保持本机登录并检查网络，再查询登记状态。", style = MaterialTheme.typography.bodyLarge)
-                                Button({ onRegister(name) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("核对设备登记") }
+                                Button({ onRegister(displayName) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("核对设备登记") }
                             }
                             else -> {
                                 Row(Modifier.semantics { liveRegion = LiveRegionMode.Polite }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                                     Text(when (state.phase) {
                                         HomePhase.LOADING -> "正在准备登录"
+                                        HomePhase.RECOVERING -> "正在恢复本机登录"
+                                        HomePhase.RENEWING -> "正在更新登录信息"
+                                        HomePhase.CLEARING -> "正在清理本机登录"
                                         HomePhase.STARTING -> "正在连接学校认证"
                                         HomePhase.BROWSER -> "等待浏览器完成登录"
                                         HomePhase.EXCHANGING -> "正在验证登录信息"
@@ -95,9 +108,14 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                         state.error?.let { error ->
                             Text(errorText(error), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                            if (error == "vault.lock_required" && state.phase != HomePhase.ENROLL) {
+                                OutlinedButton(onSecuritySettings, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("前往安全设置") }
+                            }
                         }
-                        if (state.phase !in setOf(HomePhase.LOADING, HomePhase.UNCONFIGURED, HomePhase.INVALID_CONFIGURATION, HomePhase.SIGNED_OUT)) {
-                            TextButton(onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.phase == HomePhase.READY) "退出本机登录" else "取消并退出登录") }
+                        if (state.phase !in setOf(HomePhase.LOADING, HomePhase.CLEARING, HomePhase.UNCONFIGURED, HomePhase.INVALID_CONFIGURATION, HomePhase.SIGNED_OUT)) {
+                            TextButton(onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                Text(if (state.phase in setOf(HomePhase.READY, HomePhase.REAUTHENTICATE)) "退出本机登录" else if (state.phase == HomePhase.RECOVERY_ERROR) "清除本机登录" else "取消并退出登录")
+                            }
                         }
                     }
                 }
@@ -125,6 +143,13 @@ private fun errorText(code: String): String = when (code) {
     "login.invalid_callback" -> "没有接受此登录返回，请继续原来的登录或重新开始。"
     "login.expired", "auth.expired", "login.identity" -> "登录信息已失效或未通过验证，请重新登录。"
     "login.cancelled", "login.authentication_cancelled" -> "本次确认已取消，可以重新操作。"
+    "login.reauthentication", "auth.reauthentication_required" -> "需要重新验证学校账号，原设备密钥会保留。"
+    "login.account_mismatch" -> "请选择原学校账号，或先退出本机登录后切换账号。"
+    "auth.identity_mismatch" -> "账号身份信息已变化，请重新登录并登记。"
+    "login.configuration" -> "安装包配置已变化，无法复用原登录。请核对配置或清除本机登录。"
+    "vault.lock_required" -> "请先设置安全锁屏，再继续保存本机登录。"
+    "vault.locked" -> "请解锁设备后重试恢复。"
+    "vault.key_missing", "vault.corrupt", "vault.unavailable", "vault.conflict" -> "本机登录暂时无法读取或保存，请重试恢复。"
     "device.lock_required", "device.biometric_required" -> "请先设置安全锁屏和受支持的生物识别，再继续登记。"
     "device.key_invalidated", "device.key_missing" -> "设备密钥已失效，请退出本机登录后重新登记。"
     "access.denied", "access.revoked", "device.invalid" -> "当前设备没有访问权限，请检查设备登记和授权。"
