@@ -7,6 +7,8 @@ import cn.edu.ustc.dsh.session.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.security.SecureRandom
@@ -113,6 +115,7 @@ class SessionReader internal constructor(
         }
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun consume(connected: ReadRelayConnection): Unit = coroutineScope {
         mutable.value = SessionReadState(SessionReadPhase.SYNCING, cached())
         val request = UUID.randomUUID().toString()
@@ -180,7 +183,12 @@ class SessionReader internal constructor(
                 }
                 if (timeout <= 0) throw SessionDataException()
                 // A new page may be queued while no frames arrive; notice its deadline promptly.
-                val frame = withTimeoutOrNull(minOf(timeout, 100L)) { incoming.receive() } ?: continue
+                // Select atomically; timeout cancellation of Channel.receive can otherwise
+                // discard an element that arrived at the cancellation boundary.
+                val frame = select<JsonObject?> {
+                    incoming.onReceive { it }
+                    onTimeout(minOf(timeout, 100L)) { null }
+                } ?: continue
                 val type = frame.string("type")
                 when (type) {
                     "pong" -> {

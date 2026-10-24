@@ -215,6 +215,20 @@ class RelayNetworkTest {
         }
     }
 
+    @Test fun denseLiveEventsSurviveIdleAndPageDeadlinesWithoutAReplacement(): Unit = runBlocking {
+        val fixture = ReadPeer(listOf(user(1, "opening")), 1, true); fixture.enqueue()
+        SessionReader(api(), device, runtime, sessionId, scope, this, SessionReaderOptions(pageMillis = 180)).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            reader.loadOlder() // The peer deliberately leaves this page unanswered.
+            for (seq in 2L..17L) { delay(100); fixture.send("session.event", user(seq, "live-$seq")) }
+            val current = reader.await { it.window?.cursor == 17L }
+            assertEquals((1L..17L).toList(), current.window!!.records.map { it.seq })
+            assertEquals(1L, current.window.openingCursor)
+            assertEquals("network.page_timeout", current.pageError); assertFalse(current.loadingOlder)
+            assertEquals(2, server.requestCount)
+        }
+    }
+
     @Test fun disconnectUsesAFreshTicketAndSnapshotAndRevocationClearsAllCachedContent(): Unit = runBlocking {
         val first = ReadPeer(listOf(user(0, "cached")), 0); first.enqueue()
         val reader = SessionReader(api(), device, runtime, sessionId, scope, this, SessionReaderOptions(backoffMillis = { 60_000 }))
