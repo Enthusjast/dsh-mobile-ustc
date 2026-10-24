@@ -4,7 +4,7 @@
 
 M0 支持工作区白名单内根会话的列表、创建、文本 queue / steer、中断、可用模型列表和选择、快照、固定切点历史分页和 assistant 流，以及本地单次工具审批、普通提问和计划确认。模型选项从当前桌面目录校验；不接受手机指定桌面未注册的 provider、model 或 reasoning effort。DSH 原生会话 ID 保留在映射层，对外用按 profile 隔离的稳定 UUID。
 
-插件仅在本机 IPC 上监听：Linux / macOS 使用权限 0700 父目录内的 Unix socket，Windows 使用按 runtime 隔离、`readableAll` 与 `writableAll` 均关闭的命名管道。修改示例配置为实际 profile 的稳定 UUID、绝对路径和已存在 preset：
+本机 IPC 是显式选择的调试入口；仅使用 Relay 时可省略 `socketPath`。启用 IPC 时：Linux / macOS 使用权限 0700 父目录内的 Unix socket，Windows 使用按 runtime 隔离、`readableAll` 与 `writableAll` 均关闭的命名管道。修改示例配置为实际 profile 的稳定 UUID、绝对路径和已存在 preset：
 
 ```yaml
 - id: ustc-remote-control
@@ -58,11 +58,13 @@ curl --unix-socket /tmp/dsh-remote-private/probe.sock http://localhost/m0/probe
 
 受保护工具在原生审批服务中等待本地应答，并通过最终 guard 检查当前执行 token。前置 listener 跳过等待或桌面入口直接返回允许时，guard 仍拒绝执行。这只验证了已声明工具经 DSH ToolRuntime 的路径；底层 capability、真实微信 / 桌面共存及完整企业策略需另行组合验收。
 
-普通提问与工具批准分开处理。主机已接入 timed question 的原生前台 claim、超时 continued 投影与迟到消息路径，已用本机 npm DSH 服务及真实工具循环验证；Relay 已通过独立 `question.timed.v1` 接入，支持按订阅领取 / 释放等待和持久迟到消息；本机 Go/PostgreSQL/DSH 联合测试已通过，Android UI 仍待实现。生命周期、重载与验收范围见 [timed question 适配记录](../../docs/timed-question-adapter.md)。文件、归档、子 Agent 接管、签名审批、学校身份和账号切换仍未交付。Windows 命名管道代码已实现，仍需发行包及 Windows 实机验收。
+普通提问与工具批准分开处理。主机已接入 timed question 的原生前台 claim、超时 continued 投影与迟到消息路径，已用本机 npm DSH 服务及真实工具循环验证；Relay 已通过独立 `question.timed.v1` 接入，支持按订阅领取 / 释放等待和持久迟到消息；本机 Go/PostgreSQL/DSH 联合测试已通过，Android UI 仍待实现。生命周期、重载与验收范围见 [timed question 适配记录](../../docs/timed-question-adapter.md)。文件、归档、子 Agent 接管、完整复合执行适配、学校身份和账号切换仍待交付或验收。Windows 命名管道代码已实现，仍需发行包及 Windows 实机验收。
 
 Relay 双方协商 `question.blocking.v1` 后，普通阻塞式问题和计划确认随会话订阅发送待答快照。回答须绑定会话与 epoch、具备 `question.answer` 权限，并经加密命令日志记录；多设备只能完成一次，重试返回持久结果。问题回答不能应答工具审批。协议与阻塞式问题限制见 [问题应答说明](../../docs/question-protocol.md)。
 
-签名审批已加入 JCS 上下文绑定、ES256 JWS 验证、Go / TypeScript 共享样例，以及加密的一次性主机审批日志。日志使用 SQLite schema 2，自动迁移旧命令记录；已用本机 DSH guard 夹具验证事务消费、竞争、重启和失败关闭。真实权限 / 认证强度提供器、回调 / guard 生产接线和远程审批传输仍未接入，不声明可远程签名批准工具。字段和生命周期见 [审批签名记录](../../docs/approval-signatures.md) 与 [主机审批日志](../../docs/approval-journal.md)。
+正式插件现在支持显式提供的签名审批集成：`createRemoteControlPlugin(hostCredentials, signedOptions)`。`signedOptions` 提供已登记的 host/installation 身份、匹配控制面的 policyVersion/requiredAssurance、独立安装的 authority 公钥锚，以及可选的可信 capability 分类和资源版本读取器。默认保护全部受管理调用，不把原型的 `highRiskTools` 名单当作完整企业风险分类。工作区必须带唯一 `remoteId`；实际执行目录由原生 WorkingDirectory 服务读取，并再次核对物理根目录与实时资源。示例与限制见 [原生签名审批接入](../../docs/approval-native.md)。
+
+签名模式使用真实原生审批服务并保留其拒绝策略，手机决定与原生允许必须同时成立。本机未签名 `interaction.answer` 无法批准该模式。最终 guard 校验后，公开工具定义的本体适配器在异步包装器之后提交一次性消费；signal 约束再次检查租约、目录和工具替换，阻止过期调度及重试复用。运行时 / 网络断开使未消费请求失效，不恢复旧 Promise；已开始的工具保留实际结果。SQLite schema 3 记录待确认结果，直到匹配指纹的服务端确认；重连补报事实，不重放工具。真实 Go / PostgreSQL / npm DSH CLI 已走通 Bash 允许一次、篡改签名不消费、拒绝、取消与持久结果对账，学校 IdP、Android、生产密钥供给及其它 capability / 平台路径仍有验收缺口。
 
 每个 runtime 使用独立 SQLite WAL 命令日志。修改命令在调用 DSH 前先提交 `host_accepted`；`session.create` 在创建结果 flush 成功后才返回确定结果，`message.submit` 在 DSH 接受且 `sessions.flush()` 持久检查点成功后记录 `agent_queued`，其它已完成操作记为 `settled`。日志以 request_id 和规范化操作摘要去重；同 ID 不同内容返回冲突。消息重试复用 DSH 原生 requestId，可在插件重启后再次提交并避免重复插入；其它处于 dispatching 的操作标为 `outcome_unknown`，不会自动重放。数据库保存 AES-256-GCM 加密的命令 / 结果正文，收到持久确认后清除命令正文；请求摘要和状态保留。最多保留 100,000 条幂等记录及 4,096 条未完成正文，达到上限后拒绝新修改，不淘汰旧 request_id。
 

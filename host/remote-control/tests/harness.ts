@@ -77,6 +77,7 @@ export async function host(options: { probe?: boolean; timeoutMs?: number; direc
     { id: 'questions', name: '@deepseek-ai/dsh-user-questions' },
     { id: 'defaults', name: '@deepseek-ai/dsh-agent-default-model', config: { provider: 'fixture', model: 'fixture' } },
     { id: 'fs', name: '@deepseek-ai/dsh-fs-local' },
+    { id: 'working-directory', name: '@deepseek-ai/dsh-working-directory' },
     { id: 'attachments', name: '@deepseek-ai/dsh-attachment-local', config: { dshHome: directory } },
     { id: 'credentials', name: '@deepseek-ai/dsh-credentials-local', config: { path: join(directory, 'credentials.yaml') } },
     { id: 'connection', name: '@deepseek-ai/dsh-client-connection' },

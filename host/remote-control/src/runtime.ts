@@ -14,13 +14,12 @@ const definiteRejections = new Set([
 export type CommandStateObserver = (state: CommandState, result?: unknown) => void | Promise<void>
 
 export class ProbeRuntime {
-  readonly epoch = randomUUID()
   private readonly sync: SessionSync
   private readonly commands = new Map<string, { digest: string; result: Promise<unknown> }>()
   private readonly serial = new Map<string, Promise<unknown>>()
   private closed = false
 
-  constructor(readonly client: DshClient, private readonly interactions: InteractionRouter, private readonly journal: CommandJournal = new MemoryCommandJournal(client.runtimeId)) {
+  constructor(readonly client: DshClient, private readonly interactions: InteractionRouter, private readonly journal: CommandJournal = new MemoryCommandJournal(client.runtimeId), readonly epoch = randomUUID()) {
     this.sync = new SessionSync(client, this.epoch, interactions, interactions.timed)
   }
 

@@ -9,6 +9,7 @@ class LocalModel extends LlmAdapter {
     this.questionToolIssued = false
     this.cancelWaitIssued = false
     this.timedQuestionsIssued = new Set()
+    this.signedApprovalsIssued = new Set()
   }
 
   providerInfo(provider) { return { id: provider, name: 'Local DSH integration fixture' } }
@@ -31,6 +32,17 @@ class LocalModel extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index: 0, id, name: 'ask_user_question', argumentsDelta: args }
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'ask_user_question', arguments: args } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    const signedApproval = ['ALLOW', 'REJECT', 'CANCEL'].find(mode => userText.includes(`REMOTE_APPROVAL_${mode}`) && !this.signedApprovalsIssued.has(mode))
+    if (signedApproval) {
+      this.signedApprovalsIssued.add(signedApproval)
+      const args = JSON.stringify({ description: `Signed approval ${signedApproval.toLowerCase()} fixture`, command: `printf authorized >> approval-${signedApproval.toLowerCase()}.txt` })
+      const id = randomUUID()
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id, name: 'bash', argumentsDelta: args }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'bash', arguments: args } }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }

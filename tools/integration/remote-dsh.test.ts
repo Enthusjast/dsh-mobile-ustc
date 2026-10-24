@@ -11,6 +11,9 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayCreateDigest, relayQuestionDigest, relayTimedQuestionDigest } from '../../host/remote-control/src/relay-client.js'
+import { CompactSign } from 'jose'
+import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext, type ApprovalDecision } from '../../host/remote-control/src/approval-contract.js'
+import { canonicalObject } from '../../host/remote-control/src/canonical.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -124,6 +127,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const root = await mkdtemp(join(cluster, 'clients-'))
   const query = (sql: string) => execFileSync(psql, ['-X', '--dbname', database, '-v', 'ON_ERROR_STOP=1', '-At'], { input: sql, encoding: 'utf8' }).trim()
   const signingKey = key(), installationKey = key(), phoneKey = key(), approvalKey = key(), outsiderKey = key(), outsiderApprovalKey = key()
+  const approvalAuthority = key()
   const siblingKey = key(), siblingApprovalKey = key()
   const orgId = randomUUID(), ownerId = randomUUID(), phoneUserId = randomUUID(), outsiderId = randomUUID()
   const jwks = createServer((req, res) => {
@@ -145,10 +149,18 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(address && typeof address === 'object')
   await new Promise<void>(accept => reserved.close(() => accept()))
   const origin = `http://127.0.0.1:${address.port}`
+  const authority = { issuer: 'https://remote.example.edu', key_id: 'dsh-approval-authority/cli-integration', public_jwk: approvalAuthority.jwk, key_jkt: approvalAuthority.jkt, active: true,
+    valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString() }
+  const approvalSigningFile = join(root, 'approval-authority.pem'), approvalPolicyFile = join(root, 'approval-policy.json')
+  await writeFile(approvalSigningFile, approvalAuthority.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+  await writeFile(approvalPolicyFile, JSON.stringify({ policy: { version: 7, assurance_profile: 'fixture/step-up', max_auth_age_seconds: 60 },
+    mappings: [{ profile: 'fixture/step-up', issuer, client_id: 'fixture-phone', acr: 'urn:fixture:verified', required_amr: ['otp'] }],
+    signing: { issuer: authority.issuer, key_id: authority.key_id, private_key_file: approvalSigningFile, valid_from: authority.valid_from, valid_until: authority.valid_until } }), { mode: 0o600 })
   const service = await startProcess(serviceBin, [], {
     PATH: process.env.PATH ?? '', REMOTE_ISSUER: issuer, REMOTE_JWKS_URL: `${issuer}/jwks`, REMOTE_AUDIENCE: 'urn:dsh-e2e',
     REMOTE_CLIENT_IDS: 'fixture-host,fixture-phone', REMOTE_HOST_CLIENT_IDS: 'fixture-host', REMOTE_REQUIRED_SCOPES: 'remote.access',
     REMOTE_PUBLIC_ORIGIN: origin, REMOTE_DATABASE_URL: database, REMOTE_LISTEN_ADDR: `127.0.0.1:${address.port}`,
+    REMOTE_APPROVAL_POLICY_FILE: approvalPolicyFile,
   })
   t.after(async () => { const [code] = await service.stop('SIGTERM'); assert.equal(code, 0, 'Go service did not drain cleanly') })
   await until(async () => {
@@ -161,6 +173,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const token = jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
       iss: issuer, sub: subject, aud: 'urn:dsh-e2e', client_id: clientId, jti: randomUUID(), iat: now(), exp: now() + 300,
       scope: 'remote.access', cnf: { jkt: proofKey.jkt },
+      auth_time: now() - 2, acr: 'urn:fixture:verified', amr: ['otp'],
     })
     let nonce = ''
     return async (method: string, path: string, body?: object | ((proofJTI: string) => object), expected = 200) => {
@@ -227,7 +240,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     "import { createPrivateKey, sign } from 'node:crypto'",
     `import { createRemoteControlPlugin } from ${JSON.stringify(plugin)}`,
     `const privateKey = createPrivateKey({format:'jwk',key:${JSON.stringify(installationKey.privateKey.export({ format: 'jwk' }))}})`,
-    `const plugin = createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(enrollment.installation_id)},credential:${JSON.stringify(credential.credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}}}}})`,
+    `const plugin = createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(enrollment.installation_id)},credential:${JSON.stringify(credential.credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}}}}}, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
     'export const {name,inject,apply}=plugin', '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
@@ -279,18 +292,20 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   })
   const beforeCreate = (await command('session.list', {})).payload.items.length
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
-  const scope = { actions: ['message.submit', 'question.answer', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
+  const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
   await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
-  const validate = new Ajv2020({ strict: true }).compile(schema)
+  const ajv = new Ajv2020({ strict: true }); ajv.addFormat('date-time', value => Number.isFinite(Date.parse(value)))
+  const validate = ajv.compile(schema)
+  const validateApproval = ajv.compile(JSON.parse(await readFile('contracts/ws/v1/approval.schema.json', 'utf8')))
   const connectPhone = async (api: typeof phone, deviceId: string, proofKey: ReturnType<typeof key>, issued?: typeof ticket) => {
     const connectionTicket = issued ?? await api('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
     const socket = new WebSocket(origin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', { headers: { authorization: `DSH-Ticket ${connectionTicket.ticket}` }, perMessageDeflate: false, maxPayload: 65_536 })
-    const collector = new FrameCollector(socket, value => validate(value))
+    const collector = new FrameCollector(socket, value => validate(value) || validateApproval(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
+    const caps = ['approval.signed.v1', 'command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -302,6 +317,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     return collector
   }
   const mobile = await connectPhone(phone, device.device_id, phoneKey, ticket)
+  const approvalWatchId = randomUUID()
+  mobile.send({ v: 1, type: 'approval.subscribe', request_id: approvalWatchId, runtime_id: enrollment.runtime_id, payload: {} })
+  await mobile.wait(frame => frame.type === 'approval.snapshot' && frame.request_id === approvalWatchId)
   const creationId = randomUUID()
   const creation = { v: 1, type: 'session.create', request_id: creationId, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
     payload: { workspace_id: enrollment.workspaces[0].workspace_id, preset: 'standard' } }
@@ -505,8 +523,64 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await answerTimed(unattended.question.question_id, 'agent_queued')
   await mobile.wait(frame => frame.type === 'question.timed.snapshot' && frame.session_id === timedSessionId && frame.payload.items.length === 0, unattended.from)
 
+  const approvalSecrets: string[] = []
+  for (const choice of ['ALLOW', 'REJECT', 'CANCEL'] as const) {
+    const from = mobile.frames.length, promptID = randomUUID(), approvalMarker = `REMOTE_APPROVAL_${choice}_${randomUUID()}`
+    approvalSecrets.push(approvalMarker)
+    mobile.send({ ...submit, request_id: promptID, payload: { mode: 'queue', content: [{ type: 'text', text: approvalMarker }] } })
+    const pending = await mobile.wait(frame => frame.type === 'approval.reference' && frame.session_id === sessionId && frame.payload.status.state === 'pending', from)
+    const approvalID = pending.payload.status.approval_id
+    const detailsID = randomUUID()
+    mobile.send({ v: 1, type: 'approval.details.get', request_id: detailsID, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: sessionId, payload: { approval_id: approvalID } })
+    const detail = await mobile.wait(frame => frame.type === 'approval.details' && frame.request_id === detailsID, from)
+    const context = detail.payload.context as ApprovalContext
+    const binding = approvalBinding(context)
+    assert.equal(context.approval_id, approvalID)
+    assert.equal(context.tool, 'bash')
+    assert.equal(context.workspace.workspace_id, enrollment.workspaces[0].workspace_id)
+    assert.equal(binding.sha256, pending.payload.status.binding_sha256)
+    const sentinel = join(workspace, `approval-${choice.toLowerCase()}.txt`)
+    const commandText = (context.arguments as { command: string }).command
+    approvalSecrets.push(commandText)
+    assert.ok(commandText.includes(`approval-${choice.toLowerCase()}.txt`))
+    if (choice === 'CANCEL') {
+      const id = randomUUID()
+      mobile.send({ v: 1, type: 'session.cancel', request_id: id, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: sessionId, payload: {} })
+      await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === id && frame.payload.state === 'settled', from)
+      await mobile.wait(frame => frame.type === 'approval.reference' && frame.payload.status.approval_id === approvalID && frame.payload.status.host_state === 'cancelled', from)
+      await assert.rejects(readFile(sentinel), { code: 'ENOENT' })
+    } else {
+      const decision: ApprovalDecision = { domain: 'dsh-mobile-ustc/approval-decision/v1', protocol_version: 1,
+        host_id: context.host_id, installation_id: context.installation_id, runtime_id: context.runtime_id, runtime_epoch: context.runtime_epoch,
+        session_id: context.session_id, approval_id: context.approval_id, execution_id: context.execution_id, binding_sha256: binding.sha256,
+        decision: choice === 'ALLOW' ? 'allow_once' : 'reject', user_id: phoneUserId, device_id: device.device_id, key_version: device.key_version,
+        policy_version: context.policy_version, nonce: context.nonce, issued_at: new Date().toISOString(), expires_at: context.expires_at }
+      const proof = await new CompactSign(canonicalObject(decision)).setProtectedHeader({ alg: 'ES256', kid: approvalKeyID(device.device_id, device.key_version), typ: APPROVAL_JWS_TYPE }).sign(approvalKey.privateKey)
+      const connection = mobile.frames.find(frame => frame.type === 'hello.ok').payload.connection_id
+      if (choice === 'ALLOW') {
+        const parts = proof.split('.'); parts[2] = (parts[2]![0] === 'A' ? 'B' : 'A') + parts[2]!.slice(1)
+        await phone('POST', `/v1/approvals/${approvalID}/decisions`, { connection_id: connection, decision_jws: parts.join('.') }, 400)
+        assert.equal(query(`select state from approvals where id='${approvalID}'`), 'pending')
+        await assert.rejects(readFile(sentinel), { code: 'ENOENT' })
+      }
+      const accepted = await phone('POST', `/v1/approvals/${approvalID}/decisions`, { connection_id: connection, decision_jws: proof })
+      assert.equal(accepted.delivery, 'forwarded')
+      const expected = choice === 'ALLOW' ? 'settled' : 'denied'
+      const observed = await mobile.wait(frame => frame.type === 'approval.reference' && frame.payload.status.approval_id === approvalID && frame.payload.status.host_state === expected, from)
+      if (choice === 'ALLOW') {
+        assert.equal(observed.payload.status.execution_outcome, 'succeeded')
+        assert.equal(await readFile(sentinel, 'utf8'), 'authorized', 'the protected native Bash ran more than once')
+        const retry = await phone('POST', `/v1/approvals/${approvalID}/decisions`, { connection_id: connection, decision_jws: proof })
+        assert.equal(retry.delivery, 'recorded')
+        assert.equal(await readFile(sentinel, 'utf8'), 'authorized')
+      } else await assert.rejects(readFile(sentinel), { code: 'ENOENT' })
+    }
+    await mobile.wait(frame => frame.type === 'session.event' && frame.session_id === sessionId && frame.payload.type === 'turn/end', from)
+    await until(async () => query(`select count(*) from audit_log where action='approval.result' and metadata->>'approval_id'='${approvalID}'`) !== '0' ? true : undefined, 'native approval result audit')
+  }
+
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, cancelMarker, questionMarker, answerMarker, ...timedSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
+  for (const secret of [marker, cancelMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
@@ -532,5 +606,6 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
+  t.diagnostic('The normal plugin negotiated signed approval: current Bash context, invalid-proof nonconsumption, phone allow/reject/cancel, one actual execution, duplicate decision reconciliation and durable native result reporting passed through the real Go service.')
   t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, questions, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

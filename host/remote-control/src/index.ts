@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { randomUUID } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
 import { DshClient, type Workspace } from './dsh-client.js'
 import { defaultCommandJournalPath, PersistentCommandJournal } from './command-journal.js'
@@ -7,7 +8,10 @@ import { InteractionRouter } from './interaction-router.js'
 import { ProbeRuntime } from './runtime.js'
 import { startDebugServer } from './debug-server.js'
 import { startHostRelay, type HostCredentialProvider } from './relay-client.js'
+import { SignedApprovals, type SignedApprovalOptions } from './signed-approvals.js'
+import { RelayApprovals } from './relay-approvals.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
+export type { SignedApprovalOptions } from './signed-approvals.js'
 
 export const name = 'ustc-remote-control'
 export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections']
@@ -38,7 +42,7 @@ export const Config: z<Config> = z.object({
 })
 
 /** Opt-in M0 integration into the current Cordis profile; no default export. */
-export async function apply(ctx: Context, config: Config = {}, credentials?: HostCredentialProvider): Promise<void> {
+export async function apply(ctx: Context, config: Config = {}, credentials?: HostCredentialProvider, signedOptions?: SignedApprovalOptions): Promise<void> {
   if (!config.enabled) return
   const options = Config(config)
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.runtimeId!)) {
@@ -48,6 +52,8 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
   if (options.relayUrl && (!credentials || !options.applicationVersion)) {
     throw new Error('remote-control Relay requires an external host credential provider and applicationVersion')
   }
+  if (signedOptions && (!options.relayUrl || !credentials)) throw new Error('signed approval requires an authenticated Relay connection')
+  if (!options.socketPath && !options.relayUrl) throw new Error('remote-control requires an explicit local socket or Relay endpoint')
   const managed = (agent: Agent | undefined): boolean => {
     const seen = new Set<string>()
     let session = agent?.session
@@ -67,16 +73,20 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
     const journalPath = options.commandJournalPath || defaultCommandJournalPath(options.runtimeId!)
     const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!)
     let runtime: ProbeRuntime | undefined
+    let signed: SignedApprovals | undefined
     try {
-      const interactions = new InteractionRouter(ctx, options.runtimeId!, managed, options.highRiskTools!, options.interactionTimeoutMs!)
-      runtime = new ProbeRuntime(client, interactions, journal)
+      const epoch = randomUUID()
+      const interactions = new InteractionRouter(ctx, options.runtimeId!, managed, signedOptions ? [] : options.highRiskTools!, options.interactionTimeoutMs!)
+      if (signedOptions) signed = new SignedApprovals(ctx, options.runtimeId!, epoch, journal.approvals(epoch), workspaces, managed, options.interactionTimeoutMs!, signedOptions)
+      runtime = new ProbeRuntime(client, interactions, journal, epoch)
       let server: Awaited<ReturnType<typeof startDebugServer>> | undefined
       let relay: Awaited<ReturnType<typeof startHostRelay>> | undefined
       try {
-        server = await startDebugServer(options.socketPath!, runtime)
+        if (options.socketPath) server = await startDebugServer(options.socketPath, runtime)
         if (options.relayUrl && credentials) relay = startHostRelay({
           url: options.relayUrl, runtime, credentials,
           dshVersion: '0.2.1-rc.2', applicationVersion: options.applicationVersion!, pluginVersion: '0.0.1',
+          ...(signed ? { approvals: binding => new RelayApprovals(signed!, binding) } : {}),
         })
       } catch (error) {
         await relay?.close()
@@ -87,11 +97,12 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
         try { await relay?.close() }
         finally {
           try { await server?.close() }
-          finally { journal.close() }
+          finally { signed?.close(); journal.close() }
         }
       }
     } catch (error) {
       runtime?.close()
+      signed?.close()
       journal.close()
       throw error
     }
@@ -99,10 +110,10 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
 }
 
 /** Build a Cordis plugin entry that receives credentials from an OS-backed integration. */
-export function createRemoteControlPlugin(credentials: HostCredentialProvider) {
+export function createRemoteControlPlugin(credentials: HostCredentialProvider, signedOptions?: SignedApprovalOptions) {
   return {
     name,
-    inject,
-    apply(ctx: Context, config: Config = {}) { return apply(ctx, config, credentials) },
+    inject: signedOptions && !signedOptions.workingDirectory ? [...inject, 'workingDirectory'] : inject,
+    apply(ctx: Context, config: Config = {}) { return apply(ctx, config, credentials, signedOptions) },
   }
 }

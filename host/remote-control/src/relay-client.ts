@@ -8,6 +8,8 @@ import { parseCommand, ProbeError, type Command } from './protocol.js'
 import type { CommandStateObserver } from './runtime.js'
 import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
 import { questionAnswerPayload } from './questions.js'
+import { SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
+import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approvals.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
@@ -120,6 +122,7 @@ export interface HostRelayOptions {
   dshVersion: string
   applicationVersion: string
   pluginVersion: string
+  approvals?: HostApprovalPeerFactory
 }
 
 interface RelaySocket {
@@ -304,10 +307,11 @@ async function proofForHello(
   runtimeId: string,
   runtimeEpoch: string,
   versions: Pick<HostRelayOptions, 'dshVersion' | 'applicationVersion' | 'pluginVersion'>,
+  offered: readonly string[] = capabilities,
 ): Promise<string> {
   const helloDigest = hostHelloDigest([
     'host', runtimeId, runtimeEpoch, versions.dshVersion, versions.applicationVersion,
-    versions.pluginVersion, '1', [...capabilities].sort().join('\n'),
+    versions.pluginVersion, '1', [...offered].sort().join('\n'),
   ])
   const header = encodeJwsPart({ typ: PROOF_TYPE, alg: 'ES256' })
   const payload = encodeJwsPart({
@@ -398,6 +402,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   let stopWatchingCatalog = () => {}
   let catalogRetryTimer: NodeJS.Timeout | undefined
   let sessions: RelaySessions | undefined
+  let approvals: HostApprovalPeer | undefined
   const abortConnection = () => {
     connection.abort()
     socket.terminate()
@@ -411,7 +416,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       throw new ProbeError('auth.proof_invalid')
     }
     const challenge = challengeEnvelope.data.payload
-    const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options)
+    const offered = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY] : [...capabilities]
+    const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
       type: 'hello.proof',
@@ -423,7 +429,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         application_version: options.applicationVersion,
         plugin_version: options.pluginVersion,
         protocol_version: 1,
-        capabilities: [...capabilities],
+        capabilities: offered,
       },
     })
     const ack = helloOkSchema.safeParse(await receiveFrame(queue, 15_000))
@@ -437,6 +443,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       throw new ProbeError('protocol.unsupported')
     }
 
+    if (options.approvals && (!ack.data.payload.capabilities.includes(SIGNED_APPROVAL_CAPABILITY) || !ack.data.payload.capabilities.includes('session.catalog.v1'))) throw new ProbeError('protocol.unsupported')
+
     const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
     if (ack.data.payload.capabilities.includes('session.read.v1')) sessions = new RelaySessions({
       epoch: options.runtime.epoch, client: options.runtime.client,
@@ -449,6 +457,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     let catalogDirty = false
     let snapshotRequested = true
     const deltaSessionIDs = new Set<string>()
+    const catalogBarriers = new Set<{ nativeId: string; resolve(): void; reject(error: Error): void }>()
     const waitForCatalogAck = (snapshotId: string, count: number) => new Promise<void>((resolve, reject) => {
       let timer: NodeJS.Timeout
       const aborted = () => entry.reject(new Error('Relay connection aborted'))
@@ -496,6 +505,13 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
               })
             }
             await acknowledged
+            for (const barrier of [...catalogBarriers]) {
+              const item = items.find(item => item.dsh_session_id === barrier.nativeId)
+              if (item) {
+                if (item.state === 'unavailable' || !item.workspace_id) barrier.reject(new ProbeError('access.denied'))
+                else barrier.resolve()
+              }
+            }
           } finally {
             pendingCatalogAcks.get(snapshotId)?.reject(new Error('Relay catalog publication ended'))
           }
@@ -532,9 +548,24 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       : () => {}
     if (catalogEnabled) requestCatalogRefresh()
 
+    if (options.approvals) approvals = options.approvals({
+      installationId: credential.installationId, connectionId: ack.data.payload.connection_id, signal: connection.signal,
+      send: frame => sendFrame(socket, frame), fail: abortConnection,
+      publishCatalog: (nativeId, signal) => new Promise<void>((resolve, reject) => {
+        if (catalogBarriers.size >= 64 || connection.signal.aborted || signal.aborted) { reject(new ProbeError('runtime.offline')); return }
+        const lifetime = AbortSignal.any([connection.signal, signal])
+        const abort = () => barrier.reject(new ProbeError('runtime.offline'))
+        const cleanup = () => { catalogBarriers.delete(barrier); lifetime.removeEventListener('abort', abort) }
+        const barrier = { nativeId, resolve: () => { cleanup(); resolve() }, reject: (error: Error) => { cleanup(); reject(error) } }
+        catalogBarriers.add(barrier); lifetime.addEventListener('abort', abort, { once: true })
+        requestCatalogRefresh({ kind: 'delta', sessionIds: [nativeId] })
+      }),
+    })
+
     const handleFrame = async (value: unknown) => {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const frame = value as Record<string, unknown>
+        if (approvals && await approvals.handle(value)) return
         if (frame.v === 1 && frame.type === 'pong') return
         if (frame.type === 'session.catalog.ack') {
           const parsed = sessionCatalogAckSchema.safeParse(value)
@@ -610,6 +641,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     try { await reader }
     finally { clearInterval(heartbeat) }
   } finally {
+    approvals?.close()
     sessions?.close()
     if (catalogRetryTimer) clearTimeout(catalogRetryTimer)
     stopWatchingCatalog()

@@ -133,6 +133,15 @@ export class ApprovalLeaseCache {
     } catch { return undefined }
   }
 
+  decision(context: ApprovalContext): ApprovalDecision | undefined {
+    if (this.closed) return undefined
+    try {
+      const entry = this.entries.get(context.approval_id)
+      if (!entry || approvalBinding(context).sha256 !== entry.lease.binding_sha256 || !this.authorization(context,entry.decision)) return undefined
+      return structuredClone(entry.decision)
+    } catch { return undefined }
+  }
+
   close(): void { this.closed = true; this.entries.clear() }
 
   private assertConnection(context: ApprovalContext): void {

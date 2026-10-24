@@ -1,0 +1,43 @@
+# Normal plugin signed approval ownership
+
+The normal plugin now connects native DSH execution to signed approval transport, the verified authority cache, durable one-use consumption and acknowledged result reports. The production Go entrypoint + disposable PostgreSQL + installed npm DSH 0.2.1-rc.2 CLI test exercises this same plugin factory, not a replacement host bridge. Identity, model and credential providers are local fixtures; school SSO, Android and production host key provisioning remain separate gates.
+
+Provision signed approval through trusted process integration:
+
+```js
+import { createRemoteControlPlugin } from '/absolute/path/to/host/remote-control/lib/index.js'
+import { hostCredentials, enrolledIdentity, pinnedAuthorities, executionPolicy } from './trusted-host-integration.js'
+
+export const { name, inject, apply } = createRemoteControlPlugin(hostCredentials, {
+  hostId: enrolledIdentity.host_id,
+  installationId: enrolledIdentity.installation_id,
+  policyVersion: executionPolicy.version,
+  requiredAssurance: executionPolicy.required_assurance,
+  authorities: pinnedAuthorities,
+  requiresApproval: executionPolicy.requiresApproval,
+  resourceFacts: executionPolicy.collectResourceFacts,
+})
+```
+
+These are trusted code/public identity inputs, not phone settings. Policy version/profile must match the configured server, and authority issuer/key/thumbprint/validity are provisioned independently. Startup validates public keys and requires a current anchor. Every configured workspace must have an absolute directory and unique enrolled `remoteId`. The factory additionally injects the native WorkingDirectory service unless a trusted integration supplies its explicit reader. The immutable session-header cwd identifies the enrolled workspace; its current execution directory comes from WorkingDirectory and must remain inside that resolved root.
+
+Omitting `requiresApproval` protects every managed native invocation. An exception callback must be a pure current-capability policy, not an assumed complete tool-name/regex risk classifier. `resourceFacts` is a pure synchronous ownership/version collector, run again before actual dispatch. The default facts bind the physical workspace root, effective relative execution directory, native tool-definition instance and model-facing schema. They do not lock files or freeze all ambient OS state. Resource/capability adapters must supply any stronger preconditions they require. Composite `run_code` is rejected without an explicit resource adapter; its real execution-world/backend integration is not yet an acceptance claim. Child-session catalog/approval support remains incomplete, and managed child high-risk calls fail closed rather than being independently taken over. Missing agents, roots, registered context or supported definition/signal boundaries also deny.
+
+The native owner records the exact token/agent/call/tool/arguments and context before publishing. It keeps questions and plan reviews in their existing independent router. With signed mode enabled, the M0 unsigned approval-answer path cannot mint this owner's permission. The native approval service is still called inside its real open turn, and its policy/denials are preserved. Both the phone proof and a native allowed-once outcome are required. An earlier desktop/automatic allow cannot replace the phone decision; a signed phone rejection or cancellation never dispatches the tool. Unknown intrinsic approval calls without the exact owned invocation mapping return unavailable.
+
+The pinned DSH guard runs before the asynchronous `tools/execute` waterfall. A guard-only consumption check would therefore precede delayed wrappers and the runtime's late definition lookup. The plugin uses two public-definition/execution adapters, tested against the installed package:
+
+1. `tools.guard` validates the approved binding, current connection, cache/lease, effective cwd, live resource facts and definition. It supplies no allow override to other guards and does not spend the durable permit yet.
+2. A signal accessor preserves the original caller cancellation through wrapper replacements and revalidates while the native dispatcher reads/fuses the signal immediately before resolving a body. Registry swaps, changed cwd/resources, mutated token/Agent/call/lineage identity, disposal or expired authority abort before an unadapted replacement can run.
+3. A wrapper on the existing public `ToolDefinition.execute` commits the journal's approved→consumed CAS immediately before that same body. It checks the actual arguments/identity again. It creates no shadow registration and does not alter native scope restrictions. A failed/ignored write grants no body entry.
+4. Weak execution keys retain spent/blocked markers, so retries of one execution cannot invoke the body twice, including after plugin disposal. Untracked calls delegate to the original definition. Disposed owners release their validation callbacks; the lightweight definition wrapper retains only weak negative/spent fences for delayed old executions. Frozen/incompatible definitions or signal descriptors deny rather than bypassing the boundary.
+
+No synchronous network/report write is inserted after permit consumption. Report notifications are queued for a later microtask. The approval/lease timer closes an unstarted dispatch; it is cleared at actual body entry, so a legitimately started long-running tool is not forcibly cut off by the three-second admission lease. Caller cancellation still propagates. Final native pipeline success/failure/cancellation settles the journal; it does not rewrite the phone's signed choice. Existing earlier/later guards can still deny before body entry, and a failed final result does not assert that no side effect happened.
+
+WSS offers `approval.signed.v1` only when this integration is installed. A signed-mode host requires both approval and catalog capabilities; no legacy unsigned fallback is selected if the server is unconfigured. Publication waits for an acknowledged catalog entry for that native session, then sends the canonical context and waits for its registration receipt. A details RPC can confirm registration when its acknowledgement races another event. Paired authority/phone signatures are independently verified, then the local decision commits before the native response is resolved. Bad/expired proofs cannot consume pending state.
+
+Each connection owns its cache, registration waits, finite writer and report sender. Writes are paced at 75 ms, limited to 32 queued frames/512 KiB, and each frame remains within 64 KiB. Catalog barriers and registration waits are bounded to 64; registration waits expire within five seconds or caller/connection cancellation. Result batches reserve four journal facts, retain at most 64 outstanding fingerprints and retry after five seconds. Acknowledgements verify routing, complete fingerprint, decision digest and an appropriate persisted host state/outcome before clearing the exact current local fact.
+
+Disconnect invalidates unconsumed work, aborts native waits, clears cache authority and stops the sender. Already started executions may finish and record their actual result while the same profile remains owned. Reconnect sends durable facts immediately, preserving their original epoch and content-derived correlation IDs; it recreates no native promises. Profile unload/account integration disposal invalidates remaining authority, records unobserved spent work as unknown, aborts credential acquisition, and closes sockets/timers/listeners through Cordis lifecycle cleanup. An uncooperative catalog/credential promise cannot keep the native wait or plugin shutdown alive. Relay-only mode needs no local debug socket; IPC exists only when `socketPath` is explicitly provided.
+
+`npm run verify` covers native allow/reject/no-phone/cancel/never policy, automatic/pre-allow responders, existing guards, live file/cwd changes, after-guard directory changes, async expiry, signal/identity replacement, registry replacement, retries, disposal, a started tool finishing after disconnect, report acknowledgement/retry and uncooperative provider cleanup. The CLI/Go integration signs a real Bash request through the normal factory: a modified proof leaves it pending, allow creates one sentinel, the duplicate decision records the existing result, reject/cancel create none, and native result/audit/outbox states reconcile without persisting command parameters. This is local real-DSH evidence, not real-school authentication, Android, all composite/child capability paths, all OS platforms or target-load acceptance.
