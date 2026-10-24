@@ -33,8 +33,20 @@ const resultPayload = z.strictObject({
 export const ApprovalResultFrame = z.strictObject({ ...scoped, type: z.literal('approval.result'), payload_sha256: sha256, payload: resultPayload })
 const resultFacts = ApprovalResultFrame.omit({ payload_sha256: true, request_id: true, v: true })
 export type ApprovalResultFacts = z.infer<typeof resultFacts>
+export type ApprovalResultFrame = z.infer<typeof ApprovalResultFrame>
 export function approvalResultDigest(value: ApprovalResultFacts): string {
   return createHash('sha256').update(canonicalObject(resultFacts.parse(value))).digest('hex')
+}
+
+/** Content-derived correlation ID; the complete SHA-256 remains the receipt identity. */
+export function makeApprovalResultFrame(value: ApprovalResultFacts): ApprovalResultFrame {
+  const facts = resultFacts.parse(value), digest = approvalResultDigest(facts)
+  const bytes = createHash('sha256').update('dsh-mobile-ustc/approval-report-id/v1\0').update(digest).digest().subarray(0, 16)
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  const requestID = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  return ApprovalResultFrame.parse({ v: 1, request_id: requestID, ...facts, payload_sha256: digest })
 }
 
 export const ApprovalWireFrame = z.discriminatedUnion('type', [

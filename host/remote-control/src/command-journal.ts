@@ -10,7 +10,7 @@ import { encryptJournalBytes, decryptJournalBytes, type Ciphertext } from './jou
 export const MAX_JOURNAL_COMMANDS = 100_000
 const MAX_PENDING_JOURNAL_COMMANDS = 4096
 const MAX_COMMAND_BYTES = 64 * 1024
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 const RUNTIME_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export type CommandState = 'host_accepted' | 'dispatching' | 'agent_queued' | 'settled' | 'rejected' | 'outcome_unknown'
@@ -289,7 +289,7 @@ export class PersistentCommandJournal implements CommandJournal {
           PRAGMA user_version = 1;
           COMMIT;
         `)
-      } else if (version !== 1 && version !== SCHEMA_VERSION) {
+      } else if (version !== 1 && version !== 2 && version !== SCHEMA_VERSION) {
         throw new Error(`unsupported command journal schema version: ${String(version)}`)
       }
       database.exec('BEGIN IMMEDIATE')

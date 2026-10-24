@@ -86,6 +86,125 @@ test('approval decisions persist once; altered proofs do not spend pending state
   assert.throws(()=>h.ledger.settle(context.approval_id,'failed'),/approval.conflict/)
 })
 
+test('durable reports use stable fingerprints and old acknowledgements cannot clear newer native facts', async t => {
+  const h=await fixture(t),context=h.context()
+  h.ledger.register(context)
+  await h.ledger.decide(context.approval_id,await h.sign(context),h.signer.registered,(c,d)=>h.authority(c,d))
+  const [approved]=h.ledger.takeReports()
+  assert.equal(approved?.payload.state,'approved')
+  assert.deepEqual(h.ledger.takeReports(),[])
+  h.ledger.retryReports()
+  assert.deepEqual(h.ledger.takeReports(),[approved])
+  h.ledger.consume(context.approval_id,context,(c,d)=>h.authority(c,d))
+  assert.equal(h.ledger.acknowledgeReport(context.approval_id,approved!.payload_sha256),false)
+  const [consumed]=h.ledger.takeReports()
+  assert.equal(consumed?.payload.state,'consumed')
+  assert.notEqual(consumed!.request_id,approved!.request_id)
+  h.ledger.settle(context.approval_id,'failed')
+  assert.equal(h.ledger.acknowledgeReport(context.approval_id,consumed!.payload_sha256),false)
+  const [settled]=h.ledger.takeReports()
+  assert.equal(settled?.payload.execution_outcome,'failed')
+  assert.equal(h.ledger.acknowledgeReport(context.approval_id,settled!.payload_sha256),true)
+  assert.equal(h.ledger.acknowledgeReport(context.approval_id,settled!.payload_sha256),true)
+  assert.deepEqual(h.ledger.takeReports(),[])
+  await h.reopen()
+  assert.deepEqual(h.ledger.takeReports(),[])
+  assert.throws(()=>h.ledger.consume(context.approval_id,context,(c,d)=>h.authority(c,d)),/approval.stale/)
+})
+
+test('registration acknowledgements only enable factual reporting, including cancellation racing the ack', async t => {
+  const h=await fixture(t),context=h.context()
+  h.ledger.register(context)
+  h.ledger.invalidate(context.approval_id,'cancelled')
+  assert.deepEqual(h.ledger.takeReports(),[])
+  const remote={approval_id:context.approval_id,runtime_id:h.runtime,runtime_epoch:context.runtime_epoch,session_id:context.session_id,execution_id:context.execution_id,
+    binding_sha256:approvalBinding(context).sha256,state:'pending',expires_at:context.expires_at}
+  assert.throws(()=>h.ledger.confirmRegistration({...remote,binding_sha256:'b'.repeat(64)}),/approval.conflict/)
+  h.ledger.confirmRegistration(remote)
+  h.ledger.confirmRegistration(remote)
+  const [report]=h.ledger.takeReports()
+  assert.equal(report?.payload.state,'cancelled')
+  assert.equal(report?.payload.decision_payload_sha256,undefined)
+  assert.equal(JSON.stringify(report).includes((context.arguments as {text:string}).text),false)
+  assert.equal(JSON.stringify(report).includes(context.nonce),false)
+  assert.throws(()=>h.ledger.consume(context.approval_id,context,(c,d)=>h.authority(c,d)),/approval.stale/)
+})
+
+test('unacknowledged final results survive restart while consumed work recovers only as unknown', async t => {
+  const h=await fixture(t),one=h.context(),two=h.context()
+  for(const context of [one,two]) {
+    h.ledger.register(context)
+    await h.ledger.decide(context.approval_id,await h.sign(context),h.signer.registered,(c,d)=>h.authority(c,d))
+    h.ledger.consume(context.approval_id,context,(c,d)=>h.authority(c,d))
+  }
+  h.ledger.settle(one.approval_id,'succeeded')
+  const before=h.ledger.takeReports()
+  const final=before.find(report=>report.payload.approval_id===one.approval_id)!
+  await h.reopen()
+  h.ledger.retryReports()
+  const recovered=h.ledger.takeReports()
+  assert.deepEqual(recovered.find(report=>report.payload.approval_id===one.approval_id),final)
+  assert.equal(recovered.find(report=>report.payload.approval_id===two.approval_id)?.payload.state,'outcome_unknown')
+  for(const report of recovered)assert.equal(report.runtime_epoch,one.runtime_epoch)
+  for(const context of [one,two])assert.throws(()=>h.ledger.consume(context.approval_id,context,(c,d)=>h.authority(c,d)),/approval.stale/)
+})
+
+test('bounded report reservations back off per approval without starving other results', async t => {
+  const h=await fixture(t),contexts=[h.context(),h.context()]
+  for(const context of contexts) {
+    h.ledger.register(context)
+    h.ledger.confirmRegistration({approval_id:context.approval_id,runtime_id:h.runtime,runtime_epoch:context.runtime_epoch,session_id:context.session_id,execution_id:context.execution_id,binding_sha256:approvalBinding(context).sha256,state:'pending',expires_at:context.expires_at})
+    h.ledger.invalidate(context.approval_id)
+  }
+  const [one]=h.ledger.takeReports(1,1000),[two]=h.ledger.takeReports(1,1000)
+  assert.notEqual(one!.payload.approval_id,two!.payload.approval_id)
+  assert.deepEqual(h.ledger.takeReports(1,1000),[])
+  h.advance(1000)
+  assert.equal(h.ledger.takeReports(2,1000).length,2)
+  assert.throws(()=>h.ledger.takeReports(65),/approval.invalid_report/)
+  assert.throws(()=>h.ledger.takeReports(1,60_001),/approval.invalid_report/)
+})
+
+test('schema-two journals migrate encrypted native results into the durable report queue', async t => {
+  const h=await fixture(t),context=h.context()
+  h.ledger.register(context)
+  await h.ledger.decide(context.approval_id,await h.sign(context),h.signer.registered,(c,d)=>h.authority(c,d))
+  h.ledger.consume(context.approval_id,context,(c,d)=>h.authority(c,d))
+  h.ledger.settle(context.approval_id,'succeeded')
+  h.parent.close()
+  const previous=new DatabaseSync(h.path)
+  previous.exec(`DROP INDEX approval_records_reports; ALTER TABLE approval_records DROP COLUMN report_due_at;
+    ALTER TABLE approval_records DROP COLUMN report_pending; ALTER TABLE approval_records DROP COLUMN remote_registered; PRAGMA user_version=2;`)
+  previous.close()
+  await h.reopen()
+  const [report]=h.ledger.takeReports()
+  assert.equal(report?.payload.state,'settled')
+  assert.equal(report?.payload.execution_outcome,'succeeded')
+  assert.deepEqual(h.ledger.get(context.approval_id).context,context)
+})
+
+test('failed report reservations retain the native fact and an ignored ack never clears it', async t => {
+  const h=await fixture(t),context=h.context()
+  h.ledger.register(context)
+  await h.ledger.decide(context.approval_id,await h.sign(context),h.signer.registered,(c,d)=>h.authority(c,d))
+  h.ledger.consume(context.approval_id,context,(c,d)=>h.authority(c,d))
+  h.ledger.settle(context.approval_id,'succeeded')
+  const [report]=h.ledger.takeReports()
+  const sql=new DatabaseSync(h.path)
+  sql.exec(`CREATE TRIGGER ignore_ack BEFORE UPDATE ON approval_records WHEN NEW.report_pending=0 BEGIN SELECT RAISE(IGNORE); END;`)
+  assert.equal(h.ledger.acknowledgeReport(context.approval_id,report!.payload_sha256),false)
+  sql.exec('DROP TRIGGER ignore_ack;')
+  h.ledger.retryReports()
+  sql.exec(`CREATE TRIGGER fail_report BEFORE UPDATE ON approval_records WHEN NEW.report_due_at>OLD.report_due_at BEGIN SELECT RAISE(ABORT,'fixture unavailable'); END;`)
+  assert.throws(()=>h.ledger.takeReports(),/approval.storage_unavailable/)
+  assert.equal(sql.prepare('SELECT state,report_pending FROM approval_records').get()?.state,'settled')
+  assert.equal(sql.prepare('SELECT report_pending FROM approval_records').get()?.report_pending,1)
+  sql.exec('DROP TRIGGER fail_report;');sql.close()
+  await h.reopen()
+  const [recovered]=h.ledger.takeReports()
+  assert.deepEqual(recovered,report)
+})
+
 test('competing owners can commit only one decision and cannot overwrite it with a different actor or choice', async t => {
   const h=await fixture(t), context=h.context(), other=await actor()
   h.ledger.register(context)
@@ -236,7 +355,7 @@ test('version-one command journals migrate without losing their encrypted receip
   previous.exec('DROP TABLE approval_records; DROP TABLE approval_runs; PRAGMA user_version=1;');previous.close()
   const parent=await PersistentCommandJournal.open(h.path,h.runtime);t.after(()=>parent.close())
   assert.equal(parent.admit(request,owner).state,'settled')
-  const database=new DatabaseSync(h.path);assert.equal(database.prepare('PRAGMA user_version').get()?.user_version,2);database.close()
+  const database=new DatabaseSync(h.path);assert.equal(database.prepare('PRAGMA user_version').get()?.user_version,3);database.close()
 })
 
 test('missing key-check metadata cannot reseed a journal containing approvals', async t => {

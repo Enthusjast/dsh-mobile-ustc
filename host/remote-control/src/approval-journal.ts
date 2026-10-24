@@ -5,6 +5,7 @@ import { verifyApprovalDecision, type RegisteredApprovalKey } from './approval-s
 import { authorizedApproval, type ApprovalAuthorization, type ApprovalAuthorizer, type ApprovalGuardAuthorizer } from './approval-authorization.js'
 import { canonicalObject, parseSigningObject } from './canonical.js'
 import { encryptJournalBytes, decryptJournalBytes, type Ciphertext } from './journal-crypto.js'
+import { ApprovalWireStatus, makeApprovalResultFrame, type ApprovalResultFrame } from './approval-protocol.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const DIGEST = /^[0-9a-f]{64}$/
@@ -19,6 +20,7 @@ type Row = {
   context_nonce: Uint8Array; context_ciphertext: Uint8Array; context_tag: Uint8Array;
   decision_nonce: Uint8Array | null; decision_ciphertext: Uint8Array | null; decision_tag: Uint8Array | null;
   decision_sha256: string | null; decided_at: number | null; decision_expires_at: number | null; outcome: ApprovalOutcome | null;
+  remote_registered: number; report_pending: number; report_due_at: number;
 }
 type DecisionData = { compact: string; claims: ApprovalDecision; payload_sha256: string; key_jkt: string; authorization: ApprovalAuthorization }
 export interface ApprovalStatus {
@@ -54,7 +56,15 @@ export function migrateApprovalJournal(database: DatabaseSync): void {
       CREATE INDEX approval_records_state ON approval_records(runtime_id,boot_id,state);
       PRAGMA user_version=2;
     `)
-    else if (version !== 2) throw failure('approval.schema_unsupported')
+    else if (version !== 2 && version !== 3) throw failure('approval.schema_unsupported')
+    if (version !== 3) database.exec(`
+      ALTER TABLE approval_records ADD COLUMN remote_registered INTEGER NOT NULL DEFAULT 0 CHECK(remote_registered IN (0,1));
+      ALTER TABLE approval_records ADD COLUMN report_pending INTEGER NOT NULL DEFAULT 0 CHECK(report_pending IN (0,1));
+      ALTER TABLE approval_records ADD COLUMN report_due_at INTEGER NOT NULL DEFAULT 0 CHECK(report_due_at>=0);
+      UPDATE approval_records SET remote_registered=1,report_pending=1 WHERE decision_sha256 IS NOT NULL;
+      CREATE INDEX approval_records_reports ON approval_records(runtime_id,remote_registered,report_pending,report_due_at,updated_at);
+      PRAGMA user_version=3;
+    `)
     database.exec('COMMIT')
   } catch (error) { try { database.exec('ROLLBACK') } catch {} throw error }
 }
@@ -73,7 +83,7 @@ export class PersistentApprovalJournal {
     const journal = new PersistentApprovalJournal(database, key, runtimeId, epoch, now)
     journal.transaction(() => {
       const time = journal.clock()
-      database.prepare(`UPDATE approval_records SET state=CASE WHEN state='consumed' THEN 'outcome_unknown' ELSE 'invalidated' END, updated_at=?
+      database.prepare(`UPDATE approval_records SET state=CASE WHEN state='consumed' THEN 'outcome_unknown' ELSE 'invalidated' END, updated_at=?,report_pending=remote_registered,report_due_at=0
         WHERE runtime_id=? AND state IN ('pending','approved','consumed')`).run(time, runtimeId)
       database.prepare(`INSERT INTO approval_runs(runtime_id,runtime_epoch,boot_id,active) VALUES(?,?,?,1)
         ON CONFLICT(runtime_id) DO UPDATE SET runtime_epoch=excluded.runtime_epoch,boot_id=excluded.boot_id,active=1`).run(runtimeId, epoch, journal.bootId)
@@ -158,10 +168,12 @@ export class PersistentApprovalJournal {
       const record: DecisionData = { compact, claims:verified.claims, payload_sha256:verified.payload_sha256, key_jkt:signingKey.approval_key_jkt, authorization }
       const encrypted = encryptJournalBytes(this.key, this.aad(row, 'decision'), canonicalObject(record))
       const state = verified.claims.decision === 'allow_once' ? 'approved' : 'denied'
-      const updated = this.database.prepare(`UPDATE approval_records SET state=?,decision_nonce=?,decision_ciphertext=?,decision_tag=?,decision_sha256=?,decided_at=?,decision_expires_at=?,updated_at=?
+      const updated = this.database.prepare(`UPDATE approval_records SET state=?,decision_nonce=?,decision_ciphertext=?,decision_tag=?,decision_sha256=?,decided_at=?,decision_expires_at=?,updated_at=?,remote_registered=1,report_pending=1,report_due_at=0
         WHERE runtime_id=? AND approval_id=? AND boot_id=? AND state='pending'`).run(state, encrypted.nonce, encrypted.ciphertext, encrypted.tag, verified.payload_sha256, now, Date.parse(verified.claims.expires_at), now, this.runtimeId, approvalId, this.bootId)
       if (updated.changes !== 1) throw failure('approval.stale')
-      return { status:this.status(this.required(approvalId)) }
+      const committed = this.required(approvalId)
+      if (committed.state !== state || committed.decision_sha256 !== verified.payload_sha256 || committed.remote_registered !== 1 || committed.report_pending !== 1) throw failure('approval.stale')
+      return { status:this.status(committed) }
     })
     if (result.error) throw result.error
     return result.status!
@@ -206,7 +218,7 @@ export class PersistentApprovalJournal {
       this.context(row)
       if (row.state === 'settled') { if (row.outcome !== outcome) throw failure('approval.conflict'); return this.status(row) }
       if (row.state !== 'consumed') throw failure('approval.stale')
-      const updated = this.database.prepare(`UPDATE approval_records SET state='settled',outcome=?,updated_at=? WHERE runtime_id=? AND approval_id=? AND boot_id=? AND state='consumed'`).run(outcome, this.clock(), this.runtimeId, approvalId, this.bootId)
+      const updated = this.database.prepare(`UPDATE approval_records SET state='settled',outcome=?,updated_at=?,report_pending=remote_registered,report_due_at=0 WHERE runtime_id=? AND approval_id=? AND boot_id=? AND state='consumed'`).run(outcome, this.clock(), this.runtimeId, approvalId, this.bootId)
       if (updated.changes !== 1 || this.required(approvalId).state !== 'settled') throw failure('approval.stale')
       return this.status(this.required(approvalId))
     })
@@ -228,10 +240,66 @@ export class PersistentApprovalJournal {
     this.closed = true
     for (const operation of this.operations) operation.abort(failure('approval.storage_unavailable'))
     this.transaction(() => {
-      this.database.prepare(`UPDATE approval_records SET state=CASE WHEN state='consumed' THEN 'outcome_unknown' ELSE 'invalidated' END,updated_at=?
+      this.database.prepare(`UPDATE approval_records SET state=CASE WHEN state='consumed' THEN 'outcome_unknown' ELSE 'invalidated' END,updated_at=?,report_pending=remote_registered,report_due_at=0
         WHERE runtime_id=? AND boot_id=? AND state IN ('pending','approved','consumed')`).run(this.clock(), this.runtimeId, this.bootId)
       this.database.prepare('UPDATE approval_runs SET active=0 WHERE runtime_id=? AND boot_id=?').run(this.runtimeId, this.bootId)
     }, true)
+  }
+
+  /** Registration acknowledgement is a metadata fact, never approval authority. */
+  confirmRegistration(value: unknown): void {
+    const status = ApprovalWireStatus.parse(value)
+    this.transaction(() => {
+      this.assertOwner()
+      const row = this.required(status.approval_id)
+      this.context(row)
+      if (status.runtime_id !== this.runtimeId || status.runtime_epoch !== row.runtime_epoch || status.session_id !== row.session_id ||
+        status.execution_id !== row.execution_id || status.binding_sha256 !== row.binding_sha256 || Date.parse(status.expires_at) !== row.expires_at ||
+        (row.decision_sha256 && status.decision_payload_sha256 && row.decision_sha256 !== status.decision_payload_sha256)) throw failure('approval.conflict')
+      if (row.remote_registered === 1) return
+      const updated = this.database.prepare(`UPDATE approval_records SET remote_registered=1,report_pending=CASE WHEN state='pending' THEN report_pending ELSE 1 END,report_due_at=0
+        WHERE runtime_id=? AND approval_id=? AND remote_registered=0`).run(this.runtimeId,row.approval_id)
+      if (updated.changes !== 1 || this.required(row.approval_id).remote_registered !== 1) throw failure('approval.stale')
+    })
+  }
+
+  /** Reserve bounded metadata reports; retries use the same content-derived ID. */
+  takeReports(limit = 16, retryAfterMs = 5000): ApprovalResultFrame[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64 || !Number.isSafeInteger(retryAfterMs) || retryAfterMs < 100 || retryAfterMs > 60_000) throw failure('approval.invalid_report')
+    return this.transaction(() => {
+      this.assertOwner()
+      const now = this.clock()
+      const rows = this.database.prepare(`SELECT * FROM approval_records WHERE runtime_id=? AND remote_registered=1 AND report_pending=1 AND state!='pending' AND report_due_at<=?
+        ORDER BY report_due_at,updated_at,approval_id LIMIT ?`).all(this.runtimeId,now,limit) as Row[]
+      return rows.map(row => {
+        const context = this.context(row)
+        if (row.decision_sha256) this.decision(row,context)
+        this.expire(row,now)
+        const report = this.report(row)
+        const updated = this.database.prepare(`UPDATE approval_records SET report_due_at=? WHERE runtime_id=? AND approval_id=? AND report_pending=1 AND state=?`).run(now+retryAfterMs,this.runtimeId,row.approval_id,row.state)
+        if (updated.changes !== 1) throw failure('approval.stale')
+        return report
+      })
+    })
+  }
+
+  acknowledgeReport(approvalId: string, payloadSHA256: string): boolean {
+    if (!DIGEST.test(payloadSHA256)) throw failure('approval.invalid_report')
+    return this.transaction(() => {
+      this.assertOwner()
+      const row = this.required(approvalId)
+      const context = this.context(row)
+      if (row.decision_sha256) this.decision(row,context)
+      if (row.state === 'pending' || !row.remote_registered || this.report(row).payload_sha256 !== payloadSHA256) return false
+      if (!row.report_pending) return true
+      const updated = this.database.prepare(`UPDATE approval_records SET report_pending=0,report_due_at=0 WHERE runtime_id=? AND approval_id=? AND state=? AND report_pending=1`).run(this.runtimeId,approvalId,row.state)
+      return updated.changes === 1 && this.required(approvalId).report_pending === 0
+    })
+  }
+
+  /** A new connection may retry receipts immediately, without reviving execution. */
+  retryReports(): void {
+    this.transaction(() => { this.assertOwner(); this.database.prepare('UPDATE approval_records SET report_due_at=0 WHERE runtime_id=? AND report_pending=1').run(this.runtimeId) })
   }
 
   private clock(): number {
@@ -287,9 +355,15 @@ export class PersistentApprovalJournal {
     if ((row.state === 'pending' || row.state === 'approved') && deadline <= now) this.setState(row, 'expired', now)
   }
   private setState(row: Row, state: ApprovalState, now: number): void {
-    const updated = this.database.prepare('UPDATE approval_records SET state=?,updated_at=? WHERE runtime_id=? AND approval_id=? AND boot_id=? AND state=?').run(state, now, this.runtimeId, row.approval_id, row.boot_id, row.state)
+    const updated = this.database.prepare('UPDATE approval_records SET state=?,updated_at=?,report_pending=remote_registered,report_due_at=0 WHERE runtime_id=? AND approval_id=? AND boot_id=? AND state=?').run(state, now, this.runtimeId, row.approval_id, row.boot_id, row.state)
     if (updated.changes !== 1 || this.required(row.approval_id).state !== state) throw failure('approval.stale')
     row.state = state
+  }
+  private report(row: Row): ApprovalResultFrame {
+    if (row.state === 'pending') throw failure('approval.invalid_report')
+    return makeApprovalResultFrame({ type:'approval.result',runtime_id:this.runtimeId,runtime_epoch:row.runtime_epoch,session_id:row.session_id,
+      payload:{approval_id:row.approval_id,execution_id:row.execution_id,binding_sha256:row.binding_sha256,state:row.state,
+        ...(row.decision_sha256?{decision_payload_sha256:row.decision_sha256}:{}),...(row.outcome?{execution_outcome:row.outcome}:{})} })
   }
   private status(row: Row): ApprovalStatus {
     if (!STATES.has(row.state) || !DIGEST.test(row.binding_sha256)) throw failure('journal.integrity_failed')
