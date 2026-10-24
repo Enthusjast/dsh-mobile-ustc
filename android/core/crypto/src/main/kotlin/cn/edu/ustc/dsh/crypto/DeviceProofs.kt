@@ -59,6 +59,16 @@ object DeviceProofs {
     }
 
     fun nonce(value: String): String = value.also { if (it.length !in 1..256 || it.any { c -> c !in '!'..'~' }) throw DeviceProofException() }
+    fun relayHandshake(signer: DeviceProofSigner, hello: DeviceHello, challenge: DeviceChallenge, runtimeId: String, now: Long): String = proofCheck {
+        Contract.uuid(runtimeId)
+        if (now < 0 || now >= challenge.expiresAt) throw DeviceProofException()
+        val header = jsonObject("alg" to "ES256".json(), "typ" to RELAY_PROOF_TYPE.json())
+        val claims = jsonObject("iss" to hello.deviceId.json(), "aud" to RELAY_PROOF_AUDIENCE.json(), "challenge_id" to challenge.challengeId.json(),
+            "connection_id" to challenge.connectionId.json(), "nonce" to challenge.nonce.json(), "runtime_id" to runtimeId.json(),
+            "hello_sha256" to hello.digest().json(), "iat" to (now / 1000).json(), "jti" to randomId().json())
+        val input = compactInput(header, claims)
+        finish(input, signer.signJose(input.toByteArray(Charsets.US_ASCII)), signer.publicKey)
+    }
     internal fun proofId(value: String): String = Contract.boundedText(value, 256).also { if (it.length < 16) throw DeviceProofException() }
     internal fun hash(value: String): String = Contract.base64url(MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8)))
     internal fun compactInput(header: JsonObject, claims: JsonObject): String = "${Contract.base64url(JsonDocument.of(header).canonicalBytes())}.${Contract.base64url(JsonDocument.of(claims).canonicalBytes())}"

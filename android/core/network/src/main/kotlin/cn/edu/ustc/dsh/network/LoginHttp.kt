@@ -3,7 +3,7 @@ package cn.edu.ustc.dsh.network
 import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.protocol.*
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.*
@@ -11,9 +11,14 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.net.URI
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.Proxy
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import javax.net.ssl.SSLSocket
 
 class RemoteRequestException(val code: String = "network.unavailable") : IllegalStateException(code)
 
@@ -37,6 +42,46 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
     fun resource(config: LoginConfiguration, session: LoginSession, signer: DeviceProofSigner): RemoteApi {
         if (session.issuer != config.issuer || session.clientId != config.clientId || session.deploymentFingerprint != config.fingerprint || session.proofKeyThumbprint != signer.publicKey.thumbprint) throw RemoteRequestException("auth.identity_mismatch")
         return RemoteApi(this, config, session, signer)
+    }
+
+    internal suspend fun relaySocket(uri: URI, ticket: String): BoundedWebSocket = suspendCancellableCoroutine { continuation ->
+        val raw = Socket()
+        val secured = java.util.concurrent.atomic.AtomicReference<SSLSocket?>()
+        fun closeNetwork() { runCatching { raw.close() }; runCatching { secured.get()?.close() } }
+        val task = CoroutineScope(Dispatchers.IO).launch(start = CoroutineStart.LAZY) {
+            var link: BoundedWebSocket? = null
+            try {
+                if (uri.scheme != "wss" || uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null || uri.path != "/v1/realtime") throw RelayException("network.insecure_endpoint")
+                val proxies = client.proxy?.let { listOf(it) } ?: client.proxySelector.select(URI("https://${uri.rawAuthority}${uri.path}"))
+                if (proxies.isEmpty() || proxies.first().type() != Proxy.Type.DIRECT) throw RelayException("network.proxy_unsupported")
+                raw.connect(InetSocketAddress(uri.host, if (uri.port < 0) 443 else uri.port), 10_000)
+                raw.tcpNoDelay = true
+                val tls = client.sslSocketFactory.createSocket(raw, uri.host, if (uri.port < 0) 443 else uri.port, true) as SSLSocket
+                secured.set(tls)
+                if (!continuation.isActive) throw CancellationException()
+                tls.soTimeout = 10_000
+                val spec = client.connectionSpecs.firstOrNull { it.isTls } ?: throw RelayException("network.tls_rejected")
+                val versions = spec.tlsVersions?.map { it.javaName } ?: tls.enabledProtocols.toList()
+                tls.enabledProtocols = tls.supportedProtocols.filter { it in versions && (it == "TLSv1.2" || it == "TLSv1.3") }.toTypedArray()
+                spec.cipherSuites?.let { suites ->
+                    val names = suites.map { it.javaName.removePrefix("SSL_").removePrefix("TLS_") }.toSet()
+                    tls.enabledCipherSuites = tls.enabledCipherSuites.filter { it.removePrefix("SSL_").removePrefix("TLS_") in names }.toTypedArray()
+                }
+                tls.sslParameters = tls.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                tls.startHandshake()
+                if (!client.hostnameVerifier.verify(uri.host, tls.session)) throw RelayException("network.tls_rejected")
+                client.certificatePinner.check(uri.host, tls.session.peerCertificates.toList())
+                tls.soTimeout = 45_000
+                if (!continuation.isActive) throw CancellationException()
+                link = BoundedWebSocket(uri, ticket, tls, ::closeNetwork)
+                continuation.resume(link, onCancellation = { _, value, _ -> value.close() })
+            } catch (error: Exception) {
+                link?.close(); closeNetwork()
+                if (continuation.isActive) continuation.resumeWithException(if (error is RelayException) error else RelayException("network.tls_or_connection_failed"))
+            }
+        }
+        continuation.invokeOnCancellation { task.cancel(); closeNetwork() }
+        task.start()
     }
 
     private suspend fun get(url: String): ByteArray = checked(execute(Request.Builder().url(url).header("Accept", "application/json").header("Cache-Control", "no-store").build())).bytes
@@ -144,6 +189,26 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
 
     suspend fun runtimes(): JsonObject = mutex.withLock { JsonDocument.parse(read("/v1/runtimes")).root }
     suspend fun hosts(): JsonObject = mutex.withLock { JsonDocument.parse(read("/v1/hosts")).root }
+    suspend fun sessions(runtimeId: String): JsonObject = mutex.withLock {
+        Contract.uuid(runtimeId)
+        JsonDocument.parse(read("/v1/runtimes/$runtimeId/sessions")).root
+    }
+
+    suspend fun readTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeReadTicket = mutex.withLock {
+        Contract.uuid(runtimeId); Contract.uuid(deviceId)
+        if (scope.actions != setOf("session.read") || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
+        val body = jsonObject("runtime_id" to runtimeId.json(), "scope" to scope.json())
+        val requestedAt = System.currentTimeMillis()
+        val root = JsonDocument.parse(request("POST", "/v1/realtime/tickets", body)).root
+        root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+        val data = root.obj("data"); data.exactKeys("ticket", "runtime_id", "grant_version", "scope", "expires_at")
+        val token = data.string("ticket")
+        if (Contract.base64url(token).size != 32 || data.string("runtime_id") != runtimeId || !scope.same(RelayScope.parse(data.obj("scope")))) throw RemoteRequestException("auth.identity_mismatch")
+        val expires = relayTime(data.string("expires_at"))
+        if (expires <= System.currentTimeMillis() || expires > requestedAt + 60_000) throw RemoteRequestException("auth.expired")
+        RealtimeReadTicket(http, config, signer, deviceId, runtimeId, data.integer("grant_version"), scope, expires, session.accessExpiresAt, token)
+    }
 
     /** Reconciliation only: never creates or revives a device and never replays a write. */
     suspend fun currentDevice(approvalKey: PublicProofKey): RegisteredDevice? = mutex.withLock {
@@ -200,13 +265,17 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         fun cancel() { once.set(true); signatureRequest.cancel() }
     }
 
-    private suspend fun read(path: String): ByteArray {
+    private suspend fun read(path: String): ByteArray = request("GET", path)
+
+    private suspend fun request(method: String, path: String, body: JsonObject? = null): ByteArray {
         val url = (config.remoteOrigin + path).toHttpUrl()
         repeat(2) { attempt ->
             val access = session.accessTokenForRequest(System.currentTimeMillis())
-            val proof = DeviceProofs.dpop(signer, "GET", url.toString(), System.currentTimeMillis(), nonce, access)
+            val proof = DeviceProofs.dpop(signer, method, url.toString(), System.currentTimeMillis(), nonce, access)
             nonce = null
-            val reply = http.execute(Request.Builder().url(url).header("Authorization", "DPoP $access").header("DPoP", proof.compact).header("Accept", "application/json").header("Cache-Control", "no-store").build())
+            val builder = Request.Builder().url(url).header("Authorization", "DPoP $access").header("DPoP", proof.compact).header("Accept", "application/json").header("Cache-Control", "no-store")
+            if (body != null) builder.post(JsonDocument.of(body).canonicalBytes().toRequestBody("application/json".toMediaType()))
+            val reply = http.execute(builder.build())
             nonce = reply.nonce()
             val challenge = reply.status == 401 && reply.headers.values("WWW-Authenticate").any { it == "DPoP error=\"use_dpop_nonce\"" }
             if (attempt == 0 && challenge && nonce != null) return@repeat

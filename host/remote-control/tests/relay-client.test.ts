@@ -4,6 +4,7 @@ import { createHash, createPrivateKey, generateKeyPairSync, sign, verify } from 
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, startHostRelay } from '../src/relay-client.js'
 import { mobileSessionId, type SessionCatalogChange } from '../src/dsh-client.js'
 
@@ -31,6 +32,11 @@ test('host hello digest matches the Go length-prefixed protocol golden', () => {
     'host', runtimeId, runtimeEpoch, '0.2.1-rc.2', '1.2.3', '0.0.1', '1',
     ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'].join('\n'),
   ]), 'AD-ziN2o1S2R_pQVRbx77zT0m7nbTasOj9q3evX07NY')
+})
+
+test('device hello digest matches the shared Kotlin and Go fixture', () => {
+  const fixture = JSON.parse(readFileSync(new URL('../../../contracts/security/relay-device-hello.json', import.meta.url), 'utf8'))
+  assert.equal(hostHelloDigest(['device', fixture.device_id, '1', [...fixture.capabilities].sort().join('\n')]), fixture.hello_sha256)
 })
 
 test('Relay shutdown does not wait on a credential provider that ignores cancellation', async () => {

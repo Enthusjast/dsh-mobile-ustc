@@ -39,6 +39,7 @@ android {
         manifestPlaceholders["appAuthRedirectScheme"] = "cn.edu.ustc.dsh.mobile"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testInstrumentationRunnerArguments["accountFixture"] = providers.gradleProperty("accountFixture").orElse("false").get()
+        testInstrumentationRunnerArguments["networkFixture"] = providers.gradleProperty("networkFixture").orElse("false").get()
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

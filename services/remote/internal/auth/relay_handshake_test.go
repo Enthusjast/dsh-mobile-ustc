@@ -7,6 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -115,5 +120,28 @@ func TestRelayHelloDigestMatchesNodeGolden(t *testing.T) {
 	const want = "AD-ziN2o1S2R_pQVRbx77zT0m7nbTasOj9q3evX07NY"
 	if got != want {
 		t.Fatalf("relay hello digest=%s, want %s", got, want)
+	}
+}
+
+func TestDeviceHelloDigestMatchesSharedKotlinNodeFixture(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve shared fixture")
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../contracts/security/relay-device-hello.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		DeviceID     string   `json:"device_id"`
+		Capabilities []string `json:"capabilities"`
+		Digest       string   `json:"hello_sha256"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(fixture.Capabilities)
+	if got := RelayHelloDigest("device", fixture.DeviceID, "1", strings.Join(fixture.Capabilities, "\n")); got != fixture.Digest {
+		t.Fatalf("device hello digest mismatch: %s", got)
 	}
 }

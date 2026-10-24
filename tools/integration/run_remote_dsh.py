@@ -2,6 +2,7 @@
 """Run Go/PostgreSQL tests and real npm DSH in a disposable socket-only cluster."""
 
 import os
+import argparse
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,7 +10,18 @@ import tempfile
 
 
 def main():
+    arguments = argparse.ArgumentParser()
+    arguments.add_argument("--kotlin-relay", action="store_true", help="Also run the actual Kotlin Relay client against Go/PostgreSQL over TLS")
+    options = arguments.parse_args()
     repo = Path(__file__).resolve().parents[2]
+    kotlin_classpath = None
+    java = None
+    if options.kotlin_relay:
+        java = shutil.which("java")
+        if not java:
+            raise SystemExit("Install JDK 17 or 21 to run the Kotlin Relay probe.")
+        subprocess.run([str(repo / "android/gradlew"), "-PjvmOnly=true", ":core:network:writeFixtureClasspath"], cwd=repo / "android", check=True)
+        kotlin_classpath = (repo / "android/core/network/build/fixtures/classpath.txt").read_text().strip()
     pg_bin = Path(os.environ.get("REMOTE_TEST_PG_BIN", "/usr/lib/postgresql/18/bin"))
     go = os.environ.get("REMOTE_TEST_GO") or shutil.which("go")
     if not go and Path("/opt/go1.26.10/bin/go").is_file():
@@ -34,6 +46,8 @@ def main():
             subprocess.run(["npm", "run", "build"], cwd=repo, check=True)
             env = dict(os.environ, REMOTE_TEST_CLUSTER_ROOT=root, REMOTE_TEST_DATABASE_URL=dsn,
                        REMOTE_TEST_PSQL=str(pg_bin / "psql"), REMOTE_TEST_PG_DUMP=str(pg_bin / "pg_dump"), REMOTE_TEST_SERVICE_BIN=str(binary))
+            if kotlin_classpath:
+                env.update(REMOTE_TEST_KOTLIN_CLASSPATH=kotlin_classpath, REMOTE_TEST_JAVA=java)
             # Each Go integration test owns a private database in this cluster.
             # Running here ensures the security tests cannot silently skip PG.
             result = subprocess.run([go, "test", "-race", "-count=1", "./..."], cwd=repo / "services/remote", env=env)

@@ -5,6 +5,7 @@ import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.PublicProofKey
 import cn.edu.ustc.dsh.keystore.*
 import cn.edu.ustc.dsh.network.LoginHttp
+import cn.edu.ustc.dsh.network.RemoteApi
 import cn.edu.ustc.dsh.protocol.*
 import com.nimbusds.jose.*
 import com.nimbusds.jose.crypto.ECDSASigner
@@ -41,6 +42,10 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val registrationRequests = AtomicInteger()
     val meRequests = AtomicInteger()
     val hostRequests = AtomicInteger()
+    @Volatile var relayProofReceived = false
+    private var relayScope: RelayScope? = null
+    private var relayProofKey: ECKey? = null
+    private val relayToken = "C".repeat(42) + "A"
     @Volatile var active = false
     @Volatile var revoked = false
     @Volatile var member = true
@@ -135,6 +140,34 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             grantNumber++; refreshSecret = "fixture-refresh-$grantNumber"
             return response(tokenReply(jkt, browserSubject, browserNonce, 120))
         }
+        if (path == "/v1/realtime") {
+            require(request.getHeader("Authorization") == "DSH-Ticket $relayToken" && request.getHeader("Sec-WebSocket-Protocol") == RELAY_SUBPROTOCOL)
+            val connectionId = UUID.randomUUID().toString(); val challengeId = UUID.randomUUID().toString(); val nonce = "D".repeat(42) + "A"
+            return MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "challenge".json(), "payload" to jsonObject(
+                        "connection_id" to connectionId.json(), "challenge_id" to challengeId.json(), "nonce" to nonce.json(), "role" to "device".json(),
+                        "expires_at" to java.time.Instant.ofEpochMilli(System.currentTimeMillis() + 9000).toString().json()))).canonicalText())
+                }
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    try {
+                        val payload = JsonDocument.parse(text).root.obj("payload")
+                        val proof = JWSObject.parse(payload.string("proof"))
+                        require(proof.header.type.toString() == RELAY_PROOF_TYPE && proof.header.jwk == null && proof.verify(ECDSAVerifier(relayProofKey!!)))
+                        val claims = JsonDocument.parse(proof.payload.toBytes()).root
+                        require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
+                        require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
+                        require(claims.string("hello_sha256") == DeviceHello(deviceId, listOf("connection.heartbeat.v1", "session.read.v1")).digest())
+                        relayProofReceived = true
+                        webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
+                            "role" to "device".json(), "connection_id" to connectionId.json(), "device_id" to deviceId.json(), "runtime_id" to "55555555-5555-4555-8555-555555555555".json(),
+                            "grant_version" to 7L.json(), "scope" to relayScope!!.json(), "protocols" to JsonArray(listOf(1L.json())),
+                            "capabilities" to JsonArray(listOf("connection.heartbeat.v1".json(), "session.read.v1".json())), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(),
+                            "server_time" to java.time.Instant.now().toString().json(), "lease_expires_at" to java.time.Instant.ofEpochMilli(System.currentTimeMillis() + 299_000).toString().json()))).canonicalText())
+                    } catch (_: Exception) { failure.set("native Relay proof validation failed"); webSocket.cancel() }
+                }
+            }).setHeader("Sec-WebSocket-Protocol", RELAY_SUBPROTOCOL)
+        }
         require(path.startsWith("/v1/"))
         val access = request.getHeader("Authorization")!!.removePrefix("DPoP ")
         val token = JWSObject.parse(access)
@@ -176,6 +209,14 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (path == "/v1/realtime/tickets") {
+            val body = JsonDocument.parse(request.body.readByteArray()).root
+            require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
+            relayScope = RelayScope.parse(body.obj("scope"))
+            require(relayScope!!.actions == setOf("session.read"))
+            return resourceResponse(data(jsonObject("ticket" to relayToken.json(), "runtime_id" to body.string("runtime_id").json(), "grant_version" to 7L.json(), "scope" to relayScope!!.json(),
+                "expires_at" to java.time.Instant.ofEpochMilli(System.currentTimeMillis() + 30_000).toString().json())), 201)
+        }
         if (path == "/v1/hosts") {
             hostRequests.incrementAndGet()
             return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to "44444444-4444-4444-8444-444444444444".json(), "alias" to "夹具电脑".json(), "state" to "active".json()))))))
@@ -211,6 +252,15 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         PendingKeyLedger(context, ledgerName).add(abandoned)
         DeviceKeyStore(context).use { it.create(abandoned.scope(), DeviceKeyPurpose.PROOF, 1) }
         return abandoned
+    }
+    fun readApi(proof: DeviceKeyHandle): RemoteApi {
+        val now = System.currentTimeMillis()
+        proofJkt = proof.thumbprint; relayProofKey = ECKey.parse(JsonDocument.of(proof.publicJwk).canonicalText()); active = true
+        val login = PendingLogin(OidcDiscovery.parse(JsonDocument.of(discovery()).canonicalBytes(), config), proof.thumbprint, now)
+        val exchange = login.acceptCallback(LoginConfiguration.REDIRECT_URI + "?state=${login.state}&code=network-fixture", now)
+        val keys = IssuerKeys.parse(JsonDocument.of(jsonObject("keys" to JsonArray(listOf(JsonDocument.parse(issuerKey.toPublicJWK().toJSONString()).root)))).canonicalBytes())
+        val verified = TokenVerifier.authorizationCodeResponse(JsonDocument.of(tokenReply(proof.thumbprint, subject, login.nonce, 300)).canonicalBytes(), exchange, keys, System.currentTimeMillis())
+        return http.resource(config, verified, proof.proofSigner())
     }
     override fun close() { vault.clear(); PendingKeyLedger(context, ledgerName).recover(); server.shutdown() }
 }

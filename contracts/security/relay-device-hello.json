@@ -1,0 +1,11 @@
+{
+  "device_id": "22222222-2222-4222-8222-222222222222",
+  "protocols": [
+    1
+  ],
+  "capabilities": [
+    "connection.heartbeat.v1",
+    "session.read.v1"
+  ],
+  "hello_sha256": "BKnT1bjAM_Dk0HwI7BOgPmNfx0LOCPZc1aV6nl2SX_g"
+}
