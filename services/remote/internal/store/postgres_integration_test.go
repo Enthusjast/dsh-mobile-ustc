@@ -931,7 +931,7 @@ func newPostgresIntegrationDatabase(t *testing.T) (context.Context, *Postgres) {
 	if !ok {
 		t.Fatal("resolve integration test source path")
 	}
-	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql", "003_host_credentials.up.sql", "004_realtime_handshake.up.sql", "005_session_creation_commands.up.sql", "006_approval_control.up.sql"} {
+	for _, name := range []string{"001_remote_control.up.sql", "002_enrollment_runtime.up.sql", "003_host_credentials.up.sql", "004_realtime_handshake.up.sql", "005_session_creation_commands.up.sql", "006_approval_control.up.sql", "007_approval_host_results.up.sql"} {
 		migrationPath := filepath.Join(filepath.Dir(sourceFile), "../../../../deploy/sql", name)
 		migration, err := os.ReadFile(migrationPath)
 		if err != nil {

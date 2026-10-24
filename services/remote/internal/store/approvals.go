@@ -52,6 +52,8 @@ type ApprovalStatus struct {
 	Decision      string    `json:"decision,omitempty"`
 	PayloadSHA256 string    `json:"decision_payload_sha256,omitempty"`
 	ExpiresAt     time.Time `json:"expires_at"`
+	HostState     string    `json:"host_state,omitempty"`
+	Outcome       string    `json:"execution_outcome,omitempty"`
 }
 
 func NewApprovalControl(database *Postgres, policy ApprovalPolicy, assurance *auth.AssuranceVerifier) (*ApprovalControl, error) {
@@ -118,7 +120,7 @@ func (control *ApprovalControl) Register(ctx context.Context, connection Runtime
 		return ApprovalStatus{}, err
 	}
 	var active int
-	if err := transaction.QueryRowContext(ctx, `select count(*) from approvals where runtime_id = $1 and state in ('pending', 'decision_received')`, request.RuntimeID).Scan(&active); err != nil {
+	if err := transaction.QueryRowContext(ctx, `select count(*) from approvals where runtime_id = $1 and (state in ('pending', 'decision_received') or (state = 'allowed' and host_state = 'consumed'))`, request.RuntimeID).Scan(&active); err != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
 	}
 	existing, existingConnection, err := readApproval(ctx, transaction, request.ApprovalID)
@@ -373,10 +375,11 @@ func readApproval(ctx context.Context, transaction *sql.Tx, id string) (Approval
 	var connectionID string
 	err := transaction.QueryRowContext(ctx, `
 		select id::text, runtime_id::text, runtime_epoch::text, session_id::text, execution_id::text,
-		       binding_sha256, state, coalesce(decision, ''), coalesce(decision_payload_sha256, ''), expires_at, connection_id::text
+		       binding_sha256, state, coalesce(decision, ''), coalesce(decision_payload_sha256, ''), expires_at, connection_id::text,
+		       coalesce(host_state, ''), coalesce(execution_outcome, '')
 		from approvals where id = $1 and metadata_version = 1 for update`, id).
 		Scan(&status.ApprovalID, &status.RuntimeID, &status.RuntimeEpoch, &status.SessionID, &status.ExecutionID,
-			&status.BindingSHA256, &status.State, &status.Decision, &status.PayloadSHA256, &status.ExpiresAt, &connectionID)
+			&status.BindingSHA256, &status.State, &status.Decision, &status.PayloadSHA256, &status.ExpiresAt, &connectionID, &status.HostState, &status.Outcome)
 	return status, connectionID, err
 }
 
@@ -421,13 +424,14 @@ func approvalChange(ctx context.Context, transaction *sql.Tx, orgID, actorType, 
 // connection disappears: the service cannot assert whether execution occurred.
 func endRuntimeApprovals(ctx context.Context, transaction *sql.Tx, orgID, runtimeID, connectionID string, expiredOnly bool) error {
 	rows, err := transaction.QueryContext(ctx, `
-		update approvals set state = case when state = 'decision_received' then 'outcome_unknown'
+		update approvals set state = case when state = 'decision_received' or host_state = 'consumed' then 'outcome_unknown'
 		    when $3 then 'expired' else 'invalidated' end
-		where runtime_id = $1 and metadata_version = 1 and state in ('pending', 'decision_received')
+		where runtime_id = $1 and metadata_version = 1 and (state in ('pending', 'decision_received') or (state = 'allowed' and host_state = 'consumed'))
 		  and ($2 = '' or connection_id = nullif($2, '')::uuid)
 		  and (not $3 or least(expires_at, coalesce(decision_expires_at, expires_at)) <= clock_timestamp())
 		returning id::text, runtime_epoch::text, session_id::text, execution_id::text,
-		    binding_sha256, state, coalesce(decision, ''), coalesce(decision_payload_sha256, ''), expires_at`,
+		    binding_sha256, state, coalesce(decision, ''), coalesce(decision_payload_sha256, ''), expires_at,
+		    coalesce(host_state, ''), coalesce(execution_outcome, '')`,
 		runtimeID, connectionID, expiredOnly)
 	if err != nil {
 		return ErrDatabaseUnavailable
@@ -436,7 +440,7 @@ func endRuntimeApprovals(ctx context.Context, transaction *sql.Tx, orgID, runtim
 	for rows.Next() {
 		status := ApprovalStatus{RuntimeID: runtimeID}
 		if err := rows.Scan(&status.ApprovalID, &status.RuntimeEpoch, &status.SessionID, &status.ExecutionID,
-			&status.BindingSHA256, &status.State, &status.Decision, &status.PayloadSHA256, &status.ExpiresAt); err != nil {
+			&status.BindingSHA256, &status.State, &status.Decision, &status.PayloadSHA256, &status.ExpiresAt, &status.HostState, &status.Outcome); err != nil {
 			_ = rows.Close()
 			return ErrDatabaseUnavailable
 		}

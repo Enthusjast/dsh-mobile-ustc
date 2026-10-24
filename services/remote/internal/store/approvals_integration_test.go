@@ -710,9 +710,9 @@ func TestPostgresApprovalMigrationInvalidatesLegacyPendingAndPreservesAudit(t *t
 		t.Fatal(err)
 	}
 	_, file, _, _ := runtime.Caller(0)
-	apply := func(direction string) {
+	apply := func(name, direction string) {
 		t.Helper()
-		raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/006_approval_control."+direction+".sql"))
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/"+name+"."+direction+".sql"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -720,7 +720,8 @@ func TestPostgresApprovalMigrationInvalidatesLegacyPendingAndPreservesAudit(t *t
 			t.Fatalf("approval migration %s: %v", direction, err)
 		}
 	}
-	apply("down")
+	apply("007_approval_host_results", "down")
+	apply("006_approval_control", "down")
 	legacyID := approvalTestUUID(t)
 	if _, err := fixture.database.DB.ExecContext(fixture.ctx, `
 		insert into approvals (id, session_id, runtime_epoch, execution_id, call_id, binding_sha256, policy_version, state, expires_at)
@@ -734,7 +735,8 @@ func TestPostgresApprovalMigrationInvalidatesLegacyPendingAndPreservesAudit(t *t
 		approvalTestUUID(t), fixture.request.SessionID, fixture.request.RuntimeEpoch, approvalTestUUID(t), strings.Repeat("b", 64)); err != nil {
 		t.Fatal(err)
 	}
-	apply("up")
+	apply("006_approval_control", "up")
+	apply("007_approval_host_results", "up")
 	var invalidated int
 	if err := fixture.database.DB.QueryRowContext(fixture.ctx, `select count(*) from approvals where metadata_version = 0 and state = 'invalidated'`).Scan(&invalidated); err != nil || invalidated != 2 {
 		t.Fatalf("migration revived legacy approvals: count=%d error=%v", invalidated, err)
