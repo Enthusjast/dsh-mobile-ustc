@@ -73,9 +73,48 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 	if denied.Code != http.StatusForbidden || repo.activeDeviceCall != 1 || repo.listCalls != 0 {
 		t.Fatalf("revoked or unregistered device was not denied before listing: status=%d active-checks=%d list-calls=%d", denied.Code, repo.activeDeviceCall, repo.listCalls)
 	}
+	repo.account = store.AccountIdentity{UserID: "11111111-1111-4111-8111-111111111111", Memberships: []store.OrganizationMembership{
+		{OrganizationID: "33333333-3333-4333-8333-333333333333", Role: "member"},
+	}}
+	me := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodGet,
+		"https://api.example.edu/v1/me?user_id=attacker&organization_id=untrusted", "proof-jti-account-lookup-0001", denied.Header().Get("DPoP-Nonce"))
+	var meBody struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Issuer      string                         `json:"issuer"`
+			Subject     string                         `json:"subject"`
+			UserID      string                         `json:"user_id"`
+			Memberships []store.OrganizationMembership `json:"memberships"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(me.Body.Bytes(), &meBody); err != nil {
+		t.Fatal(err)
+	}
+	if me.Code != http.StatusOK || !meBody.OK || meBody.Data.UserID != repo.account.UserID || len(meBody.Data.Memberships) != 1 ||
+		meBody.Data.Memberships[0] != repo.account.Memberships[0] || meBody.Data.Issuer != issuer || meBody.Data.Subject != "user-ustc-123" ||
+		repo.accountLookup != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.activeDeviceCall != 1 || me.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("identity was not resolved before enrollment from verified claims: status=%d body=%s", me.Code, me.Body.String())
+	}
+	accountNonce := me.Header().Get("DPoP-Nonce")
+	for _, failed := range []struct {
+		err    error
+		status int
+		jti    string
+	}{
+		{store.ErrIdentityNotProvisioned, http.StatusForbidden, "proof-jti-account-unknown-0002"},
+		{store.ErrDatabaseUnavailable, http.StatusServiceUnavailable, "proof-jti-account-outage-0003"},
+	} {
+		repo.accountErr = failed.err
+		response := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodGet, "https://api.example.edu/v1/me", failed.jti, accountNonce)
+		if response.Code != failed.status || strings.Contains(response.Body.String(), `"user_id"`) || strings.Contains(response.Body.String(), `"subject"`) {
+			t.Fatalf("failed identity lookup disclosed an account: status=%d body=%s", response.Code, response.Body.String())
+		}
+		accountNonce = response.Header().Get("DPoP-Nonce")
+	}
+	repo.accountErr = nil
 
 	repo.activeDeviceErr = nil
-	listed := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodGet, requestURI, "proof-jti-active-0003", denied.Header().Get("DPoP-Nonce"))
+	listed := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodGet, requestURI, "proof-jti-active-0003", accountNonce)
 	if listed.Code != http.StatusOK || repo.activeDeviceCall != 2 || repo.listCalls != 1 {
 		t.Fatalf("active device could not list hosts: status=%d active-checks=%d list-calls=%d body=%s", listed.Code, repo.activeDeviceCall, repo.listCalls, listed.Body.String())
 	}

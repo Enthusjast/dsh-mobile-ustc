@@ -26,6 +26,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-
 
 type Repository interface {
 	Ready(context.Context) error
+	AccountIdentity(context.Context, store.UserIdentity) (store.AccountIdentity, error)
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
 	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
 	GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error)
@@ -333,9 +334,14 @@ func (api *API) ready(response http.ResponseWriter, request *http.Request) {
 
 func (api *API) me(response http.ResponseWriter, request *http.Request) {
 	principal, _ := auth.PrincipalFromContext(request.Context())
+	account, err := api.database.AccountIdentity(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject})
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
 	writeData(response, http.StatusOK, map[string]any{
 		"issuer": principal.Issuer, "subject": principal.Subject, "client_id": principal.ClientID,
-		"scopes": sortedScopes(principal.Scopes),
+		"scopes": sortedScopes(principal.Scopes), "user_id": account.UserID, "memberships": account.Memberships,
 	})
 }
 

@@ -47,6 +47,10 @@ class LoginHttpTest {
         "issuer" to "$origin/issuer".json(), "authorization_endpoint" to "$origin/authorize".json(), "token_endpoint" to "$origin/token?tenant=school".json(),
         "jwks_uri" to "$origin/jwks".json(), "response_types_supported" to JsonArray(listOf("code".json())), "id_token_signing_alg_values_supported" to JsonArray(listOf("ES256".json())),
     )).canonicalText()
+    private fun me(config: LoginConfiguration, userId: String = "22222222-2222-4222-8222-222222222222", memberships: List<JsonValue> = listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json()))): String = JsonDocument.of(jsonObject(
+        "ok" to JsonBoolean(true), "data" to jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(),
+            "scopes" to JsonArray(listOf("remote.access".json())), "user_id" to userId.json(), "memberships" to JsonArray(memberships)),
+    )).canonicalText()
     private fun jwt(claims: JsonObject, type: String): String {
         val header = JWSHeader.Builder(JWSAlgorithm.ES256).keyID(issuerKey.keyID).type(JOSEObjectType(type)).build()
         return JWSObject(header, Payload(JsonDocument.of(claims).canonicalText())).apply { sign(ECDSASigner(issuerKey)) }.serialize()
@@ -87,8 +91,8 @@ class LoginHttpTest {
         val session = TokenVerifier.authorizationCodeResponse(raw, exchange, keys, System.currentTimeMillis())
         val api = http.resource(config, session, signer)
         server.enqueue(response("{\"ok\":false,\"error\":{\"code\":\"auth.proof_invalid\"}}", 401).setHeader("DPoP-Nonce", "resource-one").setHeader("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\""))
-        server.enqueue(response(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("issuer" to config.issuer.json(), "subject" to session.subject.json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json()))))).canonicalText()).setHeader("DPoP-Nonce", "resource-two"))
-        assertEquals(session.subject, api.me().string("subject"))
+        server.enqueue(response(me(config)).setHeader("DPoP-Nonce", "resource-two"))
+        assertEquals("22222222-2222-4222-8222-222222222222", api.me().userId)
         val resourceFirst = server.takeRequest(); val resourceSecond = server.takeRequest()
         assertFalse("nonce" in claims(resourceFirst).fields)
         assertEquals("resource-one", claims(resourceSecond).string("nonce"))
@@ -97,7 +101,7 @@ class LoginHttpTest {
         server.enqueue(response("{\"ok\":true,\"data\":[]}"))
         api.runtimes()
         assertEquals("resource-two", claims(server.takeRequest()).string("nonce"))
-        server.enqueue(response(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("issuer" to config.issuer.json(), "subject" to session.subject.json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json()))))).canonicalText()).setHeader("DPoP-Nonce", "registration-nonce"))
+        server.enqueue(response(me(config)).setHeader("DPoP-Nonce", "registration-nonce"))
         val approvalKey = ECKeyGenerator(Curve.P_256).generate()
         val approvalPublic = PublicProofKey(JsonDocument.parse(approvalKey.toPublicJWK().toJSONString()).root)
         val registration = api.prepareRegistration(approvalPublic, "校园手机")
@@ -121,6 +125,14 @@ class LoginHttpTest {
         assertEquals(signer.publicKey.thumbprint, possessionClaims.string("proof_key_jkt"))
         assertEquals("校园手机", body.string("name"))
         assertThrows(RemoteRequestException::class.java) { runBlocking { registration.submit(signed) } }
+        server.enqueue(response(me(config, userId = "33333333-3333-4333-8333-333333333333")))
+        assertEquals("auth.identity_mismatch", assertThrows(RemoteRequestException::class.java) { runBlocking { api.me() } }.code)
+        server.takeRequest()
+        server.enqueue(response(me(config, memberships = emptyList())))
+        val requestsBefore = server.requestCount
+        assertEquals("access.organization_missing", assertThrows(RemoteRequestException::class.java) { runBlocking { api.prepareRegistration(approvalPublic, "校园手机") } }.code)
+        server.takeRequest()
+        assertEquals(requestsBefore + 1, server.requestCount) // Only GET /me, no enrollment write.
     }
 
     @Test fun redirectsOversizedBodiesAndCancellationCannotDiscloseCredentialsOrHangCalls(): Unit = runBlocking {

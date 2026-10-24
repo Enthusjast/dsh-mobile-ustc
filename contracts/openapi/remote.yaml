@@ -23,7 +23,7 @@ paths:
     get:
       responses:
         '200':
-          description: Verified token identity and resource scopes.
+          description: Verified token identity, resource scopes and the authoritative active service user with current organization memberships. Requires a provisioned active user; available before device enrollment. Memberships do not grant runtime access.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:
@@ -31,6 +31,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/MeResponse'
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/devices:
     post:
       requestBody:
@@ -524,12 +526,22 @@ components:
         data:
           type: object
           additionalProperties: false
-          required: [issuer, subject, client_id, scopes]
+          required: [issuer, subject, client_id, scopes, user_id, memberships]
           properties:
             issuer: { type: string, format: uri }
             subject: { type: string }
             client_id: { type: string }
             scopes: { type: array, items: { type: string }, uniqueItems: true }
+            user_id: { type: string, format: uuid }
+            memberships:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [organization_id, role]
+                properties:
+                  organization_id: { type: string, format: uuid }
+                  role: { enum: [member, admin] }
     DeviceRegistration:
       type: object
       additionalProperties: false

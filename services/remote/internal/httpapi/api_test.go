@@ -15,6 +15,10 @@ import (
 
 type fakeRepository struct {
 	readyError              error
+	account                 store.AccountIdentity
+	accountErr              error
+	accountCalls            int
+	accountLookup           store.UserIdentity
 	listCalls               int
 	activeDeviceID          string
 	activeDeviceErr         error
@@ -45,6 +49,11 @@ type fakeRepository struct {
 }
 
 func (fake *fakeRepository) Ready(context.Context) error { return fake.readyError }
+func (fake *fakeRepository) AccountIdentity(_ context.Context, identity store.UserIdentity) (store.AccountIdentity, error) {
+	fake.accountCalls++
+	fake.accountLookup = identity
+	return fake.account, fake.accountErr
+}
 func (fake *fakeRepository) ActiveDevice(context.Context, store.UserIdentity, string) (string, error) {
 	fake.activeDeviceCall++
 	return fake.activeDeviceID, fake.activeDeviceErr
@@ -206,7 +215,7 @@ func TestProtectedRoutesRejectAnonymousRequestsBeforeDatabaseAccess(t *testing.T
 			t.Fatalf("anonymous GET %s status = %d, want 401", target, response.Code)
 		}
 	}
-	if repo.listCalls != 0 {
+	if repo.listCalls != 0 || repo.accountCalls != 0 {
 		t.Fatal("unauthenticated route accessed the repository")
 	}
 }

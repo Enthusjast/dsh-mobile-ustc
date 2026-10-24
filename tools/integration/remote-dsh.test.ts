@@ -200,6 +200,19 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const phone = client('phone', 'fixture-phone', phoneKey)
   const siblingPhone = client('phone', 'fixture-phone', siblingKey)
   const outsider = client('outsider', 'fixture-phone', outsiderKey)
+  const phoneIdentity = await phone('GET', '/v1/me?user_id=untrusted&organization_id=untrusted')
+  assert.equal(phoneIdentity.issuer, issuer)
+  assert.equal(phoneIdentity.subject, 'phone')
+  assert.equal(phoneIdentity.user_id, phoneUserId)
+  assert.deepEqual(phoneIdentity.memberships, [{ organization_id: orgId, role: 'member' }])
+  assert.equal((await owner('GET', '/v1/me')).user_id, ownerId)
+  await client('not-provisioned', 'fixture-phone', key())('GET', '/v1/me', undefined, 403)
+  query(`delete from org_memberships where user_id='${phoneUserId}';`)
+  assert.deepEqual((await phone('GET', '/v1/me')).memberships, [])
+  query(`insert into org_memberships(org_id,user_id,role) values ('${orgId}','${phoneUserId}','member');
+    update users set status='suspended' where id='${phoneUserId}';`)
+  await phone('GET', '/v1/me', undefined, 403)
+  query(`update users set status='active' where id='${phoneUserId}';`)
   const register = (api: typeof phone, proofKey: ReturnType<typeof key>, approval: ReturnType<typeof key>, subject: string) => api('POST', '/v1/devices', proofJTI => ({
     name: subject, proof_public_jwk: proofKey.jwk, approval_public_jwk: approval.jwk,
     approval_proof: jws(approval.privateKey, { alg: 'ES256', typ: 'dsh-device-registration-proof+jwt' }, {

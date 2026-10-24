@@ -123,6 +123,7 @@ private fun errorText(code: String): String = when (code) {
     "device.lock_required", "device.biometric_required" -> "请先设置安全锁屏和受支持的生物识别，再继续登记。"
     "device.key_invalidated", "device.key_missing" -> "设备密钥已失效，请退出本机登录后重新登记。"
     "access.denied", "access.revoked", "device.invalid" -> "当前设备没有访问权限，请检查设备登记和授权。"
+    "access.organization_missing" -> "当前账号不属于此安装包配置的组织，请联系管理员。"
     "auth.proof_invalid" -> "设备证明未通过验证，请重新确认后重试。"
     else -> "暂时无法完成操作，请检查网络后重试。"
 }

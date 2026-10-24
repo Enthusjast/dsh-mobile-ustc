@@ -112,16 +112,20 @@ class TokenEndpoint internal constructor(private val http: LoginHttp, private va
 
 class RemoteApi internal constructor(private val http: LoginHttp, private val config: LoginConfiguration, private val session: LoginSession, private val signer: DeviceProofSigner) {
     private var nonce: String? = null
+    private var mappedUserId: String? = null
     private val mutex = Mutex()
 
     /** Current identity can be queried before registering a device and obtains a fresh nonce. */
-    suspend fun me(): JsonObject = mutex.withLock {
+    suspend fun me(): ServiceAccountIdentity = mutex.withLock { identity() }
+
+    private suspend fun identity(): ServiceAccountIdentity {
         val data = JsonDocument.parse(read("/v1/me")).root
         data.exactKeys("ok", "data")
         if (data["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
-        val me = data.obj("data")
-        meIdentity(me)
-        me
+        val account = ServiceAccountIdentity.parse(data.obj("data"), session.issuer, session.subject, session.clientId, session.scopes, config.organizationId)
+        if (mappedUserId != null && account.userId != mappedUserId) throw RemoteRequestException("auth.identity_mismatch")
+        mappedUserId = account.userId
+        return account
     }
 
     suspend fun runtimes(): JsonObject = mutex.withLock { JsonDocument.parse(read("/v1/runtimes")).root }
@@ -129,10 +133,7 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
 
     suspend fun prepareRegistration(approvalKey: PublicProofKey, name: String): RegistrationRequest = mutex.withLock {
         // A successful /me request obtains a nonce before asking for user auth.
-        val identity = JsonDocument.parse(read("/v1/me")).root
-        identity.exactKeys("ok", "data")
-        if (identity["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
-        meIdentity(identity.obj("data"))
+        identity()
         val jti = DeviceProofs.randomId()
         val prepared = PreparedDeviceRegistration.prepare(session.issuer, session.subject, name, approvalKey, signer.publicKey, jti, System.currentTimeMillis())
         val reserved = nonce; nonce = null
@@ -161,10 +162,6 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
             RegisteredDevice(Contract.uuid(data.string("device_id")), data.integer("key_version", 1, 1))
         }
         fun cancel() { once.set(true); signatureRequest.cancel() }
-    }
-
-    private fun meIdentity(me: JsonObject) {
-        if (me.string("issuer") != session.issuer || me.string("subject") != session.subject || me.string("client_id") != session.clientId) throw RemoteRequestException("auth.identity_mismatch")
     }
 
     private suspend fun read(path: String): ByteArray {

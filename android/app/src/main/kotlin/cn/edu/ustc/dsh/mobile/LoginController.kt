@@ -89,6 +89,7 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
     private var approval: DeviceKeyHandle? = null
     private var pending: PendingLogin? = null
     private var session: LoginSession? = null
+    private var account: ServiceAccountIdentity? = null
     private var api: RemoteApi? = null
     private var registration: RemoteApi.RegistrationRequest? = null
     private var operation: AuthenticatedKeyOperation<DeviceRegistrationProof>? = null
@@ -168,9 +169,9 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
                     TokenVerifier.authorizationCodeResponse(response, exchange, http.keys(attempt.discovery), System.currentTimeMillis())
                 }
                 val resource = http.resource(configuration!!, verified, signer)
-                resource.me()
+                val mappedAccount = resource.me()
                 if (generation != stamp) return@launch
-                session = verified; api = resource
+                session = verified; account = mappedAccount; api = resource
                 mutable.value = HomeState(HomePhase.ENROLL, verified.issuer, subject = verified.subject)
                 deadline = scope.launch {
                     delay((verified.accessExpiresAt - System.currentTimeMillis()).coerceAtLeast(1))
@@ -252,6 +253,9 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
         mutable.value = mutable.value.copy(refreshing = true)
         job = scope.launch {
             try {
+                val mappedAccount = api!!.me()
+                if (generation != stamp) return@launch
+                account = mappedAccount
                 val hosts = api!!.hosts()
                 if (hosts["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
                 val names = hosts.obj("data").array("items").associate { item ->
@@ -285,13 +289,13 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
         generation++; job?.cancel(); deadline?.cancel(); pending?.cancel(); discardRegistration()
         owner?.close()
         val old = reference
-        owner = null; reference = null; proof = null; approval = null; pending = null; session = null; api = null
+        owner = null; reference = null; proof = null; approval = null; pending = null; session = null; account = null; api = null
         mutable.value = HomeState(HomePhase.SIGNED_OUT, configuration?.issuer ?: "", error)
         if (old != null) scope.launch(Dispatchers.IO) { runCatching { ledger.delete(old) } }
     }
     private fun authorityLost(error: Exception): Boolean =
         (error is LoginException && error.failure in setOf(LoginFailure.EXPIRED, LoginFailure.IDENTITY)) ||
-            (error is RemoteRequestException && error.code in setOf("auth.expired", "auth.identity_mismatch", "access.revoked", "device.invalid"))
+            (error is RemoteRequestException && error.code in setOf("auth.expired", "auth.identity_mismatch", "access.organization_missing", "access.denied", "access.revoked", "device.invalid"))
     private fun code(error: Exception): String = when (error) {
         is LoginException -> "login.${error.failure.name.lowercase()}"
         is RemoteRequestException -> error.code
