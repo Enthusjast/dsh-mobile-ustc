@@ -8,7 +8,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 
-enum class LoginFailure { CONFIGURATION, INVALID_RESPONSE, EXPIRED, CANCELLED, IDENTITY, UNAVAILABLE }
+enum class LoginFailure { CONFIGURATION, INVALID_RESPONSE, EXPIRED, CANCELLED, IDENTITY, REAUTHENTICATION, UNAVAILABLE }
 class LoginException(val failure: LoginFailure) : IllegalArgumentException("login: ${failure.name.lowercase()}")
 
 /** Public deployment configuration is provisioned with the app, never from an OAuth callback. */
@@ -16,6 +16,7 @@ class LoginConfiguration private constructor(
     val issuer: String, val clientId: String, val redirectUri: String, val resource: String,
     val audience: String, val remoteOrigin: String, val organizationId: String,
     val scopes: Set<String>, val endpointOrigins: Set<String>, val signingAlgorithms: Set<String>,
+    val fingerprint: String,
 ) {
     companion object {
         const val REDIRECT_URI = "cn.edu.ustc.dsh.mobile:/oauth2redirect"
@@ -35,7 +36,7 @@ class LoginConfiguration private constructor(
             val scopes = strings(root.array("scopes"), 32)
             if ("openid" !in scopes || scopes.none { it != "openid" && it != "offline_access" } || scopes.any { !Regex("[\\x21\\x23-\\x5b\\x5d-\\x7e]{1,128}").matches(it) }) invalid(LoginFailure.CONFIGURATION)
             LoginConfiguration(issuer, Contract.boundedText(root.string("client_id"), 256), REDIRECT_URI, resource,
-                Contract.boundedText(root.string("audience"), 512), remote, Contract.uuid(root.string("organization_id")), scopes, origins, algorithms)
+                Contract.boundedText(root.string("audience"), 512), remote, Contract.uuid(root.string("organization_id")), scopes, origins, algorithms, JsonDocument.of(root).sha256())
         }
         internal fun strings(values: List<JsonValue>, max: Int): Set<String> {
             val strings = values.map { (it as? JsonString)?.value ?: invalid(LoginFailure.CONFIGURATION) }
@@ -48,6 +49,7 @@ class LoginConfiguration private constructor(
 class OidcDiscovery private constructor(
     val configuration: LoginConfiguration, val authorizationEndpoint: String, val tokenEndpoint: String, val jwksUri: String,
     val responseIssuerRequired: Boolean,
+    val refreshAllowed: Boolean,
 ) {
     companion object {
         fun parse(raw: ByteArray, configuration: LoginConfiguration): OidcDiscovery = loginCheck(LoginFailure.CONFIGURATION) {
@@ -80,7 +82,8 @@ class OidcDiscovery private constructor(
             }
             noReservedQuery(authorization, setOf("response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "code_challenge", "code_challenge_method", "resource", "dpop_jkt"))
             noReservedQuery(token, setOf("grant_type", "client_id", "redirect_uri", "code", "code_verifier", "resource", "refresh_token"))
-            OidcDiscovery(configuration, authorization, token, endpoint("jwks_uri", true), responseIssuer == JsonBoolean(true))
+            val refreshAllowed = "grant_types_supported" !in root.fields || "refresh_token" in LoginConfiguration.strings(root.array("grant_types_supported"), 64)
+            OidcDiscovery(configuration, authorization, token, endpoint("jwks_uri", true), responseIssuer == JsonBoolean(true), refreshAllowed)
         }
     }
 }

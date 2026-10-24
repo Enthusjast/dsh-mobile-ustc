@@ -51,16 +51,28 @@ class IssuerKeys private constructor(private val keys: List<JWK>) {
     }
 }
 
+internal enum class VerificationOrigin { AUTHORIZATION_CODE, REFRESH, CACHED_ACCESS, STORED }
+
 /** Secret-bearing session values are never placed in Compose/SavedState or log messages. */
 class LoginSession internal constructor(
     val issuer: String, val subject: String, val clientId: String, val proofKeyThumbprint: String,
-    val accessExpiresAt: Long, val scopes: Set<String>, private val accessToken: String, private val refreshToken: String?,
+    val accessExpiresAt: Long, val scopes: Set<String>, internal val accessToken: String, internal val refreshToken: String?,
+    val verifiedAt: Long, internal val identityNonce: String, internal val identityAudiences: Set<String>,
+    internal val identityAuthorizedParty: String?, internal val authenticationTime: Long?, val deploymentFingerprint: String,
+    private val resourceValidated: Boolean = true, internal val verificationOrigin: VerificationOrigin = VerificationOrigin.AUTHORIZATION_CODE,
 ) {
+    private val refreshSpent = java.util.concurrent.atomic.AtomicBoolean()
     fun accessTokenForRequest(now: Long): String {
-        if (now < 0 || now >= accessExpiresAt) invalid(LoginFailure.EXPIRED)
+        if (!resourceValidated) invalid(LoginFailure.IDENTITY)
+        if (now < verifiedAt || now >= accessExpiresAt) invalid(LoginFailure.EXPIRED)
         return accessToken
     }
-    fun refreshTokenForRequest(): String? = refreshToken
+    fun hasRefreshToken(): Boolean = refreshToken != null
+    /** The caller commits its durable in-flight marker first. Failed exchanges cannot reuse this instance. */
+    fun consumeRefreshTokenForRequest(): String {
+        if (refreshToken == null || !refreshSpent.compareAndSet(false, true)) invalid(LoginFailure.REAUTHENTICATION)
+        return refreshToken
+    }
 }
 
 object TokenVerifier {
@@ -98,7 +110,63 @@ object TokenVerifier {
         val deadline = minOf(accessExpiry, exchange.callbackAt + expiresIn * 1000)
         if (deadline <= now) invalid(LoginFailure.EXPIRED)
         LoginSession(config.issuer, idSubject, config.clientId, login.proofKeyThumbprint, deadline,
-            java.util.Collections.unmodifiableSet(scopes), access, refresh)
+            java.util.Collections.unmodifiableSet(scopes), access, refresh, now, login.nonce, audiences(id),
+            (id.fields["azp"] as? JsonString)?.value, if ("auth_time" in id.fields) id.integer("auth_time", 0) else null, config.fingerprint)
+    }
+
+    /** A decrypted snapshot alone cannot authorize resource calls. Reverify its access JWT first. */
+    fun revalidateStored(previous: LoginSession, config: LoginConfiguration, keys: IssuerKeys, now: Long): LoginSession = loginCheck(LoginFailure.IDENTITY) {
+        if (previous.issuer != config.issuer || previous.clientId != config.clientId || previous.deploymentFingerprint != config.fingerprint) invalid(LoginFailure.IDENTITY)
+        if (now < previous.verifiedAt || now >= previous.accessExpiresAt) invalid(LoginFailure.EXPIRED)
+        val claims = verifiedAccess(previous.accessToken, config, keys, previous.subject, previous.proofKeyThumbprint, now, 0)
+        if (scopes(claims.string("scope")) != previous.scopes || previous.accessExpiresAt > claims.integer("exp", 0, Long.MAX_VALUE / 1000) * 1000) invalid(LoginFailure.IDENTITY)
+        copy(previous, previous.accessToken, previous.refreshToken, previous.accessExpiresAt, previous.scopes, now, VerificationOrigin.CACHED_ACCESS)
+    }
+
+    /** ID tokens are optional during refresh. Any returned one must preserve the original OIDC identity. */
+    fun refreshResponse(raw: ByteArray, previous: LoginSession, config: LoginConfiguration, keys: IssuerKeys, requestedAt: Long, now: Long): LoginSession = loginCheck(LoginFailure.IDENTITY) {
+        if (previous.issuer != config.issuer || previous.clientId != config.clientId || previous.deploymentFingerprint != config.fingerprint) invalid(LoginFailure.IDENTITY)
+        if (requestedAt < previous.verifiedAt || now < requestedAt || now - requestedAt > 120_000) invalid(LoginFailure.EXPIRED)
+        val response = JsonDocument.parse(raw).root
+        if ("error" in response.fields || !response.string("token_type").equals("DPoP", true)) invalid(LoginFailure.IDENTITY)
+        val access = token(response.string("access_token"))
+        val claims = verifiedAccess(access, config, keys, previous.subject, previous.proofKeyThumbprint, now, requestedAt)
+        val granted = scopes(claims.string("scope"))
+        if (!previous.scopes.containsAll(granted)) invalid(LoginFailure.IDENTITY)
+        if ("scope" in response.fields) {
+            val returned = scopes(response.string("scope"))
+            if (!returned.containsAll(config.scopes - setOf("openid", "offline_access")) || !(config.scopes + previous.scopes).containsAll(returned)) invalid(LoginFailure.IDENTITY)
+        }
+        if ("id_token" in response.fields) {
+            val id = jwt(token(response.string("id_token")), config, keys, false)
+            if (identity(id, previous.issuer) != previous.subject || audiences(id) != previous.identityAudiences) invalid(LoginFailure.IDENTITY)
+            val azp = (id.fields["azp"] as? JsonString)?.value
+            if (audiences(id).size > 1 && azp != previous.clientId || "azp" in id.fields && (azp == null || azp != previous.identityAuthorizedParty)) invalid(LoginFailure.IDENTITY)
+            if ("auth_time" in id.fields && id.integer("auth_time", 0) != previous.authenticationTime) invalid(LoginFailure.IDENTITY)
+            if ("nonce" in id.fields && !constantEqual(id.string("nonce"), previous.identityNonce)) invalid(LoginFailure.IDENTITY)
+            if ("at_hash" in id.fields && !constantEqual(id.string("at_hash"), halfHash(access))) invalid(LoginFailure.IDENTITY)
+            if ("c_hash" in id.fields) invalid(LoginFailure.IDENTITY)
+            times(id, now, requestedAt, 86_400)
+        }
+        val refresh = if ("refresh_token" in response.fields) token(response.string("refresh_token")) else previous.refreshToken
+        val expiry = minOf(claims.integer("exp", 0, Long.MAX_VALUE / 1000) * 1000, requestedAt + response.integer("expires_in", 1, 3600) * 1000)
+        if (expiry <= now) invalid(LoginFailure.EXPIRED)
+        copy(previous, access, refresh, expiry, java.util.Collections.unmodifiableSet(granted), now, VerificationOrigin.REFRESH)
+    }
+
+    private fun copy(previous: LoginSession, access: String, refresh: String?, expiry: Long, scopes: Set<String>, now: Long, origin: VerificationOrigin) = LoginSession(
+        previous.issuer, previous.subject, previous.clientId, previous.proofKeyThumbprint, expiry, scopes, access, refresh, now,
+        previous.identityNonce, previous.identityAudiences, previous.identityAuthorizedParty, previous.authenticationTime, previous.deploymentFingerprint, true, origin,
+    )
+
+    private fun verifiedAccess(access: String, config: LoginConfiguration, keys: IssuerKeys, subject: String, proofJKT: String, now: Long, issuedFloor: Long): JsonObject {
+        val claims = jwt(access, config, keys, true)
+        if (identity(claims, config.issuer) != subject || !audience(claims, config.audience) || claims.string("client_id") != config.clientId) invalid(LoginFailure.IDENTITY)
+        times(claims, now, issuedFloor, 3600)
+        Contract.boundedText(claims.string("jti"), 256)
+        val cnf = claims.obj("cnf"); cnf.exactKeys("jkt")
+        if (!constantEqual(cnf.string("jkt"), proofJKT) || !scopes(claims.string("scope")).containsAll(config.scopes - setOf("openid", "offline_access"))) invalid(LoginFailure.IDENTITY)
+        return claims
     }
 
     private fun token(value: String): String = value.also { if (it.length !in 1..64 * 1024 || it.any { c -> c <= ' ' || c >= '\u007f' }) invalid(LoginFailure.IDENTITY) }
@@ -126,6 +194,11 @@ object TokenVerifier {
             expected in values
         }
         else -> false
+    }
+    private fun audiences(root: JsonObject): Set<String> = when (val value = root["aud"]) {
+        is JsonString -> setOf(Contract.boundedText(value.value, 512))
+        is JsonArray -> LoginConfiguration.strings(value.values, 32)
+        else -> invalid(LoginFailure.IDENTITY)
     }
     private fun times(root: JsonObject, now: Long, startedAt: Long, maxLifetime: Long): Long {
         val issued = root.integer("iat", 0, Long.MAX_VALUE / 1000)

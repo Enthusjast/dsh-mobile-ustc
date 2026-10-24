@@ -11,6 +11,7 @@ android {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testInstrumentationRunnerArguments["biometricFixture"] = providers.gradleProperty("biometricFixture").orElse("false").get()
+        testInstrumentationRunnerArguments["vaultFixture"] = providers.gradleProperty("vaultFixture").orElse("false").get()
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -35,7 +35,7 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
     suspend fun keys(discovery: OidcDiscovery): IssuerKeys = IssuerKeys.parse(get(discovery.jwksUri))
     fun tokenEndpoint(discovery: OidcDiscovery, signer: DeviceProofSigner): TokenEndpoint = TokenEndpoint(this, discovery, signer)
     fun resource(config: LoginConfiguration, session: LoginSession, signer: DeviceProofSigner): RemoteApi {
-        if (session.issuer != config.issuer || session.clientId != config.clientId || session.proofKeyThumbprint != signer.publicKey.thumbprint) throw RemoteRequestException("auth.identity_mismatch")
+        if (session.issuer != config.issuer || session.clientId != config.clientId || session.deploymentFingerprint != config.fingerprint || session.proofKeyThumbprint != signer.publicKey.thumbprint) throw RemoteRequestException("auth.identity_mismatch")
         return RemoteApi(this, config, session, signer)
     }
 
@@ -94,8 +94,19 @@ class TokenEndpoint internal constructor(private val http: LoginHttp, private va
     private val mutex = Mutex()
     suspend fun exchange(exchange: CodeExchange, now: () -> Long = System::currentTimeMillis): ByteArray = mutex.withLock {
         if (exchange.login.discovery !== discovery || exchange.login.proofKeyThumbprint != signer.publicKey.thumbprint) throw RemoteRequestException("auth.identity_mismatch")
+        request(exchange.form(), now)
+    }
+
+    suspend fun refresh(previous: LoginSession, now: () -> Long = System::currentTimeMillis): ByteArray = mutex.withLock {
+        if (previous.deploymentFingerprint != discovery.configuration.fingerprint || previous.proofKeyThumbprint != signer.publicKey.thumbprint) throw RemoteRequestException("auth.identity_mismatch")
+        if (!discovery.refreshAllowed) throw RemoteRequestException("auth.reauthentication_required")
+        val refreshToken = previous.consumeRefreshTokenForRequest()
+        request(mapOf("grant_type" to "refresh_token", "client_id" to discovery.configuration.clientId, "resource" to discovery.configuration.resource, "refresh_token" to refreshToken), now)
+    }
+
+    private suspend fun request(parameters: Map<String, String>, now: () -> Long): ByteArray {
         val url = discovery.tokenEndpoint.toHttpUrl()
-        val form = FormBody.Builder().apply { exchange.form().forEach { (name, value) -> add(name, value) } }.build()
+        val form = FormBody.Builder().apply { parameters.forEach { (name, value) -> add(name, value) } }.build()
         repeat(2) { attempt ->
             val proof = DeviceProofs.dpop(signer, "POST", url.toString(), now(), nonce)
             nonce = null
@@ -103,8 +114,11 @@ class TokenEndpoint internal constructor(private val http: LoginHttp, private va
             nonce = reply.nonce()
             val challenge = reply.status == 400 && runCatching { JsonDocument.parse(reply.bytes).root.string("error") == "use_dpop_nonce" }.getOrDefault(false)
             if (attempt == 0 && challenge && nonce != null) return@repeat
-            if (reply.status !in 200..299) throw RemoteRequestException("auth.token_exchange_failed")
-            return@withLock reply.bytes
+            if (reply.status !in 200..299) {
+                val rejected = runCatching { JsonDocument.parse(reply.bytes).root.string("error") }.getOrNull()
+                throw RemoteRequestException(if (reply.status == 400 && rejected in setOf("invalid_grant", "unsupported_grant_type")) "auth.reauthentication_required" else "auth.token_exchange_failed")
+            }
+            return reply.bytes
         }
         throw RemoteRequestException("auth.token_exchange_failed")
     }

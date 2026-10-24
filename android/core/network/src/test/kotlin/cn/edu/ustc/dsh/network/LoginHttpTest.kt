@@ -69,7 +69,7 @@ class LoginHttpTest {
             "scope" to "remote.access".json(), "cnf" to jsonObject("jkt" to signer.publicKey.thumbprint.json())), "at+jwt")
         val id = jwt(base.with("aud" to config.clientId.json(), "nonce" to login.nonce.json()), "JWT")
         server.enqueue(response("{\"error\":\"use_dpop_nonce\"}", 400).setHeader("DPoP-Nonce", "issuer-nonce"))
-        server.enqueue(response(JsonDocument.of(jsonObject("access_token" to access.json(), "id_token" to id.json(), "token_type" to "DPoP".json(), "expires_in" to 300L.json())).canonicalText()))
+        server.enqueue(response(JsonDocument.of(jsonObject("access_token" to access.json(), "id_token" to id.json(), "token_type" to "DPoP".json(), "expires_in" to 300L.json(), "refresh_token" to "original-refresh-secret".json())).canonicalText()))
         val raw = http.tokenEndpoint(discovery, signer).exchange(exchange)
         val first = server.takeRequest(); val second = server.takeRequest()
         fun claims(request: RecordedRequest): JsonObject {
@@ -162,6 +162,30 @@ class LoginHttpTest {
         assertEquals("access.organization_missing", assertThrows(RemoteRequestException::class.java) { runBlocking { api.prepareRegistration(approvalPublic, "校园手机") } }.code)
         server.takeRequest()
         assertEquals(requestsBefore + 1, server.requestCount) // Only GET /me, no enrollment write.
+        val endpoint = http.tokenEndpoint(discovery, signer)
+        server.enqueue(response("{\"error\":\"use_dpop_nonce\"}", 400).setHeader("DPoP-Nonce", "fresh-issuer-refresh-nonce"))
+        server.enqueue(response(JsonDocument.of(jsonObject("access_token" to access.json(), "token_type" to "DPoP".json(), "expires_in" to 300L.json(), "refresh_token" to "rotated-refresh-secret".json())).canonicalText()))
+        val refreshedRaw = endpoint.refresh(session)
+        val initialRefresh = server.takeRequest(); val challengedRefresh = server.takeRequest()
+        assertNull(initialRefresh.getHeader("Authorization")); assertFalse("ath" in claims(initialRefresh).fields)
+        assertFalse("nonce" in claims(initialRefresh).fields)
+        assertEquals("fresh-issuer-refresh-nonce", claims(challengedRefresh).string("nonce"))
+        assertNotEquals(claims(initialRefresh).string("jti"), claims(challengedRefresh).string("jti"))
+        val initialRefreshForm = initialRefresh.body.readUtf8()
+        assertEquals(initialRefreshForm, challengedRefresh.body.readUtf8())
+        assertTrue(initialRefreshForm.contains("grant_type=refresh_token"))
+        assertTrue(initialRefreshForm.contains("refresh_token=original-refresh-secret"))
+        assertTrue(initialRefreshForm.contains("resource=urn%3Adsh-remote")); assertTrue(initialRefreshForm.contains("client_id=mobile"))
+        assertFalse(initialRefreshForm.contains("code_verifier")); assertFalse(initialRefreshForm.contains("code="))
+        assertTrue(TokenVerifier.refreshResponse(refreshedRaw, session, config, keys, System.currentTimeMillis(), System.currentTimeMillis()).hasRefreshToken())
+        val afterRefresh = server.requestCount
+        assertEquals(LoginFailure.REAUTHENTICATION, assertThrows(LoginException::class.java) { runBlocking { endpoint.refresh(session) } }.failure)
+        assertEquals(afterRefresh, server.requestCount)
+        val restored = StoredLogin.parseAuthenticated(session.authenticatedStorageBytes(), config, signer.publicKey.thumbprint, System.currentTimeMillis())
+        server.enqueue(response("{\"error\":\"invalid_grant\"}", 400))
+        assertEquals("auth.reauthentication_required", assertThrows(RemoteRequestException::class.java) { runBlocking { endpoint.refresh(restored) } }.code)
+        server.takeRequest()
+        assertEquals(afterRefresh + 1, server.requestCount)
     }
 
     @Test fun redirectsOversizedBodiesAndCancellationCannotDiscloseCredentialsOrHangCalls(): Unit = runBlocking {
