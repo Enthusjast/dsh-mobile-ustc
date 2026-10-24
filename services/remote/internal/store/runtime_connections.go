@@ -83,6 +83,9 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 		where runtime_id = $1`, input.RuntimeID); err != nil {
 		return RuntimeConnection{}, ErrDatabaseUnavailable
 	}
+	if err := endRuntimeApprovals(ctx, transaction, orgID, input.RuntimeID, "", false); err != nil {
+		return RuntimeConnection{}, err
+	}
 	metadata, _ := json.Marshal(map[string]any{
 		"runtime_id": input.RuntimeID, "runtime_epoch": input.RuntimeEpoch,
 		"connection_id": input.ConnectionID, "protocol_version": input.ProtocolVersion,
@@ -146,6 +149,15 @@ func (postgres *Postgres) DetachRuntimeConnection(ctx context.Context, installat
 			update sessions set state = 'unavailable', updated_at = clock_timestamp()
 			where runtime_id = $1`, runtimeID); err != nil {
 			return ErrDatabaseUnavailable
+		}
+		var orgID string
+		if err := transaction.QueryRowContext(ctx, `
+			select h.org_id::text from runtimes r join installations i on i.id = r.installation_id
+			join hosts h on h.id = i.host_id where r.id = $1`, runtimeID).Scan(&orgID); err != nil {
+			return ErrDatabaseUnavailable
+		}
+		if err := endRuntimeApprovals(ctx, transaction, orgID, runtimeID, connectionID, false); err != nil {
+			return err
 		}
 	}
 	if err := transaction.Commit(); err != nil {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the real Go/DSH integration in a disposable, socket-only PG cluster."""
+"""Run Go/PostgreSQL tests and real npm DSH in a disposable socket-only cluster."""
 
 import os
 from pathlib import Path
@@ -34,6 +34,11 @@ def main():
             subprocess.run(["npm", "run", "build"], cwd=repo, check=True)
             env = dict(os.environ, REMOTE_TEST_CLUSTER_ROOT=root, REMOTE_TEST_DATABASE_URL=dsn,
                        REMOTE_TEST_PSQL=str(pg_bin / "psql"), REMOTE_TEST_PG_DUMP=str(pg_bin / "pg_dump"), REMOTE_TEST_SERVICE_BIN=str(binary))
+            # Each Go integration test owns a private database in this cluster.
+            # Running here ensures the security tests cannot silently skip PG.
+            result = subprocess.run([go, "test", "-race", "-count=1", "./..."], cwd=repo / "services/remote", env=env)
+            if result.returncode:
+                return result.returncode
             result = subprocess.run([str(repo / "node_modules/.bin/tsx"), "--test", str(repo / "tools/integration/remote-dsh.test.ts")], cwd=repo, env=env)
             if result.returncode:
                 for line in log.read_text().splitlines():
