@@ -41,6 +41,11 @@ type Principal struct {
 	ProofJTI    string
 	ExpiresAt   time.Time
 	IssuedAt    time.Time
+	// These optional claims come only from a verified access token. Their presence
+	// alone does not establish a local assurance profile.
+	AuthenticatedAt time.Time
+	ACR             string
+	AMR             []string
 }
 
 type Authenticator struct {
@@ -190,8 +195,13 @@ func (auth *Authenticator) validateClaims(claims map[string]any) (Principal, err
 	if jkt == "" {
 		return Principal{}, errInvalidToken
 	}
+	authenticatedAt, acr, amr, err := authenticationClaims(claims, issuedAt, auth.clockSkew)
+	if err != nil {
+		return Principal{}, errInvalidToken
+	}
 	return Principal{Issuer: issuer, Subject: subject, ClientID: clientID, TokenID: tokenID, Scopes: scopes,
-		ProofKeyJKT: jkt, ExpiresAt: expiresAt, IssuedAt: issuedAt}, nil
+		ProofKeyJKT: jkt, ExpiresAt: expiresAt, IssuedAt: issuedAt,
+		AuthenticatedAt: authenticatedAt, ACR: acr, AMR: amr}, nil
 }
 
 func audienceContains(value any, expected string) bool {
