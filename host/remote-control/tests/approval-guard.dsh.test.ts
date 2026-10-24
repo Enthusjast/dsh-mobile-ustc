@@ -13,15 +13,22 @@ import { DshClient, mobileSessionId } from '../src/dsh-client.js'
 import { PersistentCommandJournal } from '../src/command-journal.js'
 import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext, type ApprovalDecision } from '../src/approval-contract.js'
 import { canonicalObject } from '../src/canonical.js'
+import { ApprovalLeaseCache, APPROVAL_AUTHORIZATION_DOMAIN, APPROVAL_AUTHORIZATION_AUDIENCE, APPROVAL_AUTHORIZATION_JWS_TYPE } from '../src/approval-lease.js'
+import type { RegisteredApprovalKey } from '../src/approval-signature.js'
 
 test('real DSH final guards require committed one-use approval and preserve every native denial', async t => {
-  for(const mode of ['allow','reject','invalid-signature','revoked','changed-resource','write-failure','automatic-answer','pre-allow','guard-before','guard-after','cancel'] as const) await t.test(mode,async()=>{
+  for(const mode of ['allow','signed-lease','lease-revoked','lease-tampered','lease-expired','reject','invalid-signature','revoked','changed-resource','write-failure','automatic-answer','pre-allow','guard-before','guard-after','cancel'] as const) await t.test(mode,async()=>{
     const h=await host({probe:false})
     const path=join(h.directory,'approval-state','commands.sqlite'), epoch=randomUUID()
     const parent=await PersistentCommandJournal.open(path,h.runtimeId), ledger=parent.approvals(epoch)
     const {privateKey,publicKey}=generateKeyPairSync('ec',{namedCurve:'prime256v1'})
     const publicJWK=publicKey.export({format:'jwk'}), jkt=await calculateJwkThumbprint(publicJWK)
     const registered={user_id:randomUUID(),device_id:randomUUID(),key_version:1,approval_key_jkt:jkt,public_jwk:publicJWK,active:true}
+    const authorityKeys=generateKeyPairSync('ec',{namedCurve:'prime256v1'}), authorityPublic=authorityKeys.publicKey.export({format:'jwk'})
+    const authority={issuer:'https://remote.example.edu',key_id:'dsh-approval-authority/native-fixture',public_jwk:authorityPublic as {kty:'EC';crv:'P-256';x:string;y:string},
+      key_jkt:await calculateJwkThumbprint(authorityPublic),active:true,valid_from:new Date(Date.now()-60000).toISOString(),valid_until:new Date(Date.now()+3600000).toISOString()}
+    const signedLeaseMode=mode==='signed-lease'||mode.startsWith('lease-'), connectionID=randomUUID()
+    let leaseCache:ApprovalLeaseCache|undefined, leaseClock=Date.now()
     const client=new DshClient(h.ctx,h.runtimeId,[{id:'fixture',cwd:h.cwd}],['fixture'])
     const created=await client.create('fixture','fixture')
     const agent=h.ctx.agents.get(await client.resolve(created.session_id,new AbortController().signal))!
@@ -33,13 +40,14 @@ test('real DSH final guards require committed one-use approval and preserve ever
     let calls=0, signedResponses=0, active=true
     let external:DatabaseSync|undefined
     const resourceHash=()=>createHash('sha256').update(readFileSync(source)).digest('hex')
-    const authorize=(context:ApprovalContext,decision:ApprovalDecision)=>{
+    const localEvidence=(context:ApprovalContext,decision:ApprovalDecision)=>{
       const now=Date.now()
       return active?{lease_id:randomUUID(),action:'approval.decide',role:'owner',runtime_id:h.runtimeId,runtime_epoch:epoch,session_id:context.session_id,
         approval_id:context.approval_id,execution_id:context.execution_id,binding_sha256:decision.binding_sha256,policy_version:context.policy_version,
         user_id:decision.user_id,device_id:decision.device_id,key_version:decision.key_version,approval_key_jkt:jkt,grant_version:1,
         assurance_profile:context.required_assurance.profile,authenticated_at:new Date(now-1000).toISOString(),issued_at:new Date(now).toISOString(),expires_at:new Date(now+2000).toISOString()}:undefined
     }
+    const authorize=(context:ApprovalContext,decision:ApprovalDecision)=>signedLeaseMode?leaseCache?.authorization(context,decision):localEvidence(context,decision)
     try {
       h.ctx.tools.register(defineContentToolFixture({name:'protected',description:'Observable signed-approval fixture',parameters:{value:{type:'string',description:'Fixture value'}},
         async execute(){calls++;await writeFile(sentinel,'executed');return [{type:'text',text:'executed'}]}}))
@@ -68,7 +76,21 @@ test('real DSH final guards require committed one-use approval and preserve ever
         let compact=await new CompactSign(canonicalObject(claims)).setProtectedHeader({alg:'ES256',kid:approvalKeyID(registered.device_id,1),typ:APPROVAL_JWS_TYPE}).sign(privateKey)
         if(mode==='invalid-signature'){const parts=compact.split('.');parts[2]=(parts[2]![0]==='A'?'B':'A')+parts[2]!.slice(1);compact=parts.join('.')}
         let status
-        try{status=await ledger.decide(context.approval_id,compact,registered,authorize)}catch{return 'rejected'}
+        try{
+          let acceptedKey:RegisteredApprovalKey=registered
+          if(signedLeaseMode){
+            leaseCache=new ApprovalLeaseCache({host_id:context.host_id,installation_id:context.installation_id,runtime_id:h.runtimeId,runtime_epoch:epoch,connection_id:connectionID},[authority],()=>leaseClock)
+            const lease={...localEvidence(context,claims)!,domain:APPROVAL_AUTHORIZATION_DOMAIN,protocol_version:1,issuer:authority.issuer,audience:APPROVAL_AUTHORIZATION_AUDIENCE,
+              host_id:context.host_id,installation_id:context.installation_id,connection_id:connectionID,approval_public_jwk:publicJWK,decision_payload_sha256:createHash('sha256').update(canonicalObject(claims)).digest('hex')}
+            let proof=await new CompactSign(canonicalObject(lease)).setProtectedHeader({alg:'ES256',kid:authority.key_id,typ:APPROVAL_AUTHORIZATION_JWS_TYPE}).sign(authorityKeys.privateKey)
+            if(mode==='lease-tampered'){const parts=proof.split('.');parts[2]=(parts[2]![0]==='A'?'B':'A')+parts[2]!.slice(1);proof=parts.join('.')}
+            leaseClock=Date.now()
+            acceptedKey=await leaseCache.admit(context,compact,proof)
+          }
+          status=await ledger.decide(context.approval_id,compact,acceptedKey,authorize)
+        }catch{return 'rejected'}
+        if(mode==='lease-revoked')leaseCache!.close()
+        if(mode==='lease-expired')leaseClock+=2001
         if(mode==='revoked')active=false
         if(mode==='changed-resource')await writeFile(source,'after')
         if(mode==='cancel')lifetime.abort()
@@ -100,9 +122,10 @@ test('real DSH final guards require committed one-use approval and preserve ever
         external.exec("CREATE TRIGGER fail_guard BEFORE UPDATE ON approval_records WHEN NEW.state='consumed' BEGIN SELECT RAISE(ABORT,'injected guard failure'); END;")
       }
       const result=await h.ctx.tools.execute({agent,callId:ToolCallId(randomUUID()),name:'protected',arguments:{value:'exact signed invocation'},signal:lifetime.signal})
-      assert.equal(calls,mode==='allow'?1:0)
-      assert.equal(result.isError,mode!=='allow')
-      if(mode==='allow')await access(sentinel)
+      const executed=mode==='allow'||mode==='signed-lease'
+      assert.equal(calls,executed?1:0)
+      assert.equal(result.isError,!executed)
+      if(executed)await access(sentinel)
       else await assert.rejects(access(sentinel),{code:'ENOENT'})
       if(mode==='pre-allow')assert.equal(contexts.size,0)
       else {
@@ -112,13 +135,13 @@ test('real DSH final guards require committed one-use approval and preserve ever
           assert.throws(()=>ledger.consume(context.approval_id,context,authorize),/approval.storage_unavailable/)
         }else{
           const status=ledger.get(context.approval_id).status
-          assert.equal(status.state,mode==='allow'||mode==='guard-after'?'settled':mode==='reject'?'denied':'invalidated')
-          if(mode==='allow'||mode==='guard-after')assert.equal(status.outcome,mode==='allow'?'succeeded':'failed')
+          assert.equal(status.state,executed||mode==='guard-after'?'settled':mode==='reject'?'denied':'invalidated')
+          if(executed||mode==='guard-after')assert.equal(status.outcome,executed?'succeeded':'failed')
           assert.throws(()=>ledger.consume(context.approval_id,context,authorize))
         }
       }
       if(mode==='automatic-answer'||mode==='pre-allow')assert.equal(signedResponses,0)
       assert.equal(h.errors.length,0)
-    }finally{lifetime.abort();external?.close();parent.close();await h.close()}
+    }finally{lifetime.abort();leaseCache?.close();external?.close();parent.close();await h.close()}
   })
 })
