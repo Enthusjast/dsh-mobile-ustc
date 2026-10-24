@@ -27,6 +27,7 @@ export const Command = z.discriminatedUnion('type', [
   ])),
   sessionCommand('session.cancel', empty),
   sessionCommand('question.answer', questionAnswerPayload),
+  sessionCommand('question.timed.answer', questionAnswerPayload),
   sessionCommand('session.model.select', z.strictObject({
     provider: z.string().min(1).max(128), model: z.string().min(1).max(128), reasoning_effort: z.string().min(1).max(64).optional(),
   })),

@@ -122,6 +122,9 @@ func (fake *fakeRepository) SyncRealtimeSessionCatalog(context.Context, store.Ru
 func (fake *fakeRepository) AuthorizeRealtimeSessionRead(context.Context, store.TicketRedemption, string) error {
 	return nil
 }
+func (fake *fakeRepository) AuthorizeRealtimeQuestion(context.Context, store.TicketRedemption, string) error {
+	return nil
+}
 
 func (fake *fakeRepository) InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error) {
 	return nil, nil

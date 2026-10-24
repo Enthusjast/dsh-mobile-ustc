@@ -14,7 +14,7 @@ const MAX_BUFFERED_BYTES = 512 * 1024
 const PROTOCOL = 'dsh.remote.v1'
 const PROOF_TYPE = 'dsh-relay-handshake-proof+jwt'
 const AUDIENCE = 'urn:dsh-mobile-ustc:realtime'
-const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'] as const
+const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'] as const
 const requiredCapabilities = ['command.relay.v1', 'connection.heartbeat.v1'] as const
 const uuid = z.uuid()
 const nonEmptyText = z.string().min(1).max(32_768).regex(/\S/).refine(text => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text))
@@ -73,10 +73,11 @@ const submitSchema = z.strictObject({
 })
 const cancelSchema = submitSchema.extend({ type: z.literal('session.cancel'), payload: z.strictObject({}) })
 const questionSchema = submitSchema.extend({ type: z.literal('question.answer'), payload: questionAnswerPayload })
+const timedQuestionSchema = submitSchema.extend({ type: z.literal('question.timed.answer'), payload: questionAnswerPayload })
 const createSchema = submitSchema.omit({ session_id: true }).extend({
   type: z.literal('session.create'), payload: z.strictObject({ workspace_id: uuid, preset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/) }),
 })
-const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, cancelSchema, createSchema, questionSchema])
+const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, cancelSchema, createSchema, questionSchema, timedQuestionSchema])
 type ForwardedCommand = z.infer<typeof forwardedCommandSchema>
 const catalogItemSchema = z.strictObject({
   session_id: uuid,
@@ -113,6 +114,7 @@ export interface HostRelayOptions {
     }
     dispatch(command: Command, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
     follow: SessionReaderRuntime['follow']
+    claimQuestion?: SessionReaderRuntime['claimQuestion']
   }
   credentials: HostCredentialProvider
   dshVersion: string
@@ -333,6 +335,8 @@ function parseForwarded(data: unknown, runtimeId: string, runtimeEpoch: string):
       ? relayCancelDigest(parsed.data.session_id, parsed.data.runtime_epoch)
       : parsed.data.type === 'question.answer'
         ? relayQuestionDigest(parsed.data.session_id, parsed.data.runtime_epoch, parsed.data.payload)
+      : parsed.data.type === 'question.timed.answer'
+        ? relayTimedQuestionDigest(parsed.data.session_id, parsed.data.runtime_epoch, parsed.data.payload)
       : parsed.data.type === 'session.create'
         ? relayCreateDigest(parsed.data.runtime_epoch, parsed.data.payload)
         : forwardedDigest(parsed.data.session_id, parsed.data.payload)) !== parsed.data.payload_sha256) {
@@ -438,7 +442,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       epoch: options.runtime.epoch, client: options.runtime.client,
       follow: (command, signal) => options.runtime.follow(command, signal),
       dispatch: (command, signal) => options.runtime.dispatch(command, signal, { userId: 'relay-read', deviceId: 'relay-read' }),
-    }, frame => sendFrame(socket, frame))
+      ...(options.runtime.claimQuestion ? { claimQuestion: (sessionId: string, questionId: string, signal: AbortSignal) => options.runtime.claimQuestion!(sessionId, questionId, signal) } : {}),
+    }, frame => sendFrame(socket, frame), ack.data.payload.capabilities.includes('question.timed.v1'))
     const pendingCatalogAcks = new Map<string, { count: number; resolve(): void; reject(error: Error): void }>()
     let catalogRefresh: Promise<void> | undefined
     let catalogDirty = false
@@ -554,6 +559,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         if (forwarded.type === 'session.cancel' && !ack.data.payload.capabilities.includes('session.cancel.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.create' && !ack.data.payload.capabilities.includes('session.create.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'question.answer' && !ack.data.payload.capabilities.includes('question.blocking.v1')) throw new ProbeError('protocol.unsupported')
+        if (forwarded.type === 'question.timed.answer' && !ack.data.payload.capabilities.includes('question.timed.v1')) throw new ProbeError('protocol.unsupported')
         const command = makeCommand(forwarded)
         const owner: CommandOwner = { userId: forwarded.user_id, deviceId: forwarded.device_id }
         let reported: CommandState | undefined
@@ -684,4 +690,8 @@ export function relayCreateDigest(runtimeEpoch: string, payload: z.infer<typeof 
 
 export function relayQuestionDigest(sessionId: string, runtimeEpoch: string, payload: z.infer<typeof questionAnswerPayload>): string {
   return createHash('sha256').update(JSON.stringify(jcs({ type: 'question.answer', runtime_epoch: runtimeEpoch, session_id: sessionId, payload }))).digest('hex')
+}
+
+export function relayTimedQuestionDigest(sessionId: string, runtimeEpoch: string, payload: z.infer<typeof questionAnswerPayload>): string {
+  return createHash('sha256').update(JSON.stringify(jcs({ type: 'question.timed.answer', runtime_epoch: runtimeEpoch, session_id: sessionId, payload }))).digest('hex')
 }

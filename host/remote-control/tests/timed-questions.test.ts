@@ -7,6 +7,8 @@ import * as askUser from '@deepseek-ai/dsh-tool-ask-user'
 import { host } from './harness.js'
 import { DshClient } from '../src/dsh-client.js'
 import { InteractionRouter } from '../src/interaction-router.js'
+import { ProbeRuntime } from '../src/runtime.js'
+import { parseCommand } from '../src/protocol.js'
 
 async function until<T>(read: () => T | undefined): Promise<T> {
   const deadline = Date.now() + 3500
@@ -112,7 +114,14 @@ test('a real timed question tool continues once and its late reply becomes one n
     const answer = { answers: [{ id: 'plan', selected: ['Continue'], custom: 'late fixture reply' }] }
     assert.throws(() => reloaded!.timed.answer(h.sessionId, continued.question_id, answer), /interaction.stale/)
     assert.throws(() => reloaded!.timed.answer(h.sessionId, restored.question_id, { answers: [{ id: 'plan', selected: ['invented'] }] }), /interaction.invalid_answer/)
-    assert.deepEqual(reloaded.timed.answer(h.sessionId, restored.question_id, answer), { accepted: true, delivery: 'late_message' })
+    const runtime = new ProbeRuntime(h.client, reloaded)
+    const command = parseCommand({ v: 0, type: 'question.timed.answer', request_id: randomUUID(), runtime_epoch: runtime.epoch, session_id: h.sessionId,
+      payload: { question_id: restored.question_id, ...answer } })
+    const receipts: string[] = []
+    const queued = await runtime.dispatch(command, lifetime.signal, undefined, state => { receipts.push(state) })
+    assert.deepEqual(receipts, ['host_accepted', 'dispatching', 'agent_queued'])
+    assert.equal((queued.payload as { checkpoint: { state: string } }).checkpoint.state, 'persisted')
+    assert.deepEqual(await runtime.dispatch(command, lifetime.signal), queued)
     assert.throws(() => reloaded!.timed.answer(h.sessionId, restored.question_id, answer), /interaction.stale/)
     held.release()
     await h.agent.whenIdle()
@@ -123,5 +132,23 @@ test('a real timed question tool continues once and its late reply becomes one n
     assert.equal(events.filter(event => event.type === 'tool/result' && event.data.message.toolCallId === callId).length, 1, 'late reply completed the old tool again')
     assert.deepEqual(reloaded.timed.snapshot(h.sessionId).items, [])
     assert.equal(h.errors.length, 0)
+    runtime.close()
   } finally { held.release(); lifetime.abort(); reloaded?.close(); await h.close() }
+})
+
+test('a failed late-answer checkpoint remains unknown and cannot enqueue the reply again', async () => {
+  let answers = 0
+  const client = { runtimeId: randomUUID(), async resolve() { return 'native' }, async checkpoint() { return { state: 'failed' } } } as unknown as DshClient
+  const interactions = { timed: { answer() { answers++; return { accepted: true, delivery: 'late_message' } } }, close() {} } as unknown as InteractionRouter
+  const runtime = new ProbeRuntime(client, interactions)
+  const command = parseCommand({ v: 0, type: 'question.timed.answer', request_id: randomUUID(), runtime_epoch: runtime.epoch, session_id: randomUUID(),
+    payload: { question_id: randomUUID(), answers: [{ id: 'choice', selected: ['Reply'] }] } })
+  const states: string[] = []
+  try {
+    const unknown = await runtime.dispatch(command, new AbortController().signal, undefined, state => { states.push(state) })
+    assert.equal((unknown.payload as { command_state: string }).command_state, 'outcome_unknown')
+    assert.deepEqual(states, ['host_accepted', 'dispatching', 'outcome_unknown'])
+    await assert.rejects(runtime.dispatch(command, new AbortController().signal), /command.outcome_unknown/)
+    assert.equal(answers, 1)
+  } finally { runtime.close() }
 })

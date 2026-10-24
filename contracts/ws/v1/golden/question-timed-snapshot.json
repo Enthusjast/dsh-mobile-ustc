@@ -1,0 +1,39 @@
+{
+  "v": 1,
+  "request_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_id": "33333333-3333-4333-8333-333333333333",
+  "runtime_epoch": "44444444-4444-4444-8444-444444444444",
+  "session_id": "55555555-5555-4555-8555-555555555555",
+  "type": "question.timed.snapshot",
+  "subscription_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "sync_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "payload": {
+    "revision": 2,
+    "items": [
+      {
+        "question_id": "99999999-9999-4999-8999-999999999999",
+        "expires_at": null,
+        "questions": [
+          {
+            "id": "plan",
+            "question": "Continue?",
+            "detail": "Review this plan.",
+            "options": [
+              {
+                "label": "Continue"
+              },
+              {
+                "label": "Cancel"
+              }
+            ],
+            "intent": {
+              "kind": "plan-review",
+              "approve": "Continue"
+            }
+          }
+        ],
+        "state": "continued"
+      }
+    ]
+  }
+}

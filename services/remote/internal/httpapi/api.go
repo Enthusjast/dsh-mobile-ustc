@@ -51,6 +51,7 @@ type Repository interface {
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
 	AuthorizeRealtimeSessionRead(context.Context, store.TicketRedemption, string) error
+	AuthorizeRealtimeQuestion(context.Context, store.TicketRedemption, string) error
 	InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error)
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)

@@ -75,6 +75,10 @@ func validQuestionAnswer(payload questionAnswerPayload) bool {
 }
 
 func questionAnswerDigest(sessionID, epoch string, payload questionAnswerPayload) string {
+	return questionAnswerTypeDigest("question.answer", sessionID, epoch, payload)
+}
+
+func questionAnswerTypeDigest(kind, sessionID, epoch string, payload questionAnswerPayload) string {
 	encoded := []byte(`{"payload":{"answers":[`)
 	for index, answer := range payload.Answers {
 		if index > 0 {
@@ -103,7 +107,9 @@ func questionAnswerDigest(sessionID, epoch string, payload questionAnswerPayload
 	encoded = appendJSONString(encoded, epoch)
 	encoded = append(encoded, `,"session_id":`...)
 	encoded = appendJSONString(encoded, sessionID)
-	encoded = append(encoded, `,"type":"question.answer"}`...)
+	encoded = append(encoded, `,"type":`...)
+	encoded = appendJSONString(encoded, kind)
+	encoded = append(encoded, '}')
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }

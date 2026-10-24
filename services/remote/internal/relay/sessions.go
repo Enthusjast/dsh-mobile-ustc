@@ -14,6 +14,9 @@ type sessionSubscription struct {
 	pages                            map[string]string
 	fragment                         *sessionFragmentState
 	questions                        bool
+	timedQuestions                   bool
+	claims                           map[string]*questionClaim
+	claimIDs                         map[string]struct{}
 }
 
 type sessionFragmentState struct {
@@ -40,7 +43,7 @@ type sessionFragmentPayload struct {
 
 func isSessionContent(kind string) bool {
 	switch kind {
-	case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "question.snapshot":
+	case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "question.snapshot", "question.timed.snapshot":
 		return true
 	}
 	return false
@@ -93,6 +96,9 @@ func (server *Server) routeSessionRead(ctx context.Context, live *liveConnection
 		return
 	}
 	subscription := &sessionSubscription{id: id, requestID: envelope.RequestID, sessionID: envelope.SessionID, device: live, host: host, pages: make(map[string]string), questions: live.supports("question.blocking.v1") && host.supports("question.blocking.v1")}
+	subscription.timedQuestions = live.supports("question.timed.v1") && host.supports("question.timed.v1")
+	subscription.claims = make(map[string]*questionClaim)
+	subscription.claimIDs = make(map[string]struct{})
 	server.mu.Lock()
 	code := ""
 	for _, existing := range live.subscriptions {
@@ -131,6 +137,9 @@ func (server *Server) routeSessionRead(ctx context.Context, live *liveConnection
 	forward := map[string]any{"max_messages": *payload.MaxMessages}
 	if subscription.questions {
 		forward["questions"] = true
+	}
+	if subscription.timedQuestions {
+		forward["timed_questions"] = true
 	}
 	envelope.Payload, _ = json.Marshal(forward)
 	if err := host.sendJSON(ctx, envelope); err != nil {
@@ -304,6 +313,9 @@ func validateSessionContent(subscription *sessionSubscription, envelope wireEnve
 		return false
 	}
 	if kind == "question.snapshot" && !subscription.questions {
+		return false
+	}
+	if kind == "question.timed.snapshot" && !subscription.timedQuestions {
 		return false
 	}
 	if kind == "session.page.result" {

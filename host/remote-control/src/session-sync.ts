@@ -3,23 +3,25 @@ import type { DshClient } from './dsh-client.js'
 import type { Command, Frame } from './protocol.js'
 import { ProbeError } from './protocol.js'
 import { projectChunk, projectEvent, projectStream } from './projection.js'
-import type { QuestionSource } from './questions.js'
+import type { QuestionSource, TimedQuestionSource } from './questions.js'
 
 interface Sync { session: string; through: number }
 
 export class SessionSync {
   private readonly cuts = new Map<string, Sync>()
-  constructor(private readonly client: DshClient, private readonly epoch: string, private readonly questions?: QuestionSource) {}
+  constructor(private readonly client: DshClient, private readonly epoch: string, private readonly questions?: QuestionSource, private readonly timed?: TimedQuestionSource) {}
 
   async *follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal): AsyncIterable<Frame> {
     if (!this.questions) { yield* this.nativeFollow(command, signal); return }
     const lifetime = new AbortController()
     let changed = true
+    let timedChanged = true
     let wake: (() => void) | undefined
     const abort = () => { lifetime.abort(); wake?.() }
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
     const dispose = this.questions.watch(command.session_id, () => { changed = true; wake?.() })
+    const disposeTimed = this.timed?.watch(command.session_id, () => { timedChanged = true; wake?.() })
     const iterator = this.nativeFollow(command, lifetime.signal)[Symbol.asyncIterator]()
     let nativeValue: IteratorResult<Frame> | undefined
     let nativeFailed = false
@@ -43,6 +45,12 @@ export class SessionSync {
             session_id: command.session_id, sync_id: syncId, payload: this.questions.snapshot(command.session_id) }
           continue
         }
+        if (timedChanged && this.timed && syncId && baselineReady) {
+          timedChanged = false
+          yield { v: 0, type: 'question.timed.snapshot', runtime_epoch: this.epoch, request_id: command.request_id,
+            session_id: command.session_id, sync_id: syncId, payload: this.timed.snapshot(command.session_id) }
+          continue
+        }
         if (!nativeValue) {
           await new Promise<void>(resolve => { wake = resolve })
           wake = undefined
@@ -59,6 +67,7 @@ export class SessionSync {
       }
     } finally {
       dispose()
+      disposeTimed?.()
       signal.removeEventListener('abort', abort)
       lifetime.abort()
       await iterator.return?.()

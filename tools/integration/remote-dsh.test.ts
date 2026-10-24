@@ -10,7 +10,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
-import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayCreateDigest, relayQuestionDigest } from '../../host/remote-control/src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayCreateDigest, relayQuestionDigest, relayTimedQuestionDigest } from '../../host/remote-control/src/relay-client.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -63,6 +63,9 @@ class FrameCollector {
   readonly frames: any[] = []
   failure: Error | undefined
   closed = false
+  private readonly pending: object[] = []
+  private writing = false
+  private lastSent = 0
   constructor(readonly socket: any, validate: (value: unknown) => boolean) {
     socket.on('message', (raw: Buffer) => {
       try {
@@ -76,7 +79,26 @@ class FrameCollector {
     socket.on('error', (error: Error) => { this.failure = error })
     socket.on('close', () => { this.closed = true })
   }
-  send(value: object) { this.socket.send(JSON.stringify(value)) }
+  send(value: object) {
+    assert.ok(this.pending.length < 64, 'Integration send queue exceeded budget')
+    this.pending.push(value)
+    if (!this.writing) void this.write()
+  }
+  private async write() {
+    this.writing = true
+    try {
+      while (this.pending.length) {
+        // Keep this phone fixture inside the production 20-operation/second
+        // quota, including when the offline model completes immediately.
+        const pause = Math.max(0, 60 - (Date.now() - this.lastSent))
+        if (pause) await new Promise(resolve => setTimeout(resolve, pause))
+        if (this.closed) throw new Error('Relay socket closed with queued fixture input')
+        this.socket.send(JSON.stringify(this.pending.shift()))
+        this.lastSent = Date.now()
+      }
+    } catch (error) { this.failure = error instanceof Error ? error : new Error('Fixture socket write failed') }
+    finally { this.writing = false }
+  }
   wait(predicate: (frame: any) => boolean, from = 0) {
     return until(async () => {
       if (this.failure) throw this.failure
@@ -84,7 +106,10 @@ class FrameCollector {
       if (frame) return frame
       if (this.closed) throw new Error('Relay socket closed before expected frame')
       return undefined
-    }, 'Relay frame')
+    }, 'Relay frame').catch(error => {
+      const metadata = this.frames.slice(from).slice(-12).map(frame => ({ type: frame.type, request_id: frame.request_id, state: frame.payload?.state, code: frame.payload?.code }))
+      throw new Error(`${String(error)}; recent routing metadata=${JSON.stringify(metadata)}`)
+    })
   }
 }
 
@@ -206,6 +231,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     'export const {name,inject,apply}=plugin', '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
+  const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
+  const questionPlugin = "          - id: tool-ask-user\n            name: '@deepseek-ai/dsh-tool-ask-user'"
+  assert.ok(standardPreset.includes(questionPlugin), 'Pinned DSH preset question tool changed')
+  const timedPreset = standardPreset.replace('- id: preset-standard', '- id: preset-remote-timed')
+    .replace('        id: standard', '        id: remote-timed')
+    .replace(questionPlugin, questionPlugin + '\n            config:\n              mode: timed\n              timeout: 1')
   await writeFile(patch, [
     '- insert:', '    - id: local-model', `      name: ${JSON.stringify(resolve('host/remote-control/tests/fixtures/dsh-local-model.mjs'))}`,
     '    - id: remote-control', `      name: ${JSON.stringify(wrapper)}`, '      config:', '        enabled: true',
@@ -213,8 +244,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     `        relayUrl: ${JSON.stringify(origin)}`, '        applicationVersion: dsh-go-integration',
     `        commandJournalPath: ${JSON.stringify(join(root, 'journal', 'commands.sqlite'))}`,
     '        workspaces:', '          - id: probe', `            remoteId: ${enrollment.workspaces[0].workspace_id}`, `            cwd: ${JSON.stringify(workspace)}`,
-    '        presets: [standard]', '        highRiskTools: [bash, pwsh, run_code]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
-  ].join('\n'), { mode: 0o600 })
+    '        presets: [standard, remote-timed]', '        highRiskTools: [bash, pwsh, run_code]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
+  ].join('\n') + '\n' + timedPreset, { mode: 0o600 })
   const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
   const dsh = await startProcess(process.execPath, [join(dshPackage, 'lib/bin.js'), '--profile', 'remote-e2e', '--from-default-profile', 'web', '--patch', patch,
     '--host', '127.0.0.1', '--port', '0', '--no-open'], {
@@ -259,7 +290,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const collector = new FrameCollector(socket, value => validate(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
+    const caps = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -414,8 +445,68 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'turn/end', questionFrom)
   assert.equal((await phone('GET', `/v1/commands/${questionAnswer.request_id}?device_id=${device.device_id}`)).state, results[0].payload.state)
 
+  const timedSecrets: string[] = []
+  const timedCreationId = randomUUID()
+  mobile.send({ ...creation, request_id: timedCreationId, payload: { ...creation.payload, preset: 'remote-timed' } })
+  const timedCreated = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === timedCreationId && frame.payload.state === 'settled')
+  const timedSessionId = timedCreated.session_id
+  const timedSubscriptionId = randomUUID()
+  mobile.send({ v: 1, type: 'session.subscribe', request_id: timedSubscriptionId, runtime_id: enrollment.runtime_id, session_id: timedSessionId, payload: {} })
+  const timedOpening = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === timedSubscriptionId)
+  const timedEnvelope = { v: 1, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: timedSessionId,
+    subscription_id: timedOpening.subscription_id, sync_id: timedOpening.sync_id }
+  const promptTimed = async (mode: string) => {
+    const marker = `REMOTE_TIMED_${mode}_${randomUUID()}`, from = mobile.frames.length
+    timedSecrets.push(marker)
+    mobile.send({ ...submit, request_id: randomUUID(), session_id: timedSessionId, payload: { mode: 'queue', content: [{ type: 'text', text: marker }] } })
+    const state = await mobile.wait(frame => frame.type === 'question.timed.snapshot' && frame.session_id === timedSessionId && frame.payload.items.some((item: any) => item.state === 'open'), from)
+    return { from, question: state.payload.items.find((item: any) => item.state === 'open') }
+  }
+  const claimTimed = async (questionId: string) => {
+    const request = { ...timedEnvelope, type: 'question.claim', request_id: randomUUID(), payload: { question_id: questionId } }
+    mobile.send(request)
+    const frame = await mobile.wait(frame => frame.type === 'question.claimed' && frame.request_id === request.request_id)
+    assert.equal(frame.payload.question_id, questionId)
+    assert.ok(frame.payload.remaining_ms >= 0)
+    return request
+  }
+  const answerTimed = async (questionId: string, expected: 'settled' | 'agent_queued') => {
+    const marker = `REMOTE_TIMED_ANSWER_${randomUUID()}`, from = mobile.frames.length
+    timedSecrets.push(marker)
+    const request = { v: 1, type: 'question.timed.answer', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: timedSessionId,
+      payload: { question_id: questionId, answers: [{ id: 'timed-choice', selected: ['Reply'], custom: marker }] } }
+    mobile.send(request)
+    const receipt = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === request.request_id && frame.payload.state === expected, from)
+    assert.equal(receipt.payload.payload_sha256, relayTimedQuestionDigest(timedSessionId, probe.runtime_epoch, request.payload))
+    const retryFrom = mobile.frames.length
+    mobile.send(request)
+    await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === request.request_id && frame.payload.state === expected, retryFrom)
+    if (expected === 'agent_queued') await mobile.wait(frame => frame.type === 'session.event' && frame.session_id === timedSessionId && frame.payload.type === 'user/message' && JSON.stringify(frame.payload.data).includes(marker), from)
+    await mobile.wait(frame => frame.type === 'session.event' && frame.session_id === timedSessionId && frame.payload.type === 'turn/end', from)
+    assert.equal((await phone('GET', `/v1/commands/${request.request_id}?device_id=${device.device_id}`)).state, expected)
+  }
+  const foreground = await promptTimed('FOREGROUND')
+  const foregroundClaim = await claimTimed(foreground.question.question_id)
+  siblingMobile.send({ ...foregroundClaim, request_id: randomUUID() })
+  await siblingMobile.wait(frame => frame.type === 'error' && frame.payload.code === 'protocol.resync_required')
+  await answerTimed(foreground.question.question_id, 'settled')
+  await mobile.wait(frame => frame.type === 'question.claim.closed' && frame.request_id === foregroundClaim.request_id)
+  const released = await promptTimed('RELEASE')
+  const releasedClaim = await claimTimed(released.question.question_id)
+  const releaseId = randomUUID()
+  mobile.send({ ...timedEnvelope, type: 'question.release', request_id: releaseId, payload: { claim_id: releasedClaim.request_id } })
+  await mobile.wait(frame => frame.type === 'question.released' && frame.request_id === releaseId)
+  mobile.send(releasedClaim)
+  await mobile.wait(frame => frame.type === 'error' && frame.request_id === releasedClaim.request_id && frame.payload.code === 'rate.limited')
+  await mobile.wait(frame => frame.type === 'question.timed.snapshot' && frame.payload.items.some((item: any) => item.question_id === released.question.question_id && item.state === 'continued'), released.from)
+  await answerTimed(released.question.question_id, 'agent_queued')
+  const unattended = await promptTimed('LATE')
+  await mobile.wait(frame => frame.type === 'question.timed.snapshot' && frame.payload.items.some((item: any) => item.question_id === unattended.question.question_id && item.state === 'continued'), unattended.from)
+  await answerTimed(unattended.question.question_id, 'agent_queued')
+  await mobile.wait(frame => frame.type === 'question.timed.snapshot' && frame.session_id === timedSessionId && frame.payload.items.length === 0, unattended.from)
+
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, cancelMarker, questionMarker, answerMarker, 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
+  for (const secret of [marker, cancelMarker, questionMarker, answerMarker, ...timedSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
@@ -440,5 +531,6 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic(`Idle device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
+  t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
   t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, questions, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

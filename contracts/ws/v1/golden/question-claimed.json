@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "request_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "runtime_id": "33333333-3333-4333-8333-333333333333",
+  "runtime_epoch": "44444444-4444-4444-8444-444444444444",
+  "session_id": "55555555-5555-4555-8555-555555555555",
+  "type": "question.claimed",
+  "subscription_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "sync_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "payload": {
+    "question_id": "99999999-9999-4999-8999-999999999999",
+    "remaining_ms": 1500,
+    "expires_at": "2026-10-24T12:03:00Z"
+  }
+}

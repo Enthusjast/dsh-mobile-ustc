@@ -42,7 +42,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -60,6 +60,7 @@ type Repository interface {
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
 	AuthorizeRealtimeSessionRead(context.Context, store.TicketRedemption, string) error
+	AuthorizeRealtimeQuestion(context.Context, store.TicketRedemption, string) error
 	InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error)
 }
 
@@ -791,7 +792,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			}) != nil {
 				return
 			}
-		case "message.submit", "session.cancel", "session.create", "question.answer":
+		case "message.submit", "session.cancel", "session.create", "question.answer", "question.timed.answer":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				closePolicy(connection, "operation denied")
@@ -823,7 +824,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeCommandReceipt(parent, live, host, envelope)
-		case "session.subscribe", "session.unsubscribe", "session.page":
+		case "session.subscribe", "session.unsubscribe", "session.page", "question.claim", "question.release":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				closePolicy(connection, "operation denied")
@@ -838,8 +839,19 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				server.sendProtocolError(parent, live, "rate.limited", &envelope)
 				continue
 			}
-			server.routeSessionRead(parent, live, envelope)
-		case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "session.fragment", "session.error", "session.closed", "question.snapshot":
+			if envelope.Type == "question.claim" || envelope.Type == "question.release" {
+				server.routeQuestionClaim(parent, live, envelope)
+			} else {
+				server.routeSessionRead(parent, live, envelope)
+			}
+		case "question.claimed", "question.claim.closed":
+			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				closePolicy(connection, "operation denied")
+				return
+			}
+			server.routeQuestionClaimResult(parent, live, envelope)
+		case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "session.fragment", "session.error", "session.closed", "question.snapshot", "question.timed.snapshot":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				closePolicy(connection, "operation denied")
@@ -973,6 +985,9 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 	if envelope.Type == "question.answer" {
 		capability = "question.blocking.v1"
 	}
+	if envelope.Type == "question.timed.answer" {
+		capability = "question.timed.v1"
+	}
 	if !live.supports("command.relay.v1") || !live.supports(capability) {
 		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
 		return
@@ -982,6 +997,7 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		(envelope.Type == "message.submit" && envelope.RuntimeEpoch != "") ||
 		(envelope.Type == "session.cancel" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
 		(envelope.Type == "question.answer" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
+		(envelope.Type == "question.timed.answer" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
 		envelope.DeviceID != "" || envelope.UserID != "" || envelope.PayloadSHA256 != "" || envelope.SubscriptionID != "" || envelope.SyncID != "" {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
@@ -996,14 +1012,14 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		}
 		payload = submit
 		digest, _ = messageSubmitDigest(envelope.SessionID, submit)
-	} else if envelope.Type == "question.answer" {
+	} else if envelope.Type == "question.answer" || envelope.Type == "question.timed.answer" {
 		var answer questionAnswerPayload
 		if decodePayload(envelope.Payload, &answer) != nil || !validQuestionAnswer(answer) {
 			server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 			return
 		}
 		payload = answer
-		digest = questionAnswerDigest(envelope.SessionID, envelope.RuntimeEpoch, answer)
+		digest = questionAnswerTypeDigest(envelope.Type, envelope.SessionID, envelope.RuntimeEpoch, answer)
 	} else {
 		if decodePayload(envelope.Payload, &struct{}{}) != nil {
 			server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
@@ -1034,7 +1050,11 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		server.sendProtocolError(parent, live, "runtime.offline", &envelope)
 		return
 	}
-	status, err := server.database.RecordRealtimeCommand(parent, live.peer.redemption, envelope.Type, envelope.RequestID, envelope.SessionID, digest)
+	action := envelope.Type
+	if action == "question.timed.answer" {
+		action = "question.answer"
+	}
+	status, err := server.database.RecordRealtimeCommand(parent, live.peer.redemption, action, envelope.RequestID, envelope.SessionID, digest)
 	if err != nil {
 		server.sendProtocolError(parent, live, commandErrorCode(err), &envelope)
 		return

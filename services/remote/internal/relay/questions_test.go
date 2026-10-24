@@ -17,6 +17,9 @@ func TestQuestionAnswerDigestMatchesUnicodeGoldenAndRejectsInvalidBatches(t *tes
 	if digest := questionAnswerDigest("55555555-5555-4555-8555-555555555555", "44444444-4444-4444-8444-444444444444", answer); digest != "a1d12f0ecdb9e9d2c48ee8bbbf1554cc1349f5283dcc673db35036184f4934dc" {
 		t.Fatalf("question digest=%s", digest)
 	}
+	if digest := questionAnswerTypeDigest("question.timed.answer", "55555555-5555-4555-8555-555555555555", "44444444-4444-4444-8444-444444444444", answer); digest != "032043ab168d7808062a636a5b22f77343a3440c81cc915a1156b11ec57fd918" {
+		t.Fatalf("timed question digest=%s", digest)
+	}
 	for _, invalid := range []questionAnswerPayload{
 		{QuestionID: answer.QuestionID, Answers: nil},
 		{QuestionID: answer.QuestionID, Answers: []questionAnswerItem{{ID: "plan"}}},

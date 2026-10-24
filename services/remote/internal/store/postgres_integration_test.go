@@ -537,6 +537,14 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.AuthorizeRealtimeSessionRead(ctx, messageTicketRedemption, relaySessionID); err != nil {
 		t.Fatalf("active workspace read grant denied: %v", err)
 	}
+	questionTicket := messageTicketRedemption
+	questionTicket.Scope.Actions = []string{"session.read", "question.answer"}
+	if err := postgres.AuthorizeRealtimeQuestion(ctx, questionTicket, relaySessionID); err != nil {
+		t.Fatalf("active question claim denied: %v", err)
+	}
+	if err := postgres.AuthorizeRealtimeQuestion(ctx, messageTicketRedemption, relaySessionID); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("question timing claim accepted without answer action: %v", err)
+	}
 	deviceConnectionID := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 	deviceLease := RealtimeConnectionLease{
 		Role: "device", ConnectionID: deviceConnectionID, RuntimeID: enrollment.RuntimeID,

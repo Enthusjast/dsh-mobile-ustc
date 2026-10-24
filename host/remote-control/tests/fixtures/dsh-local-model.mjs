@@ -8,6 +8,7 @@ class LocalModel extends LlmAdapter {
     this.approvalToolIssued = false
     this.questionToolIssued = false
     this.cancelWaitIssued = false
+    this.timedQuestionsIssued = new Set()
   }
 
   providerInfo(provider) { return { id: provider, name: 'Local DSH integration fixture' } }
@@ -20,6 +21,19 @@ class LocalModel extends LlmAdapter {
       .filter(part => part.type === 'text')
       .map(part => part.text)
       .join('\n')
+    const timed = ['REMOTE_TIMED_FOREGROUND', 'REMOTE_TIMED_RELEASE', 'REMOTE_TIMED_LATE']
+      .find(marker => userText.includes(marker) && !this.timedQuestionsIssued.has(marker))
+    if (timed) {
+      this.timedQuestionsIssued.add(timed)
+      const args = JSON.stringify({ timeout: timed === 'REMOTE_TIMED_FOREGROUND' ? 10 : timed === 'REMOTE_TIMED_RELEASE' ? 2 : 1,
+        questions: [{ id: 'timed-choice', question: 'Answer the timed DSH fixture question.', options: [{ label: 'Reply' }] }] })
+      const id = randomUUID()
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id, name: 'ask_user_question', argumentsDelta: args }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'ask_user_question', arguments: args } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
     if (!this.cancelWaitIssued && userText.includes('REMOTE_CANCEL_WAIT')) {
       this.cancelWaitIssued = true
       yield { type: 'block-start', index: 0, blockType: 'text' }

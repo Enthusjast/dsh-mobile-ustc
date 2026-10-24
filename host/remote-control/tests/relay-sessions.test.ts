@@ -107,3 +107,47 @@ test('a blocked socket cannot grow the native follower queue without bound', asy
     assert.equal(sent.find(frame => frame.type === 'session.error').payload.code, 'protocol.resync_required')
   } finally { transport.close(); release() }
 })
+
+test('timed UI claims stay bound to a negotiated subscription and release on explicit release, unsubscribe and socket close', async () => {
+  const sent: any[] = [], claims: AbortSignal[] = []
+  const runtime: SessionReaderRuntime = {
+    epoch, client: { runtimeId },
+    async *follow(command, signal) {
+      yield { v: 0, type: 'session.snapshot', runtime_epoch: epoch, request_id: command.request_id, session_id: sessionId,
+        sync_id: syncId, payload: { cursor: 0, records: [], has_more: false, assistant: null } }
+      await once(signal, 'abort')
+    },
+    async dispatch() { throw new Error('unused') },
+    async *claimQuestion(_session, _question, signal) {
+      claims.push(signal)
+      yield { remaining_ms: 1000, expires_at: new Date(Date.now() + 1000).toISOString() }
+      await once(signal, 'abort')
+    },
+  }
+  const transport = new RelaySessions(runtime, async frame => { sent.push(frame) }, true)
+  try {
+    transport.handle({ ...subscribe, payload: { max_messages: 30, timed_questions: true } })
+    await waitFor(() => sent.some(frame => frame.type === 'session.snapshot'))
+    const claimId = randomUUID(), questionId = randomUUID()
+    const claim = { ...subscribe, type: 'question.claim', request_id: claimId, sync_id: syncId, payload: { question_id: questionId } }
+    transport.handle({ ...claim, sync_id: randomUUID() })
+    await waitFor(() => sent.some(frame => frame.type === 'session.error'))
+    assert.equal(claims.length, 0)
+    transport.handle(claim)
+    await waitFor(() => sent.some(frame => frame.type === 'question.claimed'))
+    assert.equal(sent.find(frame => frame.type === 'question.claimed').request_id, claimId)
+    transport.handle({ ...claim, type: 'question.release', request_id: randomUUID(), payload: { claim_id: claimId } })
+    await waitFor(() => claims[0]?.aborted === true)
+    assert.throws(() => transport.handle(claim), /protocol.invalid/, 'retired claim identity was reused')
+    transport.handle({ ...claim, request_id: randomUUID() })
+    await waitFor(() => claims.length === 2)
+    transport.handle({ ...subscribe, type: 'session.unsubscribe', payload: {} })
+    assert.equal(claims[1]?.aborted, true)
+    transport.handle({ ...subscribe, subscription_id: randomUUID(), payload: { max_messages: 30, timed_questions: true } })
+    await waitFor(() => sent.filter(frame => frame.type === 'session.snapshot').length === 2)
+    const nextSubscription = sent.filter(frame => frame.type === 'session.snapshot')[1].subscription_id
+    transport.handle({ ...claim, subscription_id: nextSubscription, request_id: randomUUID() })
+    await waitFor(() => claims.length === 3)
+  } finally { transport.close() }
+  assert.equal(claims[2]?.aborted, true)
+})

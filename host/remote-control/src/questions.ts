@@ -31,3 +31,7 @@ export interface TimedQuestionView {
   questions: BlockingQuestion['questions']
 }
 export interface TimedQuestionSnapshot { revision: number; items: TimedQuestionView[] }
+export interface TimedQuestionSource {
+  snapshot(sessionId: string): TimedQuestionSnapshot
+  watch(sessionId: string, changed: () => void): () => void
+}

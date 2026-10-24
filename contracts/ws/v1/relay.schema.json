@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dsh-mobile-ustc.invalid/contracts/ws/v1/relay.schema.json",
-  "title": "DSH Mobile Relay frames with session reads",
-  "description": "Strict challenge, heartbeat, text/cancel commands, host catalog and scoped session read frames. Read routing uses per-connection subscription IDs and host-generated sync IDs. Fragmented projected payloads are at most 2 MiB.",
+  "title": "DSH Mobile Relay v1 frames",
+  "description": "Strict challenge, heartbeat, text/create/cancel commands, scoped session reads, and blocking/timed question frames. Read routing uses per-connection subscription IDs and host-generated sync IDs. Fragmented projected payloads are at most 2 MiB.",
   "oneOf": [
     { "$ref": "#/$defs/challenge" },
     { "$ref": "#/$defs/deviceHelloProof" },
@@ -20,6 +20,14 @@
     { "$ref": "#/$defs/questionAnswer" },
     { "$ref": "#/$defs/questionAnswerToHost" },
     { "$ref": "#/$defs/questionSnapshot" },
+    { "$ref": "#/$defs/questionTimedAnswer" },
+    { "$ref": "#/$defs/questionTimedAnswerToHost" },
+    { "$ref": "#/$defs/questionTimedSnapshot" },
+    { "$ref": "#/$defs/questionClaim" },
+    { "$ref": "#/$defs/questionRelease" },
+    { "$ref": "#/$defs/questionReleased" },
+    { "$ref": "#/$defs/questionClaimed" },
+    { "$ref": "#/$defs/questionClaimClosed" },
     { "$ref": "#/$defs/sessionCreate" },
     { "$ref": "#/$defs/sessionCreateToHost" },
     { "$ref": "#/$defs/hostCreationReceipt" },
@@ -835,6 +843,472 @@
         }
       }
     },
+    "questionTimedAnswer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.timed.answer"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/questionAnswerPayload"
+        }
+      }
+    },
+    "questionTimedAnswerToHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "user_id",
+        "device_id",
+        "payload_sha256",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.timed.answer"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "payload": {
+          "$ref": "#/$defs/questionAnswerPayload"
+        }
+      }
+    },
+    "timedQuestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "expires_at",
+        "questions",
+        "state"
+      ],
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/questionItem"
+          }
+        },
+        "state": {
+          "enum": [
+            "open",
+            "continued",
+            "reply_queued"
+          ]
+        }
+      }
+    },
+    "questionTimedSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.timed.snapshot"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "revision",
+            "items"
+          ],
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "items": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/timedQuestion"
+              }
+            }
+          }
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "questionClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.claim"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "question_id"
+          ],
+          "properties": {
+            "question_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "questionRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.release"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "claim_id"
+          ],
+          "properties": {
+            "claim_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "questionReleased": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.released"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "claim_id"
+          ],
+          "properties": {
+            "claim_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "questionClaimed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.claimed"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "question_id",
+            "remaining_ms",
+            "expires_at"
+          ],
+          "properties": {
+            "question_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "remaining_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "expires_at": {
+              "type": "string"
+            }
+          }
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "questionClaimClosed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload",
+        "sync_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "question.claim.closed"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "question_id",
+            "code"
+          ],
+          "properties": {
+            "question_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "code": {
+              "enum": [
+                "question.ended",
+                "interaction.stale",
+                "rate.limited",
+                "internal"
+              ]
+            }
+          }
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
     "submitPayload": {
       "type": "object", "additionalProperties": false, "required": ["mode", "content"],
       "properties": {
@@ -994,6 +1468,9 @@
               "maximum": 100
             },
             "questions": {
+              "type": "boolean"
+            },
+            "timed_questions": {
               "type": "boolean"
             }
           }
@@ -1329,7 +1806,8 @@
                 "assistant.chunk",
                 "assistant.end",
                 "session.page.result",
-                "question.snapshot"
+                "question.snapshot",
+                "question.timed.snapshot"
               ]
             },
             "fragment_id": {

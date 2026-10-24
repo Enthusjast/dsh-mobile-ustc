@@ -21,7 +21,7 @@ export class ProbeRuntime {
   private closed = false
 
   constructor(readonly client: DshClient, private readonly interactions: InteractionRouter, private readonly journal: CommandJournal = new MemoryCommandJournal(client.runtimeId)) {
-    this.sync = new SessionSync(client, this.epoch, interactions)
+    this.sync = new SessionSync(client, this.epoch, interactions, interactions.timed)
   }
 
   private check(command: Command): void {
@@ -55,6 +55,13 @@ export class ProbeRuntime {
         case 'question.answer': return this.interactions.answerQuestion(command.session_id, command.payload.question_id, {
           answers: command.payload.answers.map(item => ({ id: item.id, selected: item.selected, ...(item.custom === undefined ? {} : { custom: item.custom }) })),
         })
+        case 'question.timed.answer': {
+          const native = await this.client.resolve(command.session_id, signal)
+          const result = this.interactions.timed.answer(command.session_id, command.payload.question_id, {
+            answers: command.payload.answers.map(item => ({ id: item.id, selected: item.selected, ...(item.custom === undefined ? {} : { custom: item.custom }) })),
+          })
+          return result.delivery === 'late_message' ? { ...result, checkpoint: await this.client.checkpoint(native) } : result
+        }
         case 'session.model.select': {
           const id = await this.client.resolve(command.session_id, signal)
           return this.client.selectModel(id, {
@@ -74,7 +81,7 @@ export class ProbeRuntime {
         case 'session.subscribe': throw new ProbeError('protocol.streaming_required')
       }
     }
-    const mutating = ['session.create', 'message.submit', 'session.cancel', 'session.model.select', 'interaction.answer', 'question.answer'].includes(command.type)
+    const mutating = ['session.create', 'message.submit', 'session.cancel', 'session.model.select', 'interaction.answer', 'question.answer', 'question.timed.answer'].includes(command.type)
     let payload: unknown
     if (!mutating) payload = await run()
     else {
@@ -114,7 +121,8 @@ export class ProbeRuntime {
           await report('dispatching')
           try {
             const value = await run()
-            const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create'
+            const lateAnswer = command.type === 'question.timed.answer' && value !== null && typeof value === 'object' && 'delivery' in value && value.delivery === 'late_message'
+            const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create' || lateAnswer
             if (checkpointRequired && value !== null && typeof value === 'object'
               && 'checkpoint' in value && value.checkpoint !== null && typeof value.checkpoint === 'object'
               && 'state' in value.checkpoint && value.checkpoint.state !== 'persisted') {
@@ -129,7 +137,7 @@ export class ProbeRuntime {
               await report('outcome_unknown')
               return { command_state: 'outcome_unknown' }
             }
-            const state = command.type === 'message.submit' ? 'agent_queued' : 'settled'
+            const state = command.type === 'message.submit' || lateAnswer ? 'agent_queued' : 'settled'
             this.journal.complete(command.request_id, owner, state, value)
             await report(state, value)
             return value
@@ -159,6 +167,11 @@ export class ProbeRuntime {
   follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal) {
     this.check(command)
     return this.sync.follow(command, signal)
+  }
+
+  claimQuestion(sessionId: string, questionId: string, signal: AbortSignal) {
+    if (this.closed) throw new ProbeError('runtime.offline')
+    return this.interactions.timed.claim(sessionId, questionId, signal)
   }
 
   close(): void { this.closed = true; this.interactions.close() }

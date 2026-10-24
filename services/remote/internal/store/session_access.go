@@ -8,6 +8,15 @@ import (
 	"slices"
 )
 
+// A UI claim affects native execution timing and requires answer authority in
+// addition to the read scope of its current subscription.
+func (postgres *Postgres) AuthorizeRealtimeQuestion(ctx context.Context, ticket TicketRedemption, sessionID string) error {
+	if !slices.Contains(ticket.Scope.Actions, "question.answer") {
+		return ErrAccessDenied
+	}
+	return postgres.AuthorizeRealtimeSessionRead(ctx, ticket, sessionID)
+}
+
 // AuthorizeRealtimeSessionRead is called at admission and before every content
 // frame. Directory visibility alone never grants access to session bodies.
 func (postgres *Postgres) AuthorizeRealtimeSessionRead(ctx context.Context, ticket TicketRedemption, sessionID string) error {

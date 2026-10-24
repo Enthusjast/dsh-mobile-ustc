@@ -222,6 +222,13 @@ func (fake *relayTestStore) AuthorizeRealtimeSessionRead(_ context.Context, tick
 	return nil
 }
 
+func (fake *relayTestStore) AuthorizeRealtimeQuestion(ctx context.Context, ticket store.TicketRedemption, sessionID string) error {
+	if !slices.Contains(ticket.Scope.Actions, "question.answer") {
+		return store.ErrAccessDenied
+	}
+	return fake.AuthorizeRealtimeSessionRead(ctx, ticket, sessionID)
+}
+
 func (fake *relayTestStore) InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error) {
 	return nil, nil
 }
@@ -685,7 +692,7 @@ func dialRelayHost(t *testing.T, serverURL string, key *ecdsa.PrivateKey, instal
 		t.Fatal(err)
 	}
 	if len(capabilities) == 0 {
-		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
 	}
 	challenge := readChallenge(t, connection, "installation")
 	hello := hostHandshakePayload{
@@ -722,7 +729,7 @@ func dialRelayDevice(t *testing.T, serverURL string, key *ecdsa.PrivateKey, tick
 		t.Fatal(err)
 	}
 	if len(capabilities) == 0 {
-		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "session.cancel.v1", "session.create.v1", "session.read.v1"}
+		capabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.cancel.v1", "session.create.v1", "session.read.v1"}
 	}
 	challenge := readChallenge(t, connection, "device")
 	hello := deviceHandshakePayload{

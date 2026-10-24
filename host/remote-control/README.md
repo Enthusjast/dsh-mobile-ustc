@@ -58,9 +58,9 @@ curl --unix-socket /tmp/dsh-remote-private/probe.sock http://localhost/m0/probe
 
 受保护工具在原生审批服务中等待本地应答，并通过最终 guard 检查当前执行 token。前置 listener 跳过等待或桌面入口直接返回允许时，guard 仍拒绝执行。这只验证了已声明工具经 DSH ToolRuntime 的路径；底层 capability、真实微信 / 桌面共存及完整企业策略需另行组合验收。
 
-普通提问与工具批准分开处理。主机已接入 timed question 的原生前台 claim、超时 continued 投影与迟到消息路径，已用本机 npm DSH 服务及真实工具循环验证；其 Relay / 手机传输尚未接入，当前不声明远程 timed capability。生命周期、重载与验收范围见 [timed question 适配记录](../../docs/timed-question-adapter.md)。文件、归档、子 Agent 接管、签名审批、学校身份和账号切换仍未交付。Windows 命名管道代码已实现，仍需发行包及 Windows 实机验收。
+普通提问与工具批准分开处理。主机已接入 timed question 的原生前台 claim、超时 continued 投影与迟到消息路径，已用本机 npm DSH 服务及真实工具循环验证；Relay 已通过独立 `question.timed.v1` 接入，支持按订阅领取 / 释放等待和持久迟到消息；本机 Go/PostgreSQL/DSH 联合测试已通过，Android UI 仍待实现。生命周期、重载与验收范围见 [timed question 适配记录](../../docs/timed-question-adapter.md)。文件、归档、子 Agent 接管、签名审批、学校身份和账号切换仍未交付。Windows 命名管道代码已实现，仍需发行包及 Windows 实机验收。
 
-Relay 双方协商 `question.blocking.v1` 后，普通阻塞式问题和计划确认随会话订阅发送待答快照。回答须绑定会话与 epoch、具备 `question.answer` 权限，并经加密命令日志记录；多设备只能完成一次，重试返回持久结果。问题回答不能应答工具审批。协议、限制及 timed question 待办见 [问题应答说明](../../docs/question-protocol.md)。
+Relay 双方协商 `question.blocking.v1` 后，普通阻塞式问题和计划确认随会话订阅发送待答快照。回答须绑定会话与 epoch、具备 `question.answer` 权限，并经加密命令日志记录；多设备只能完成一次，重试返回持久结果。问题回答不能应答工具审批。协议与阻塞式问题限制见 [问题应答说明](../../docs/question-protocol.md)。
 
 每个 runtime 使用独立 SQLite WAL 命令日志。修改命令在调用 DSH 前先提交 `host_accepted`；`session.create` 在创建结果 flush 成功后才返回确定结果，`message.submit` 在 DSH 接受且 `sessions.flush()` 持久检查点成功后记录 `agent_queued`，其它已完成操作记为 `settled`。日志以 request_id 和规范化操作摘要去重；同 ID 不同内容返回冲突。消息重试复用 DSH 原生 requestId，可在插件重启后再次提交并避免重复插入；其它处于 dispatching 的操作标为 `outcome_unknown`，不会自动重放。数据库保存 AES-256-GCM 加密的命令 / 结果正文，收到持久确认后清除命令正文；请求摘要和状态保留。最多保留 100,000 条幂等记录及 4,096 条未完成正文，达到上限后拒绝新修改，不淘汰旧 request_id。
 

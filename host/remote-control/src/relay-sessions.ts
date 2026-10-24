@@ -8,11 +8,13 @@ const base = {
   session_id: uuid, subscription_id: uuid,
 }
 const requestSchema = z.discriminatedUnion('type', [
-  z.strictObject({ ...base, type: z.literal('session.subscribe'), payload: z.strictObject({ max_messages: z.int().min(1).max(100), questions: z.boolean().optional() }) }),
+  z.strictObject({ ...base, type: z.literal('session.subscribe'), payload: z.strictObject({ max_messages: z.int().min(1).max(100), questions: z.boolean().optional(), timed_questions: z.boolean().optional() }) }),
   z.strictObject({ ...base, type: z.literal('session.unsubscribe'), payload: z.strictObject({}) }),
   z.strictObject({ ...base, type: z.literal('session.page'), payload: z.strictObject({
     sync_id: uuid, through_seq: z.int().min(-1), before_seq: z.int().min(0), max_messages: z.int().min(1).max(100),
   }) }),
+  z.strictObject({ ...base, sync_id: uuid, type: z.literal('question.claim'), payload: z.strictObject({ question_id: uuid }) }),
+  z.strictObject({ ...base, sync_id: uuid, type: z.literal('question.release'), payload: z.strictObject({ claim_id: uuid }) }),
 ])
 type ReadRequest = z.infer<typeof requestSchema>
 
@@ -21,23 +23,27 @@ export interface SessionReaderRuntime {
   client: { runtimeId: string }
   follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal): AsyncIterable<Frame>
   dispatch(command: Command, signal: AbortSignal): Promise<unknown>
+  claimQuestion?(sessionId: string, questionId: string, signal: AbortSignal): AsyncIterable<{ remaining_ms: number; expires_at: string }>
 }
 
 interface Subscription {
-  request: ReadRequest
+  request: Extract<ReadRequest, { type: 'session.subscribe' }>
   abort: AbortController
   queue: Array<{ frame: unknown; bytes: number }>
   bytes: number
   writing: boolean
   finished: boolean
   pages: Set<string>
+  syncId?: string
+  claims: Map<string, AbortController>
+  usedClaims: Set<string>
 }
 
 const MAX_FRAME = 64 * 1024
 const MAX_PAYLOAD = 2 * 1024 * 1024
 const MAX_SUBSCRIPTION_BYTES = 3 * 1024 * 1024
 const MAX_TOTAL_BYTES = 12 * 1024 * 1024
-const contentTypes = new Set(['session.snapshot', 'session.event', 'session.checkpoint', 'assistant.start', 'assistant.chunk', 'assistant.end', 'question.snapshot'])
+const contentTypes = new Set(['session.snapshot', 'session.event', 'session.checkpoint', 'assistant.start', 'assistant.chunk', 'assistant.end', 'question.snapshot', 'question.timed.snapshot'])
 
 /** Split only the projected payload. Routing and sync identities remain visible on every fragment. */
 export function encodeSessionFrames(frame: Record<string, unknown>): Record<string, unknown>[] {
@@ -61,26 +67,43 @@ export class RelaySessions {
   private bytes = 0
   private closed = false
 
-  constructor(private readonly runtime: SessionReaderRuntime, private readonly send: (frame: unknown) => Promise<void>) {}
+  constructor(private readonly runtime: SessionReaderRuntime, private readonly send: (frame: unknown) => Promise<void>, private readonly timedEnabled = false) {}
 
   handle(value: unknown): boolean {
-    if (value === null || typeof value !== 'object' || !['session.subscribe', 'session.unsubscribe', 'session.page'].includes(String((value as { type?: unknown }).type))) return false
+    if (value === null || typeof value !== 'object' || !['session.subscribe', 'session.unsubscribe', 'session.page', 'question.claim', 'question.release'].includes(String((value as { type?: unknown }).type))) return false
     const parsed = requestSchema.safeParse(value)
     if (!parsed.success || this.closed) throw new ProbeError('protocol.invalid')
     const request = parsed.data
     if (request.runtime_id !== this.runtime.client.runtimeId || request.runtime_epoch !== this.runtime.epoch) throw new ProbeError('runtime.changed')
     const existing = this.subscriptions.get(request.subscription_id)
     if (request.type === 'session.subscribe') {
+      if (request.payload.timed_questions && !this.timedEnabled) throw new ProbeError('protocol.unsupported')
       if (existing || this.subscriptions.size >= 32) {
         void this.sendError(request, 'rate.limited')
         return true
       }
-      const subscription: Subscription = { request, abort: new AbortController(), queue: [], bytes: 0, writing: false, finished: false, pages: new Set() }
+      const subscription: Subscription = { request, abort: new AbortController(), queue: [], bytes: 0, writing: false, finished: false, pages: new Set(), claims: new Map(), usedClaims: new Set() }
       this.subscriptions.set(request.subscription_id, subscription)
       void this.follow(subscription)
     } else if (!existing || existing.request.session_id !== request.session_id) {
-      if (request.type === 'session.page') void this.sendError(request, 'protocol.resync_required')
+      if (request.type !== 'session.unsubscribe') void this.sendError(request, 'protocol.resync_required')
     } else if (request.type === 'session.unsubscribe') this.remove(existing)
+    else if (request.type === 'question.claim' || request.type === 'question.release') {
+      if (!this.timedEnabled || !existing.request.payload.timed_questions || !this.runtime.claimQuestion) throw new ProbeError('protocol.unsupported')
+      if (request.sync_id !== existing.syncId) { void this.sendError(request, 'protocol.resync_required'); return true }
+      if (request.type === 'question.release') {
+        existing.claims.get(request.payload.claim_id)?.abort()
+        existing.claims.delete(request.payload.claim_id)
+      } else if (existing.usedClaims.has(request.request_id)) throw new ProbeError('protocol.invalid')
+      else if (existing.claims.size >= 4 || existing.usedClaims.size >= 256) {
+        this.enqueue(existing, this.envelope(request, 'question.claim.closed', { question_id: request.payload.question_id, code: 'rate.limited' }, request.sync_id))
+      } else {
+        const abort = new AbortController()
+        existing.usedClaims.add(request.request_id)
+        existing.claims.set(request.request_id, abort)
+        void this.claim(existing, request, abort)
+      }
+    }
     else {
       if (existing.pages.size >= 4 || existing.pages.has(request.request_id)) {
         void this.sendError(request, 'rate.limited')
@@ -114,7 +137,9 @@ export class RelaySessions {
       for await (const source of this.runtime.follow(command, subscription.abort.signal)) {
         if (subscription.abort.signal.aborted) return
         if (source.type === 'question.snapshot' && (request.type !== 'session.subscribe' || !request.payload.questions)) continue
+        if (source.type === 'question.timed.snapshot' && !request.payload.timed_questions) continue
         if (!contentTypes.has(source.type) || source.session_id !== request.session_id || source.runtime_epoch !== request.runtime_epoch || !source.sync_id) throw new ProbeError('protocol.invalid')
+        if (source.type === 'session.snapshot') subscription.syncId = source.sync_id
         this.enqueue(subscription, this.envelope(request, source.type, source.payload, source.sync_id))
       }
       if (!subscription.abort.signal.aborted) {
@@ -123,6 +148,25 @@ export class RelaySessions {
         if (!subscription.writing) this.remove(subscription)
       }
     } catch (error) { this.fail(subscription, error) }
+  }
+
+  private async claim(subscription: Subscription, request: Extract<ReadRequest, { type: 'question.claim' }>, abort: AbortController): Promise<void> {
+    try {
+      for await (const result of this.runtime.claimQuestion!(request.session_id, request.payload.question_id, abort.signal)) {
+        if (abort.signal.aborted) return
+        this.enqueue(subscription, this.envelope(request, 'question.claimed', { question_id: request.payload.question_id, ...result }, request.sync_id))
+      }
+      if (!abort.signal.aborted) this.enqueue(subscription, this.envelope(request, 'question.claim.closed', { question_id: request.payload.question_id, code: 'question.ended' }, request.sync_id))
+    } catch (error) {
+      if (!abort.signal.aborted) {
+        const code = error instanceof ProbeError && ['interaction.stale', 'rate.limited'].includes(error.code) ? error.code : 'internal'
+        try { this.enqueue(subscription, this.envelope(request, 'question.claim.closed', { question_id: request.payload.question_id, code }, request.sync_id)) }
+        catch (failure) { this.fail(subscription, failure) }
+      }
+    } finally {
+      abort.abort()
+      if (subscription.claims.get(request.request_id) === abort) subscription.claims.delete(request.request_id)
+    }
   }
 
   private async page(subscription: Subscription, request: Extract<ReadRequest, { type: 'session.page' }>): Promise<void> {
@@ -181,6 +225,8 @@ export class RelaySessions {
   private remove(subscription: Subscription): void {
     if (this.subscriptions.get(subscription.request.subscription_id) === subscription) this.subscriptions.delete(subscription.request.subscription_id)
     subscription.abort.abort()
+    for (const claim of subscription.claims.values()) claim.abort()
+    subscription.claims.clear()
     this.bytes -= subscription.bytes
     subscription.bytes = 0
     subscription.queue.length = 0
