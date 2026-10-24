@@ -56,7 +56,7 @@ func (control *ApprovalControl) RecordResult(ctx context.Context, connection Run
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
 		where r.id = $1 and i.id = $2 and i.key_version = $3 and r.epoch = $4 and r.connection_id = $5
-		  and r.connection_key_version = i.key_version and r.revoked_at is null and r.protocol_version = 1
+		  and r.connection_key_version = i.key_version and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+` and r.protocol_version = 1
 		  and r.last_seen_at > clock_timestamp() - interval '45 seconds'
 		for share of r, i, h`, connection.RuntimeID, connection.InstallationID, keyVersion, connection.RuntimeEpoch, connection.ConnectionID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {

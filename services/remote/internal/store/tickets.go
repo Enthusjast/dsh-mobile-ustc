@@ -62,7 +62,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 		select h.org_id::text from runtimes r
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
-		where r.id = $1 and r.revoked_at is null
+		where r.id = $1 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		for share of r, i, h`, runtimeID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RealtimeTicket{}, ErrAccessDenied
@@ -230,7 +230,7 @@ func (postgres *Postgres) ValidateRealtimeLease(ctx context.Context, ticket Tick
 		join org_memberships m on m.user_id = u.id
 		join hosts h on h.org_id = m.org_id and h.state = 'active'
 		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
 		where u.id = $1 and u.status = 'active' and d.key_version = $5 and d.proof_key_thumbprint = $6
 		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > clock_timestamp())
@@ -295,7 +295,7 @@ func loadRealtimeTicket(ctx context.Context, transaction *sql.Tx, digest []byte,
 		join org_memberships m on m.user_id = u.id
 		join hosts h on h.org_id = m.org_id and h.state = 'active'
 		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
 		where u.id = $1 and u.status = 'active' and g.revoked_at is null
 		  and (g.expires_at is null or g.expires_at > now())

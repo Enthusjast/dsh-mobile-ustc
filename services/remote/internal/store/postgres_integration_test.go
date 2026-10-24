@@ -267,8 +267,11 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.CreateEnrollment(ctx, conflictingEnrollment); !errors.Is(err, ErrEnrollmentConflict) {
 		t.Fatalf("conflicting enrollment retry error=%v, want ErrEnrollmentConflict", err)
 	}
-	if _, err := postgres.GetEnrollment(ctx, UserIdentity{Issuer: identity.Issuer, Subject: "target-subject"}, enrollment.EnrollmentID); err != nil {
-		t.Fatalf("organization member could not inspect enrollment: %v", err)
+	if _, err := postgres.GetEnrollment(ctx, UserIdentity{Issuer: identity.Issuer, Subject: "target-subject"}, enrollment.EnrollmentID); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("unconfirmed member inspected enrollment without the code: %v", err)
+	}
+	if info, err := postgres.PreviewEnrollment(ctx, UserIdentity{Issuer: identity.Issuer, Subject: "target-subject"}, enrollment.EnrollmentID, enrollmentCode); err != nil || info.InstallationKeyJKT != installationThumbprint || info.UserConfirmedByMe {
+		t.Fatalf("code-authorized preview did not preserve installation attribution: info=%+v err=%v", info, err)
 	}
 	if _, err := postgres.GetEnrollment(ctx, UserIdentity{Issuer: identity.Issuer, Subject: "outsider-subject"}, enrollment.EnrollmentID); !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("unaffiliated user inspected enrollment: %v", err)

@@ -325,7 +325,7 @@ func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx,
 		select h.org_id::text from runtimes r
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
-		where r.id = $1 and r.revoked_at is null
+		where r.id = $1 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		for share of r, i, h`, runtimeID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", GrantScope{}, false, ErrAccessDenied

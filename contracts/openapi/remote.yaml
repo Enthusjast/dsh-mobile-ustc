@@ -35,6 +35,7 @@ paths:
         '503': { $ref: '#/components/responses/Error' }
   /v1/devices:
     post:
+      description: Phone-client registration. Separately allowlisted host OAuth clients cannot register phone credentials.
       requestBody:
         required: true
         content:
@@ -57,7 +58,7 @@ paths:
         '503': { $ref: '#/components/responses/Error' }
   /v1/devices/current:
     get:
-      description: Reconcile enrollment using only the verified issuer, subject and token-bound DPoP key. Caller-supplied device/key selectors are ignored. This read is available before enrollment and for a revoked key; it grants no resource access and returns no other account/device.
+      description: Reconcile phone enrollment using only the verified issuer, subject and token-bound DPoP key. Host OAuth clients are denied. Caller-supplied device/key selectors are ignored. This read is available before enrollment and for a revoked key; it grants no resource access and returns no other account/device.
       responses:
         '200':
           description: Current enrollment state for the authenticated key.
@@ -115,7 +116,29 @@ paths:
         - $ref: '#/components/parameters/UUID'
       responses:
         '200':
-          description: Enrollment display metadata for an active organization member; the confirmation code is never returned.
+          description: Status for the initiating installation owner or the user who confirmed. Phone access requires a registered device; an allowlisted host client must also prove the matching installation key. The code is never returned.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollmentDetails' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/enrollments/{id}/preview:
+    post:
+      description: Read-only phone preview before confirmation. Requires a registered device, current organization membership and the exact 256-bit code in the JSON body. Does not activate resources or create grants.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollmentCodeRequest' }
+      responses:
+        '200':
+          description: Verified display metadata, installation key thumbprint and current-account confirmation attribution, without the code.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:
@@ -838,7 +861,7 @@ components:
         data:
           type: object
           additionalProperties: false
-          required: [enrollment_id, request_id, organization_id, organization_name, host_id, host_alias, installation_id, runtime_id, profile_ref, protocol_version, state, expires_at, host_confirmed, user_confirmed, workspaces]
+          required: [enrollment_id, request_id, organization_id, organization_name, host_id, host_alias, installation_id, installation_key_jkt, runtime_id, profile_ref, protocol_version, state, expires_at, host_confirmed, user_confirmed, user_confirmed_by_me, workspaces]
           properties:
             enrollment_id: { type: string, format: uuid }
             request_id: { type: string, format: uuid }
@@ -847,6 +870,7 @@ components:
             host_id: { type: string, format: uuid }
             host_alias: { type: string }
             installation_id: { type: string, format: uuid }
+            installation_key_jkt: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
             runtime_id: { type: string, format: uuid }
             profile_ref: { type: string }
             dsh_version: { type: string }
@@ -857,6 +881,7 @@ components:
             expires_at: { type: string, format: date-time }
             host_confirmed: { type: boolean }
             user_confirmed: { type: boolean }
+            user_confirmed_by_me: { type: boolean }
             workspaces: { type: array, items: { $ref: '#/components/schemas/EnrollmentWorkspace' } }
     EnrollmentWorkspace:
       type: object

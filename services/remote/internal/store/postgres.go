@@ -204,7 +204,7 @@ func (postgres *Postgres) ListHosts(ctx context.Context, identity UserIdentity) 
 		join org_memberships m on m.user_id = u.id
 		join hosts h on h.org_id = m.org_id and h.state = 'active'
 		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id
 		where u.issuer = $1 and u.subject = $2 and u.status = 'active'
 		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > now())
@@ -247,7 +247,7 @@ func (postgres *Postgres) ListRuntimes(ctx context.Context, identity UserIdentit
 		join org_memberships m on m.user_id = u.id
 		join hosts h on h.org_id = m.org_id and h.state = 'active'
 		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id
 		where u.issuer = $1 and u.subject = $2 and u.status = 'active'
 		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > now())
@@ -300,7 +300,7 @@ func (postgres *Postgres) ListSessions(ctx context.Context, identity UserIdentit
 		join org_memberships m on m.user_id = u.id
 		join hosts h on h.org_id = m.org_id and h.state = 'active'
 		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id
 		join sessions s on s.runtime_id = r.id
 		where u.issuer = $1 and u.subject = $2 and u.status = 'active'
@@ -339,7 +339,7 @@ func (postgres *Postgres) CommandStatus(ctx context.Context, identity UserIdenti
 		left join sessions s on s.id = c.session_id and s.runtime_id = c.runtime_id
 		left join workspaces w on w.id = c.workspace_id and w.runtime_id = c.runtime_id
 		join runtime_grants g on g.runtime_id = c.runtime_id and g.user_id = u.id
-		join runtimes r on r.id = c.runtime_id and r.revoked_at is null
+		join runtimes r on r.id = c.runtime_id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
 		join org_memberships m on m.org_id = h.org_id and m.user_id = u.id

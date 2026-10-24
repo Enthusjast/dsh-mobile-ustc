@@ -51,7 +51,7 @@ func (postgres *Postgres) InvalidRealtimeConnectionLeases(ctx context.Context, l
 			join org_memberships m on m.user_id = u.id
 			join hosts h on h.org_id = m.org_id and h.state = 'active'
 			join installations i on i.host_id = h.id and i.revoked_at is null
-			join runtimes r on r.installation_id = i.id and r.id = lease.runtime_id and r.revoked_at is null
+			join runtimes r on r.installation_id = i.id and r.id = lease.runtime_id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 			join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = lease.grant_version
 			where u.id = lease.user_id and u.status = 'active' and d.key_version = lease.device_key_version
 			  and d.proof_key_thumbprint = lease.proof_key_thumbprint
@@ -70,7 +70,7 @@ func (postgres *Postgres) InvalidRealtimeConnectionLeases(ctx context.Context, l
 			join installations i on i.id = r.installation_id and i.id = lease.installation_id and i.revoked_at is null
 			join hosts h on h.id = i.host_id and h.state = 'active'
 			where r.id = lease.runtime_id and r.epoch = lease.runtime_epoch and r.connection_id::text = lease.connection_id
-			  and r.revoked_at is null and i.key_version = lease.key_version and r.connection_key_version = i.key_version
+			  and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+` and i.key_version = lease.key_version and r.connection_key_version = i.key_version
 		))`, string(encoded))
 	if err != nil {
 		return nil, ErrDatabaseUnavailable

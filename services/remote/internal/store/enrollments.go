@@ -25,6 +25,11 @@ var ErrEnrollmentLimit = errors.New("store: enrollment limit reached")
 var profileRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var keyThumbprintPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
+// Legacy resources without enrollment rows were explicitly provisioned. Every
+// API-created profile has a row and stays unavailable until both confirmations.
+const runtimeEnrollmentApprovedSQL = `not exists (select 1 from enrollments binding where binding.runtime_id = r.id and binding.state <> 'approved')`
+const installationHasApprovedRuntimeSQL = `exists (select 1 from runtimes r where r.installation_id = i.id and r.revoked_at is null and ` + runtimeEnrollmentApprovedSQL + `)`
+
 type enrollmentQuery interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -73,6 +78,7 @@ type EnrollmentInfo struct {
 	HostID             string                `json:"host_id"`
 	HostAlias          string                `json:"host_alias"`
 	InstallationID     string                `json:"installation_id"`
+	InstallationKeyJKT string                `json:"installation_key_jkt"`
 	RuntimeID          string                `json:"runtime_id"`
 	ProfileRef         string                `json:"profile_ref"`
 	DSHVersion         string                `json:"dsh_version,omitempty"`
@@ -83,6 +89,7 @@ type EnrollmentInfo struct {
 	ExpiresAt          time.Time             `json:"expires_at"`
 	HostConfirmed      bool                  `json:"host_confirmed"`
 	UserConfirmed      bool                  `json:"user_confirmed"`
+	UserConfirmedByMe  bool                  `json:"user_confirmed_by_me"`
 	Workspaces         []EnrollmentWorkspace `json:"workspaces"`
 }
 
@@ -374,6 +381,23 @@ func enrollmentCreated(ctx context.Context, query enrollmentQuery, enrollmentID 
 }
 
 func (postgres *Postgres) GetEnrollment(ctx context.Context, identity UserIdentity, enrollmentID string) (EnrollmentInfo, error) {
+	return postgres.enrollmentInfo(ctx, identity, enrollmentID, nil)
+}
+
+// Preview requires possession of the code before disclosing another user's
+// pending installation. The code stays in the request body and is never returned.
+func (postgres *Postgres) PreviewEnrollment(ctx context.Context, identity UserIdentity, enrollmentID, code string) (EnrollmentInfo, error) {
+	digest, err := enrollmentCodeHash(code)
+	if err != nil {
+		return EnrollmentInfo{}, ErrEnrollmentInvalid
+	}
+	return postgres.enrollmentInfo(ctx, identity, enrollmentID, digest)
+}
+
+func (postgres *Postgres) enrollmentInfo(ctx context.Context, identity UserIdentity, enrollmentID string, codeHash []byte) (EnrollmentInfo, error) {
+	if !grantUUIDPattern.MatchString(enrollmentID) {
+		return EnrollmentInfo{}, ErrEnrollmentInvalid
+	}
 	actorID, err := postgres.ActiveUser(ctx, identity)
 	if err != nil {
 		return EnrollmentInfo{}, err
@@ -381,29 +405,35 @@ func (postgres *Postgres) GetEnrollment(ctx context.Context, identity UserIdenti
 	var info EnrollmentInfo
 	var userConfirmed sql.NullString
 	var hostConfirmed sql.NullTime
+	var expectedCodeHash []byte
+	var codeExpired bool
 	err = postgres.DB.QueryRowContext(ctx, `
 		select e.id::text, e.request_id::text, o.id::text, o.name, h.id::text, h.alias,
-		       i.id::text, r.id::text, r.profile_ref, coalesce(r.dsh_version,''),
+		       i.id::text, i.public_key_thumbprint, r.id::text, r.profile_ref, coalesce(r.dsh_version,''),
 		       coalesce(r.application_version,''), coalesce(r.plugin_version,''), r.protocol_version,
 		       case when e.state in ('pending','user_confirmed') and e.expires_at <= clock_timestamp() then 'expired' else e.state end,
-		       e.expires_at, e.user_confirmed_by::text, e.host_confirmed_at
+		       e.expires_at, e.user_confirmed_by::text, e.host_confirmed_at, e.code_hash, e.expires_at <= clock_timestamp()
 		from enrollments e
 		join hosts h on h.id = e.host_id
 		join orgs o on o.id = h.org_id
 		join installations i on i.id = e.installation_id and i.host_id = h.id
 		join runtimes r on r.id = e.runtime_id and r.installation_id = i.id
 		join org_memberships m on m.org_id = h.org_id and m.user_id = $2
-		where e.id = $1`, enrollmentID, actorID).
+		where e.id = $1 and (e.requested_by = $2 or e.user_confirmed_by = $2 or $3)`, enrollmentID, actorID, codeHash != nil).
 		Scan(&info.EnrollmentID, &info.RequestID, &info.OrganizationID, &info.OrganizationName, &info.HostID, &info.HostAlias,
-			&info.InstallationID, &info.RuntimeID, &info.ProfileRef, &info.DSHVersion, &info.ApplicationVersion,
-			&info.PluginVersion, &info.ProtocolVersion, &info.State, &info.ExpiresAt, &userConfirmed, &hostConfirmed)
+			&info.InstallationID, &info.InstallationKeyJKT, &info.RuntimeID, &info.ProfileRef, &info.DSHVersion, &info.ApplicationVersion,
+			&info.PluginVersion, &info.ProtocolVersion, &info.State, &info.ExpiresAt, &userConfirmed, &hostConfirmed, &expectedCodeHash, &codeExpired)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EnrollmentInfo{}, ErrAccessDenied
 	}
 	if err != nil {
 		return EnrollmentInfo{}, ErrDatabaseUnavailable
 	}
+	if codeHash != nil && (codeExpired || subtle.ConstantTimeCompare(expectedCodeHash, codeHash) != 1) {
+		return EnrollmentInfo{}, ErrEnrollmentInvalid
+	}
 	info.UserConfirmed = userConfirmed.Valid
+	info.UserConfirmedByMe = userConfirmed.Valid && userConfirmed.String == actorID
 	info.HostConfirmed = hostConfirmed.Valid
 	info.Workspaces, err = enrollmentWorkspaces(ctx, postgres.DB, info.RuntimeID)
 	if err != nil {
@@ -471,6 +501,9 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 	if err != nil {
 		return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 	}
+	if !hostConfirmation && row.UserConfirmedBy.Valid && row.UserConfirmedBy.String != actorID {
+		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
+	}
 	if row.State == "approved" {
 		if err := transaction.Commit(); err != nil {
 			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
@@ -484,13 +517,17 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 		if _, err := transaction.ExecContext(ctx, `update enrollments set state = 'expired' where id = $1`, row.ID); err != nil {
 			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 		}
-		if _, err := transaction.ExecContext(ctx, `update hosts set state = 'revoked' where id = $1 and state = 'pending'`, row.HostID); err != nil {
-			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
-		}
-		if _, err := transaction.ExecContext(ctx, `update installations set revoked_at = clock_timestamp() where id = $1 and revoked_at is null`, row.InstallationID); err != nil {
-			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
-		}
 		if _, err := transaction.ExecContext(ctx, `update runtimes set revoked_at = clock_timestamp() where id = $1 and revoked_at is null`, row.RuntimeID); err != nil {
+			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
+		}
+		if _, err := transaction.ExecContext(ctx, `update installations i set revoked_at = clock_timestamp()
+			where i.id = $1 and i.revoked_at is null and not exists
+			(select 1 from runtimes r where r.installation_id = i.id and r.revoked_at is null)`, row.InstallationID); err != nil {
+			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
+		}
+		if _, err := transaction.ExecContext(ctx, `update hosts h set state = 'revoked'
+			where h.id = $1 and h.state = 'pending' and not exists
+			(select 1 from installations i where i.host_id = h.id and i.revoked_at is null)`, row.HostID); err != nil {
 			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 		}
 		actorType, actorIDForAudit, auditDeviceID := "device", deviceID, deviceID
@@ -515,9 +552,6 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 		if err := transaction.Commit(); err != nil {
 			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 		}
-		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
-	}
-	if !hostConfirmation && row.UserConfirmedBy.Valid && row.UserConfirmedBy.String != actorID {
 		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
 	}
 	changed := false

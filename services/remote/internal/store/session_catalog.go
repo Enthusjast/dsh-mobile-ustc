@@ -106,7 +106,7 @@ func (postgres *Postgres) SyncRealtimeSessionCatalog(
 		join hosts h on h.id = i.host_id and h.state = 'active'
 		where r.id = $1 and i.id = $2 and i.key_version = $3
 		  and r.epoch = $4 and r.connection_id = $5 and r.connection_key_version = $3
-		  and r.revoked_at is null
+		  and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		for share of r, i, h`, connection.RuntimeID, connection.InstallationID, keyVersion,
 		connection.RuntimeEpoch, connection.ConnectionID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {

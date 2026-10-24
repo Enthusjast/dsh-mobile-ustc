@@ -31,6 +31,7 @@ type Repository interface {
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
 	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
 	GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error)
+	PreviewEnrollment(context.Context, store.UserIdentity, string, string) (store.EnrollmentInfo, error)
 	ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
 	ConfirmEnrollmentHost(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
 	CreateHostCredentialChallenge(context.Context, store.UserIdentity, string) (store.HostCredentialChallenge, error)
@@ -141,10 +142,11 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.HandleFunc("GET /healthz", api.health)
 	mux.HandleFunc("GET /readyz", api.ready)
 	mux.Handle("GET /v1/me", api.authenticated(http.HandlerFunc(api.me)))
-	mux.Handle("POST /v1/devices", api.authenticated(http.HandlerFunc(api.registerDevice)))
-	mux.Handle("GET /v1/devices/current", api.authenticated(http.HandlerFunc(api.currentDevice)))
+	mux.Handle("POST /v1/devices", api.phoneAuthenticated(http.HandlerFunc(api.registerDevice)))
+	mux.Handle("GET /v1/devices/current", api.phoneAuthenticated(http.HandlerFunc(api.currentDevice)))
 	mux.Handle("POST /v1/enrollments", api.hostAuthenticated(http.HandlerFunc(api.createEnrollment)))
-	mux.Handle("GET /v1/enrollments/{id}", api.protected(http.HandlerFunc(api.getEnrollment)))
+	mux.Handle("GET /v1/enrollments/{id}", api.authenticated(http.HandlerFunc(api.getEnrollment)))
+	mux.Handle("POST /v1/enrollments/{id}/preview", api.protected(http.HandlerFunc(api.previewEnrollment)))
 	mux.Handle("POST /v1/enrollments/{id}/confirm", api.protected(http.HandlerFunc(api.confirmEnrollmentUser)))
 	mux.Handle("POST /v1/enrollments/{id}/host-confirm", api.hostAuthenticated(http.HandlerFunc(api.confirmEnrollmentHost)))
 	mux.Handle("POST /v1/host-credentials/challenges", api.hostAuthenticated(http.HandlerFunc(api.createHostCredentialChallenge)))
@@ -171,7 +173,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 }
 
 func (api *API) protected(next http.Handler) http.Handler {
-	return api.authenticated(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	return api.phoneAuthenticated(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		principal, _ := auth.PrincipalFromContext(request.Context())
 		deviceID, err := api.database.ActiveDevice(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, principal.ProofKeyJKT)
 		if err != nil {
@@ -185,6 +187,17 @@ func (api *API) protected(next http.Handler) http.Handler {
 
 func (api *API) authenticated(next http.Handler) http.Handler {
 	return api.identity.Middleware(next)
+}
+
+func (api *API) phoneAuthenticated(next http.Handler) http.Handler {
+	return api.authenticated(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		principal, _ := auth.PrincipalFromContext(request.Context())
+		if _, host := api.hostClients[principal.ClientID]; host {
+			writeError(response, http.StatusForbidden, "access.denied")
+			return
+		}
+		next.ServeHTTP(response, request)
+	}))
 }
 
 func (api *API) hostAuthenticated(next http.Handler) http.Handler {
@@ -243,9 +256,20 @@ func (api *API) getEnrollment(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	principal, _ := auth.PrincipalFromContext(request.Context())
+	_, hostClient := api.hostClients[principal.ClientID]
+	if !hostClient {
+		if _, err := api.database.ActiveDevice(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, principal.ProofKeyJKT); err != nil {
+			api.writeStoreError(response, err)
+			return
+		}
+	}
 	info, err := api.database.GetEnrollment(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, enrollmentID)
 	if err != nil {
 		api.writeStoreError(response, err)
+		return
+	}
+	if hostClient && info.InstallationKeyJKT != principal.ProofKeyJKT {
+		writeError(response, http.StatusForbidden, "access.denied")
 		return
 	}
 	writeData(response, http.StatusOK, info)
@@ -253,6 +277,26 @@ func (api *API) getEnrollment(response http.ResponseWriter, request *http.Reques
 
 func (api *API) confirmEnrollmentUser(response http.ResponseWriter, request *http.Request) {
 	api.confirmEnrollment(response, request, false)
+}
+
+func (api *API) previewEnrollment(response http.ResponseWriter, request *http.Request) {
+	enrollmentID := request.PathValue("id")
+	if !uuidPattern.MatchString(enrollmentID) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	var input enrollmentCodeRequest
+	if !decodeBody(response, request, &input) {
+		writeError(response, http.StatusBadRequest, "enrollment.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	info, err := api.database.PreviewEnrollment(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, enrollmentID, input.Code)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, info)
 }
 
 func (api *API) confirmEnrollmentHost(response http.ResponseWriter, request *http.Request) {

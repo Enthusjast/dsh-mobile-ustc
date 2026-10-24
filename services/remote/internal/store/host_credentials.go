@@ -62,7 +62,7 @@ func (postgres *Postgres) CreateHostCredentialChallenge(ctx context.Context, ide
 	err = transaction.QueryRowContext(ctx, `
 		select i.id::text, h.org_id::text, i.key_version
 		from installations i
-		join hosts h on h.id = i.host_id and h.state = 'active'
+		join hosts h on h.id = i.host_id and h.state = 'active' and `+installationHasApprovedRuntimeSQL+`
 		where i.owner_user_id = $1 and i.public_key_thumbprint = $2 and i.revoked_at is null
 		for update of i, h`, userID, proofKeyJKT).Scan(&installationID, &orgID, &keyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -164,7 +164,7 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 	err = transaction.QueryRowContext(ctx, `
 		select i.id::text, h.org_id::text, i.public_jwk, i.public_key_thumbprint, i.key_version
 		from installations i
-		join hosts h on h.id = i.host_id and h.state = 'active'
+		join hosts h on h.id = i.host_id and h.state = 'active' and `+installationHasApprovedRuntimeSQL+`
 		join users u on u.id = i.owner_user_id and u.status = 'active'
 		where i.id = $1 and i.public_key_thumbprint = $2 and u.id = $3 and i.revoked_at is null
 		for update of i, h`, challengeInstallationID, proofKeyJKT, userID).Scan(
@@ -284,7 +284,7 @@ func (postgres *Postgres) LookupHostConnectionCredential(ctx context.Context, cr
 		select i.id::text, i.public_key_thumbprint, i.public_jwk, i.key_version, c.expires_at
 		from host_connection_credentials c
 		join installations i on i.id = c.installation_id and i.revoked_at is null
-		join hosts h on h.id = i.host_id and h.state = 'active'
+		join hosts h on h.id = i.host_id and h.state = 'active' and `+installationHasApprovedRuntimeSQL+`
 		where c.token_sha256 = $1 and c.revoked_at is null and c.expires_at > clock_timestamp()
 		  and c.key_version = i.key_version`, digest[:]).
 		Scan(&result.InstallationID, &result.KeyThumbprint, &result.PublicJWK, &result.KeyVersion, &result.ExpiresAt)

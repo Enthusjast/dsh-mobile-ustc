@@ -32,6 +32,11 @@ type fakeRepository struct {
 	ticketCalls             int
 	enrollmentCalls         int
 	enrollmentResult        store.EnrollmentCreated
+	enrollmentInfo          store.EnrollmentInfo
+	enrollmentReadCalls     int
+	enrollmentPreviewCalls  int
+	enrollmentPreviewActor  store.UserIdentity
+	enrollmentPreviewCode   string
 	hostConfirmCalls        int
 	hostConfirmJKT          string
 	challengeCalls          int
@@ -74,7 +79,20 @@ func (fake *fakeRepository) CreateEnrollment(context.Context, store.EnrollmentIn
 	return fake.enrollmentResult, nil
 }
 func (fake *fakeRepository) GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error) {
-	return store.EnrollmentInfo{}, errors.New("not implemented")
+	fake.enrollmentReadCalls++
+	if fake.enrollmentInfo.EnrollmentID == "" {
+		return store.EnrollmentInfo{}, errors.New("not implemented")
+	}
+	return fake.enrollmentInfo, nil
+}
+func (fake *fakeRepository) PreviewEnrollment(_ context.Context, actor store.UserIdentity, _, code string) (store.EnrollmentInfo, error) {
+	fake.enrollmentPreviewCalls++
+	fake.enrollmentPreviewActor = actor
+	fake.enrollmentPreviewCode = code
+	if fake.enrollmentInfo.EnrollmentID == "" {
+		return store.EnrollmentInfo{}, errors.New("not implemented")
+	}
+	return fake.enrollmentInfo, nil
 }
 func (fake *fakeRepository) ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error) {
 	return store.EnrollmentConfirmation{}, errors.New("not implemented")

@@ -70,7 +70,7 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 		join org_memberships m on m.user_id = u.id
 		join hosts h on h.org_id = m.org_id and h.state = 'active'
 		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null
+		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
 		join sessions s on s.runtime_id = r.id and s.id = $5
 		where u.id = $1 and u.status = 'active' and d.key_version = $6 and d.proof_key_thumbprint = $7
@@ -198,7 +198,7 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
 		where r.id = $1 and i.id = $2 and i.key_version = $3 and r.epoch = $4
-		  and r.connection_id = $5 and r.revoked_at is null
+		  and r.connection_id = $5 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		for share of r, i, h`, receipt.RuntimeID, receipt.InstallationID, receipt.KeyVersion,
 		receipt.RuntimeEpoch, receipt.ConnectionID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -44,7 +44,7 @@ func (control *ApprovalControl) authorizeRead(ctx context.Context, ticket Ticket
 		select g.scope, a.workspace_id::text, s.id::text, g.expires_at
 		from approvals a
 		join sessions s on s.id = a.session_id and s.runtime_id = a.runtime_id
-		join runtimes r on r.id = s.runtime_id and r.revoked_at is null
+		join runtimes r on r.id = s.runtime_id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
 		join org_memberships m on m.org_id = h.org_id and m.user_id = $2

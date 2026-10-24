@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -217,6 +218,67 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		!strings.Contains(credential.Body.String(), `"credential"`) {
 		t.Fatalf("host credential exchange did not bind challenge and DPoP key: status=%d calls=%d key=%s challenge=%s body=%s", credential.Code, repo.credentialCalls, repo.credentialJKT, repo.credentialID, credential.Body.String())
 	}
+	t.Run("enrollment preview is device protected and host status is key bound", func(t *testing.T) {
+		repo.enrollmentInfo = store.EnrollmentInfo{EnrollmentID: repo.enrollmentResult.EnrollmentID, InstallationKeyJKT: proofJKT, ProfileRef: "private-profile"}
+		nonce := credential.Header().Get("DPoP-Nonce")
+		sequence := 0
+		send := func(token, method, path string, body ...any) *httptest.ResponseRecorder {
+			sequence++
+			response := sendDPoPRequest(t, hostAPI, token, proofKey, proofJWK, method, "https://api.example.edu"+path, fmt.Sprintf("proof-jti-binding-%04d", sequence), nonce, body...)
+			nonce = response.Header().Get("DPoP-Nonce")
+			return response
+		}
+		path := "/v1/enrollments/" + repo.enrollmentResult.EnrollmentID
+		repo.activeDeviceErr = store.ErrDeviceNotFound
+		denied := send(access, http.MethodPost, path+"/preview", map[string]any{"code": createBody["code"]})
+		if denied.Code != http.StatusForbidden || repo.enrollmentPreviewCalls != 0 {
+			t.Fatal("unregistered phone reached enrollment preview")
+		}
+		before := repo.activeDeviceCall
+		hostStatus := send(hostAccess, http.MethodGet, path)
+		if hostStatus.Code != http.StatusOK || repo.activeDeviceCall != before || hostStatus.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("installation owner cannot read its own key-bound status")
+		}
+		repo.enrollmentInfo.InstallationKeyJKT = strings.Repeat("A", 43)
+		wrongHost := send(hostAccess, http.MethodGet, path)
+		if wrongHost.Code != http.StatusForbidden || strings.Contains(wrongHost.Body.String(), "private-profile") {
+			t.Fatal("a different installation key read host metadata")
+		}
+		repo.enrollmentInfo.InstallationKeyJKT = proofJKT
+		for index, route := range []struct {
+			method, path string
+			body         any
+		}{
+			{http.MethodPost, "/v1/devices", map[string]any{}},
+			{http.MethodGet, "/v1/devices/current", nil},
+			{http.MethodPost, path + "/preview", map[string]any{"code": createBody["code"]}},
+			{http.MethodPost, path + "/confirm", map[string]any{"code": createBody["code"]}},
+		} {
+			beforeDeviceCalls := repo.activeDeviceCall
+			var denied *httptest.ResponseRecorder
+			if route.body == nil {
+				denied = send(hostAccess, route.method, route.path)
+			} else {
+				denied = send(hostAccess, route.method, route.path, route.body)
+			}
+			if denied.Code != http.StatusForbidden || repo.activeDeviceCall != beforeDeviceCalls {
+				t.Fatalf("host client crossed phone route %d", index)
+			}
+		}
+		phoneStatus := send(access, http.MethodGet, path)
+		if phoneStatus.Code != http.StatusForbidden || repo.enrollmentReadCalls != 2 {
+			t.Fatal("phone status bypassed active-device check")
+		}
+		repo.activeDeviceErr = nil
+		extra := send(access, http.MethodPost, path+"/preview", map[string]any{"code": createBody["code"], "user_id": "attacker"})
+		if extra.Code != http.StatusBadRequest || repo.enrollmentPreviewCalls != 0 {
+			t.Fatal("preview accepted caller identity fields")
+		}
+		preview := send(access, http.MethodPost, path+"/preview?user_id=attacker", map[string]any{"code": createBody["code"]})
+		if preview.Code != http.StatusOK || repo.enrollmentPreviewCalls != 1 || repo.enrollmentPreviewCode != createBody["code"] || repo.enrollmentPreviewActor != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || preview.Header().Get("Cache-Control") != "no-store" || strings.Contains(preview.Body.String(), createBody["code"].(string)) {
+			t.Fatal("preview did not bind verified identity and private request body")
+		}
+	})
 }
 
 func sendDPoPRequest(t *testing.T, handler http.Handler, access string, proofKey *ecdsa.PrivateKey, proofJWK map[string]any, method, uri, jti, nonce string, body ...any) *httptest.ResponseRecorder {

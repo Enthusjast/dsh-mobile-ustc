@@ -301,7 +301,7 @@ func lockApprovalRuntime(ctx context.Context, transaction *sql.Tx, request appro
 		select h.org_id::text, r.connection_id::text from runtimes r
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
-		where r.id = $1 and i.id = $2 and h.id = $3 and r.epoch = $4 and r.revoked_at is null
+		where r.id = $1 and i.id = $2 and h.id = $3 and r.epoch = $4 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		  and r.connection_id is not null and r.connection_key_version = i.key_version and r.protocol_version = 1
 		  and r.last_seen_at > clock_timestamp() - interval '45 seconds'
 		`+locking, request.RuntimeID, request.InstallationID, request.HostID, request.RuntimeEpoch).Scan(&orgID, &connectionID)

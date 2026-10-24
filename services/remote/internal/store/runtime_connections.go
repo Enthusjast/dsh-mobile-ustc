@@ -58,7 +58,7 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 		from runtimes r
 		join installations i on i.id = r.installation_id and i.revoked_at is null
 		join hosts h on h.id = i.host_id and h.state = 'active'
-		where r.id = $1 and i.id = $2 and i.key_version = $3 and r.revoked_at is null
+		where r.id = $1 and i.id = $2 and i.key_version = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		for update of r, i, h`, input.RuntimeID, input.InstallationID, input.KeyVersion).Scan(&protocolVersion, &orgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RuntimeConnection{}, ErrHostCredentialInvalid
@@ -111,7 +111,7 @@ func (postgres *Postgres) TouchRuntimeConnection(ctx context.Context, installati
 		update runtimes r set last_seen_at = clock_timestamp()
 		from installations i, hosts h
 		where r.id = $1 and r.installation_id = $2 and r.epoch = $3 and r.connection_id = $4
-		  and r.revoked_at is null and i.id = r.installation_id and i.revoked_at is null
+		  and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+` and i.id = r.installation_id and i.revoked_at is null
 		  and r.connection_key_version = i.key_version and h.id = i.host_id and h.state = 'active'`,
 		runtimeID, installationID, runtimeEpoch, connectionID)
 	if err != nil {

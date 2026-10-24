@@ -1,0 +1,1 @@
+drop index enrollments_unapproved_runtime_idx;
