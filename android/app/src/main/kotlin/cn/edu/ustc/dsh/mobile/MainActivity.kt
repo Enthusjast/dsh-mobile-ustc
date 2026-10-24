@@ -24,6 +24,8 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class MainActivity : FragmentActivity() {
     private val model: HomeViewModel by viewModels()
+    override fun onStart() { super.onStart(); model.foreground(true) }
+    override fun onStop() { model.foreground(false); super.onStop() }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)

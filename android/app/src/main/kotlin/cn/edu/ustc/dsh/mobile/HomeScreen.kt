@@ -18,15 +18,19 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.activity.compose.BackHandler
 
 @Composable
 fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
     val state by model.state.collectAsStateWithLifecycle()
-    HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel)
+    if (state.phase == HomePhase.READY && state.selectedRuntimeId != null) {
+        BackHandler { model.back() }
+        SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel)
+    } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime)
 }
 
 @Composable
-fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
+fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit, onRuntime: (String) -> Unit = {}) {
     var name by rememberSaveable { mutableStateOf("${Build.MANUFACTURER} ${Build.MODEL}".trim()) }
     val displayName = state.deviceName ?: name
     val nameValid = displayName.trim().isNotEmpty() && displayName.trim().toByteArray(Charsets.UTF_8).size <= 160 && displayName.none { it < ' ' || it == '\u007f' }
@@ -128,6 +132,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                                 Text(runtime.hostAlias, style = MaterialTheme.typography.titleMedium)
                                 Text("运行环境 ${runtime.id.take(8)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 if (runtime.version.isNotEmpty()) Text("DSH ${runtime.version}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                OutlinedButton({ onRuntime(runtime.id) }, enabled = runtime.access?.organizationId != null && runtime.access.canList(), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看会话") }
                             }
                         }
                     }

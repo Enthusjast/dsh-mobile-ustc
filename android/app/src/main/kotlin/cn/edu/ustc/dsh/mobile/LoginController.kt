@@ -25,12 +25,15 @@ import javax.inject.Singleton
 enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, RECOVERING, RECOVERY_ERROR, REAUTHENTICATE, RENEWING, CLEARING, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, RECONCILING, REGISTRATION_UNKNOWN, READY }
 class BrowserLaunch(val id: Long, val uri: Uri)
 class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<DeviceRegistrationProof>)
-data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String)
+data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String, val access: RuntimeDirectoryEntry? = null)
 data class HomeState(
     val phase: HomePhase = HomePhase.LOADING, val issuer: String = "", val error: String? = null,
     val subject: String = "", val deviceId: String = "", val runtimes: List<RuntimeRow> = emptyList(),
     val browser: BrowserLaunch? = null, val biometric: BiometricLaunch? = null, val authenticationId: Long? = null,
     val securitySetupRequired: Boolean = false, val refreshing: Boolean = false, val deviceName: String? = null,
+    val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
+    val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
+    val reader: SessionReadState? = null,
 )
 
 internal class LoginEnvironment(
@@ -66,6 +69,12 @@ class LoginController internal constructor(private val context: Context, private
     private var registration: RemoteApi.RegistrationRequest? = null
     private var operation: AuthenticatedKeyOperation<DeviceRegistrationProof>? = null
     private var cleanupPending = false
+    private var foreground = false
+    private var navigationGeneration = 0L
+    private var navigationJob: Job? = null
+    private var readerJob: Job? = null
+    private var reader: SessionReader? = null
+    private var desired: Pair<String, String?>? = null
     private enum class Source { BROWSER, CACHE, REFRESH }
 
     init {
@@ -356,7 +365,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun renew() {
         if (checkpoint == null || session == null) return
-        val stamp = fence(closeKeys = false)
+        val stamp = fence(closeKeys = false, preserveSelection = true)
         mutable.value = HomeState(HomePhase.RENEWING, configuration!!.issuer, subject = checkpoint!!.session.subject)
         work {
             try { if (renewCredential(stamp)) install(session!!, Source.REFRESH, stamp) }
@@ -395,6 +404,7 @@ class LoginController internal constructor(private val context: Context, private
         current(stamp); showReauthentication(error)
     }
     private fun showReauthentication(error: String?) {
+        retireNavigation(false)
         deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
         session = null; api = null
         mutable.value = HomeState(HomePhase.REAUTHENTICATE, configuration!!.issuer, error, subject = checkpoint?.session?.subject ?: "")
@@ -422,23 +432,113 @@ class LoginController internal constructor(private val context: Context, private
             if (hosts["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
             val names = hosts.obj("data").array("items").associate { item ->
                 val host = item as? JsonObject ?: throw RemoteRequestException("network.invalid_response")
-                Contract.uuid(host.string("id")) to Contract.boundedText(host.string("alias"), 160)
+                val alias = Contract.boundedText(host.string("alias"), 640)
+                if (alias.codePointCount(0, alias.length) > 160) throw RemoteRequestException("network.invalid_response")
+                Contract.uuid(host.string("id")) to alias
             }
             val response = resource.runtimes()
             current(stamp)
             if (response["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
-            val items = response.obj("data").array("items").map { item ->
+            val items = response.obj("data").array("items").mapNotNull { item ->
                 val row = item as? JsonObject ?: throw RemoteRequestException("network.invalid_response")
-                val hostId = Contract.uuid(row.string("host_id"))
-                val version = (row.fields["dsh_version"] as? JsonString)?.value ?: ""
-                if (version.isNotEmpty()) Contract.boundedText(version, 128)
-                RuntimeRow(Contract.uuid(row.string("id")), hostId, version, names[hostId] ?: "已授权的电脑")
+                val access = RuntimeDirectoryEntry.parse(row)
+                if (access.organizationId != null && access.organizationId != configuration!!.organizationId) return@mapNotNull null
+                RuntimeRow(access.id, access.hostId, access.dshVersion, names[access.hostId] ?: "已授权的电脑", access)
             }
+            val oldAccess = mutable.value.runtimes.firstOrNull { it.id == desired?.first }?.access
             mutable.value = mutable.value.copy(runtimes = items, error = null)
+            val selection = desired
+            if (selection != null) {
+                val entry = items.firstOrNull { it.id == selection.first }?.access
+                if (entry?.canList() != true || entry.organizationId != configuration!!.organizationId) {
+                    retireNavigation(false)
+                    mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, sessions = emptyList(), reader = null, loadingSessions = false, sessionError = "access.denied")
+                } else if (foreground && (mutable.value.selectedRuntimeId == null || oldAccess?.grantVersion != entry.grantVersion || oldAccess?.scope?.same(entry.scope!!) != true)) navigateRuntime(selection.first, selection.second)
+            }
         } finally { if (generation == stamp) mutable.value = mutable.value.copy(refreshing = false) }
     }
 
-    private fun fence(closeKeys: Boolean): Long {
+    private fun retireNavigation(keepDesired: Boolean) {
+        navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
+        reader?.close(); reader = null
+        if (!keepDesired) desired = null
+    }
+    fun foreground(active: Boolean) {
+        if (foreground == active) return
+        foreground = active
+        if (!active) {
+            retireNavigation(true)
+            mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null), loadingSessions = false)
+        } else if (mutable.value.phase == HomePhase.READY) desired?.let { navigateRuntime(it.first, it.second) }
+    }
+    private fun navigation(block: suspend CoroutineScope.() -> Unit) {
+        val task = scope.launch(start = CoroutineStart.LAZY, block = block); navigationJob = task; task.start()
+    }
+    fun openRuntime(id: String) = navigateRuntime(id, null)
+    private fun navigateRuntime(id: String, resumeSession: String?) {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        val row = mutable.value.runtimes.firstOrNull { it.id == id } ?: return
+        if (row.access?.organizationId != configuration!!.organizationId || !row.access.canList()) return
+        desired = id to resumeSession
+        if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
+        retireNavigation(true)
+        val stamp = generation; val view = navigationGeneration; val resource = api!!
+        mutable.value = mutable.value.copy(selectedRuntimeId = id, selectedSessionId = null, sessions = emptyList(), loadingSessions = true, sessionError = null, reader = null)
+        navigation {
+            try {
+                val response = resource.sessions(id)
+                current(stamp); if (view != navigationGeneration) return@navigation
+                if (response["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+                val entries = response.obj("data").array("items").map { SessionDirectoryEntry.parse(it as? JsonObject ?: throw RemoteRequestException("network.invalid_response")) }
+                if (entries.map { it.id }.toSet().size != entries.size) throw RemoteRequestException("network.invalid_response")
+                mutable.value = mutable.value.copy(sessions = entries, loadingSessions = false)
+                if (resumeSession != null && entries.any { it.id == resumeSession }) { navigationJob = null; openSession(resumeSession) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp && view == navigationGeneration) {
+                    mutable.value = mutable.value.copy(loadingSessions = false, sessionError = code(error))
+                    if (authorityLost(error)) refresh()
+                }
+            }
+        }
+    }
+    fun openSession(id: String) {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        val runtimeId = mutable.value.selectedRuntimeId ?: return
+        val runtime = mutable.value.runtimes.firstOrNull { it.id == runtimeId }?.access ?: return
+        val selected = mutable.value.sessions.firstOrNull { it.id == id } ?: return
+        val allowed = selected.readScope(runtime) ?: return
+        desired = runtimeId to id
+        if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
+        retireNavigation(true)
+        val stamp = generation; val view = navigationGeneration
+        val opened = api!!.reader(checkpoint!!.deviceId!!, runtimeId, id, allowed, scope)
+        reader = opened
+        mutable.value = mutable.value.copy(selectedSessionId = id, reader = SessionReadState(SessionReadPhase.CONNECTING), sessionError = null)
+        readerJob = scope.launch {
+            opened.state.collect { state ->
+                if (generation != stamp || view != navigationGeneration || !foreground) return@collect
+                mutable.value = mutable.value.copy(reader = state)
+                if (state.phase == SessionReadPhase.AUTH_REQUIRED && mutable.value.phase == HomePhase.READY) renew()
+                else if (state.phase == SessionReadPhase.REVOKED && mutable.value.phase == HomePhase.READY) refresh()
+            }
+        }
+    }
+    fun loadOlder() = reader?.loadOlder()
+    fun retryRead() = reader?.retry()
+    fun refreshSessions() { mutable.value.selectedRuntimeId?.let { navigateRuntime(it, null) } }
+    fun back() {
+        val runtime = mutable.value.selectedRuntimeId ?: return
+        if (mutable.value.selectedSessionId != null) {
+            retireNavigation(false); desired = runtime to null
+            mutable.value = mutable.value.copy(selectedSessionId = null, reader = null)
+        } else {
+            retireNavigation(false)
+            mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, sessions = emptyList(), reader = null, loadingSessions = false, sessionError = null)
+        }
+    }
+    private fun fence(closeKeys: Boolean, preserveSelection: Boolean = false): Long {
+        retireNavigation(preserveSelection)
         generation++; job?.cancel(); deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
         if (closeKeys) { owner?.close(); owner = null; proof = null; approval = null; api = null; session = null }
         return generation
@@ -462,6 +562,7 @@ class LoginController internal constructor(private val context: Context, private
     private fun handle(error: Exception, stamp: Long) {
         if (generation != stamp) return
         deadline?.cancel()
+        retireNavigation(false)
         if (authorityLost(error)) clearAccount(code(error))
         else { session = null; api = null; discardRegistration(); mutable.value = HomeState(HomePhase.RECOVERY_ERROR, configuration?.issuer ?: "", code(error)) }
     }
@@ -487,6 +588,13 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun register(name: String) = login.register(name)
     fun cancel() = login.cancel()
     fun refresh() = login.refresh()
+    fun foreground(active: Boolean) = login.foreground(active)
+    fun openRuntime(id: String) = login.openRuntime(id)
+    fun openSession(id: String) = login.openSession(id)
+    fun loadOlder() = login.loadOlder()
+    fun retryRead() = login.retryRead()
+    fun refreshSessions() = login.refreshSessions()
+    fun back() = login.back()
     fun browserOpened(id: Long) = login.browserOpened(id)
     fun browserUnavailable() = login.browserUnavailable()
     fun promptOpened(id: Long) = login.promptOpened(id)

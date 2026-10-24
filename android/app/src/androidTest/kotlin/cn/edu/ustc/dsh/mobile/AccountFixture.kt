@@ -31,6 +31,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val organizationId = "11111111-1111-4111-8111-111111111111"
     val userId = "22222222-2222-4222-8222-222222222222"
     val deviceId = "33333333-3333-4333-8333-333333333333"
+    val runtimeId = "55555555-5555-4555-8555-555555555555"
+    val sessionId = "66666666-6666-4666-8666-666666666666"
     val subject = "school-fixture-user"
     private val server = MockWebServer()
     private val issuerKey = ECKeyGenerator(Curve.P_256).keyID("local-account-issuer").generate()
@@ -42,9 +44,18 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val registrationRequests = AtomicInteger()
     val meRequests = AtomicInteger()
     val hostRequests = AtomicInteger()
+    val sessionRequests = AtomicInteger()
+    val ticketRequests = AtomicInteger()
+    val subscriptions = AtomicInteger()
+    val relayClosures = AtomicInteger()
+    @Volatile var allowSessionRead = true
+    @Volatile var holdSessions = false
+    private val directoryScope get() = RelayScope(if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list"), emptyList(), listOf(sessionId))
+    private val currentRelay = AtomicReference<WebSocket?>()
     @Volatile var relayProofReceived = false
     private var relayScope: RelayScope? = null
     private var relayProofKey: ECKey? = null
+    private var relayAccessExpiresAt = 0L
     private val relayToken = "C".repeat(42) + "A"
     @Volatile var active = false
     @Volatile var revoked = false
@@ -143,17 +154,54 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         if (path == "/v1/realtime") {
             require(request.getHeader("Authorization") == "DSH-Ticket $relayToken" && request.getHeader("Sec-WebSocket-Protocol") == RELAY_SUBPROTOCOL)
             val connectionId = UUID.randomUUID().toString(); val challengeId = UUID.randomUUID().toString(); val nonce = "D".repeat(42) + "A"
+            val subscribedScope = relayScope!!
+            val proofKey = relayProofKey!!
+            val leaseExpires = minOf(relayAccessExpiresAt, System.currentTimeMillis() + 299_000)
             return MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                private val epoch = "77777777-7777-4777-8777-777777777777"
+                private val subscription = UUID.randomUUID().toString()
+                private val sync = UUID.randomUUID().toString()
+                private fun send(socket: WebSocket, type: String, request: String, payload: JsonObject) {
+                    var frame = jsonObject("v" to 1L.json(), "type" to type.json(), "request_id" to request.json(), "runtime_id" to runtimeId.json(), "runtime_epoch" to epoch.json(),
+                        "session_id" to sessionId.json(), "subscription_id" to subscription.json(), "payload" to payload)
+                    if (type != "session.subscribed") frame = frame.with("sync_id" to sync.json())
+                    require(socket.send(JsonDocument.of(frame).canonicalText()))
+                }
+                private fun user(seq: Long, text: String) = jsonObject("native_seq" to seq.json(), "time" to 1000L.json(), "type" to "user/message".json(), "surface_op" to "append".json(),
+                    "data" to jsonObject("content" to JsonArray(listOf(jsonObject("type" to "text".json(), "text" to text.json())))))
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    currentRelay.set(webSocket)
                     webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "challenge".json(), "payload" to jsonObject(
                         "connection_id" to connectionId.json(), "challenge_id" to challengeId.json(), "nonce" to nonce.json(), "role" to "device".json(),
                         "expires_at" to java.time.Instant.ofEpochMilli(System.currentTimeMillis() + 9000).toString().json()))).canonicalText())
                 }
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     try {
-                        val payload = JsonDocument.parse(text).root.obj("payload")
+                        val frame = JsonDocument.parse(text).root
+                        val payload = frame.obj("payload")
+                        when (frame.string("type")) {
+                            "ping" -> {
+                                webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "pong".json(), "payload" to jsonObject("connection_id" to connectionId.json(), "server_time" to java.time.Instant.now().toString().json()))).canonicalText())
+                                return
+                            }
+                            "session.subscribe" -> {
+                                require(frame.string("runtime_id") == runtimeId && frame.string("session_id") == sessionId && sessionId in subscribedScope.sessions)
+                                val requestId = frame.string("request_id")
+                                send(webSocket, "session.subscribed", requestId, jsonObject())
+                                send(webSocket, "session.snapshot", requestId, jsonObject("cursor" to 2L.json(), "has_more" to JsonBoolean(true), "records" to JsonArray(listOf(user(2, "电脑当前消息"))), "assistant" to jsonObject("revision" to 0L.json())))
+                                send(webSocket, "session.checkpoint", requestId, jsonObject("state" to "persisted".json(), "through_seq" to 2L.json()))
+                                subscriptions.incrementAndGet()
+                                return
+                            }
+                            "session.page" -> {
+                                require(frame.string("runtime_epoch") == epoch && frame.string("subscription_id") == subscription && payload.integer("through_seq", -1) == 2L && payload.integer("before_seq") == 2L)
+                                send(webSocket, "session.page.result", frame.string("request_id"), jsonObject("records" to JsonArray(listOf(user(0, "最早的消息"), user(1, "更早的消息"))), "has_more" to JsonBoolean(false), "through_seq" to 2L.json()))
+                                return
+                            }
+                        }
+                        require(frame.string("type") == "hello.proof")
                         val proof = JWSObject.parse(payload.string("proof"))
-                        require(proof.header.type.toString() == RELAY_PROOF_TYPE && proof.header.jwk == null && proof.verify(ECDSAVerifier(relayProofKey!!)))
+                        require(proof.header.type.toString() == RELAY_PROOF_TYPE && proof.header.jwk == null && proof.verify(ECDSAVerifier(proofKey)))
                         val claims = JsonDocument.parse(proof.payload.toBytes()).root
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
@@ -161,11 +209,13 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         relayProofReceived = true
                         webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
                             "role" to "device".json(), "connection_id" to connectionId.json(), "device_id" to deviceId.json(), "runtime_id" to "55555555-5555-4555-8555-555555555555".json(),
-                            "grant_version" to 7L.json(), "scope" to relayScope!!.json(), "protocols" to JsonArray(listOf(1L.json())),
+                            "grant_version" to 7L.json(), "scope" to subscribedScope.json(), "protocols" to JsonArray(listOf(1L.json())),
                             "capabilities" to JsonArray(listOf("connection.heartbeat.v1".json(), "session.read.v1".json())), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(),
-                            "server_time" to java.time.Instant.now().toString().json(), "lease_expires_at" to java.time.Instant.ofEpochMilli(System.currentTimeMillis() + 299_000).toString().json()))).canonicalText())
+                            "server_time" to java.time.Instant.now().toString().json(), "lease_expires_at" to java.time.Instant.ofEpochMilli(leaseExpires).toString().json()))).canonicalText())
                     } catch (_: Exception) { failure.set("native Relay proof validation failed"); webSocket.cancel() }
                 }
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { relayClosures.incrementAndGet() }
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { relayClosures.incrementAndGet() }
             }).setHeader("Sec-WebSocket-Protocol", RELAY_SUBPROTOCOL)
         }
         require(path.startsWith("/v1/"))
@@ -210,19 +260,34 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
         if (path == "/v1/realtime/tickets") {
+            if (!allowSessionRead) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
             val body = JsonDocument.parse(request.body.readByteArray()).root
             require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
             relayScope = RelayScope.parse(body.obj("scope"))
             require(relayScope!!.actions == setOf("session.read"))
+            relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
+            relayAccessExpiresAt = claims.integer("exp") * 1000
+            ticketRequests.incrementAndGet()
             return resourceResponse(data(jsonObject("ticket" to relayToken.json(), "runtime_id" to body.string("runtime_id").json(), "grant_version" to 7L.json(), "scope" to relayScope!!.json(),
                 "expires_at" to java.time.Instant.ofEpochMilli(System.currentTimeMillis() + 30_000).toString().json())), 201)
+        }
+        if (path == "/v1/runtimes/$runtimeId/sessions") {
+            sessionRequests.incrementAndGet()
+            val result = resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("session_id" to sessionId.json(), "workspace_id" to JsonNull, "state" to "available".json(), "last_persisted_seq" to 2L.json(), "updated_at" to java.time.Instant.now().toString().json()))))))
+            return if (holdSessions) result.setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS) else result
         }
         if (path == "/v1/hosts") {
             hostRequests.incrementAndGet()
             return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to "44444444-4444-4444-8444-444444444444".json(), "alias" to "夹具电脑".json(), "state" to "active".json()))))))
         }
         require(path == "/v1/runtimes")
-        return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to "55555555-5555-4555-8555-555555555555".json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "dsh_version" to "0.2.1-rc.2".json()))))))
+        return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
+            "access" to jsonObject("role" to "viewer".json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+    }
+
+    fun revokeSession() {
+        allowSessionRead = false
+        require(currentRelay.get()!!.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "access.revoked".json(), "payload" to jsonObject("code" to "access.revoked".json()))).canonicalText()))
     }
 
     fun seed(registering: Boolean = false, refreshing: Boolean = false) {
@@ -262,5 +327,5 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         val verified = TokenVerifier.authorizationCodeResponse(JsonDocument.of(tokenReply(proof.thumbprint, subject, login.nonce, 300)).canonicalBytes(), exchange, keys, System.currentTimeMillis())
         return http.resource(config, verified, proof.proofSigner())
     }
-    override fun close() { vault.clear(); PendingKeyLedger(context, ledgerName).recover(); server.shutdown() }
+    override fun close() { currentRelay.getAndSet(null)?.close(1001, "fixture complete"); vault.clear(); PendingKeyLedger(context, ledgerName).recover(); server.shutdown() }
 }
