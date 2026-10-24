@@ -2,6 +2,7 @@ package cn.edu.ustc.dsh.network
 
 import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
+import cn.edu.ustc.dsh.command.*
 import cn.edu.ustc.dsh.protocol.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -195,6 +196,17 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
     }
     fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
         SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
+    fun chatReader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope): SessionReader {
+        if (journal.owner.deviceId != deviceId || journal.owner.organizationId != config.organizationId || journal.owner.deploymentHash != config.fingerprint ||
+            mappedUserId != null && mappedUserId != journal.owner.userId) throw RemoteRequestException("auth.identity_mismatch")
+        return SessionReader(this, deviceId, runtimeId, sessionId, scope, owner, journal = journal)
+    }
+    suspend fun commandStatus(id: String, deviceId: String): CommandReceipt = mutex.withLock {
+        Contract.uuid(id); Contract.uuid(deviceId)
+        val root = JsonDocument.parse(read("/v1/commands/$id?device_id=$deviceId")).root; root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+        CommandReceipt.status(root.obj("data")).also { if (it.requestId != id) throw RemoteRequestException("network.invalid_response") }
+    }
     fun hostBinding(owner: CoroutineScope, resumeId: String? = null, onAuthorityFailure: (String) -> Unit = {}, onReady: () -> Unit = {}): HostBindingFlow =
         HostBindingFlow(this, owner, resumeId, onAuthorityFailure, onReady)
 
@@ -235,9 +247,17 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         accepted
     }
 
-    suspend fun readTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeReadTicket = mutex.withLock {
-        Contract.uuid(runtimeId); Contract.uuid(deviceId)
+    suspend fun readTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
         if (scope.actions != setOf("session.read") || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
+        issueSessionTicket(runtimeId, deviceId, scope)
+    }
+    suspend fun sessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
+        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "command.status") } ||
+            scope.actions.any { it in setOf("message.submit", "session.cancel") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
+        issueSessionTicket(runtimeId, deviceId, scope)
+    }
+    private suspend fun issueSessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket {
+        Contract.uuid(runtimeId); Contract.uuid(deviceId)
         val body = jsonObject("runtime_id" to runtimeId.json(), "scope" to scope.json())
         val requestedAt = System.currentTimeMillis()
         val root = JsonDocument.parse(request("POST", "/v1/realtime/tickets", body)).root
@@ -248,7 +268,7 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         if (Contract.base64url(token).size != 32 || data.string("runtime_id") != runtimeId || !scope.same(RelayScope.parse(data.obj("scope")))) throw RemoteRequestException("auth.identity_mismatch")
         val expires = relayTime(data.string("expires_at"))
         if (expires <= System.currentTimeMillis() || expires > requestedAt + 60_000) throw RemoteRequestException("auth.expired")
-        RealtimeReadTicket(http, config, signer, deviceId, runtimeId, data.integer("grant_version"), scope, expires, session.accessExpiresAt, token)
+        return RealtimeSessionTicket(http, config, signer, deviceId, runtimeId, data.integer("grant_version"), scope, expires, session.accessExpiresAt, token)
     }
 
     /** Reconciliation only: never creates or revives a device and never replays a write. */

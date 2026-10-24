@@ -9,13 +9,13 @@ import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Ephemeral one-use credential. Never in UI state, storage, logs or a URL. */
-class RealtimeReadTicket internal constructor(
+class RealtimeSessionTicket internal constructor(
     private val http: LoginHttp, private val configuration: LoginConfiguration, private val signer: DeviceProofSigner,
     val deviceId: String, val runtimeId: String, val grantVersion: Long, val scope: RelayScope,
     val expiresAt: Long, private val credentialExpiresAt: Long, private val token: String,
 ) {
     private val spent = AtomicBoolean()
-    suspend fun connect(): ReadRelayConnection {
+    suspend fun connect(): SessionRelayConnection {
         if (!spent.compareAndSet(false, true) || System.currentTimeMillis() >= expiresAt || System.currentTimeMillis() >= credentialExpiresAt) throw RelayException("ticket.invalid")
         var socket: BoundedWebSocket? = null
         var transferred = false
@@ -27,11 +27,14 @@ class RealtimeReadTicket internal constructor(
                 link.awaitOpen()
                 val now = System.currentTimeMillis()
                 val challenge = DeviceChallenge.parse(link.receive(), now, expiresAt)
-                val hello = DeviceHello(deviceId, listOf("connection.heartbeat.v1", "session.read.v1"))
+                val capabilities = mutableListOf("connection.heartbeat.v1", "session.read.v1")
+                if (scope.actions.any { it in setOf("message.submit", "session.cancel") }) capabilities += "command.relay.v1"
+                if ("session.cancel" in scope.actions) capabilities += "session.cancel.v1"
+                val hello = DeviceHello(deviceId, capabilities)
                 val proof = withContext(Dispatchers.Default) { DeviceProofs.relayHandshake(signer, hello, challenge, runtimeId, System.currentTimeMillis()) }
                 link.send(hello.frame(proof))
                 val connection = DeviceConnection.parse(link.receive(), hello, challenge, runtimeId, grantVersion, scope, System.currentTimeMillis(), credentialExpiresAt)
-                ReadRelayConnection(connection, link)
+                SessionRelayConnection(connection, link)
             } ?: throw RelayException("relay.handshake_timeout")
             currentCoroutineContext().ensureActive()
             transferred = true
@@ -41,7 +44,7 @@ class RealtimeReadTicket internal constructor(
 }
 
 /** One authenticated socket; session routing and recovery are owned by its foreground reader. */
-class ReadRelayConnection internal constructor(val identity: DeviceConnection, private val socket: BoundedWebSocket) : AutoCloseable {
+class SessionRelayConnection internal constructor(val identity: DeviceConnection, private val socket: BoundedWebSocket) : AutoCloseable {
     private val started = System.nanoTime()
     private val lifetime = identity.leaseExpiresAt - identity.connectedAt
     private fun current() {

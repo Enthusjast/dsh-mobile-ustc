@@ -23,6 +23,19 @@ class RuntimeDirectoryEntry private constructor(val id: String, val hostId: Stri
 }
 
 class SessionDirectoryEntry private constructor(val id: String, val workspaceId: String?, val state: String, val lastPersisted: Long, val updatedAt: Long) {
+    fun viewScope(grant: RuntimeDirectoryEntry): RelayScope? = try {
+        if (!grant.canList() || grant.scope == null || "session.read" !in grant.scope.actions) null else {
+            val actions = mutableSetOf("session.read")
+            if ("command.status" in grant.scope.actions) {
+                actions += "command.status"
+                if (grant.role in setOf("operator", "owner")) {
+                    if ("message.submit" in grant.scope.actions) actions += "message.submit"
+                    if ("session.cancel" in grant.scope.actions) actions += "session.cancel"
+                }
+            }
+            grant.scope.session(id, workspaceId, actions)
+        }
+    } catch (_: ProtocolException) { null }
     fun readScope(grant: RuntimeDirectoryEntry): RelayScope? = try {
         if (!grant.canList() || state == "unavailable") null else grant.scope?.readSession(id, workspaceId)
     } catch (_: ProtocolException) { null }

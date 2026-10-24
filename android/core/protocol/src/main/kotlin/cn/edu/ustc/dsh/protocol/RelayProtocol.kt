@@ -29,11 +29,14 @@ class RelayScope(actions: Collection<String>, workspaces: Collection<String>, se
     fun contains(other: RelayScope): Boolean = actions.containsAll(other.actions) && workspaces.containsAll(other.workspaces) && sessions.containsAll(other.sessions)
     fun same(other: RelayScope): Boolean = actions == other.actions && workspaces == other.workspaces && sessions == other.sessions
     fun readSession(sessionId: String, workspaceId: String?): RelayScope {
+        return session(sessionId, workspaceId, setOf("session.read"))
+    }
+    fun session(sessionId: String, workspaceId: String?, requested: Set<String>): RelayScope {
         Contract.uuid(sessionId); workspaceId?.let(Contract::uuid)
-        if ("session.read" !in actions) throw ProtocolException()
+        if (requested.isEmpty() || !actions.containsAll(requested)) throw ProtocolException()
         return when {
-            sessionId in sessions -> RelayScope(listOf("session.read"), emptyList(), listOf(sessionId))
-            workspaceId != null && workspaceId in workspaces -> RelayScope(listOf("session.read"), listOf(workspaceId), emptyList())
+            sessionId in sessions -> RelayScope(requested, emptyList(), listOf(sessionId))
+            workspaceId != null && workspaceId in workspaces -> RelayScope(requested, listOf(workspaceId), emptyList())
             else -> throw ProtocolException()
         }
     }

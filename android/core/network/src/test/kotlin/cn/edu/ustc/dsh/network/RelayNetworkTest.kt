@@ -4,6 +4,7 @@ import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.protocol.*
 import cn.edu.ustc.dsh.session.*
+import cn.edu.ustc.dsh.command.*
 import com.nimbusds.jose.*
 import com.nimbusds.jose.crypto.ECDSASigner
 import com.nimbusds.jose.crypto.ECDSAVerifier
@@ -211,7 +212,7 @@ class RelayNetworkTest {
         }
     }
     private fun ticketResponse(value: String = token) = json(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to value.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(), "expires_at" to time(30_000))))
-    private suspend fun ticket(nonceChallenge: Boolean = false): RealtimeReadTicket {
+    private suspend fun ticket(nonceChallenge: Boolean = false): RealtimeSessionTicket {
         if (nonceChallenge) server.enqueue(json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "auth.proof_invalid".json()))).setResponseCode(401)
             .setHeader("DPoP-Nonce", "fresh-resource-ticket-nonce").setHeader("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\""))
         server.enqueue(ticketResponse())
@@ -236,7 +237,7 @@ class RelayNetworkTest {
         "role" to "device".json(), "connection_id" to connection.json(), "device_id" to device.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(),
         "protocols" to JsonArray(listOf(1L.json())), "capabilities" to JsonArray(listOf("connection.heartbeat.v1".json(), "session.read.v1".json())),
         "server_time" to time(0), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(), "lease_expires_at" to time(299_000)))
-    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL, onContent: ((WebSocket, JsonObject) -> Unit)? = null): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL, expectedCapabilities: List<String> = listOf("connection.heartbeat.v1", "session.read.v1"), onContent: ((WebSocket, JsonObject) -> Unit)? = null): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
         override fun onOpen(socket: WebSocket, response: Response) { socket.send(JsonDocument.of(challenge).canonicalText()) }
         override fun onMessage(socket: WebSocket, text: String) {
             try {
@@ -254,7 +255,7 @@ class RelayNetworkTest {
                 val claims = JsonDocument.parse(proof.payload.toBytes()).root
                 assertEquals(connection, claims.string("connection_id")); assertEquals(challengeId, claims.string("challenge_id")); assertEquals(runtime, claims.string("runtime_id"))
                 assertEquals(device, claims.string("iss")); assertEquals(RELAY_PROOF_AUDIENCE, claims.string("aud"))
-                assertEquals(DeviceHello(device, listOf("connection.heartbeat.v1", "session.read.v1")).digest(), claims.string("hello_sha256"))
+                assertEquals(DeviceHello(device, expectedCapabilities).digest(), claims.string("hello_sha256"))
                 socket.send(JsonDocument.of(accepted).canonicalText())
             } catch (error: Throwable) { peerFailure.set(error); socket.cancel() }
         }
@@ -269,6 +270,7 @@ class RelayNetworkTest {
         lateinit var socket: WebSocket
         lateinit var request: String
         var onPage: (JsonObject) -> Unit = {}
+        var onCommand: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected command") }
         fun receive(socket: WebSocket, frame: JsonObject) {
             this.socket = socket
             when (frame.string("type")) {
@@ -283,6 +285,7 @@ class RelayNetworkTest {
                     assertEquals(subscription, frame.string("subscription_id")); assertEquals(epoch, frame.string("runtime_epoch"))
                     onPage(frame)
                 }
+                "message.submit", "session.cancel" -> onCommand(socket, frame)
                 else -> error("unexpected client frame")
             }
         }
@@ -299,6 +302,87 @@ class RelayNetworkTest {
         fun enqueue(value: String = token) { server.enqueue(ticketResponse(value)); server.enqueue(peer(onContent = ::receive)) }
     }
     private suspend fun SessionReader.await(test: (SessionReadState) -> Boolean) = withTimeout(5000) { state.first(test) }.also { peerFailure.get()?.let { throw AssertionError(it) } }
+
+    private inner class CommandPeer {
+        val granted = RelayScope(listOf("session.read", "message.submit", "command.status", "session.cancel"), emptyList(), listOf(sessionId))
+        val journal = MemoryCommandJournal(CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device))
+        val feed = ReadPeer(listOf(user(0, "opening")), 0)
+        val statuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
+        val writes = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
+        var advertisedState = RemoteCommandState.AGENT_QUEUED
+        init {
+            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "command.relay.v1", "session.cancel.v1")
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
+                        "user_id" to journal.owner.userId.json(), "memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json())))))
+                    request.path == "/v1/realtime/tickets" -> ticketResponse().setBody(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))).canonicalText())
+                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.map(String::json)))), expectedCapabilities = capabilities, onContent = feed::receive)
+                    request.path!!.startsWith("/v1/commands/") -> {
+                        assertEquals(device, request.requestUrl!!.queryParameter("device_id"))
+                        statuses[request.requestUrl!!.pathSegments.last()]?.let(::bindingReply) ?: json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            feed.onCommand = { socket, frame ->
+                writes += frame
+                val intent = CommandIntent.parse(frame)
+                assertTrue(runBlocking { journal.list(runtime, sessionId).single { it.intent.requestId == intent.requestId }.attempts } > 0)
+                statuses[intent.requestId] = jsonObject("request_id" to intent.requestId.json(), "session_id" to sessionId.json(), "state" to advertisedState.wire.json(), "payload_sha256" to intent.digest.json(), "updated_at" to time(0))
+                // This deliberately claims a stronger fact than REST can report.
+                socket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "command.receipt".json(), "runtime_id" to runtime.json(), "runtime_epoch" to "77777777-7777-4777-8777-777777777777".json(),
+                    "session_id" to sessionId.json(), "request_id" to intent.requestId.json(), "payload" to jsonObject("state" to "agent_queued".json(), "payload_sha256" to intent.digest.json(), "updated_at" to time(0)))).canonicalText())
+            }
+        }
+        fun reader(owner: CoroutineScope) = api().chatReader(device, runtime, sessionId, granted, journal, owner)
+    }
+    @Test fun chatPersistsBeforeWritingAndUsesOneSocketForReadAndCommandFacts(): Unit = runBlocking {
+        val fixture = CommandPeer()
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!
+            val id = commands.submit("steer", "继续中文🙂")
+            val delivered = withTimeout(5000) { commands.state.first { it.records.any { row -> row.intent.requestId == id && row.everAgentQueued } } }.records.single()
+            assertEquals(id, fixture.writes.single().string("request_id")); assertEquals(CommandDelivery.CONFIRMED, delivered.delivery)
+            assertEquals("steer", delivered.intent.payload.string("mode"))
+            assertEquals(1, fixture.writes.size)
+        }
+    }
+    @Test fun aReceiptHintCannotAdvanceBeyondThisDevicesAuthoritativePersistenceFacts(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.advertisedState = RemoteCommandState.RECEIVED
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!; val id = commands.submit("queue", "original")
+            val record = withTimeout(5000) { commands.state.first { it.records.any { row -> row.intent.requestId == id && row.remote == RemoteCommandState.RECEIVED } } }.records.single()
+            assertFalse(record.everAgentQueued); assertFalse(record.everHostSaved)
+        }
+    }
+    @Test fun failedDurableAttemptNeverWritesAndAStaleCancellationNeverTargetsANewEpoch(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.journal.failBegin = true
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!; commands.submit("queue", "do not send")
+            withTimeout(5000) { commands.state.first { it.error == "data.unavailable" } }
+            assertTrue(fixture.writes.isEmpty())
+            assertThrows(CommandDataException::class.java) { runBlocking { commands.cancel("88888888-8888-4888-8888-888888888888") } }
+            assertTrue(fixture.writes.isEmpty())
+        }
+    }
+    @Test fun explicitRetryRequeriesReceivedAndReusesTheExactOriginalRequest(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.advertisedState = RemoteCommandState.RECEIVED
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!; val id = commands.submit("queue", "same request only")
+            withTimeout(5000) { commands.state.first { it.records.singleOrNull()?.remote == RemoteCommandState.RECEIVED } }
+            val original = JsonDocument.of(fixture.writes.single()).canonicalText()
+            commands.sendPending(id)
+            withTimeout(5000) { commands.state.first { it.records.singleOrNull()?.attempts == 2L } }
+            withTimeout(5000) { while (fixture.writes.size < 2) delay(10) }
+            assertEquals(2, fixture.writes.size)
+            assertEquals(original, JsonDocument.of(fixture.writes.last()).canonicalText())
+        }
+    }
 
     @Test fun readerMergesStreamingSettlementAndHistoryWithoutMovingTheOpeningCut(): Unit = runBlocking {
         val fixture = ReadPeer(listOf(user(2, "opening"), user(3, "latest")), 3, true); fixture.enqueue()

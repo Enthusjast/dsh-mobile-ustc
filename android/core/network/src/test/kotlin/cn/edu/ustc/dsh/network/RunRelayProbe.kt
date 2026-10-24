@@ -3,6 +3,7 @@ package cn.edu.ustc.dsh.network
 import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.command.*
 import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.JWSHeader
 import com.nimbusds.jose.crypto.ECDSASigner
@@ -160,6 +161,27 @@ object RunRelayProbe {
             val snapshot = withTimeout(10_000) { reopened.state.first { it.phase == SessionReadPhase.READY && it.window?.checkpoint == "persisted" } }.window!!
             check(snapshot.cursor >= settledCursor && snapshot.items.none { it.live })
             check(snapshot.items.last().blocks.single().text == "DSH local integration fixture response")
+        }
+        val account = api.me()
+        val config = LoginConfiguration.parse(JsonDocument.of(fixture.obj("deployment")).canonicalBytes())
+        val journal = MemoryCommandJournal(CommandOwner(UUID.randomUUID().toString(), config.organizationId, config.fingerprint, account.userId, fixture.string("device_id")))
+        val commandScope = runtimeAccess.scope!!.session(session, entry.workspaceId, setOf("session.read", "message.submit", "command.status", "session.cancel"))
+        api.chatReader(fixture.string("device_id"), runtime, session, commandScope, journal, owner).use { chat ->
+            withTimeout(10_000) { chat.state.first { it.phase == SessionReadPhase.READY } }
+            val writer = chat.commands!!
+            val id = writer.submit("queue", "KOTLIN_SOCKET_SEND")
+            withTimeout(15_000) { writer.state.first { it.records.any { command -> command.intent.requestId == id && command.everAgentQueued } } }
+            val observed = withTimeout(15_000) { chat.state.first { it.window?.items?.any { item -> item.blocks.any { block -> block.text == "KOTLIN_SOCKET_SEND" } } == true } }
+            val nativeCursor = observed.window!!.cursor
+            writer.sendPending(id) // Same-ID explicit action queries first; queued intent cannot be replayed.
+            withTimeout(5000) { writer.state.first { it.error == "command.reconcile_required" } }
+            check(journal.list(runtime, session).single().attempts == 1L)
+            check(chat.state.value.window!!.cursor >= nativeCursor)
+            writer.submit("queue", "REMOTE_CANCEL_WAIT")
+            val waiting = withTimeout(15_000) { chat.state.first { it.window?.items?.any { item -> item.live && item.blocks.any { block -> block.text.contains("Cancelable model call is waiting") } } == true } }
+            val cancellation = writer.cancel(waiting.runtimeEpoch!!)
+            withTimeout(10_000) { writer.state.first { it.records.any { command -> command.intent.requestId == cancellation && command.remote == RemoteCommandState.SETTLED } } }
+            withTimeout(10_000) { chat.state.first { it.window?.let { window -> !window.taskRunning && window.items.any { item -> item.interrupted } } == true } }
         }
     }
 }
