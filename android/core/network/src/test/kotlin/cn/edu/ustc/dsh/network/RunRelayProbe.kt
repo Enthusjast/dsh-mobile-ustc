@@ -9,6 +9,9 @@ import com.nimbusds.jose.crypto.ECDSASigner
 import com.nimbusds.jose.jwk.ECKey
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 import okhttp3.tls.HandshakeCertificates
 import java.io.File
@@ -52,6 +55,12 @@ object RunRelayProbe {
             ownedClient = client
             val http = LoginHttp.forTests(client)
             val api = http.resource(config, session, signer)
+            if (fixture.fields["mode"] == "content".json()) {
+                phase = "session-content"
+                content(api, fixture, root, this)
+                println("Kotlin reader / TLS Go Relay / npm DSH: large Unicode snapshot, fixed history, live settlement and fresh-snapshot reopen passed")
+                return@runBlocking
+            }
             phase = "ticket"
             val ticket = api.readTicket(fixture.string("runtime_id"), fixture.string("device_id"), RelayScope(listOf("session.read"), emptyList(), listOf(fixture.string("session_id"))))
             phase = "handshake"
@@ -70,7 +79,63 @@ object RunRelayProbe {
                 require(offline.string("type") == "error" && offline.string("request_id") == request && offline.obj("payload").string("code") == "runtime.offline")
             }
             println("Kotlin HTTPS ticket / TLS Relay proof / heartbeat / scoped offline read passed")
-        } catch (_: Exception) { throw IllegalStateException("Kotlin Relay probe failed at $phase") }
+        } catch (error: Exception) {
+            // Content checks only expose protocol phases/codes, never fixture key or token parsing.
+            if (phase == "session-content") throw IllegalStateException("Kotlin Relay probe failed at $phase", error)
+            throw IllegalStateException("Kotlin Relay probe failed at $phase")
+        }
         finally { ownedClient?.let { it.connectionPool.evictAll(); it.dispatcher.executorService.shutdownNow() } }
+    }
+
+    private suspend fun content(api: RemoteApi, fixture: JsonObject, root: File, owner: CoroutineScope) {
+        require("host_private_jwk" !in fixture.fields && "host_credential" !in fixture.fields)
+        val runtime = fixture.string("runtime_id"); val session = fixture.string("session_id")
+        val runtimeAccess = api.runtimes().obj("data").array("items").map { RuntimeDirectoryEntry.parse(it as JsonObject) }.single { it.id == runtime }
+        val entry = withTimeout(5000) {
+            var found: SessionDirectoryEntry? = null
+            while (found == null) {
+                found = api.sessions(runtime).obj("data").array("items").map { SessionDirectoryEntry.parse(it as JsonObject) }.firstOrNull { it.id == session }
+                if (found == null) delay(50)
+            }
+            found
+        }
+        val scope = entry.readScope(runtimeAccess) ?: error("directory did not authorize the fixture read")
+        check(scope.same(RelayScope(listOf("session.read"), listOf(fixture.string("workspace_id")), emptyList())))
+        var settledCursor = -1L
+        api.reader(fixture.string("device_id"), runtime, session, scope, owner).use { reader ->
+            suspend fun await(test: (SessionReadState) -> Boolean) = withTimeout(20_000) { reader.state.first { state ->
+                check(state.phase !in setOf(SessionReadPhase.ERROR, SessionReadPhase.REVOKED, SessionReadPhase.AUTH_REQUIRED)) { state.error ?: "reader stopped" }
+                test(state)
+            } }
+            val opening = await { it.phase == SessionReadPhase.READY && it.window?.checkpoint == "persisted" }
+            val cut = opening.window!!.openingCursor
+            check(opening.window.hasMore)
+            check(opening.window.items.sumOf { item -> item.blocks.sumOf { it.text.length } } > JsonDocument.MAX_BYTES)
+            while (reader.state.value.window!!.hasMore) {
+                val count = reader.state.value.window!!.records.size
+                reader.loadOlder()
+                await { !it.loadingOlder && (it.window?.records?.size ?: 0) > count }
+            }
+            val history = reader.state.value.window!!
+            check(history.openingCursor == cut && history.cursor == cut)
+            check(history.items.count { it.role == cn.edu.ustc.dsh.session.ConversationRole.USER } == 16) {
+                "native history roles=${history.items.groupingBy { it.role }.eachCount()}, events=${history.records.groupingBy { it.type }.eachCount()}, fixture_prompts=${history.items.count { it.blocks.any { block -> block.text.startsWith("KOTLIN_HISTORY_") } }}"
+            }
+            check(history.items.count { it.role == cn.edu.ustc.dsh.session.ConversationRole.ASSISTANT } == 16)
+            check(history.items.any { it.blocks.any { block -> block.text.startsWith("KOTLIN_HISTORY_0 ") && block.text.contains("中🙂") } })
+            val ready = File(fixture.string("ready_file")).canonicalFile
+            require(ready.toPath().startsWith(root.toPath()))
+            ready.writeText("ready")
+            val live = await { it.window?.let { window -> window.cursor > cut && window.persistedThrough >= window.cursor && !window.taskRunning &&
+                window.items.none { item -> item.live } && window.items.any { item -> item.blocks.any { block -> block.text == "KOTLIN_LIVE_MARKER" } } &&
+                window.items.count { item -> item.role == cn.edu.ustc.dsh.session.ConversationRole.ASSISTANT } == 17 } == true }
+            check(live.window!!.items.map { it.id }.toSet().size == live.window.items.size)
+            settledCursor = live.window.cursor
+        }
+        api.reader(fixture.string("device_id"), runtime, session, scope, owner).use { reopened ->
+            val snapshot = withTimeout(10_000) { reopened.state.first { it.phase == SessionReadPhase.READY && it.window?.checkpoint == "persisted" } }.window!!
+            check(snapshot.cursor >= settledCursor && snapshot.items.none { it.live })
+            check(snapshot.items.last().blocks.single().text == "DSH local integration fixture response")
+        }
     }
 }

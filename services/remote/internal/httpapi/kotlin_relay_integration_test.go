@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -27,7 +28,9 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	if cluster == "" {
 		t.Fatal("Kotlin composition requires the private test cluster")
 	}
-	ctx, db := testsupport.PostgresDatabase(t)
+	_, db := testsupport.PostgresDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 	postgres := &store.Postgres{DB: db}
 	const (
 		issuer         = "https://id.fixture.invalid"
@@ -42,7 +45,8 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	proof := approvalKey(t)
 	proofJWK, proofJKT := approvalPublic(t, proof)
 	approvalJWK, approvalJKT := approvalPublic(t, approvalKey(t))
-	installationJWK, installationJKT := approvalPublic(t, approvalKey(t))
+	installationKey := approvalKey(t)
+	installationJWK, installationJKT := approvalPublic(t, installationKey)
 	statements := []struct {
 		query string
 		args  []any
@@ -55,7 +59,7 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 		{`insert into runtimes(id,installation_id,profile_ref,protocol_version) values($1,$2,'kotlin-fixture',1)`, []any{runtimeID, installationID}},
 		{`insert into workspaces(id,runtime_id,workspace_ref) values($1,$2,'opaque-fixture-workspace')`, []any{workspaceID, runtimeID}},
 		{`insert into sessions(id,runtime_id,workspace_id,dsh_session_id) values($1,$2,$3,'opaque-fixture-native')`, []any{sessionID, runtimeID, workspaceID}},
-		{`insert into runtime_grants(runtime_id,user_id,role,scope,granted_by) values($1,$2,'viewer',$3::jsonb,$2)`, []any{runtimeID, userID, `{"actions":["host.list","session.list","session.read"],"workspaces":[],"sessions":["` + sessionID + `"]}`}},
+		{`insert into runtime_grants(runtime_id,user_id,role,scope,granted_by) values($1,$2,'viewer',$3::jsonb,$2)`, []any{runtimeID, userID, `{"actions":["host.list","session.list","session.read"],"workspaces":["` + workspaceID + `"],"sessions":["` + sessionID + `"]}`}},
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement.query, statement.args...); err != nil {
@@ -120,6 +124,49 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("actual Kotlin Relay client failed: %v\n%s", err, output)
+	}
+	t.Log(string(output))
+
+	// The same TLS service now carries actual npm DSH history and live content into
+	// the production Kotlin reader. Host and model are isolated local fixtures.
+	challenge, err := postgres.CreateHostCredentialChallenge(ctx, store.UserIdentity{Issuer: issuer, Subject: "kotlin-fixture"}, installationJKT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostProof := approvalSign(t, installationKey, jose.ES256, "", "dsh-host-credential-proof+jwt", map[string]any{
+		"iss": installationID, "aud": challenge.Audience, "challenge_id": challenge.ChallengeID, "nonce": challenge.Challenge,
+		"iat": time.Now().Unix(), "jti": "kotlin-host-credential-proof-0001",
+	}, nil)
+	credential, err := postgres.ExchangeHostCredential(ctx, store.UserIdentity{Issuer: issuer, Subject: "kotlin-fixture"}, installationJKT, challenge.ChallengeID, hostProof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostPrivate, err := json.Marshal(jose.JSONWebKey{Key: installationKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture["host_installation_id"] = installationID
+	fixture["host_private_jwk"] = json.RawMessage(hostPrivate)
+	fixture["host_credential"] = credential.Credential
+	fixture["workspace_id"] = workspaceID
+	raw, err = json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command = exec.CommandContext(ctx, "node", filepath.Join(repo, "tools", "integration", "kotlin-dsh-reader.mjs"), path)
+	command.Dir = repo
+	command.Cancel = func() error { return command.Process.Signal(os.Interrupt) }
+	command.WaitDelay = 6 * time.Second
+	output, err = command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("actual Kotlin/Go/DSH content chain failed: %v\n%s", err, output)
 	}
 	t.Log(string(output))
 }
