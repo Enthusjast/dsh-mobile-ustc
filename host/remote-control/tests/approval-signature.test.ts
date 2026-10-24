@@ -11,21 +11,25 @@ const fixture = JSON.parse(await readFile(new URL('../../../contracts/security/a
 }
 
 test('Go/TypeScript approval vectors bind purpose, identities, context, decision, registered key and time', async () => {
-  const binding = approvalBinding(fixture.context)
-  assert.equal(Buffer.from(binding.canonical).toString(), fixture.binding_canonical)
-  assert.equal(binding.sha256, fixture.binding_sha256)
-  const schema = JSON.parse(await readFile(new URL('../../../contracts/security/approval.schema.json', import.meta.url), 'utf8'))
-  const validate = new Ajv2020({ strict: true }).compile(schema)
-  assert.equal(validate(fixture.context), true)
-  for (const vector of fixture.vectors) {
-    const registered = vector.registered ?? fixture.registered
-    if (vector.invalid) {
-      await assert.rejects(verifyApprovalDecision(vector.compact, registered, fixture.context, Date.parse(fixture.now)), /approval: invalid signed decision/, vector.name)
-    } else {
-      const verified = await verifyApprovalDecision(vector.compact, registered, fixture.context, Date.parse(fixture.now))
-      assert.equal(verified.claims.decision, vector.decision, vector.name)
-      assert.equal(verified.payload_sha256, vector.payload_sha256, vector.name)
-      assert.equal(validate(verified.claims), true, vector.name)
+  const kotlinFixture = JSON.parse(await readFile(new URL('../../../contracts/security/approval-kotlin-signatures.json', import.meta.url), 'utf8')) as typeof fixture
+  const fixtures = [fixture, kotlinFixture]
+  for (const fixture of fixtures) {
+    const binding = approvalBinding(fixture.context)
+    assert.equal(Buffer.from(binding.canonical).toString(), fixture.binding_canonical)
+    assert.equal(binding.sha256, fixture.binding_sha256)
+    const schema = JSON.parse(await readFile(new URL('../../../contracts/security/approval.schema.json', import.meta.url), 'utf8'))
+    const validate = new Ajv2020({ strict: true }).compile(schema)
+    assert.equal(validate(fixture.context), true)
+    for (const vector of fixture.vectors) {
+      const registered = vector.registered ?? fixture.registered
+      if (vector.invalid) {
+        await assert.rejects(verifyApprovalDecision(vector.compact, registered, fixture.context, Date.parse(fixture.now)), /approval: invalid signed decision/, vector.name)
+      } else {
+        const verified = await verifyApprovalDecision(vector.compact, registered, fixture.context, Date.parse(fixture.now))
+        assert.equal(verified.claims.decision, vector.decision, vector.name)
+        assert.equal(verified.payload_sha256, vector.payload_sha256, vector.name)
+        assert.equal(validate(verified.claims), true, vector.name)
+      }
     }
   }
 })

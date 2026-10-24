@@ -38,8 +38,12 @@ type fixture struct {
 }
 
 func loadFixture(t *testing.T) (fixture, RegisteredKey, time.Time) {
+	return loadFixtureFile(t, "approval-signatures.json")
+}
+
+func loadFixtureFile(t *testing.T, name string) (fixture, RegisteredKey, time.Time) {
 	t.Helper()
-	raw, err := os.ReadFile("../../../../contracts/security/approval-signatures.json")
+	raw, err := os.ReadFile("../../../../contracts/security/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +60,16 @@ func loadFixture(t *testing.T) (fixture, RegisteredKey, time.Time) {
 }
 
 func TestApprovalSignatureSharedVectors(t *testing.T) {
-	data, key, now := loadFixture(t)
+	for _, name := range []string{"approval-signatures.json", "approval-kotlin-signatures.json"} {
+		t.Run(name, func(t *testing.T) {
+			testApprovalSignatureFixture(t, name)
+		})
+	}
+}
+
+func testApprovalSignatureFixture(t *testing.T, name string) {
+	t.Helper()
+	data, key, now := loadFixtureFile(t, name)
 	binding, err := ContextBinding(data.Context)
 	if err != nil || string(binding.Canonical) != data.Canonical || binding.SHA256 != data.SHA256 {
 		t.Fatalf("binding mismatch: %v", err)

@@ -1,0 +1,15 @@
+[versions]
+kotlin = "2.3.21"
+jackson = "2.20.1"
+jcs = "1.1"
+nimbus = "10.5"
+junit = "4.13.2"
+
+[libraries]
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
+jcs = { module = "io.github.erdtman:java-json-canonicalization", version.ref = "jcs" }
+nimbus-jose = { module = "com.nimbusds:nimbus-jose-jwt", version.ref = "nimbus" }
+junit = { module = "junit:junit", version.ref = "junit" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
