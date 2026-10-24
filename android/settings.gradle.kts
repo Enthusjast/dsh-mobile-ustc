@@ -9,3 +9,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "dsh-mobile"
 include(":core:protocol", ":core:crypto")
+if (providers.gradleProperty("jvmOnly").orNull != "true") include(":core:keystore")

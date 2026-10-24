@@ -92,6 +92,7 @@ class PreparedApprovalSignature internal constructor(
     private val input: String,
 ) {
     private var ended = false
+    val keyThumbprint: String get() = key.thumbprint
     fun signingInput(): ByteArray = input.toByteArray(Charsets.US_ASCII)
 
     /** Android's SHA256withECDSA returns DER; Nimbus converts it to JOSE r||s. */

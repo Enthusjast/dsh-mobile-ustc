@@ -12,7 +12,8 @@
     "test": "tsx --test host/remote-control/tests/*.test.ts",
     "verify": "npm run contracts:check && npm run check && npm run build && npm test",
     "test:remote-dsh": "python3 tools/integration/run_remote_dsh.py",
-    "test:android": "cd android && ./gradlew check"
+    "test:android": "cd android && ./gradlew check",
+    "test:android:core": "cd android && ./gradlew -PjvmOnly=true check"
   },
   "devDependencies": {
     "@deepseek-ai/dsh": "0.2.1-rc.2",
