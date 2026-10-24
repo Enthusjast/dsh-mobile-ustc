@@ -193,6 +193,8 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         Contract.uuid(runtimeId)
         JsonDocument.parse(read("/v1/runtimes/$runtimeId/sessions")).root
     }
+    fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
+        SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
 
     suspend fun readTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeReadTicket = mutex.withLock {
         Contract.uuid(runtimeId); Contract.uuid(deviceId)

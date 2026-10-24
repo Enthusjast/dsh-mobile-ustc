@@ -15,6 +15,7 @@ tasks.register("writeFixtureClasspath") {
 kotlin { jvmToolchain(17) }
 dependencies {
     api(project(":core:auth"))
+    api(project(":core:session"))
     implementation(libs.okhttp)
     api(libs.coroutines.core)
     testImplementation(libs.junit)

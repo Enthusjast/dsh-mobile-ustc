@@ -3,12 +3,14 @@ package cn.edu.ustc.dsh.network
 import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.session.*
 import com.nimbusds.jose.*
 import com.nimbusds.jose.crypto.ECDSASigner
 import com.nimbusds.jose.crypto.ECDSAVerifier
 import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.gen.ECKeyGenerator
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import okhttp3.*
 import okhttp3.mockwebserver.*
 import okhttp3.tls.HandshakeCertificates
@@ -20,6 +22,7 @@ import org.junit.Test
 import java.net.URI
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicReference
+import java.util.UUID
 
 class RelayNetworkTest {
     private val server = MockWebServer()
@@ -41,6 +44,7 @@ class RelayNetworkTest {
     private val scope = RelayScope(listOf("session.read"), emptyList(), listOf(sessionId))
     private val token = "A".repeat(43)
     private val peerFailure = AtomicReference<Throwable?>()
+    private val heartbeats = java.util.concurrent.atomic.AtomicInteger()
     init {
         server.useHttps(serverTLS.sslSocketFactory(), false); server.start()
         http = LoginHttp.forTests(OkHttpClient.Builder().sslSocketFactory(clientTLS.sslSocketFactory(), clientTLS.trustManager).build())
@@ -68,10 +72,11 @@ class RelayNetworkTest {
     }
     private fun time(offset: Long) = Instant.ofEpochMilli(System.currentTimeMillis() + offset).toString().json()
     private fun json(root: JsonObject) = MockResponse().setHeader("Content-Type", "application/json").setBody(JsonDocument.of(root).canonicalText())
+    private fun ticketResponse(value: String = token) = json(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to value.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(), "expires_at" to time(30_000))))
     private suspend fun ticket(nonceChallenge: Boolean = false): RealtimeReadTicket {
         if (nonceChallenge) server.enqueue(json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "auth.proof_invalid".json()))).setResponseCode(401)
             .setHeader("DPoP-Nonce", "fresh-resource-ticket-nonce").setHeader("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\""))
-        server.enqueue(json(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(), "expires_at" to time(30_000)))))
+        server.enqueue(ticketResponse())
         return api().readTicket(runtime, device, scope).also {
             val first = if (nonceChallenge) server.takeRequest() else null
             val request = server.takeRequest()
@@ -93,15 +98,17 @@ class RelayNetworkTest {
         "role" to "device".json(), "connection_id" to connection.json(), "device_id" to device.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(),
         "protocols" to JsonArray(listOf(1L.json())), "capabilities" to JsonArray(listOf("connection.heartbeat.v1".json(), "session.read.v1".json())),
         "server_time" to time(0), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(), "lease_expires_at" to time(299_000)))
-    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL, onContent: ((WebSocket, JsonObject) -> Unit)? = null): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
         override fun onOpen(socket: WebSocket, response: Response) { socket.send(JsonDocument.of(challenge).canonicalText()) }
         override fun onMessage(socket: WebSocket, text: String) {
             try {
                 val frame = JsonDocument.parse(text).root
                 if (frame.string("type") == "ping") {
+                    heartbeats.incrementAndGet()
                     socket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "pong".json(), "payload" to jsonObject("connection_id" to connection.json(), "server_time" to time(0)))).canonicalText())
                     return
                 }
+                if (frame.string("type") != "hello.proof") { requireNotNull(onContent).invoke(socket, frame); return }
                 val hello = frame.obj("payload")
                 assertEquals(device, hello.string("device_id"))
                 val proof = JWSObject.parse(hello.string("proof")); assertTrue(proof.verify(ECDSAVerifier(key)))
@@ -114,6 +121,138 @@ class RelayNetworkTest {
             } catch (error: Throwable) { peerFailure.set(error); socket.cancel() }
         }
     }).setHeader("Sec-WebSocket-Protocol", protocol)
+
+    private fun user(seq: Long, text: String) = jsonObject("native_seq" to seq.json(), "time" to 1000L.json(), "type" to "user/message".json(), "surface_op" to "append".json(),
+        "data" to jsonObject("content" to JsonArray(listOf(jsonObject("type" to "text".json(), "text" to text.json())))))
+    private inner class ReadPeer(private val records: List<JsonValue>, private val cut: Long, private val more: Boolean = false) {
+        val subscription = UUID.randomUUID().toString()
+        val sync = UUID.randomUUID().toString()
+        private val epoch = "77777777-7777-4777-8777-777777777777"
+        lateinit var socket: WebSocket
+        lateinit var request: String
+        var onPage: (JsonObject) -> Unit = {}
+        fun receive(socket: WebSocket, frame: JsonObject) {
+            this.socket = socket
+            when (frame.string("type")) {
+                "session.subscribe" -> {
+                    assertEquals(runtime, frame.string("runtime_id")); assertEquals(sessionId, frame.string("session_id"))
+                    request = frame.string("request_id")
+                    send("session.subscribed", jsonObject(), syncId = false)
+                    send("session.snapshot", jsonObject("cursor" to cut.json(), "has_more" to JsonBoolean(more), "records" to JsonArray(records), "assistant" to jsonObject("revision" to 0L.json())))
+                    send("session.checkpoint", jsonObject("state" to "persisted".json(), "through_seq" to cut.json()))
+                }
+                "session.page" -> {
+                    assertEquals(subscription, frame.string("subscription_id")); assertEquals(epoch, frame.string("runtime_epoch"))
+                    onPage(frame)
+                }
+                else -> error("unexpected client frame")
+            }
+        }
+        fun send(type: String, payload: JsonObject, requestId: String = request, syncId: Boolean = true) {
+            var frame = jsonObject("v" to 1L.json(), "type" to type.json(), "request_id" to requestId.json(), "runtime_id" to runtime.json(), "runtime_epoch" to epoch.json(),
+                "session_id" to sessionId.json(), "subscription_id" to subscription.json(), "payload" to payload)
+            if (syncId) frame = frame.with("sync_id" to sync.json())
+            check(socket.send(JsonDocument.of(frame).canonicalText()))
+        }
+        fun control(type: String, payload: JsonObject) { check(socket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to type.json(), "payload" to payload)).canonicalText())) }
+        fun start() = send("assistant.start", jsonObject("type" to "start".json(), "attemptId" to "live".json(), "revision" to 1L.json(), "startedAfterSeq" to cut.json(), "turn" to 1L.json(), "step" to 1L.json()))
+        fun chunk() = send("assistant.chunk", jsonObject("type" to "chunk".json(), "attemptId" to "live".json(), "revision" to 2L.json(), "index" to 0L.json(), "time" to 1000L.json(),
+            "chunk" to jsonObject("type" to "text-delta".json(), "index" to 0L.json(), "text" to "streamed text".json())))
+        fun enqueue(value: String = token) { server.enqueue(ticketResponse(value)); server.enqueue(peer(onContent = ::receive)) }
+    }
+    private suspend fun SessionReader.await(test: (SessionReadState) -> Boolean) = withTimeout(5000) { state.first(test) }.also { peerFailure.get()?.let { throw AssertionError(it) } }
+
+    @Test fun readerMergesStreamingSettlementAndHistoryWithoutMovingTheOpeningCut(): Unit = runBlocking {
+        val fixture = ReadPeer(listOf(user(2, "opening"), user(3, "latest")), 3, true); fixture.enqueue()
+        SessionReader(api(), device, runtime, sessionId, scope, this, SessionReaderOptions(heartbeatMillis = 100)).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY && it.window?.persistedThrough == 3L }
+            fixture.start(); fixture.chunk()
+            reader.await { it.window?.items?.lastOrNull()?.live == true && it.window.items.last().blocks.isNotEmpty() }
+            val pageRequest = CompletableDeferred<String>()
+            fixture.onPage = { page ->
+                assertEquals(3L, page.obj("payload").integer("through_seq", -1)); assertEquals(2L, page.obj("payload").integer("before_seq", 0))
+                fixture.send("session.event", user(4, "live user"))
+                fixture.send("session.page.result", jsonObject("records" to JsonArray(listOf(user(0, "oldest"), user(1, "older"))), "has_more" to JsonBoolean(false), "through_seq" to 3L.json()), page.string("request_id"))
+                pageRequest.complete(page.string("request_id"))
+            }
+            reader.loadOlder(); withTimeout(5000) { pageRequest.await() }
+            val history = reader.await { it.window?.cursor == 4L && !it.window.hasMore }
+            assertEquals(3L, history.window!!.openingCursor); assertEquals("oldest", history.window.items.first().blocks.single().text)
+            val message = jsonObject("native_seq" to 5L.json(), "time" to 1000L.json(), "type" to "assistant/message".json(), "surface_op" to "append".json(),
+                "data" to jsonObject("turn" to 1L.json(), "step" to 1L.json(), "message" to jsonObject("content" to JsonArray(listOf(jsonObject("type" to "text".json(), "text" to "settled".json()))))))
+            fixture.send("session.event", message)
+            val held = reader.await { it.window?.cursor == 5L }
+            assertFalse(held.window!!.items.any { item -> item.blocks.any { it.text == "settled" } })
+            fixture.send("assistant.end", jsonObject("type" to "end".json(), "attemptId" to "live".json(), "revision" to 3L.json(), "index" to 1L.json(), "outcome" to jsonObject("kind" to "committed".json(), "eventType" to "assistant/message".json(), "seq" to 5L.json())))
+            val settled = reader.await { it.window?.items?.lastOrNull()?.blocks?.singleOrNull()?.text == "settled" }
+            assertEquals(1, settled.window!!.items.count { it.role == ConversationRole.ASSISTANT }); assertFalse(settled.window.items.last().live)
+            delay(220) // At least two actual application heartbeat exchanges on the same TLS connection.
+            assertTrue(heartbeats.get() >= 2)
+            assertEquals(SessionReadPhase.READY, reader.state.value.phase)
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun pageTimeoutKeepsTheTransportAndAllowsAFreshCorrelatedRetry(): Unit = runBlocking {
+        val fixture = ReadPeer(listOf(user(1, "current")), 1, true); fixture.enqueue()
+        SessionReader(api(), device, runtime, sessionId, scope, this, SessionReaderOptions(pageMillis = 120)).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+            fixture.onPage = { requests += it.string("request_id") }
+            reader.loadOlder()
+            reader.await { it.pageError == "network.page_timeout" && !it.loadingOlder }
+            assertEquals(2, server.requestCount)
+            fixture.onPage = { page ->
+                requests += page.string("request_id")
+                fixture.send("session.page.result", jsonObject("records" to JsonArray(listOf(user(0, "older"))), "has_more" to JsonBoolean(false), "through_seq" to 1L.json()), requests.first())
+                fixture.send("session.event", user(2, "continued"))
+                fixture.send("session.page.result", jsonObject("records" to JsonArray(listOf(user(0, "older"))), "has_more" to JsonBoolean(false), "through_seq" to 1L.json()), page.string("request_id"))
+            }
+            reader.loadOlder()
+            val result = reader.await { it.window?.hasMore == false }
+            assertEquals(2L, result.window!!.cursor); assertEquals(3, result.window.records.size)
+            assertEquals(2, requests.size); assertNotEquals(requests[0], requests[1]); assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun disconnectUsesAFreshTicketAndSnapshotAndRevocationClearsAllCachedContent(): Unit = runBlocking {
+        val first = ReadPeer(listOf(user(0, "cached")), 0); first.enqueue()
+        val reader = SessionReader(api(), device, runtime, sessionId, scope, this, SessionReaderOptions(backoffMillis = { 60_000 }))
+        try {
+            reader.await { it.window?.persistedThrough == 0L }
+            first.start(); first.chunk(); reader.await { it.window?.items?.any { it.live && it.blocks.isNotEmpty() } == true }
+            first.socket.close(1001, "fixture disconnect")
+            val stale = reader.await { it.phase == SessionReadPhase.BACKOFF }
+            assertEquals(listOf("cached"), stale.window!!.items.map { it.blocks.single().text })
+            val second = ReadPeer(listOf(user(0, "replacement")), 0); second.enqueue("D".repeat(42) + "A")
+            reader.retry()
+            val replaced = reader.await { it.phase == SessionReadPhase.READY && it.window?.items?.firstOrNull()?.blocks?.singleOrNull()?.text == "replacement" }
+            assertFalse(replaced.window!!.items.any { it.live }); assertNotEquals(first.subscription, second.subscription)
+            val traffic = List(4) { server.takeRequest() }
+            assertNotEquals(traffic[0].getHeader("DPoP"), traffic[2].getHeader("DPoP"))
+            assertNotEquals(traffic[1].getHeader("Authorization"), traffic[3].getHeader("Authorization"))
+            second.control("access.revoked", jsonObject("code" to "access.revoked".json()))
+            second.socket.close(1001, "revoked")
+            assertNull(reader.await { it.phase == SessionReadPhase.REVOKED }.window)
+            reader.retry(); delay(100); assertEquals(4, server.requestCount)
+        } finally { reader.close() }
+        assertNull(reader.state.value.window); assertEquals(SessionReadPhase.CLOSED, reader.state.value.phase)
+    }
+
+    @Test fun nativeGapRequestsAReplacementAndExplicitCloseRetiresLateFrames(): Unit = runBlocking {
+        val first = ReadPeer(listOf(user(0, "first")), 0); first.enqueue()
+        val reader = SessionReader(api(), device, runtime, sessionId, scope, this, SessionReaderOptions(backoffMillis = { 60_000 }))
+        try {
+            reader.await { it.window?.persistedThrough == 0L }
+            first.send("session.event", user(2, "gap"))
+            assertEquals("protocol.resync_required", reader.await { it.phase == SessionReadPhase.BACKOFF }.error)
+            val second = ReadPeer(listOf(user(1, "rebaseline"), user(2, "gap recovered")), 2, true); second.enqueue()
+            reader.retry(); reader.await { it.phase == SessionReadPhase.READY && it.window?.cursor == 2L }
+            reader.close(); delay(100)
+            assertEquals(SessionReadPhase.CLOSED, reader.state.value.phase); assertNull(reader.state.value.window)
+            assertEquals(4, server.requestCount)
+        } finally { reader.close() }
+    }
 
     @Test fun httpsTicketAndTlsUpgradeBindTheRegisteredKeyAndConsumeOneSocketCredential(): Unit = runBlocking {
         val ticket = ticket(nonceChallenge = true)

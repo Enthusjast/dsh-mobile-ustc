@@ -14,7 +14,7 @@ subprojects {
 }
 
 tasks.named("check") {
-    dependsOn(":core:protocol:check", ":core:crypto:check", ":core:auth:check", ":core:network:check")
+    dependsOn(":core:protocol:check", ":core:crypto:check", ":core:auth:check", ":core:session:check", ":core:network:check")
     if (findProject(":core:keystore") != null) dependsOn(":core:keystore:check")
     if (findProject(":app") != null) dependsOn(":app:check", ":core:ui:check")
 }
