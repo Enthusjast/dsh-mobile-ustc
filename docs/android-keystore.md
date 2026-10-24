@@ -1,6 +1,6 @@
 # Android Keystore integration evidence
 
-On 2026-10-24, the Android modules passed shared JVM tests, Android lint, AAR/test-APK builds and four instrumented tests on an isolated AOSP Android 8.0 / API 26 x86_64 emulator. The biometric test was explicitly enabled and all four tests passed with no skipped cases. This is an Android runtime and provider test; no school identity, real phone, production hardware attestation or complete mobile app was involved.
+On 2026-10-24, the Android modules passed shared JVM tests, Android lint, AAR/test-APK builds and five instrumented tests on an isolated AOSP Android 8.0 / API 26 x86_64 emulator. The biometric test was explicitly enabled and all five tests passed with no skipped cases. This is an Android runtime and provider test; no school identity, real phone, production hardware attestation or complete mobile app was involved.
 
 The build pins JDK target 17, Kotlin 2.3.21, AGP 8.13.2, Gradle 8.14.5, compileSdk 36, Build Tools 35.0.0 and minSdk 26. AndroidX Biometric is pinned to 1.1.0. The local emulator used version 37.2.12 with software CPU/graphics because the current account cannot access KVM. SDK, image, emulator state, logs and build outputs remain outside Git. The SDK Command-line Tools 22.0 archive's SHA-256 was checked against the official download entry before extraction. No system PostgreSQL or TokenWorks process was used for this Android test.
 
@@ -11,6 +11,8 @@ The shared JVM suites verify the Go/Node approval vectors and the public-only Ko
 - Approval-key enrollment fails without a secure lock/enrolled strong biometric and creates no fallback key. This branch passed on the initial unconfigured emulator. After a fixture PIN and fingerprint were enrolled through Settings, the provider denied signing without authentication. API 26 reports this at `sign()` through `SignatureException`, while some providers reject at `initSign()` with `UserNotAuthenticatedException`.
 - A real AndroidX BiometricPrompt CryptoObject successfully authenticated separate allow and reject operations. Each actual AndroidKeyStore signature was DER→JOSE converted and independently verified against the full context, registered public key and current time. Cancelled operations reinitialized the old Signature and could not sign; completed operations could not be reused.
 
+The fifth test authenticates a separate device-registration proof, verifies its ES256 signature and exact purpose, and checks that its current DPoP JTI and distinct approval/proof-key thumbprints match. A corrupted emulator state with a missing GateKeeper service was rejected; the positive run used a fresh isolated AVD with an explicitly enrolled test lock/fingerprint.
+
 Run static/JVM checks and build the test APK:
 
 ```sh
@@ -18,13 +20,13 @@ cd android
 ./gradlew check :core:keystore:assembleDebugAndroidTest
 ```
 
-Run the three noninteractive platform tests on an explicitly selected test device. The interactive test is skipped unless opted in:
+Run the three noninteractive platform tests on an explicitly selected test device. The two interactive tests are skipped unless opted in:
 
 ```sh
 ANDROID_SERIAL=<test-serial> ./gradlew :core:keystore:connectedDebugAndroidTest
 ```
 
-For the complete four-test run, provision a dedicated device/emulator with a test screen lock and enrolled strong biometric, then enable the UI test and confirm its two prompts:
+For the complete five-test run, provision a dedicated device/emulator with a test screen lock and enrolled strong biometric, then enable the UI test and confirm its three prompts:
 
 ```sh
 ANDROID_SERIAL=<test-serial> ./gradlew :core:keystore:connectedDebugAndroidTest -PbiometricFixture=true
@@ -34,4 +36,4 @@ The local fixture used a private API 26 AVD on `emulator-5580`. Fingerprint enro
 
 Generated reports are under `android/core/keystore/build/reports/androidTests/connected/debug`; the APK is `android/core/keystore/build/outputs/apk/androidTest/debug/keystore-debug-androidTest.apk`. It is an instrumentation APK, not a foreground remote-control client or release artifact. A normal build/test pass does not run device tests automatically. SDK-free shared checks remain available through `./gradlew -PjvmOnly=true check`.
 
-The application must still map scopes from trusted account/organization state, register the separate public keys, build DPoP and Relay proofs, wire account/revocation/prompt cleanup, show the full approval context and send decisions through fresh authorized HTTPS admission. Platform authentication proves local key use; it cannot supply school MFA/ACR or grant execution authority. Strong-biometric policy is currently supported; device-credential alternatives must be explicitly designed and verified before being offered. Modern Android branches, biometric enrollment/credential changes, hardware-required policy/attestation, process death, backup/restore, network/account switching and physical target devices remain acceptance gates. M1/M2 are not complete.
+The development app now prepares DPoP and biometric device-registration proofs and wires initial login/prompt cleanup. It must still map authoritative account/organization state, recover accepted devices, build Relay proofs, show the full tool-approval context and send decisions through fresh authorized HTTPS admission. Platform authentication proves local key use; it cannot supply school MFA/ACR or grant execution authority. Strong-biometric policy is currently supported; device-credential alternatives must be explicitly designed and verified before being offered. Modern Android branches, biometric enrollment/credential changes, hardware-required policy/attestation, process death, backup/restore, network/account switching and physical target devices remain acceptance gates. M1/M2 are not complete.

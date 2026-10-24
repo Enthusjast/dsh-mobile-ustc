@@ -90,14 +90,14 @@ class PreparedApprovalSignature internal constructor(
     private val context: ApprovalContext,
     private val key: RegisteredApprovalKey,
     private val input: String,
-) {
+) : PreparedUserSignature<SignedApprovalDecision> {
     private var ended = false
-    val keyThumbprint: String get() = key.thumbprint
-    fun signingInput(): ByteArray = input.toByteArray(Charsets.US_ASCII)
+    override val keyThumbprint: String get() = key.thumbprint
+    override fun signingInput(): ByteArray = input.toByteArray(Charsets.US_ASCII)
 
     /** Android's SHA256withECDSA returns DER; Nimbus converts it to JOSE r||s. */
     @Synchronized
-    fun finishDerSignature(der: ByteArray, now: Long): SignedApprovalDecision = signatureCheck {
+    override fun finishDerSignature(der: ByteArray, now: Long): SignedApprovalDecision = signatureCheck {
         if (ended) throw ApprovalSignatureException()
         ended = true
         val signature = ECDSA.transcodeSignatureToConcat(der.copyOf(), 64)
@@ -105,7 +105,7 @@ class PreparedApprovalSignature internal constructor(
     }
 
     @Synchronized
-    fun cancel() { ended = true }
+    override fun cancel() { ended = true }
 }
 
 private fun constantEqual(a: String, b: String): Boolean = MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))

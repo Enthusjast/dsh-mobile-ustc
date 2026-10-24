@@ -10,3 +10,5 @@ android/.gradle/
 android/.kotlin/
 android/**/build/
 android/local.properties
+/.idea/
+/android/.idea/

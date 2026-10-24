@@ -10,8 +10,7 @@ import android.security.keystore.KeyProperties
 import android.security.keystore.UserNotAuthenticatedException
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
-import cn.edu.ustc.dsh.crypto.PreparedApprovalSignature
-import cn.edu.ustc.dsh.crypto.SignedApprovalDecision
+import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.protocol.*
 import com.nimbusds.jose.crypto.impl.ECDSA
 import com.nimbusds.jose.jwk.Curve
@@ -139,7 +138,7 @@ class DeviceKeyHandle internal constructor(
     private val publicKey: ECPublicKey,
 ) : AutoCloseable {
     @Volatile private var closed = false
-    @Volatile private var operation: ApprovalKeyOperation? = null
+    @Volatile private var operation: AuthenticatedKeyOperation<*>? = null
     internal val isClosed: Boolean get() = closed
 
     /** Only the independent proof key can sign HTTP/WSS proof input without UI. */
@@ -151,14 +150,27 @@ class DeviceKeyHandle internal constructor(
         ECDSA.transcodeSignatureToConcat(signature, 64)
     }
 
+    fun proofSigner(): DeviceProofSigner {
+        if (purpose != DeviceKeyPurpose.PROOF) throw DeviceCryptoException(DeviceCryptoFailure.WRONG_KEY)
+        return object : DeviceProofSigner {
+            override val publicKey = PublicProofKey(publicJwk)
+            override fun signJose(signingInput: ByteArray): ByteArray = signProof(signingInput)
+        }
+    }
+
     /** The app shows full context, then authenticates this exact operation with BiometricPrompt. */
     @Synchronized
-    fun beginApproval(request: PreparedApprovalSignature): ApprovalKeyOperation = deviceCheck {
+    fun beginApproval(request: PreparedApprovalSignature): ApprovalKeyOperation = beginAuthenticated(request)
+
+    fun beginRegistration(request: PreparedDeviceRegistration): AuthenticatedKeyOperation<DeviceRegistrationProof> = beginAuthenticated(request)
+
+    @Synchronized
+    private fun <T> beginAuthenticated(request: PreparedUserSignature<T>): AuthenticatedKeyOperation<T> = deviceCheck {
         ensureOpen()
         if (purpose != DeviceKeyPurpose.APPROVAL || request.keyThumbprint != thumbprint) throw DeviceCryptoException(DeviceCryptoFailure.WRONG_KEY)
         if (operation != null) throw DeviceCryptoException(DeviceCryptoFailure.BUSY)
         val signature = Signature.getInstance("SHA256withECDSA").apply { initSign(privateKey) }
-        ApprovalKeyOperation(request, signature, { !closed }) {
+        AuthenticatedKeyOperation(request, signature, { !closed }) {
             // Reinitialization aborts an unconsumed AndroidKeyStore operation;
             // a retained old CryptoObject can no longer produce a signature.
             runCatching { signature.initVerify(publicKey) }
@@ -172,8 +184,10 @@ class DeviceKeyHandle internal constructor(
     private fun ensureOpen() { if (closed) throw DeviceCryptoException(DeviceCryptoFailure.CANCELLED) }
 }
 
-class ApprovalKeyOperation internal constructor(
-    private val request: PreparedApprovalSignature,
+typealias ApprovalKeyOperation = AuthenticatedKeyOperation<SignedApprovalDecision>
+
+class AuthenticatedKeyOperation<T> internal constructor(
+    private val request: PreparedUserSignature<T>,
     private val signature: Signature,
     private val ownerActive: () -> Boolean,
     private val onEnd: () -> Unit,
@@ -186,7 +200,7 @@ class ApprovalKeyOperation internal constructor(
 
     /** Accept only the same crypto object returned by the successful platform prompt. */
     @Synchronized
-    fun finish(result: BiometricPrompt.AuthenticationResult): SignedApprovalDecision = deviceCheck {
+    fun finish(result: BiometricPrompt.AuthenticationResult): T = deviceCheck {
         if (ended || !ownerActive()) throw DeviceCryptoException(DeviceCryptoFailure.CANCELLED)
         ended = true
         try {

@@ -3,6 +3,10 @@ plugins {
     alias(libs.plugins.kotlin.jvm) apply false
     alias(libs.plugins.kotlin.android) apply false
     alias(libs.plugins.android.library) apply false
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+    alias(libs.plugins.kotlin.kapt) apply false
+    alias(libs.plugins.hilt) apply false
 }
 
 subprojects {
@@ -10,6 +14,7 @@ subprojects {
 }
 
 tasks.named("check") {
-    dependsOn(":core:protocol:check", ":core:crypto:check")
+    dependsOn(":core:protocol:check", ":core:crypto:check", ":core:auth:check", ":core:network:check")
     if (findProject(":core:keystore") != null) dependsOn(":core:keystore:check")
+    if (findProject(":app") != null) dependsOn(":app:check", ":core:ui:check")
 }

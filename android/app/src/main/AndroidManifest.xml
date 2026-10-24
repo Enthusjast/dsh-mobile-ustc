@@ -1,0 +1,22 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:name=".DshApplication" android:label="DSH 远控" android:icon="@drawable/ic_dsh"
+        android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules"
+        android:usesCleartextTraffic="false" android:theme="@style/Theme.Dsh">
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".LoginRedirectActivity" android:exported="true" android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="cn.edu.ustc.dsh.mobile" />
+            </intent-filter>
+        </activity>
+        <activity android:name="net.openid.appauth.RedirectUriReceiverActivity" tools:node="remove" />
+    </application>
+</manifest>

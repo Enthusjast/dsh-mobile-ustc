@@ -1,0 +1,12 @@
+{
+  "issuer": "https://id.example.invalid/oidc",
+  "client_id": "replace-with-registered-native-client",
+  "redirect_uri": "cn.edu.ustc.dsh.mobile:/oauth2redirect",
+  "resource": "urn:dsh-mobile-ustc:remote",
+  "audience": "urn:dsh-mobile-ustc:remote",
+  "remote_origin": "https://remote.example.invalid",
+  "organization_id": "11111111-1111-4111-8111-111111111111",
+  "scopes": ["openid", "remote.access"],
+  "endpoint_origins": ["https://id.example.invalid"],
+  "signing_algorithms": ["RS256"]
+}
