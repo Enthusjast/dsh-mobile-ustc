@@ -31,6 +31,8 @@
     "zod": "4.4.3"
   },
   "dependencies": {
+    "canonicalize": "5.1.0",
+    "jose": "6.2.13",
     "ws": "8.22.0"
   }
 }
