@@ -34,6 +34,7 @@ data class HomeState(
     val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
+    val binding: HostBindingState? = null, val pendingBindingId: String? = null,
 )
 
 internal class LoginEnvironment(
@@ -75,6 +76,11 @@ class LoginController internal constructor(private val context: Context, private
     private var readerJob: Job? = null
     private var reader: SessionReader? = null
     private var desired: Pair<String, String?>? = null
+    private var binding: HostBindingFlow? = null
+    private var bindingCollector: Job? = null
+    private var bindingGeneration = 0L
+    private var pendingBindingId: String? = null
+    private var resumeBindingView = false
     private enum class Source { BROWSER, CACHE, REFRESH }
 
     init {
@@ -405,6 +411,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun showReauthentication(error: String?) {
         retireNavigation(false)
+        retireBinding(false)
         deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
         session = null; api = null
         mutable.value = HomeState(HomePhase.REAUTHENTICATE, configuration!!.issuer, error, subject = checkpoint?.session?.subject ?: "")
@@ -455,6 +462,11 @@ class LoginController internal constructor(private val context: Context, private
                     mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, sessions = emptyList(), reader = null, loadingSessions = false, sessionError = "access.denied")
                 } else if (foreground && (mutable.value.selectedRuntimeId == null || oldAccess?.grantVersion != entry.grantVersion || oldAccess?.scope?.same(entry.scope!!) != true)) navigateRuntime(selection.first, selection.second)
             }
+            mutable.value = mutable.value.copy(pendingBindingId = pendingBindingId)
+            if (foreground && resumeBindingView && binding == null) {
+                resumeBindingView = false
+                pendingBindingId?.let(::openBinding)
+            }
         } finally { if (generation == stamp) mutable.value = mutable.value.copy(refreshing = false) }
     }
 
@@ -466,17 +478,21 @@ class LoginController internal constructor(private val context: Context, private
     fun foreground(active: Boolean) {
         if (foreground == active) return
         foreground = active
+        binding?.foreground(active)
         if (!active) {
             retireNavigation(true)
-            mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null), loadingSessions = false)
-        } else if (mutable.value.phase == HomePhase.READY) desired?.let { navigateRuntime(it.first, it.second) }
+            mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null), loadingSessions = false, binding = binding?.state?.value)
+        } else if (mutable.value.phase == HomePhase.READY && binding == null) {
+            if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
+            else desired?.let { navigateRuntime(it.first, it.second) }
+        }
     }
     private fun navigation(block: suspend CoroutineScope.() -> Unit) {
         val task = scope.launch(start = CoroutineStart.LAZY, block = block); navigationJob = task; task.start()
     }
     fun openRuntime(id: String) = navigateRuntime(id, null)
     private fun navigateRuntime(id: String, resumeSession: String?) {
-        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        if (!foreground || mutable.value.phase != HomePhase.READY || binding != null) return
         val row = mutable.value.runtimes.firstOrNull { it.id == id } ?: return
         if (row.access?.organizationId != configuration!!.organizationId || !row.access.canList()) return
         desired = id to resumeSession
@@ -528,6 +544,7 @@ class LoginController internal constructor(private val context: Context, private
     fun retryRead() = reader?.retry()
     fun refreshSessions() { mutable.value.selectedRuntimeId?.let { navigateRuntime(it, null) } }
     fun back() {
+        if (binding != null) { closeBinding(); return }
         val runtime = mutable.value.selectedRuntimeId ?: return
         if (mutable.value.selectedSessionId != null) {
             retireNavigation(false); desired = runtime to null
@@ -539,6 +556,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun fence(closeKeys: Boolean, preserveSelection: Boolean = false): Long {
         retireNavigation(preserveSelection)
+        retireBinding(preserveSelection)
         generation++; job?.cancel(); deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
         if (closeKeys) { owner?.close(); owner = null; proof = null; approval = null; api = null; session = null }
         return generation
@@ -563,12 +581,57 @@ class LoginController internal constructor(private val context: Context, private
         if (generation != stamp) return
         deadline?.cancel()
         retireNavigation(false)
+        retireBinding(false)
         if (authorityLost(error)) clearAccount(code(error))
         else { session = null; api = null; discardRegistration(); mutable.value = HomeState(HomePhase.RECOVERY_ERROR, configuration?.issuer ?: "", code(error)) }
     }
     private fun authorityLost(error: Exception): Boolean =
         error is LoginException && error.failure == LoginFailure.IDENTITY ||
             error is RemoteRequestException && error.code in setOf("auth.identity_mismatch", "access.organization_missing", "access.denied", "access.revoked", "device.invalid")
+    private fun retireBinding(keepResume: Boolean) {
+        bindingGeneration++; bindingCollector?.cancel(); bindingCollector = null
+        resumeBindingView = keepResume && binding != null && binding?.resumeId != null
+        if (keepResume) binding?.resumeId?.let { pendingBindingId = it } else pendingBindingId = null
+        binding?.close(); binding = null
+    }
+    fun openBinding(resumeId: String? = pendingBindingId) {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) {
+            pendingBindingId = resumeId; renew(); resumeBindingView = resumeId != null; return
+        }
+        retireNavigation(false); retireBinding(false)
+        val stamp = generation; val view = bindingGeneration
+        pendingBindingId = resumeId
+        val opened = api!!.hostBinding(scope, resumeId, onAuthorityFailure = { code ->
+            if (generation == stamp && bindingGeneration == view && mutable.value.phase == HomePhase.READY) {
+                if (code in setOf("auth.expired", "auth.proof_invalid")) renew() else refresh()
+            }
+        }, onReady = {
+            if (generation == stamp && bindingGeneration == view && mutable.value.phase == HomePhase.READY) refresh()
+        })
+        binding = opened
+        mutable.value = mutable.value.copy(binding = opened.state.value, pendingBindingId = pendingBindingId,
+            selectedRuntimeId = null, selectedSessionId = null, sessions = emptyList(), reader = null, loadingSessions = false, sessionError = null)
+        bindingCollector = scope.launch {
+            opened.state.collect { next ->
+                if (generation != stamp || bindingGeneration != view || binding !== opened || mutable.value.phase != HomePhase.READY) return@collect
+                pendingBindingId = if (next.phase in setOf(HostBindingPhase.READY, HostBindingPhase.UNAVAILABLE) || next.phase == HostBindingPhase.ENTER && next.id.isEmpty()) null else opened.resumeId
+                mutable.value = mutable.value.copy(binding = next, pendingBindingId = pendingBindingId)
+            }
+        }
+        opened.foreground(true)
+    }
+    fun previewBinding(id: String, code: String) = binding?.preview(id, code)
+    fun confirmBinding() = binding?.confirm()
+    fun queryBinding(id: String) = binding?.lookup(id)
+    fun refreshBinding() = binding?.lookup()
+    fun enterAnotherBinding() = binding?.enterAnother()
+    fun closeBinding() {
+        val opened = binding ?: return
+        val resume = opened.resumeId.takeIf { opened.state.value.phase !in setOf(HostBindingPhase.READY, HostBindingPhase.UNAVAILABLE) }
+        retireBinding(false); pendingBindingId = resume
+        mutable.value = mutable.value.copy(binding = null, pendingBindingId = resume)
+    }
     private fun code(error: Exception): String = when (error) {
         is LoginException -> "login.${error.failure.name.lowercase()}"
         is RemoteRequestException -> error.code
@@ -595,6 +658,13 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun retryRead() = login.retryRead()
     fun refreshSessions() = login.refreshSessions()
     fun back() = login.back()
+    fun openBinding() = login.openBinding()
+    fun previewBinding(id: String, code: String) = login.previewBinding(id, code)
+    fun confirmBinding() = login.confirmBinding()
+    fun queryBinding(id: String) = login.queryBinding(id)
+    fun refreshBinding() = login.refreshBinding()
+    fun enterAnotherBinding() = login.enterAnotherBinding()
+    fun closeBinding() = login.closeBinding()
     fun browserOpened(id: Long) = login.browserOpened(id)
     fun browserUnavailable() = login.browserUnavailable()
     fun promptOpened(id: Long) = login.promptOpened(id)

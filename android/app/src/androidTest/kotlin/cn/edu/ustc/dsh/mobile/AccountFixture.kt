@@ -33,9 +33,12 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val deviceId = "33333333-3333-4333-8333-333333333333"
     val runtimeId = "55555555-5555-4555-8555-555555555555"
     val sessionId = "66666666-6666-4666-8666-666666666666"
+    val bindingId = "88888888-8888-4888-8888-888888888888"
+    val bindingCode = "J".repeat(42) + "A"
     val subject = "school-fixture-user"
     private val server = MockWebServer()
     private val issuerKey = ECKeyGenerator(Curve.P_256).keyID("local-account-issuer").generate()
+    private val installationKey = ECKeyGenerator(Curve.P_256).generate()
     private val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
     private val serverCertificates = HandshakeCertificates.Builder().heldCertificate(certificate).build()
     private val clientCertificates = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
@@ -48,6 +51,18 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val ticketRequests = AtomicInteger()
     val subscriptions = AtomicInteger()
     val relayClosures = AtomicInteger()
+    val bindingPreviews = AtomicInteger()
+    val bindingWrites = AtomicInteger()
+    val bindingStatusReads = AtomicInteger()
+    @Volatile var bindingMode = false
+    @Volatile var bindingUserConfirmed = false
+    @Volatile var bindingHostConfirmed = false
+    @Volatile var bindingConfirmedElsewhere = false
+    @Volatile var dropBindingReply = false
+    @Volatile var holdBindingPreview = false
+    @Volatile var bindingProfile = "fixture-profile"
+    @Volatile var bindingExpiresAt = System.currentTimeMillis() + 299_000
+    val bindingApproved get() = bindingUserConfirmed && bindingHostConfirmed
     @Volatile var allowSessionRead = true
     @Volatile var holdSessions = false
     private val directoryScope get() = RelayScope(if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list"), emptyList(), listOf(sessionId))
@@ -73,7 +88,9 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     private var grantNumber = 1
     private val seenProofs = hashSetOf<String>()
     private val resourceNonces = hashSetOf<String>()
-    val origin: String get() = server.url("/").toString().trimEnd('/')
+    // Avoid calling MockWebServer.before() from a dispatcher while shutdown()
+    // holds that server monitor and awaits its dispatch queues.
+    val origin: String
     val issuer: String get() = origin + "/issuer"
     val configBytes: ByteArray get() = JsonDocument.of(jsonObject(
         "issuer" to issuer.json(), "client_id" to "mobile".json(), "redirect_uri" to LoginConfiguration.REDIRECT_URI.json(),
@@ -85,6 +102,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val vault get() = AccountVault(context, slot)
     private val reference get() = ScopeReference(accountId, organizationId)
     val http: LoginHttp
+    private val transport: OkHttpClient
     init {
         server.useHttps(serverCertificates.sslSocketFactory(), false)
         server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
@@ -96,11 +114,12 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             }
         }
         server.start()
-        val client = OkHttpClient.Builder().sslSocketFactory(clientCertificates.sslSocketFactory(), clientCertificates.trustManager)
+        origin = server.url("/").toString().trimEnd('/')
+        transport = OkHttpClient.Builder().sslSocketFactory(clientCertificates.sslSocketFactory(), clientCertificates.trustManager)
             .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).cookieJar(CookieJar.NO_COOKIES)
             .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS).readTimeout(5, java.util.concurrent.TimeUnit.SECONDS).callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
         // The production factory still trusts system TLS only. Reflection is confined to this test APK.
-        http = LoginHttp::class.java.getDeclaredConstructor(OkHttpClient::class.java).apply { isAccessible = true }.newInstance(client)
+        http = LoginHttp::class.java.getDeclaredConstructor(OkHttpClient::class.java).apply { isAccessible = true }.newInstance(transport)
     }
     fun environment(minimumValidity: Long = 0) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity)
     private fun discovery() = jsonObject("issuer" to issuer.json(), "authorization_endpoint" to "$origin/authorize".json(),
@@ -259,6 +278,34 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (bindingMode && path.startsWith("/v1/enrollments/")) {
+            require(path.startsWith("/v1/enrollments/$bindingId"))
+            fun denied() = resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+            if (!member) return denied()
+            when (path) {
+                "/v1/enrollments/$bindingId/preview" -> {
+                    val body = JsonDocument.parse(request.body.readByteArray()).root; body.exactKeys("code")
+                    if (body.string("code") != bindingCode || System.currentTimeMillis() >= bindingExpiresAt) return denied()
+                    bindingPreviews.incrementAndGet()
+                    val result = resourceResponse(data(bindingDetails()))
+                    return if (holdBindingPreview) result.setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS) else result
+                }
+                "/v1/enrollments/$bindingId/confirm" -> {
+                    val body = JsonDocument.parse(request.body.readByteArray()).root; body.exactKeys("code")
+                    if (body.string("code") != bindingCode || bindingConfirmedElsewhere || System.currentTimeMillis() >= bindingExpiresAt) return denied()
+                    bindingWrites.incrementAndGet(); bindingUserConfirmed = true
+                    val fields = bindingDetails().fields.filterKeys { it in setOf("enrollment_id", "host_id", "runtime_id", "state", "expires_at", "host_confirmed", "user_confirmed") }
+                    val result = resourceResponse(data(JsonObject(fields)))
+                    return if (dropBindingReply) result.setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else result
+                }
+                "/v1/enrollments/$bindingId" -> {
+                    bindingStatusReads.incrementAndGet()
+                    if (!bindingUserConfirmed || bindingConfirmedElsewhere) return denied()
+                    return resourceResponse(data(bindingDetails()))
+                }
+                else -> error("unsupported binding fixture operation")
+            }
+        }
         if (path == "/v1/realtime/tickets") {
             if (!allowSessionRead) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
             val body = JsonDocument.parse(request.body.readByteArray()).root
@@ -281,9 +328,18 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to "44444444-4444-4444-8444-444444444444".json(), "alias" to "夹具电脑".json(), "state" to "active".json()))))))
         }
         require(path == "/v1/runtimes")
+        if (bindingMode && (!bindingApproved || bindingConfirmedElsewhere)) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
         return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
-            "access" to jsonObject("role" to "viewer".json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+            "access" to jsonObject("role" to (if (bindingMode) "owner" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
     }
+
+    fun bindingDetails(): JsonObject = jsonObject("enrollment_id" to bindingId.json(), "request_id" to "99999999-9999-4999-8999-999999999999".json(), "organization_id" to organizationId.json(),
+        "organization_name" to "学校夹具".json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "host_alias" to "夹具电脑".json(),
+        "installation_id" to "77777777-7777-4777-8777-777777777777".json(), "installation_key_jkt" to installationKey.computeThumbprint().toString().json(), "runtime_id" to runtimeId.json(),
+        "profile_ref" to bindingProfile.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
+        "state" to (if (bindingApproved) "approved" else if (System.currentTimeMillis() >= bindingExpiresAt) "expired" else if (bindingUserConfirmed) "user_confirmed" else "pending").json(),
+        "expires_at" to java.time.Instant.ofEpochMilli(bindingExpiresAt).toString().json(), "host_confirmed" to JsonBoolean(bindingHostConfirmed), "user_confirmed" to JsonBoolean(bindingUserConfirmed),
+        "user_confirmed_by_me" to JsonBoolean(bindingUserConfirmed && !bindingConfirmedElsewhere), "workspaces" to JsonArray(listOf(jsonObject("reference" to "project".json(), "workspace_id" to sessionId.json()))))
 
     fun revokeSession() {
         allowSessionRead = false
@@ -327,5 +383,9 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         val verified = TokenVerifier.authorizationCodeResponse(JsonDocument.of(tokenReply(proof.thumbprint, subject, login.nonce, 300)).canonicalBytes(), exchange, keys, System.currentTimeMillis())
         return http.resource(config, verified, proof.proofSigner())
     }
-    override fun close() { currentRelay.getAndSet(null)?.close(1001, "fixture complete"); vault.clear(); PendingKeyLedger(context, ledgerName).recover(); server.shutdown() }
+    override fun close() {
+        currentRelay.getAndSet(null)?.close(1001, "fixture complete")
+        transport.dispatcher.cancelAll(); transport.connectionPool.evictAll(); transport.dispatcher.executorService.shutdownNow()
+        vault.clear(); PendingKeyLedger(context, ledgerName).recover(); server.shutdown()
+    }
 }
