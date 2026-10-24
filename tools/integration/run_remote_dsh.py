@@ -24,7 +24,7 @@ def main():
         binary = fixture_root / "remote"
         started = False
         try:
-            subprocess.run([str(pg_bin / "initdb"), "-D", str(data), "--auth=trust", "--username=dsh_e2e", "--no-locale"], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run([str(pg_bin / "initdb"), "-D", str(data), "--auth=trust", "--username=dsh_e2e", "--no-locale", "--encoding=UTF8"], check=True, stdout=subprocess.DEVNULL)
             subprocess.run([str(pg_bin / "pg_ctl"), "-D", str(data), "-l", str(log), "-o", "-h '' -k " + root + " -p 55439", "-w", "start"], check=True, stdout=subprocess.DEVNULL)
             started = True
             dsn = "host=" + root + " port=55439 user=dsh_e2e dbname=postgres sslmode=disable"

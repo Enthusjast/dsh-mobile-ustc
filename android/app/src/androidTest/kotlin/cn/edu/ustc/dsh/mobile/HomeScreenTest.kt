@@ -72,6 +72,18 @@ class HomeScreenTest {
         save("registration-landscape")
     }
 
+    @Test fun uncertainEnrollmentOffersAStatusQueryBeforeAnotherRegistration() {
+        var requests = 0
+        rule.setContent {
+            DshTheme {
+                HomeScreen(HomeState(HomePhase.REGISTRATION_UNKNOWN, "https://id.example.edu", error = "device.registration_unknown"), {}, { requests++ }, {}, {}, {})
+            }
+        }
+        rule.onNodeWithText("核对设备登记").performScrollTo().assertIsEnabled().performClick()
+        rule.onNodeWithText("确认并登记设备").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(1, requests) }
+    }
+
     private fun save(name: String) {
         // Only public synthetic state in this test host, never the secure live activity.
         val bitmap = rule.onRoot().captureToImage().asAndroidBitmap()

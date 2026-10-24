@@ -43,7 +43,7 @@ paths:
               $ref: '#/components/schemas/DeviceRegistration'
       responses:
         '201':
-          description: Device keys are registered for the verified user. The proof key must match the DPoP-bound access token; an ES256 approval-key possession proof binds the identity, keys, name digest and current DPoP request. The keys must be distinct.
+          description: Device keys are registered for the verified user. The proof key must match the DPoP-bound access token; an ES256 approval-key possession proof binds the identity, keys, name digest and current DPoP request. The keys must be distinct. A fresh authenticated proof with the same account, key pair, normalized name and version 1 returns the original device without another audit row. Changed data conflicts; revoked devices are never revived.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:
@@ -51,6 +51,22 @@ paths:
               schema:
                 $ref: '#/components/schemas/DeviceResponse'
         '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/devices/current:
+    get:
+      description: Reconcile enrollment using only the verified issuer, subject and token-bound DPoP key. Caller-supplied device/key selectors are ignored. This read is available before enrollment and for a revoked key; it grants no resource access and returns no other account/device.
+      responses:
+        '200':
+          description: Current enrollment state for the authenticated key.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentDeviceResponse'
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
@@ -542,6 +558,33 @@ components:
                 properties:
                   organization_id: { type: string, format: uuid }
                   role: { enum: [member, admin] }
+    CurrentDeviceResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [state]
+              properties:
+                state: { const: unregistered }
+            - type: object
+              additionalProperties: false
+              required: [state, device]
+              properties:
+                state: { enum: [active, revoked] }
+                device:
+                  type: object
+                  additionalProperties: false
+                  required: [device_id, key_version, approval_key_jkt, proof_key_jkt]
+                  properties:
+                    device_id: { type: string, format: uuid }
+                    key_version: { type: integer, minimum: 1, maximum: 9007199254740991 }
+                    approval_key_jkt: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+                    proof_key_jkt: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
     DeviceRegistration:
       type: object
       additionalProperties: false

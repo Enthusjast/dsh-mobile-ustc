@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -340,7 +342,8 @@ func (postgres *Postgres) CommandStatus(ctx context.Context, identity UserIdenti
 }
 
 func (postgres *Postgres) RegisterDevice(ctx context.Context, registration DeviceRegistration) (string, error) {
-	if len(registration.Name) == 0 || len(registration.Name) > 160 || registration.Issuer == "" || registration.Subject == "" ||
+	if registration.Name == "" || !utf8.ValidString(registration.Name) || utf8.RuneCountInString(registration.Name) > 160 ||
+		registration.Name != strings.TrimSpace(registration.Name) || strings.IndexFunc(registration.Name, unicode.IsControl) >= 0 || registration.Issuer == "" || registration.Subject == "" ||
 		len(registration.ApprovalPublicJWK) == 0 || len(registration.ProofPublicJWK) == 0 ||
 		registration.ApprovalKeyThumbprint == "" || registration.ProofKeyThumbprint == "" {
 		return "", ErrDatabaseConfig
@@ -359,8 +362,36 @@ func (postgres *Postgres) RegisterDevice(ctx context.Context, registration Devic
 		insert into devices (user_id, name, approval_public_jwk, approval_key_thumbprint,
 		                     proof_public_jwk, proof_key_thumbprint)
 		values ($1, $2, $3::jsonb, $4, $5::jsonb, $6)
+		on conflict do nothing
 		returning id::text`, userID, registration.Name, string(registration.ApprovalPublicJWK),
 		registration.ApprovalKeyThumbprint, string(registration.ProofPublicJWK), registration.ProofKeyThumbprint).Scan(&deviceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// ON CONFLICT waits for concurrent insertion. The next READ COMMITTED
+		// statement observes its committed outcome and holds revocation at bay.
+		var name, approvalJKT string
+		var version int64
+		var revoked sql.NullTime
+		err = transaction.QueryRowContext(ctx, `
+			select id::text, name, approval_key_thumbprint, key_version, revoked_at
+			from devices where user_id = $1 and proof_key_thumbprint = $2 for share`, userID, registration.ProofKeyThumbprint).
+			Scan(&deviceID, &name, &approvalJKT, &version, &revoked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrDeviceRegistrationConflict
+		}
+		if err != nil {
+			return "", ErrDatabaseUnavailable
+		}
+		if revoked.Valid {
+			return "", ErrDeviceNotFound
+		}
+		if name != registration.Name || approvalJKT != registration.ApprovalKeyThumbprint || version != 1 {
+			return "", ErrDeviceRegistrationConflict
+		}
+		if err := transaction.Commit(); err != nil {
+			return "", ErrDatabaseUnavailable
+		}
+		return deviceID, nil
+	}
 	if err != nil {
 		return "", ErrDatabaseUnavailable
 	}

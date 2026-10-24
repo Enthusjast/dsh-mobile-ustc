@@ -125,6 +125,35 @@ class LoginHttpTest {
         assertEquals(signer.publicKey.thumbprint, possessionClaims.string("proof_key_jkt"))
         assertEquals("校园手机", body.string("name"))
         assertThrows(RemoteRequestException::class.java) { runBlocking { registration.submit(signed) } }
+        fun current(state: String, approvalJkt: String = approvalPublic.thumbprint, version: Long = 1): String =
+            JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("state" to state.json(), "device" to jsonObject(
+                "device_id" to "22222222-2222-4222-8222-222222222222".json(), "key_version" to version.json(),
+                "approval_key_jkt" to approvalJkt.json(), "proof_key_jkt" to signer.publicKey.thumbprint.json(),
+            )))).canonicalText()
+        server.enqueue(response(me(config)))
+        val uncertain = api.prepareRegistration(approvalPublic, "校园手机")
+        server.takeRequest()
+        val uncertainDer = java.security.Signature.getInstance("SHA256withECDSA").run {
+            initSign(approvalKey.toECPrivateKey()); update(uncertain.signatureRequest.signingInput()); sign()
+        }
+        val uncertainProof = uncertain.signatureRequest.finishDerSignature(uncertainDer, System.currentTimeMillis())
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        val beforeWrite = server.requestCount
+        assertThrows(RemoteRequestException::class.java) { runBlocking { uncertain.submit(uncertainProof) } }
+        assertEquals(beforeWrite + 1, server.requestCount)
+        assertEquals("POST", server.takeRequest().method)
+        server.enqueue(response(me(config))); server.enqueue(response(current("active")))
+        assertEquals("22222222-2222-4222-8222-222222222222", api.currentDevice(approvalPublic)!!.deviceId)
+        assertEquals("/v1/me", server.takeRequest().path)
+        val reconciliation = server.takeRequest()
+        assertEquals("GET", reconciliation.method); assertEquals("/v1/devices/current", reconciliation.path)
+        server.enqueue(response(me(config))); server.enqueue(response("{\"ok\":true,\"data\":{\"state\":\"unregistered\"}}"))
+        assertNull(api.currentDevice(approvalPublic)); server.takeRequest(); server.takeRequest()
+        for ((body, code) in listOf(current("revoked") to "device.invalid", current("active", version = 2) to "device.invalid", current("active", approvalJkt = signer.publicKey.thumbprint) to "auth.identity_mismatch")) {
+            server.enqueue(response(me(config))); server.enqueue(response(body))
+            assertEquals(code, assertThrows(RemoteRequestException::class.java) { runBlocking { api.currentDevice(approvalPublic) } }.code)
+            server.takeRequest(); server.takeRequest()
+        }
         server.enqueue(response(me(config, userId = "33333333-3333-4333-8333-333333333333")))
         assertEquals("auth.identity_mismatch", assertThrows(RemoteRequestException::class.java) { runBlocking { api.me() } }.code)
         server.takeRequest()

@@ -19,6 +19,11 @@ type fakeRepository struct {
 	accountErr              error
 	accountCalls            int
 	accountLookup           store.UserIdentity
+	currentDevice           store.CurrentDevice
+	currentDeviceErr        error
+	currentDeviceCalls      int
+	currentDeviceIdentity   store.UserIdentity
+	currentDeviceJKT        string
 	listCalls               int
 	activeDeviceID          string
 	activeDeviceErr         error
@@ -53,6 +58,12 @@ func (fake *fakeRepository) AccountIdentity(_ context.Context, identity store.Us
 	fake.accountCalls++
 	fake.accountLookup = identity
 	return fake.account, fake.accountErr
+}
+func (fake *fakeRepository) CurrentDevice(_ context.Context, identity store.UserIdentity, jkt string) (store.CurrentDevice, error) {
+	fake.currentDeviceCalls++
+	fake.currentDeviceIdentity = identity
+	fake.currentDeviceJKT = jkt
+	return fake.currentDevice, fake.currentDeviceErr
 }
 func (fake *fakeRepository) ActiveDevice(context.Context, store.UserIdentity, string) (string, error) {
 	fake.activeDeviceCall++
@@ -208,14 +219,14 @@ func TestProtectedRoutesRejectAnonymousRequestsBeforeDatabaseAccess(t *testing.T
 	}
 	repo := &fakeRepository{}
 	handler := New(repo, identity)
-	for _, target := range []string{"/v1/me", "/v1/hosts", "/v1/runtimes", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions"} {
+	for _, target := range []string{"/v1/me", "/v1/devices/current", "/v1/hosts", "/v1/runtimes", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("anonymous GET %s status = %d, want 401", target, response.Code)
 		}
 	}
-	if repo.listCalls != 0 || repo.accountCalls != 0 {
+	if repo.listCalls != 0 || repo.accountCalls != 0 || repo.currentDeviceCalls != 0 {
 		t.Fatal("unauthenticated route accessed the repository")
 	}
 }

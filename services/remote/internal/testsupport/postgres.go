@@ -91,5 +91,9 @@ func PostgresDatabase(t *testing.T) (context.Context, *sql.DB) {
 	if err := testDB.PingContext(ctx); err != nil {
 		t.Fatalf("ping isolated test database: %v", err)
 	}
+	var encoding string
+	if err := testDB.QueryRowContext(ctx, "show server_encoding").Scan(&encoding); err != nil || encoding != "UTF8" {
+		t.Fatalf("integration database must use UTF8: encoding=%q error=%v", encoding, err)
+	}
 	return ctx, testDB
 }

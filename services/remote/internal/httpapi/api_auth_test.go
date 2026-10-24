@@ -112,6 +112,21 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		accountNonce = response.Header().Get("DPoP-Nonce")
 	}
 	repo.accountErr = nil
+	repo.currentDevice = store.CurrentDevice{State: "active", Device: &store.DeviceIdentity{DeviceID: deviceID, KeyVersion: 1, ApprovalKeyJKT: "approval-fixture", ProofKeyJKT: proofJKT}}
+	current := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodGet,
+		"https://api.example.edu/v1/devices/current?device_id=untrusted&proof_key_jkt=untrusted", "proof-jti-current-device-0004", accountNonce)
+	if current.Code != http.StatusOK || repo.currentDeviceIdentity != repo.accountLookup || repo.currentDeviceJKT != proofJKT ||
+		repo.activeDeviceCall != 1 || !strings.Contains(current.Body.String(), deviceID) || current.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("device reconciliation trusted a caller selector or required prior enrollment: status=%d body=%s", current.Code, current.Body.String())
+	}
+	repo.currentDeviceErr = store.ErrDatabaseUnavailable
+	unknownDevice := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodGet,
+		"https://api.example.edu/v1/devices/current", "proof-jti-current-device-outage-0005", current.Header().Get("DPoP-Nonce"))
+	if unknownDevice.Code != http.StatusServiceUnavailable || strings.Contains(unknownDevice.Body.String(), `"device_id"`) {
+		t.Fatalf("outage disclosed a device result: status=%d body=%s", unknownDevice.Code, unknownDevice.Body.String())
+	}
+	repo.currentDeviceErr = nil
+	accountNonce = unknownDevice.Header().Get("DPoP-Nonce")
 
 	repo.activeDeviceErr = nil
 	listed := sendDPoPRequest(t, handler, access, proofKey, proofJWK, http.MethodGet, requestURI, "proof-jti-active-0003", accountNonce)

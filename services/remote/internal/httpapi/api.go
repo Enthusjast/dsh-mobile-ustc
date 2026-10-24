@@ -27,6 +27,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-
 type Repository interface {
 	Ready(context.Context) error
 	AccountIdentity(context.Context, store.UserIdentity) (store.AccountIdentity, error)
+	CurrentDevice(context.Context, store.UserIdentity, string) (store.CurrentDevice, error)
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
 	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
 	GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error)
@@ -141,6 +142,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.HandleFunc("GET /readyz", api.ready)
 	mux.Handle("GET /v1/me", api.authenticated(http.HandlerFunc(api.me)))
 	mux.Handle("POST /v1/devices", api.authenticated(http.HandlerFunc(api.registerDevice)))
+	mux.Handle("GET /v1/devices/current", api.authenticated(http.HandlerFunc(api.currentDevice)))
 	mux.Handle("POST /v1/enrollments", api.hostAuthenticated(http.HandlerFunc(api.createEnrollment)))
 	mux.Handle("GET /v1/enrollments/{id}", api.protected(http.HandlerFunc(api.getEnrollment)))
 	mux.Handle("POST /v1/enrollments/{id}/confirm", api.protected(http.HandlerFunc(api.confirmEnrollmentUser)))
@@ -343,6 +345,16 @@ func (api *API) me(response http.ResponseWriter, request *http.Request) {
 		"issuer": principal.Issuer, "subject": principal.Subject, "client_id": principal.ClientID,
 		"scopes": sortedScopes(principal.Scopes), "user_id": account.UserID, "memberships": account.Memberships,
 	})
+}
+
+func (api *API) currentDevice(response http.ResponseWriter, request *http.Request) {
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	device, err := api.database.CurrentDevice(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, principal.ProofKeyJKT)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, device)
 }
 
 func (api *API) registerDevice(response http.ResponseWriter, request *http.Request) {
@@ -588,6 +600,8 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrIdentityNotProvisioned), errors.Is(err, store.ErrDeviceNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")
+	case errors.Is(err, store.ErrDeviceRegistrationConflict):
+		writeError(response, http.StatusConflict, "device.registration_conflict")
 	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrGrantNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")
 	case errors.Is(err, store.ErrTicketInvalid):

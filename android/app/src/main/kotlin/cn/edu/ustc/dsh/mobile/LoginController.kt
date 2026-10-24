@@ -23,7 +23,7 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, READY }
+enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, RECONCILING, REGISTRATION_UNKNOWN, READY }
 class BrowserLaunch(val id: Long, val uri: Uri)
 class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<DeviceRegistrationProof>)
 data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String)
@@ -183,6 +183,12 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
     }
 
     fun register(name: String) {
+        if (mutable.value.phase == HomePhase.REGISTRATION_UNKNOWN) {
+            val stamp = generation
+            mutable.value = mutable.value.copy(phase = HomePhase.RECONCILING, error = null)
+            job = scope.launch { reconcileRegistration(stamp) }
+            return
+        }
         if (mutable.value.phase != HomePhase.ENROLL) return
         val stamp = generation
         mutable.value = mutable.value.copy(phase = HomePhase.PREPARING, error = null, securitySetupRequired = false)
@@ -193,7 +199,11 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
                 }
                 if (generation != stamp) { localKey.close(); return@launch }
                 approval = localKey
-                val request = api!!.prepareRegistration(PublicProofKey(localKey.publicJwk), name.trim())
+                val publicKey = PublicProofKey(localKey.publicJwk)
+                val existing = api!!.currentDevice(publicKey)
+                if (generation != stamp) return@launch
+                if (existing != null) { registered(existing); return@launch }
+                val request = api!!.prepareRegistration(publicKey, name.trim())
                 if (generation != stamp) { request.cancel(); return@launch }
                 registration = request
                 operation = withContext(Dispatchers.Default) { localKey.beginRegistration(request.signatureRequest) }
@@ -220,20 +230,44 @@ class LoginController @Inject constructor(@param:ApplicationContext private val 
         operation = null; registration = null
         mutable.value = mutable.value.copy(phase = HomePhase.REGISTERING, biometric = null, authenticationId = null)
         job = scope.launch {
+            var submitted = false
             try {
                 val signed = withContext(Dispatchers.Default) { active.finish(result) }
                 if (generation != stamp) return@launch
+                submitted = true
                 val device = request.submit(signed)
                 if (generation != stamp) return@launch
-                mutable.value = mutable.value.copy(phase = HomePhase.READY, deviceId = device.deviceId)
-                refresh()
+                registered(device)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 if (generation == stamp) {
-                    if (authorityLost(error)) fail(code(error)) else mutable.value = mutable.value.copy(phase = HomePhase.ENROLL, error = code(error))
+                    if (authorityLost(error)) fail(code(error))
+                    else if (submitted) reconcileRegistration(stamp)
+                    else mutable.value = mutable.value.copy(phase = HomePhase.ENROLL, error = code(error))
                 }
             }
             finally { active.close(); request.cancel() }
+        }
+    }
+
+    private fun registered(device: RegisteredDevice) {
+        mutable.value = mutable.value.copy(phase = HomePhase.READY, deviceId = device.deviceId, error = null)
+        refresh()
+    }
+
+    private suspend fun reconcileRegistration(stamp: Long) {
+        mutable.value = mutable.value.copy(phase = HomePhase.RECONCILING, error = null)
+        try {
+            val device = api!!.currentDevice(PublicProofKey(approval!!.publicJwk))
+            if (generation != stamp) return
+            if (device != null) registered(device)
+            else mutable.value = mutable.value.copy(phase = HomePhase.ENROLL, error = "device.registration_not_found")
+        } catch (error: CancellationException) { throw error }
+        catch (error: Exception) {
+            if (generation == stamp) {
+                if (authorityLost(error)) fail(code(error))
+                else mutable.value = mutable.value.copy(phase = HomePhase.REGISTRATION_UNKNOWN, error = "device.registration_unknown")
+            }
         }
     }
 

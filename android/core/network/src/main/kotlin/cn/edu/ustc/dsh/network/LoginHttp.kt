@@ -75,7 +75,7 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
         if (reply.status !in 200..299) {
             val code = runCatching { JsonDocument.parse(reply.bytes).root.obj("error").string("code") }.getOrNull()
             // Only protocol codes reach presentation; untrusted error bodies/messages do not.
-            throw RemoteRequestException(if (code in setOf("auth.expired", "auth.proof_invalid", "access.denied", "access.revoked", "device.invalid", "internal")) code!! else "network.request_failed")
+            throw RemoteRequestException(if (code in setOf("auth.expired", "auth.proof_invalid", "access.denied", "access.revoked", "device.invalid", "device.registration_conflict", "internal")) code!! else "network.request_failed")
         }
         return reply
     }
@@ -130,6 +130,28 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
 
     suspend fun runtimes(): JsonObject = mutex.withLock { JsonDocument.parse(read("/v1/runtimes")).root }
     suspend fun hosts(): JsonObject = mutex.withLock { JsonDocument.parse(read("/v1/hosts")).root }
+
+    /** Reconciliation only: never creates or revives a device and never replays a write. */
+    suspend fun currentDevice(approvalKey: PublicProofKey): RegisteredDevice? = mutex.withLock {
+        identity()
+        val root = JsonDocument.parse(read("/v1/devices/current")).root
+        root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+        val data = root.obj("data")
+        if (data.string("state") == "unregistered") {
+            data.exactKeys("state")
+            return@withLock null
+        }
+        data.exactKeys("state", "device")
+        val state = data.string("state")
+        if (state !in setOf("active", "revoked")) throw RemoteRequestException("network.invalid_response")
+        val device = data.obj("device"); device.exactKeys("device_id", "key_version", "approval_key_jkt", "proof_key_jkt")
+        if (device.string("approval_key_jkt") != approvalKey.thumbprint || device.string("proof_key_jkt") != signer.publicKey.thumbprint) throw RemoteRequestException("auth.identity_mismatch")
+        val id = Contract.uuid(device.string("device_id"))
+        val version = device.integer("key_version", 1, 9_007_199_254_740_991)
+        if (state == "revoked" || version != 1L) throw RemoteRequestException("device.invalid")
+        RegisteredDevice(id, version)
+    }
 
     suspend fun prepareRegistration(approvalKey: PublicProofKey, name: String): RegistrationRequest = mutex.withLock {
         // A successful /me request obtains a nonce before asking for user auth.

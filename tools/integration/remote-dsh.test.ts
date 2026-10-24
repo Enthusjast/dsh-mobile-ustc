@@ -220,7 +220,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
       approval_key_jkt: approval.jkt, proof_key_jkt: proofKey.jkt, device_name_sha256: hash(subject), dpop_jti: proofJTI,
     }),
   }), 201)
+  assert.deepEqual(await phone('GET', '/v1/devices/current'), { state: 'unregistered' })
   const device = await register(phone, phoneKey, approvalKey, 'phone')
+  assert.deepEqual(await register(phone, phoneKey, approvalKey, 'phone'), device)
+  assert.deepEqual(await phone('GET', '/v1/devices/current?device_id=untrusted'), { state: 'active', device: {
+    device_id: device.device_id, key_version: 1, approval_key_jkt: approvalKey.jkt, proof_key_jkt: phoneKey.jkt,
+  } })
   const siblingDevice = await register(siblingPhone, siblingKey, siblingApprovalKey, 'phone')
   await register(outsider, outsiderKey, outsiderApprovalKey, 'outsider')
   const code = randomBytes(32).toString('base64url')
@@ -601,6 +606,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
   const deviceRevokedAt = Date.now()
   await phone('DELETE', `/v1/devices/${siblingDevice.device_id}`)
+  assert.equal((await siblingPhone('GET', '/v1/devices/current')).state, 'revoked')
   await siblingMobile.wait(frame => frame.type === 'access.revoked' && frame.payload.code === 'access.revoked')
   await until(async () => siblingMobile.closed ? true : undefined, 'idle revoked device socket close', 5000)
   assert.ok(Date.now() - deviceRevokedAt < 5000, 'idle device revocation exceeded five seconds')

@@ -43,7 +43,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                     Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         val title = when (state.phase) {
                             HomePhase.UNCONFIGURED, HomePhase.INVALID_CONFIGURATION -> "学校登录尚未配置"
-                            HomePhase.ENROLL, HomePhase.PREPARING, HomePhase.AUTHENTICATING, HomePhase.REGISTERING -> "登记这部手机"
+                            HomePhase.ENROLL, HomePhase.PREPARING, HomePhase.AUTHENTICATING, HomePhase.REGISTERING, HomePhase.RECONCILING, HomePhase.REGISTRATION_UNKNOWN -> "登记这部手机"
                             HomePhase.READY -> "本机已登记"
                             else -> "连接学校账号"
                         }
@@ -72,6 +72,10 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                                 Text(state.subject, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 OutlinedButton(onRefresh, enabled = !state.refreshing, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.refreshing) "正在刷新…" else "刷新运行实例") }
                             }
+                            HomePhase.REGISTRATION_UNKNOWN -> {
+                                Text("尚未核对设备登记结果。请保持本机登录并检查网络，再查询登记状态。", style = MaterialTheme.typography.bodyLarge)
+                                Button({ onRegister(name) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("核对设备登记") }
+                            }
                             else -> {
                                 Row(Modifier.semantics { liveRegion = LiveRegionMode.Polite }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
@@ -83,6 +87,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                                         HomePhase.PREPARING -> "正在准备设备登记"
                                         HomePhase.AUTHENTICATING -> "等待本机身份确认"
                                         HomePhase.REGISTERING -> "正在登记设备"
+                                        HomePhase.RECONCILING -> "正在核对设备登记"
                                     }, style = MaterialTheme.typography.bodyLarge)
                                 }
                             }
@@ -125,5 +130,8 @@ private fun errorText(code: String): String = when (code) {
     "access.denied", "access.revoked", "device.invalid" -> "当前设备没有访问权限，请检查设备登记和授权。"
     "access.organization_missing" -> "当前账号不属于此安装包配置的组织，请联系管理员。"
     "auth.proof_invalid" -> "设备证明未通过验证，请重新确认后重试。"
+    "device.registration_not_found" -> "尚未查到本机登记，可以再次确认后登记。"
+    "device.registration_unknown" -> "暂时无法核对登记结果，请恢复网络后再次查询。"
+    "device.registration_conflict" -> "登记信息与已有设备不一致，请先核对登记状态。"
     else -> "暂时无法完成操作，请检查网络后重试。"
 }
