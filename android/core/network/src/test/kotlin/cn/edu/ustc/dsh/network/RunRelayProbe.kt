@@ -55,6 +55,12 @@ object RunRelayProbe {
             ownedClient = client
             val http = LoginHttp.forTests(client)
             val api = http.resource(config, session, signer)
+            if (fixture.fields["mode"] == "binding".json()) {
+                phase = "host-binding"
+                binding(api, fixture, this)
+                println("Kotlin HTTPS binding preview / reviewed confirmation / independent host-key confirmation / current directory grant passed")
+                return@runBlocking
+            }
             if (fixture.fields["mode"] == "content".json()) {
                 phase = "session-content"
                 content(api, fixture, root, this)
@@ -81,10 +87,28 @@ object RunRelayProbe {
             println("Kotlin HTTPS ticket / TLS Relay proof / heartbeat / scoped offline read passed")
         } catch (error: Exception) {
             // Content checks only expose protocol phases/codes, never fixture key or token parsing.
-            if (phase == "session-content") throw IllegalStateException("Kotlin Relay probe failed at $phase", error)
+            if (phase in setOf("session-content", "host-binding")) throw IllegalStateException("Kotlin Relay probe failed at $phase", error)
             throw IllegalStateException("Kotlin Relay probe failed at $phase")
         }
         finally { ownedClient?.let { it.connectionPool.evictAll(); it.dispatcher.executorService.shutdownNow() } }
+    }
+
+    private suspend fun binding(api: RemoteApi, fixture: JsonObject, owner: CoroutineScope) {
+        require("host_private_jwk" !in fixture.fields && "host_credential" !in fixture.fields)
+        api.hostBinding(owner).use { flow ->
+            suspend fun await(phase: HostBindingPhase) = withTimeout(15_000) { flow.state.first {
+                check(it.phase !in setOf(HostBindingPhase.ERROR, HostBindingPhase.UNKNOWN, HostBindingPhase.UNAVAILABLE)) { "binding ${it.phase}: ${it.error}" }
+                it.phase == phase
+            } }
+            flow.foreground(true); flow.preview(fixture.string("binding_id"), fixture.string("binding_code"))
+            val review = await(HostBindingPhase.REVIEW)
+            check(review.details!!.keyThumbprint == fixture.string("binding_key_jkt") && !review.details.confirmedByMe)
+            check(!review.toString().contains(fixture.string("binding_code")))
+            flow.confirm()
+            val accepted = await(HostBindingPhase.READY).details!!
+            check(accepted.confirmedByMe && accepted.hostConfirmed && accepted.state == "approved")
+            check(accepted.runtimeId == fixture.string("binding_runtime_id"))
+        }
     }
 
     private suspend fun content(api: RemoteApi, fixture: JsonObject, root: File, owner: CoroutineScope) {

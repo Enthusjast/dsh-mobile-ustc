@@ -1,9 +1,15 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,11 +91,11 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	var handler *httpapi.Handler
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) { handler.ServeHTTP(response, request) }))
 	t.Cleanup(server.Close)
-	identity, err := auth.New(auth.Config{Issuer: issuer, Audience: "urn:dsh-kotlin-relay", JWKSURL: keys.URL, AllowedClients: []string{"mobile"}, RequiredScopes: []string{"remote.access"}, PublicOrigin: server.URL, MaxTokenLifetime: 15 * time.Minute})
+	identity, err := auth.New(auth.Config{Issuer: issuer, Audience: "urn:dsh-kotlin-relay", JWKSURL: keys.URL, AllowedClients: []string{"mobile", "fixture-host"}, RequiredScopes: []string{"remote.access"}, PublicOrigin: server.URL, MaxTokenLifetime: 15 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler = httpapi.New(postgres, identity)
+	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"fixture-host"}})
 	now := time.Now().UTC().Truncate(time.Second)
 	access := approvalSign(t, signing, jose.ES256, "kotlin-issuer", "at+jwt", map[string]any{"iss": issuer, "sub": "kotlin-fixture", "aud": "urn:dsh-kotlin-relay", "client_id": "mobile",
 		"jti": "kotlin-composition-access-token", "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "scope": "remote.access", "cnf": map[string]any{"jkt": proofJKT}}, nil)
@@ -126,6 +132,66 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 		t.Fatalf("actual Kotlin Relay client failed: %v\n%s", err, output)
 	}
 	t.Log(string(output))
+
+	// The phone reviews this separate profile without receiving the installation
+	// private key. A second signed HTTP client confirms only after the phone does.
+	codeBytes := make([]byte, 32)
+	if _, err := rand.Read(codeBytes); err != nil {
+		t.Fatal(err)
+	}
+	code := base64.RawURLEncoding.EncodeToString(codeBytes)
+	created, err := postgres.CreateEnrollment(ctx, store.EnrollmentInput{Issuer: issuer, Subject: "kotlin-fixture", RequestID: "aaaaaaaa-3333-4333-8333-333333333333", OrganizationID: orgID,
+		Alias: "Kotlin fixture host", ProfileRef: "mobile-binding", DSHVersion: "0.2.1-rc.2", ApplicationVersion: "kotlin-fixture", PluginVersion: "0.0.1", ProtocolVersion: 1,
+		InstallationPublicJWK: installationJWK, InstallationKeyThumbprint: installationJKT, Code: code, WorkspaceRefs: []string{"mobile-project"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostAccess := approvalSign(t, signing, jose.ES256, "kotlin-issuer", "at+jwt", map[string]any{"iss": issuer, "sub": "kotlin-fixture", "aud": "urn:dsh-kotlin-relay", "client_id": "fixture-host",
+		"jti": "kotlin-binding-host-access", "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "scope": "remote.access", "cnf": map[string]any{"jkt": installationJKT}}, nil)
+	hostResult := make(chan error, 1)
+	go func() {
+		for {
+			var confirmed bool
+			if err := db.QueryRowContext(ctx, `select user_confirmed_by is not null from enrollments where id=$1`, created.EnrollmentID).Scan(&confirmed); err != nil {
+				hostResult <- err
+				return
+			}
+			if confirmed {
+				hostResult <- confirmKotlinBindingHost(ctx, server.Client(), server.URL, hostAccess, installationKey, created.EnrollmentID, code)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				hostResult <- ctx.Err()
+				return
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
+	}()
+	fixture["mode"] = "binding"
+	fixture["binding_id"] = created.EnrollmentID
+	fixture["binding_code"] = code
+	fixture["binding_runtime_id"] = created.RuntimeID
+	fixture["binding_key_jkt"] = installationJKT
+	raw, err = json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.CommandContext(ctx, java, "-cp", classpath, "cn.edu.ustc.dsh.network.RunRelayProbe", path)
+	output, err = command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("actual Kotlin host binding failed: %v\n%s", err, output)
+	}
+	if err := <-hostResult; err != nil {
+		t.Fatalf("independent host confirmation failed: %v", err)
+	}
+	t.Log(string(output))
+	for _, field := range []string{"mode", "binding_id", "binding_code", "binding_runtime_id", "binding_key_jkt"} {
+		delete(fixture, field)
+	}
 
 	// The same TLS service now carries actual npm DSH history and live content into
 	// the production Kotlin reader. Host and model are isolated local fixtures.
@@ -169,4 +235,62 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 		t.Fatalf("actual Kotlin/Go/DSH content chain failed: %v\n%s", err, output)
 	}
 	t.Log(string(output))
+}
+
+func confirmKotlinBindingHost(ctx context.Context, client *http.Client, origin, access string, key *ecdsa.PrivateKey, enrollment, code string) error {
+	path := "/v1/enrollments/" + enrollment + "/host-confirm"
+	body, _ := json.Marshal(map[string]string{"code": code})
+	nonce := ""
+	digest := sha256.Sum256([]byte(access))
+	for attempt := 0; attempt < 2; attempt++ {
+		random := make([]byte, 24)
+		if _, err := rand.Read(random); err != nil {
+			return err
+		}
+		claims, err := json.Marshal(map[string]any{"htm": "POST", "htu": origin + path, "iat": time.Now().Unix(), "jti": base64.RawURLEncoding.EncodeToString(random), "ath": base64.RawURLEncoding.EncodeToString(digest[:]), "nonce": nonce})
+		if err != nil {
+			return err
+		}
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, (&jose.SignerOptions{}).WithType("dpop+jwt").WithHeader("jwk", jose.JSONWebKey{Key: &key.PublicKey}))
+		if err != nil {
+			return err
+		}
+		signed, err := signer.Sign(claims)
+		if err != nil {
+			return err
+		}
+		proof, err := signed.CompactSerialize()
+		if err != nil {
+			return err
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+path, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "DPoP "+access)
+		request.Header.Set("DPoP", proof)
+		response, err := client.Do(request)
+		if err != nil {
+			return err
+		}
+		nonce = response.Header.Get("DPoP-Nonce")
+		var envelope struct {
+			OK   bool                         `json:"ok"`
+			Data store.EnrollmentConfirmation `json:"data"`
+		}
+		err = json.NewDecoder(response.Body).Decode(&envelope)
+		_ = response.Body.Close()
+		if err != nil {
+			return err
+		}
+		if attempt == 0 && response.StatusCode == http.StatusUnauthorized && nonce != "" {
+			continue
+		}
+		if response.StatusCode != http.StatusOK || !envelope.OK || !envelope.Data.HostConfirmed || !envelope.Data.UserConfirmed || envelope.Data.State != "approved" {
+			return fmt.Errorf("host confirmation status %d did not approve both actors", response.StatusCode)
+		}
+		return nil
+	}
+	return fmt.Errorf("host confirmation did not accept its fresh proof")
 }

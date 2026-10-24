@@ -72,6 +72,144 @@ class RelayNetworkTest {
     }
     private fun time(offset: Long) = Instant.ofEpochMilli(System.currentTimeMillis() + offset).toString().json()
     private fun json(root: JsonObject) = MockResponse().setHeader("Content-Type", "application/json").setBody(JsonDocument.of(root).canonicalText())
+    private val bindingId = "88888888-8888-4888-8888-888888888888"
+    private val bindingCode = "H".repeat(42) + "A"
+    private fun bindingData() = jsonObject("enrollment_id" to bindingId.json(), "request_id" to sessionId.json(), "organization_id" to "11111111-1111-4111-8111-111111111111".json(), "organization_name" to "学校夹具".json(),
+        "host_id" to device.json(), "host_alias" to "夹具电脑".json(), "installation_id" to connection.json(), "installation_key_jkt" to "A".repeat(43).json(), "runtime_id" to runtime.json(),
+        "profile_ref" to "fixture".json(), "protocol_version" to 1L.json(), "state" to "pending".json(), "expires_at" to time(299_000), "host_confirmed" to JsonBoolean(false),
+        "user_confirmed" to JsonBoolean(false), "user_confirmed_by_me" to JsonBoolean(false), "workspaces" to JsonArray(listOf(jsonObject("reference" to "project".json(), "workspace_id" to sessionId.json()))))
+    private fun bindingReply(data: JsonObject) = json(jsonObject("ok" to JsonBoolean(true), "data" to data))
+    private fun confirmed(data: JsonObject, host: Boolean = false) = data.with("state" to (if (host) "approved" else "user_confirmed").json(), "user_confirmed" to JsonBoolean(true), "user_confirmed_by_me" to JsonBoolean(true), "host_confirmed" to JsonBoolean(host))
+    private fun confirmReply(data: JsonObject) = bindingReply(JsonObject(data.fields.filterKeys { it in setOf("enrollment_id", "host_id", "runtime_id", "state", "expires_at", "host_confirmed", "user_confirmed") }))
+
+    @Test fun bindingConfirmationRechecksTheExactReviewAndResolvesCurrentActorBeforeSuccess(): Unit = runBlocking {
+        val initial = bindingData(); val accepted = confirmed(initial, host = true)
+        server.enqueue(bindingReply(initial)); server.enqueue(bindingReply(initial.with("host_confirmed" to JsonBoolean(true))))
+        server.enqueue(confirmReply(accepted)); server.enqueue(bindingReply(accepted))
+        val request = api().prepareHostBinding(bindingId, bindingCode)
+        assertTrue(request.details.canConfirm()); assertFalse(request.toString().contains(bindingCode))
+        var dispatches = 0
+        val result = request.confirm { dispatches++ }
+        assertEquals("approved", result.state); assertTrue(result.confirmedByMe); assertEquals(1, dispatches)
+        val traffic = List(4) { server.takeRequest() }
+        assertEquals(listOf("/preview", "/preview", "/confirm", ""), traffic.map { it.path!!.removePrefix("/v1/enrollments/$bindingId") })
+        assertEquals(listOf("POST", "POST", "POST", "GET"), traffic.map { it.method })
+        val proofIds = traffic.map { captured ->
+            assertFalse(captured.path!!.contains(bindingCode)); assertTrue(captured.getHeader("Authorization")!!.startsWith("DPoP "))
+            val proof = JWSObject.parse(captured.getHeader("DPoP")); assertTrue(proof.verify(ECDSAVerifier(key)))
+            JsonDocument.parse(proof.payload.toBytes()).root.string("jti")
+        }
+        assertEquals(4, proofIds.toSet().size)
+        for (captured in traffic.take(3)) assertEquals(setOf("code"), JsonDocument.parse(captured.body.readUtf8()).root.fields.keys)
+        assertThrows(HostBindingException::class.java) { runBlocking { request.confirm() } }; assertEquals(4, server.requestCount)
+    }
+
+    @Test fun bindingReviewChangeOrExpiryCannotPostAConfirmation(): Unit = runBlocking {
+        for (change in listOf("profile_ref" to "changed".json(), "state" to "expired".json())) {
+            val initial = bindingData()
+            server.enqueue(bindingReply(initial)); server.enqueue(bindingReply(initial.with(change)))
+            api().prepareHostBinding(bindingId, bindingCode).use { request ->
+                val error = assertThrows(HostBindingException::class.java) { runBlocking { request.confirm() } }
+                assertEquals(if (change.first == "state") "binding.expired" else "binding.details_changed", error.code)
+            }
+            repeat(2) { assertTrue(server.takeRequest().path!!.endsWith("/preview")) }
+        }
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test fun lostBindingReplyIsQueriedWithoutAutomaticallyRepeatingTheWrite(): Unit = runBlocking {
+        val resource = api(); val initial = bindingData(); val accepted = confirmed(initial)
+        server.enqueue(bindingReply(initial)); server.enqueue(bindingReply(initial))
+        server.enqueue(confirmReply(accepted).setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        val prepared = resource.prepareHostBinding(bindingId, bindingCode)
+        var dispatched = false
+        assertThrows(RemoteRequestException::class.java) { runBlocking { prepared.confirm { dispatched = true } } }
+        assertTrue(dispatched); assertEquals(3, server.requestCount)
+        server.enqueue(bindingReply(accepted))
+        assertTrue(resource.bindingStatus(bindingId).confirmedByMe)
+        val captured = List(4) { server.takeRequest() }; assertEquals(1, captured.count { it.path!!.endsWith("/confirm") })
+        assertEquals("GET", captured.last().method)
+    }
+
+    @Test fun retiringAReviewDuringRevalidationCannotReachTheMutatingEndpoint(): Unit = runBlocking {
+        val initial = bindingData()
+        server.enqueue(bindingReply(initial)); server.enqueue(bindingReply(initial).setBodyDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS))
+        val prepared = api().prepareHostBinding(bindingId, bindingCode)
+        server.takeRequest()
+        val result = async(Dispatchers.Default) { runCatching { prepared.confirm() }.exceptionOrNull() }
+        assertTrue(withContext(Dispatchers.IO) { server.takeRequest(3, java.util.concurrent.TimeUnit.SECONDS) }!!.path!!.endsWith("/preview"))
+        prepared.close()
+        assertTrue(withTimeout(3000) { result.await() } is CancellationException)
+        assertEquals(2, server.requestCount)
+    }
+
+    private fun bindingDirectory(data: JsonObject, visible: Boolean = true, expired: Boolean = false): MockResponse {
+        var access = jsonObject("role" to "owner".json(), "grant_version" to 1L.json(), "scope" to RelayScope(listOf("session.list", "session.read"), listOf(sessionId), emptyList()).json())
+        if (expired) access = access.with("expires_at" to time(-1000))
+        return bindingReply(jsonObject("items" to JsonArray(if (!visible) emptyList() else listOf(jsonObject("id" to runtime.json(), "host_id" to data["host_id"], "organization_id" to data["organization_id"],
+            "protocol_version" to 1L.json(), "access" to access)))))
+    }
+    private suspend fun HostBindingFlow.await(phase: HostBindingPhase) = withTimeout(5000) { state.first { it.phase == phase } }
+
+    @Test fun bindingFlowWaitsForIndependentHostConfirmationAndAFreshDirectoryGrant(): Unit = runBlocking {
+        val data = bindingData(); val partial = confirmed(data)
+        server.enqueue(bindingReply(data)); server.enqueue(bindingReply(data)); server.enqueue(confirmReply(partial)); server.enqueue(bindingReply(partial))
+        var ready = 0
+        HostBindingFlow(api(), this, null, {}, { ready++ }, HostBindingOptions(60_000, 60_000)).use { flow ->
+            flow.foreground(true); flow.preview(bindingId, bindingCode); flow.await(HostBindingPhase.REVIEW)
+            assertFalse(flow.state.value.toString().contains(bindingCode)); assertEquals(0, ready)
+            flow.confirm(); flow.await(HostBindingPhase.WAITING_HOST)
+            assertEquals(bindingId, flow.resumeId); assertEquals(0, ready)
+            flow.foreground(false); assertEquals(HostBindingPhase.PAUSED, flow.state.value.phase)
+            server.enqueue(bindingReply(confirmed(data, host = true))); server.enqueue(bindingDirectory(data))
+            flow.foreground(true); flow.await(HostBindingPhase.READY)
+            assertEquals(1, ready)
+            val traffic = List(6) { server.takeRequest() }
+            assertEquals(1, traffic.count { it.path!!.endsWith("/confirm") })
+            assertEquals(listOf("GET", "GET"), traffic.takeLast(2).map { it.method })
+        }
+    }
+    @Test fun backgroundingAnUnsubmittedReviewRetiresItsCodeAndStaleConfirmAction(): Unit = runBlocking {
+        server.enqueue(bindingReply(bindingData()))
+        HostBindingFlow(api(), this, null, {}, {}).use { flow ->
+            flow.foreground(true); flow.preview(bindingId, bindingCode); flow.await(HostBindingPhase.REVIEW)
+            flow.foreground(false); assertNull(flow.resumeId); assertNull(flow.state.value.details)
+            flow.foreground(true); flow.confirm(); delay(100)
+            assertEquals(HostBindingPhase.ENTER, flow.state.value.phase); assertEquals("binding.review_cleared", flow.state.value.error)
+            assertEquals(1, server.requestCount)
+        }
+    }
+    @Test fun ambiguousBindingFlowQueriesTheOriginalIntentWithoutReplayingConfirmation(): Unit = runBlocking {
+        val data = bindingData(); val partial = confirmed(data)
+        server.enqueue(bindingReply(data)); server.enqueue(bindingReply(data)); server.enqueue(confirmReply(partial).setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        HostBindingFlow(api(), this, null, {}, {}, HostBindingOptions(60_000, 60_000)).use { flow ->
+            flow.foreground(true); flow.preview(bindingId, bindingCode); flow.await(HostBindingPhase.REVIEW)
+            flow.confirm(); flow.await(HostBindingPhase.UNKNOWN); assertEquals(bindingId, flow.resumeId)
+            flow.confirm() // A stale/repeated UI action must not issue another write.
+            server.enqueue(bindingReply(partial)); flow.lookup(); flow.await(HostBindingPhase.WAITING_HOST)
+            val traffic = List(4) { server.takeRequest() }
+            assertEquals(1, traffic.count { it.path!!.endsWith("/confirm") }); assertEquals("GET", traffic.last().method)
+        }
+    }
+    @Test fun anotherAccountOrAnAbsentDirectoryGrantCannotBecomeBindingSuccess(): Unit = runBlocking {
+        val data = bindingData()
+        server.enqueue(bindingReply(confirmed(data).with("user_confirmed_by_me" to JsonBoolean(false))))
+        HostBindingFlow(api(), this, null, {}, { fail("another account became ready") }).use { flow ->
+            flow.foreground(true); flow.preview(bindingId, bindingCode)
+            assertEquals("binding.confirmed_elsewhere", flow.await(HostBindingPhase.UNAVAILABLE).error)
+            flow.confirm(); assertEquals(1, server.requestCount)
+        }
+        server.enqueue(bindingReply(confirmed(data, host = true))); server.enqueue(bindingDirectory(data, visible = false))
+        HostBindingFlow(api(), this, null, {}, { fail("no directory grant became ready") }, HostBindingOptions(60_000, 60_000)).use { flow ->
+            flow.foreground(true); flow.preview(bindingId, bindingCode); flow.await(HostBindingPhase.WAITING_ACCESS)
+            assertEquals(3, server.requestCount)
+        }
+        server.enqueue(bindingReply(confirmed(data, host = true))); server.enqueue(bindingDirectory(data, expired = true))
+        HostBindingFlow(api(), this, null, {}, { fail("expired directory grant became ready") }, HostBindingOptions(60_000, 60_000)).use { flow ->
+            flow.foreground(true); flow.preview(bindingId, bindingCode); flow.await(HostBindingPhase.WAITING_ACCESS)
+            assertEquals(5, server.requestCount)
+        }
+    }
     private fun ticketResponse(value: String = token) = json(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to value.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(), "expires_at" to time(30_000))))
     private suspend fun ticket(nonceChallenge: Boolean = false): RealtimeReadTicket {
         if (nonceChallenge) server.enqueue(json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "auth.proof_invalid".json()))).setResponseCode(401)

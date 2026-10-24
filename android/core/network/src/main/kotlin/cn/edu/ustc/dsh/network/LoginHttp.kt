@@ -195,6 +195,45 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
     }
     fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
         SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
+    fun hostBinding(owner: CoroutineScope, resumeId: String? = null, onAuthorityFailure: (String) -> Unit = {}, onReady: () -> Unit = {}): HostBindingFlow =
+        HostBindingFlow(this, owner, resumeId, onAuthorityFailure, onReady)
+
+    suspend fun bindingStatus(id: String): HostBindingDetails = mutex.withLock {
+        bindingDetails(read("/v1/enrollments/${Contract.uuid(id)}"), id)
+    }
+    suspend fun prepareHostBinding(id: String, code: String): HostBindingRequest = mutex.withLock {
+        Contract.uuid(id); Contract.nonce(code)
+        HostBindingRequest(this, bindingDetails(request("POST", "/v1/enrollments/$id/preview", jsonObject("code" to code.json())), id), code)
+    }
+    private fun bindingDetails(bytes: ByteArray, id: String): HostBindingDetails {
+        val root = JsonDocument.parse(bytes).root
+        root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+        return HostBindingDetails.parse(root.obj("data"), config.organizationId, id)
+    }
+    internal suspend fun confirmReviewedBinding(reviewed: HostBindingDetails, code: String, current: () -> Unit, onDispatch: () -> Unit): HostBindingDetails = mutex.withLock {
+        val prefix = "/v1/enrollments/${reviewed.id}"
+        current()
+        val fresh = bindingDetails(request("POST", "$prefix/preview", jsonObject("code" to code.json()), current), reviewed.id)
+        if (fresh.reviewHash != reviewed.reviewHash) throw HostBindingException("binding.details_changed")
+        current()
+        if (fresh.confirmedByMe) return@withLock fresh
+        if (fresh.userConfirmed) throw HostBindingException("binding.confirmed_elsewhere")
+        if (!fresh.canConfirm()) throw HostBindingException(if (fresh.expired()) "binding.expired" else "binding.unavailable")
+        val root = JsonDocument.parse(request("POST", "$prefix/confirm", jsonObject("code" to code.json())) { current(); onDispatch() }).root
+        root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+        val result = root.obj("data")
+        result.exactKeys("enrollment_id", "host_id", "runtime_id", "state", "expires_at", "host_confirmed", "user_confirmed")
+        val user = (result["user_confirmed"] as? JsonBoolean)?.value ?: throw ProtocolException()
+        val host = (result["host_confirmed"] as? JsonBoolean)?.value ?: throw ProtocolException()
+        if (result.string("enrollment_id") != fresh.id || result.string("host_id") != fresh.hostId || result.string("runtime_id") != fresh.runtimeId || relayTime(result.string("expires_at")) != fresh.expiresAt ||
+            !user || result.string("state") != if (host) "approved" else "user_confirmed") throw ProtocolException()
+        current()
+        val accepted = bindingDetails(request("GET", prefix, beforeSend = current), reviewed.id)
+        if (!accepted.confirmedByMe || accepted.reviewHash != reviewed.reviewHash) throw HostBindingException("binding.details_changed")
+        accepted
+    }
 
     suspend fun readTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeReadTicket = mutex.withLock {
         Contract.uuid(runtimeId); Contract.uuid(deviceId)
@@ -269,14 +308,16 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
 
     private suspend fun read(path: String): ByteArray = request("GET", path)
 
-    private suspend fun request(method: String, path: String, body: JsonObject? = null): ByteArray {
+    private suspend fun request(method: String, path: String, body: JsonObject? = null, beforeSend: () -> Unit = {}): ByteArray {
         val url = (config.remoteOrigin + path).toHttpUrl()
         repeat(2) { attempt ->
+            currentCoroutineContext().ensureActive()
             val access = session.accessTokenForRequest(System.currentTimeMillis())
             val proof = DeviceProofs.dpop(signer, method, url.toString(), System.currentTimeMillis(), nonce, access)
             nonce = null
             val builder = Request.Builder().url(url).header("Authorization", "DPoP $access").header("DPoP", proof.compact).header("Accept", "application/json").header("Cache-Control", "no-store")
             if (body != null) builder.post(JsonDocument.of(body).canonicalBytes().toRequestBody("application/json".toMediaType()))
+            currentCoroutineContext().ensureActive(); beforeSend()
             val reply = http.execute(builder.build())
             nonce = reply.nonce()
             val challenge = reply.status == 401 && reply.headers.values("WWW-Authenticate").any { it == "DPoP error=\"use_dpop_nonce\"" }
