@@ -18,7 +18,8 @@ import { APPROVAL_AUTHORIZATION_DOMAIN, APPROVAL_AUTHORIZATION_AUDIENCE, APPROVA
 
 test('normal native approval owner requires both phone proof and native policy at the actual body boundary', async t => {
   for (const mode of ['allow', 'reject', 'invalid-proof', 'no-phone', 'auto-allow', 'auto-with-phone', 'pre-allow', 'guard-before', 'guard-after',
-    'changed-file', 'changed-directory', 'late-directory', 'call-swap', 'agent-swap', 'token-swap', 'expired-around', 'long-body', 'native-never', 'disconnect', 'disconnect-running', 'dispose-around'] as const) await t.test(mode, async () => {
+    'changed-file', 'changed-directory', 'late-directory', 'call-swap', 'agent-swap', 'token-swap', 'expired-around', 'long-body', 'native-never', 'disconnect', 'disconnect-running', 'dispose-around',
+    'device-revoke-flight', 'grant-revoke-flight', 'equal-grant', 'other-device', 'revoke-around', 'revoke-running'] as const) await t.test(mode, async () => {
     const h = await host({ probe: false })
     const workspaceID = randomUUID(), epoch = randomUUID(), hostID = randomUUID(), installationID = randomUUID(), connectionID = randomUUID()
     const parent = await PersistentCommandJournal.open(join(h.directory, 'signed', 'commands.sqlite'), h.runtimeId), journal = parent.approvals(epoch)
@@ -37,11 +38,13 @@ test('normal native approval owner requires both phone proof and native policy a
     const file = join(h.cwd, 'reviewed.txt'), subdir = join(h.cwd, 'subdirectory')
     await writeFile(file, 'before'); await mkdir(subdir)
     let calls = 0, published = 0, around = false, captured: ApprovalContext | undefined, session!: NativeApprovalSession
+    let acceptedDevice = '', acceptedUser = ''
     const errors: unknown[] = []
     h.ctx.tools.register(defineContentToolFixture({ name: 'protected', description: 'Signed owner fixture', parameters: { value: { type: 'string' } }, async execute(_args,execution) {
       calls++
       if (mode === 'long-body') { await new Promise(resolve=>setTimeout(resolve,400)); assert.equal(execution.signal.aborted,false) }
       if (mode === 'disconnect-running') session.close()
+      if (mode === 'revoke-running') session.invalidate({ kind:'device.revoked',connection_id:connectionID,device_id:acceptedDevice })
       return [{ type: 'text', text: 'executed' }]
     } }))
     if (mode === 'guard-before') h.ctx.tools.guard(exec => exec.name === 'protected' ? 'earlier native deny' : undefined)
@@ -60,6 +63,7 @@ test('normal native approval owner requires both phone proof and native policy a
       if (mode === 'late-directory') await h.ctx.workingDirectory.set(agent, subdir)
       if (mode === 'expired-around') { await new Promise(resolve => setTimeout(resolve, 400)); exec.signal = new AbortController().signal }
       if (mode === 'dispose-around') owner.close()
+      if (mode === 'revoke-around') session.invalidate({kind:'device.revoked',connection_id:connectionID,device_id:acceptedDevice})
       if (mode === 'call-swap') (exec as unknown as { callId: string }).callId = randomUUID()
       if (mode === 'agent-swap') (exec as unknown as { agent: typeof agent }).agent = otherAgent!
       if (mode === 'token-swap') (exec as unknown as { token: symbol }).token = Symbol('other execution')
@@ -83,16 +87,24 @@ test('normal native approval owner requires both phone proof and native policy a
         approval_key_jkt: await calculateJwkThumbprint(publicPhone), approval_public_jwk: publicPhone, grant_version: 1, assurance_profile: 'school/step-up',
         authenticated_at: new Date(now - 1000).toISOString(), issued_at: new Date(now).toISOString(), expires_at: new Date(Math.min(Date.parse(context.expires_at), now + (mode === 'expired-around' || mode === 'long-body' ? 300 : 2000))).toISOString() }
       const proof = await new CompactSign(canonicalObject(lease)).setProtectedHeader({ alg: 'ES256', kid: authority.key_id, typ: APPROVAL_AUTHORIZATION_JWS_TYPE }).sign(authorityKeys.privateKey)
+      acceptedDevice=decision.device_id; acceptedUser=decision.user_id
       if (mode === 'changed-file') await writeFile(file, 'after')
       if (mode === 'changed-directory') await h.ctx.workingDirectory.set(agent, subdir)
       if (mode === 'disconnect') { session.close(); return }
       if (mode === 'invalid-proof') { const parts = phoneProof.split('.'); parts[2] = (parts[2]![0] === 'A' ? 'B' : 'A') + parts[2]!.slice(1); phoneProof = parts.join('.') }
-      try { await session.decide(context.approval_id, phoneProof, proof) }
+      try {
+        const admission=session.decide(context.approval_id, phoneProof, proof)
+        if (mode==='device-revoke-flight') session.invalidate({kind:'device.revoked',connection_id:connectionID,device_id:acceptedDevice})
+        if (mode==='grant-revoke-flight') session.invalidate({kind:'grant.changed',connection_id:connectionID,user_id:acceptedUser,grant_version:2})
+        if (mode==='equal-grant') session.invalidate({kind:'grant.changed',connection_id:connectionID,user_id:acceptedUser,grant_version:1})
+        if (mode==='other-device') session.invalidate({kind:'device.revoked',connection_id:connectionID,device_id:randomUUID()})
+        await admission
+      }
       catch (error) { errors.push(error); if (mode === 'invalid-proof') { assert.equal(journal.get(context.approval_id).status.decision_sha256, undefined); session.close() } }
     })
     try {
       const result = await h.ctx.tools.execute({ agent, callId: ToolCallId(randomUUID()), name: 'protected', arguments: { value: 'exact invocation' }, signal: new AbortController().signal })
-      const executed = ['allow', 'auto-with-phone', 'disconnect-running','long-body'].includes(mode)
+      const executed = ['allow', 'auto-with-phone', 'disconnect-running','long-body','equal-grant','other-device','revoke-running'].includes(mode)
       assert.equal(calls, executed ? 1 : 0, mode)
       assert.equal(result.isError, !executed, mode)
       if (mode === 'pre-allow') assert.equal(published, 0)
@@ -107,7 +119,7 @@ test('normal native approval owner requires both phone proof and native policy a
         assert.equal(JSON.stringify(reports).includes('exact invocation'), false)
         assert.throws(() => journal.consume(captured!.approval_id, captured!, () => undefined))
       }
-      if (mode !== 'invalid-proof' && mode !== 'disconnect' && mode !== 'native-never') assert.equal(errors.length, 0, String(errors[0]))
+      if (!['invalid-proof','disconnect','native-never','device-revoke-flight','grant-revoke-flight'].includes(mode)) assert.equal(errors.length, 0, String(errors[0]))
       assert.equal(h.errors.length, 0)
     } finally { owner.close(); parent.close(); await h.close() }
   })

@@ -33,9 +33,11 @@ async function fixture(t: import('node:test').TestContext) {
     policyVersion: 7, requiredAssurance: { profile: 'fixture/verified', max_auth_age_seconds: 60 }, authorities: [{ issuer: 'https://remote.example.edu', key_id: 'dsh-approval-authority/peer-test',
       public_jwk: publicJWK, key_jkt: jkt, active: true, valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString() }] })
   const peers: RelayApprovals[] = []
+  const connections: string[] = []
   t.after(async () => { for (const peer of peers) peer.close(); owner.close(); parent.close(); await h.close() })
   const connect = (frames: ApprovalWireFrame[], catalog = async (_id: string, _signal: AbortSignal) => {}) => {
-    const peer = new RelayApprovals(owner, { installationId: installID, connectionId: randomUUID(), signal: new AbortController().signal,
+    const connectionId=randomUUID(); connections.push(connectionId)
+    const peer = new RelayApprovals(owner, { installationId: installID, connectionId, signal: new AbortController().signal,
       async send(value) { frames.push(ApprovalWireFrame.parse(value)) }, publishCatalog: catalog, fail() {} })
     peers.push(peer)
     return peer
@@ -61,7 +63,7 @@ async function fixture(t: import('node:test').TestContext) {
     binding_sha256: report.payload.binding_sha256, state: report.payload.state === 'approved' ? 'decision_received' : 'allowed', decision: 'allow_once', decision_payload_sha256: report.payload.decision_payload_sha256,
     expires_at: new Date(Date.now() + 120_000).toISOString(), host_state: report.payload.state, ...(report.payload.execution_outcome ? { execution_outcome: report.payload.execution_outcome } : {}),
   } } })
-  return { h, agent, owner, journal, connect, context, approve, ack }
+  return { h, agent, owner, journal, connect, context, approve, ack,connections }
 }
 
 test('the host sender retains a newer native result across old or invalid acknowledgements', async t => {
@@ -109,4 +111,17 @@ test('disconnect cancels a native approval even when catalog publication ignores
   assert.equal(result.isError, true)
   assert.equal(calls, 0)
   assert.equal(sent.length, 0)
+})
+
+test('actor invalidations are scoped to this exact host connection and cannot be replayed after reconnect', async t => {
+  const h=await fixture(t),frames:ApprovalWireFrame[]=[]
+  const first=h.connect(frames)
+  const event={v:1,type:'approval.invalidate',request_id:randomUUID(),runtime_id:h.owner.runtimeId,runtime_epoch:h.owner.epoch,
+    payload:{kind:'device.revoked',connection_id:h.connections[0],device_id:randomUUID()}}
+  assert.equal(await first.handle(event),true)
+  await assert.rejects(first.handle({...event,payload:{...event.payload,connection_id:randomUUID()}}),/connection mismatch/)
+  first.close()
+  const next=h.connect([])
+  await assert.rejects(next.handle(event),/connection mismatch/)
+  assert.equal(await next.handle({...event,payload:{...event.payload,connection_id:h.connections[1]}}),true)
 })

@@ -24,7 +24,7 @@ func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) (
 	rows, err := postgres.DB.QueryContext(ctx, `
 		select id::text, topic, payload from control_outbox
 		where published_at is null and topic in ('device.revoked', 'runtime_grant.updated', 'runtime_grant.revoked',
-		    'approval.pending', 'approval.decided', 'approval.ended', 'approval.result', 'approval.authorization.prepared')
+		    'approval.pending', 'approval.decided', 'approval.ended', 'approval.result', 'approval.authorization.prepared', 'approval.device.revoked')
 		order by created_at, id limit $1`, limit)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
@@ -49,7 +49,11 @@ func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) (
 		}
 		event.DeviceID, event.RuntimeID, event.UserID, event.GrantVersion = payload.DeviceID, payload.RuntimeID, payload.UserID, payload.GrantVersion
 		event.ApprovalID = payload.ApprovalID
-		if event.Topic == "approval.pending" || event.Topic == "approval.decided" || event.Topic == "approval.ended" || event.Topic == "approval.result" || event.Topic == "approval.authorization.prepared" {
+		if event.Topic == "approval.device.revoked" {
+			if !grantUUIDPattern.MatchString(event.RuntimeID) || !grantUUIDPattern.MatchString(event.DeviceID) {
+				return nil, ErrGrantInvalid
+			}
+		} else if event.Topic == "approval.pending" || event.Topic == "approval.decided" || event.Topic == "approval.ended" || event.Topic == "approval.result" || event.Topic == "approval.authorization.prepared" {
 			if !grantUUIDPattern.MatchString(event.RuntimeID) || !grantUUIDPattern.MatchString(event.ApprovalID) {
 				return nil, ErrGrantInvalid
 			}

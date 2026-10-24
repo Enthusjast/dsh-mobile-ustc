@@ -21,7 +21,7 @@ if (process.argv.includes('--check')) {
 const wireOutput = fileURLToPath(new URL('../contracts/ws/v1/approval.schema.json', import.meta.url))
 const wireSchema = z.toJSONSchema(ApprovalWireFrame, { target: 'draft-2020-12' })
 wireSchema.$id = 'urn:dsh-mobile-ustc:ws:approval:v1'
-wireSchema.description = 'Negotiated approval.signed.v1 extension to the base Relay contract. Phone decisions use fresh HTTPS JWT/DPoP admission before the Relay forwards approval.decision to the host. Context fragments contain at most 128 KiB in total, at most four ordered parts, with a three-second assembly deadline. Host result hashes cover JCS type/runtime/epoch/session/payload, excluding request_id, v and payload_sha256. Runtime validators enforce cross-field state/result and fragment bounds beyond JSON Schema.'
+wireSchema.description = 'Negotiated approval.signed.v1 extension to the base Relay contract. Host actor invalidations additionally negotiate approval.invalidation.v1 and bind the exact connection. Phone decisions use fresh HTTPS JWT/DPoP admission before the Relay forwards approval.decision to the host. Context fragments contain at most 128 KiB in total, at most four ordered parts, with a three-second assembly deadline. Host result hashes cover JCS type/runtime/epoch/session/payload, excluding request_id, v and payload_sha256. Runtime validators enforce cross-field state/result and fragment bounds beyond JSON Schema.'
 const wireGenerated = `${JSON.stringify(wireSchema, null, 2)}\n`
 if (process.argv.includes('--check')) {
   if ((await readFile(wireOutput, 'utf8').catch(() => '')) !== wireGenerated) { console.error('contracts/ws/v1/approval.schema.json is stale; run npm run contracts'); process.exitCode = 1 }

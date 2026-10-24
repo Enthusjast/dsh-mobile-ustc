@@ -10,6 +10,8 @@ export const APPROVAL_AUTHORIZATION_DOMAIN = 'dsh-mobile-ustc/approval-authoriza
 export const APPROVAL_AUTHORIZATION_AUDIENCE = 'dsh-approval-host/v1'
 export const APPROVAL_AUTHORIZATION_JWS_TYPE = 'dsh-approval-authorization+jws'
 const invalid = () => new Error('approval: invalid signed authorization')
+/** Both signatures verified, but a processed control invalidation fenced this actor. */
+export class ApprovalAuthorityRevokedError extends Error { constructor() { super('approval: authorization revoked') } }
 const uuid = ApprovalAuthorization.shape.runtime_id
 const utc = ApprovalAuthorization.shape.issued_at
 const keyID = z.string().regex(/^dsh-approval-authority\/[A-Za-z0-9._-]{1,80}$/)
@@ -83,6 +85,8 @@ export class ApprovalLeaseCache {
   private readonly connection: ApprovalLeaseConnection
   private readonly authorities: TrustedApprovalAuthority[]
   private readonly entries = new Map<string, VerifiedApprovalLease>()
+  private readonly revokedDevices = new Set<string>()
+  private readonly grantFloors = new Map<string, number>()
   private closed = false
   private inFlight = 0
   private lastTime = -Infinity
@@ -105,6 +109,7 @@ export class ApprovalLeaseCache {
         try { verified = await verifyApprovalLease(leaseJWS, authority, context, decisionJWS, this.connection.connection_id, now); break } catch {}
       }
       if (this.closed || !verified) throw invalid()
+      if (!this.permitted(verified)) throw new ApprovalAuthorityRevokedError()
       const checked = this.time()
       if (!authorizedApproval(verified.authorization, context, verified.decision, verified.key.approval_key_jkt, checked) || !approvalDecisionCurrent(context, verified.decision, checked)) throw invalid()
       for (const [id, entry] of this.entries) if (Date.parse(entry.lease.expires_at) <= checked) this.entries.delete(id)
@@ -125,6 +130,7 @@ export class ApprovalLeaseCache {
       this.assertConnection(context)
       const now = this.time(), entry = this.entries.get(context.approval_id)
       if (!entry) return undefined
+      if (!this.permitted(entry)) { this.entries.delete(context.approval_id); return undefined }
       const payload = canonicalObject(ApprovalDecision.parse(decision))
       if (approvalBinding(context).sha256 !== entry.lease.binding_sha256 || createHash('sha256').update(payload).digest('hex') !== entry.lease.decision_payload_sha256) return undefined
       const evidence = authorizedApproval(entry.authorization, context, decision, entry.key.approval_key_jkt, now)
@@ -140,6 +146,31 @@ export class ApprovalLeaseCache {
       if (!entry || approvalBinding(context).sha256 !== entry.lease.binding_sha256 || !this.authorization(context,entry.decision)) return undefined
       return structuredClone(entry.decision)
     } catch { return undefined }
+  }
+
+  invalidateDevice(deviceID: string): string[] {
+    uuid.parse(deviceID)
+    if (this.closed) return []
+    if (!this.revokedDevices.has(deviceID) && this.revokedDevices.size + this.grantFloors.size >= 1024) { this.close(); throw invalid() }
+    this.revokedDevices.add(deviceID)
+    return this.removeInvalidated()
+  }
+
+  invalidateGrant(userID: string, version: number): string[] {
+    uuid.parse(userID); ApprovalAuthorization.shape.grant_version.parse(version)
+    if (this.closed) return []
+    if (!this.grantFloors.has(userID) && this.revokedDevices.size + this.grantFloors.size >= 1024) { this.close(); throw invalid() }
+    this.grantFloors.set(userID, Math.max(this.grantFloors.get(userID) ?? 0, version))
+    return this.removeInvalidated()
+  }
+
+  private permitted(entry: VerifiedApprovalLease): boolean {
+    return !this.revokedDevices.has(entry.key.device_id) && entry.lease.grant_version >= (this.grantFloors.get(entry.key.user_id) ?? 0)
+  }
+  private removeInvalidated(): string[] {
+    const ids: string[] = []
+    for (const [id, entry] of this.entries) if (!this.permitted(entry)) { this.entries.delete(id); ids.push(id) }
+    return ids
   }
 
   close(): void { this.closed = true; this.entries.clear() }

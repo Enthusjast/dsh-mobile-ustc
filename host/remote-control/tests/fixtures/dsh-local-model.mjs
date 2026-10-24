@@ -35,7 +35,7 @@ class LocalModel extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
-    const signedApproval = ['ALLOW', 'REJECT', 'CANCEL'].find(mode => userText.includes(`REMOTE_APPROVAL_${mode}`) && !this.signedApprovalsIssued.has(mode))
+    const signedApproval = ['ALLOW', 'REJECT', 'CANCEL', 'REVOKE'].find(mode => userText.includes(`REMOTE_APPROVAL_${mode}`) && !this.signedApprovalsIssued.has(mode))
     if (signedApproval) {
       this.signedApprovalsIssued.add(signedApproval)
       const args = JSON.stringify({ description: `Signed approval ${signedApproval.toLowerCase()} fixture`, command: `printf authorized >> approval-${signedApproval.toLowerCase()}.txt` })

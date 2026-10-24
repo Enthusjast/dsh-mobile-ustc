@@ -206,7 +206,7 @@ func New(database Repository, approvalConfigs ...ApprovalConfig) *Server {
 func (server *Server) capabilities() []string {
 	capabilities := append([]string{}, supportedCapabilities...)
 	if server.approvals != nil {
-		capabilities = append(capabilities, approvalCapability)
+		capabilities = append(capabilities, approvalCapability, approvalInvalidationCapability)
 	}
 	return capabilities
 }

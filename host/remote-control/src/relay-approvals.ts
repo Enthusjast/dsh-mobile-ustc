@@ -40,6 +40,7 @@ export class RelayApprovals implements HostApprovalPeer {
   private readonly session: NativeApprovalSession
   private readonly registrations = new Map<string, Registration>()
   private readonly reports = new Map<string, { frame: ApprovalResultFrame; sent: number }>()
+  private readonly decisions = new Set<Promise<void>>()
   private readonly timer: NodeJS.Timeout
   private readonly unwatch: () => void
   private readonly onAbort = () => this.close()
@@ -114,6 +115,10 @@ export class RelayApprovals implements HostApprovalPeer {
     if (this.closed) throw new Error('approval connection closed')
     const frame = ApprovalWireFrame.parse(value)
     if (frame.runtime_id !== this.owner.runtimeId) throw new Error('approval runtime mismatch')
+    if (frame.type === 'approval.invalidate') {
+      if (frame.runtime_epoch !== this.owner.epoch || frame.payload.connection_id !== this.binding.connectionId) throw new Error('approval invalidation connection mismatch')
+      this.session.invalidate(frame.payload); this.flush(); return true
+    }
     if (frame.type === 'approval.registered') {
       const pending = this.registrations.get(frame.request_id)
       if (!pending) return true
@@ -143,14 +148,19 @@ export class RelayApprovals implements HostApprovalPeer {
         await this.send({ ...frame, type: 'approval.error', payload: { approval_id: frame.payload.approval_id, code: 'approval.stale' } })
       }
     } else {
-      try {
+      if (this.decisions.size >= 64) throw new Error('approval decision verification limit')
+      // Keep reading invalidations while local WebCrypto/SQLite admission is in
+      // flight. The cache and journal fence late continuations independently.
+      const work = (async () => { try {
         const context = this.owner.journal.get(frame.payload.approval_id).context
         if (context.session_id !== frame.session_id || context.runtime_epoch !== frame.runtime_epoch || approvalBinding(context).context.runtime_id !== frame.runtime_id) throw new Error('approval decision route mismatch')
         await this.session.decide(frame.payload.approval_id, frame.payload.decision_jws, frame.payload.authorization_jws)
       } catch (error) {
         if (error instanceof ApprovalJournalError && error.code === 'approval.storage_unavailable') throw error
-        await this.send({ ...frame, type: 'approval.error', payload: { approval_id: frame.payload.approval_id, code: 'approval.stale' } })
-      }
+        if (!this.closed) await this.send({ ...frame, type: 'approval.error', payload: { approval_id: frame.payload.approval_id, code: 'approval.stale' } })
+      } finally { this.flush() } })()
+      this.decisions.add(work)
+      void work.catch(() => { this.close(); this.binding.fail() }).finally(() => { this.decisions.delete(work) })
     }
     this.flush()
     return true

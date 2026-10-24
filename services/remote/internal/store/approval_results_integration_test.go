@@ -323,3 +323,60 @@ func TestPostgresApprovalControlEventsReplayOnlyMetadataReferences(t *testing.T)
 		}
 	}
 }
+
+func TestPostgresDeviceRevocationAtomicallyTargetsOnlyAcceptedUnspentApprovalRuntimes(t *testing.T) {
+	fixture := newApprovalFixture(t)
+	acceptResultFixture(t, fixture, "allow_once")
+	// A second accepted execution in the same runtime still needs one actor
+	// event, while an unselected request contributes no device association.
+	second := fixture.freshRequest(t)
+	fixture.register(t, second)
+	if _, err := fixture.control.Decide(fixture.ctx, fixture.principal, fixture.ticket, approvalRaw(t, second), fixture.signed(t, second, "allow_once")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.register(t, fixture.freshRequest(t))
+	if _, err := fixture.database.DB.ExecContext(fixture.ctx, `create function reject_actor_event() returns trigger language plpgsql as $$ begin if NEW.topic='approval.device.revoked' then raise exception 'fixture unavailable'; end if; return NEW; end $$;
+		create trigger reject_actor_event before insert on control_outbox for each row execute function reject_actor_event()`); err != nil {
+		t.Fatal(err)
+	}
+	identity := UserIdentity{Issuer: fixture.principal.Issuer, Subject: fixture.principal.Subject}
+	if err := fixture.database.RevokeDevice(fixture.ctx, identity.Issuer, identity.Subject, fixture.ticket.DeviceID); !errors.Is(err, ErrDatabaseUnavailable) {
+		t.Fatalf("actor outbox failure did not roll back revocation: %v", err)
+	}
+	var active bool
+	if err := fixture.database.DB.QueryRowContext(fixture.ctx, `select revoked_at is null from devices where id=$1`, fixture.ticket.DeviceID).Scan(&active); err != nil || !active {
+		t.Fatal("failed actor event left a partial device revocation")
+	}
+	if _, err := fixture.database.DB.ExecContext(fixture.ctx, `drop trigger reject_actor_event on control_outbox; drop function reject_actor_event()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.RevokeDevice(fixture.ctx, identity.Issuer, identity.Subject, fixture.ticket.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	events, err := fixture.database.PendingControlEvents(fixture.ctx, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	global, scoped := 0, 0
+	for _, event := range events {
+		if event.Topic == "device.revoked" {
+			global++
+		}
+		if event.Topic == "approval.device.revoked" {
+			scoped++
+			if event.RuntimeID != fixture.request.RuntimeID || event.DeviceID != fixture.ticket.DeviceID {
+				t.Fatalf("actor event escaped its accepted runtime: %+v", event)
+			}
+		}
+	}
+	if global != 1 || scoped != 1 {
+		t.Fatalf("device revocation events global=%d scoped=%d want 1/1", global, scoped)
+	}
+	if err := fixture.database.RevokeDevice(fixture.ctx, identity.Issuer, identity.Subject, fixture.ticket.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := fixture.database.DB.QueryRowContext(fixture.ctx, `select count(*) from control_outbox where topic='approval.device.revoked'`).Scan(&count); err != nil || count != 1 {
+		t.Fatal("idempotent device revocation duplicated actor invalidation")
+	}
+}

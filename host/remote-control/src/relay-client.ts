@@ -8,7 +8,7 @@ import { parseCommand, ProbeError, type Command } from './protocol.js'
 import type { CommandStateObserver } from './runtime.js'
 import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
 import { questionAnswerPayload } from './questions.js'
-import { SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
+import { APPROVAL_INVALIDATION_CAPABILITY, SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
 import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approvals.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
@@ -416,7 +416,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       throw new ProbeError('auth.proof_invalid')
     }
     const challenge = challengeEnvelope.data.payload
-    const offered = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY] : [...capabilities]
+    const offered = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
     const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
@@ -443,7 +443,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       throw new ProbeError('protocol.unsupported')
     }
 
-    if (options.approvals && (!ack.data.payload.capabilities.includes(SIGNED_APPROVAL_CAPABILITY) || !ack.data.payload.capabilities.includes('session.catalog.v1'))) throw new ProbeError('protocol.unsupported')
+    if (options.approvals && (![SIGNED_APPROVAL_CAPABILITY,APPROVAL_INVALIDATION_CAPABILITY,'session.catalog.v1'].every(capability=>ack.data.payload.capabilities.includes(capability)))) throw new ProbeError('protocol.unsupported')
 
     const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
     if (ack.data.payload.capabilities.includes('session.read.v1')) sessions = new RelaySessions({

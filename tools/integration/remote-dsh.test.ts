@@ -238,10 +238,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const wrapper = join(root, 'plugin.mjs')
   await writeFile(wrapper, [
     "import { createPrivateKey, sign } from 'node:crypto'",
+    "import { writeFile } from 'node:fs/promises'",
     `import { createRemoteControlPlugin } from ${JSON.stringify(plugin)}`,
     `const privateKey = createPrivateKey({format:'jwk',key:${JSON.stringify(installationKey.privateKey.export({ format: 'jwk' }))}})`,
     `const plugin = createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(enrollment.installation_id)},credential:${JSON.stringify(credential.credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}}}}}, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
-    'export const {name,inject,apply}=plugin', '',
+    'export const {name,inject}=plugin',
+    `export function apply(ctx,config){ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -593,16 +595,42 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const survivingPageId = randomUUID(), survivingPageFrom = mobile.frames.length
   mobile.send({ ...page, request_id: survivingPageId })
   await mobile.wait(frame => frame.type === 'session.page.result' && frame.request_id === survivingPageId, survivingPageFrom)
+  const revokePreparationFrom = mobile.frames.length
+  const revokeMarker=`REMOTE_APPROVAL_REVOKE_${randomUUID()}`,revokePromptId=randomUUID()
+  mobile.send({...submit,request_id:revokePromptId,payload:{mode:'queue',content:[{type:'text',text:revokeMarker}]}})
+  const revokePending=await mobile.wait(frame=>frame.type==='approval.reference'&&frame.session_id===sessionId&&frame.payload.status.state==='pending',revokePreparationFrom)
+  const revokeApprovalId=revokePending.payload.status.approval_id,revokeDetailsId=randomUUID()
+  mobile.send({v:1,type:'approval.details.get',request_id:revokeDetailsId,runtime_id:enrollment.runtime_id,runtime_epoch:probe.runtime_epoch,session_id:sessionId,payload:{approval_id:revokeApprovalId}})
+  const revokeContext=(await mobile.wait(frame=>frame.type==='approval.details'&&frame.request_id===revokeDetailsId,revokePreparationFrom)).payload.context as ApprovalContext
+  const revokeDecision:ApprovalDecision={domain:'dsh-mobile-ustc/approval-decision/v1',protocol_version:1,host_id:revokeContext.host_id,installation_id:revokeContext.installation_id,runtime_id:revokeContext.runtime_id,
+    runtime_epoch:revokeContext.runtime_epoch,session_id:revokeContext.session_id,approval_id:revokeContext.approval_id,execution_id:revokeContext.execution_id,binding_sha256:approvalBinding(revokeContext).sha256,
+    decision:'allow_once',user_id:phoneUserId,device_id:device.device_id,key_version:device.key_version,policy_version:revokeContext.policy_version,nonce:revokeContext.nonce,issued_at:new Date().toISOString(),expires_at:revokeContext.expires_at}
+  const revokeProof=await new CompactSign(canonicalObject(revokeDecision)).setProtectedHeader({alg:'ES256',kid:approvalKeyID(device.device_id,device.key_version),typ:APPROVAL_JWS_TYPE}).sign(approvalKey.privateKey)
+  const primaryConnection=mobile.frames.find(frame=>frame.type==='hello.ok').payload.connection_id
+  assert.equal((await phone('POST',`/v1/approvals/${revokeApprovalId}/decisions`,{connection_id:primaryConnection,decision_jws:revokeProof})).delivery,'forwarded')
+  await until(async()=>{try{await readFile(join(workspace,'approval-revoke-held'));return true}catch{return undefined}},'approved Bash held after native guard')
+  const revokeLeaseExpiry=Date.parse(query(`select metadata->>'expires_at' from audit_log where action='approval.authorization.prepare' and metadata->>'approval_id'='${revokeApprovalId}' order by id desc limit 1`))
+  await assert.rejects(readFile(join(workspace,'approval-revoke.txt')),{code:'ENOENT'})
   const revokedFrom = mobile.frames.length
   const grantRevokedAt = Date.now()
   await phone('DELETE', `/v1/runtimes/${enrollment.runtime_id}/grants/${phoneUserId}`)
   await mobile.wait(frame => frame.type === 'access.revoked' && frame.payload.code === 'access.revoked', revokedFrom)
   await until(async () => mobile.closed ? true : undefined, 'idle revoked grant socket close', 5000)
   assert.ok(Date.now() - grantRevokedAt < 5000, 'idle grant revocation exceeded five seconds')
-  assert.equal(mobile.frames.slice(revokedFrom).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false, 'revoked phone received new session content')
+  await until(async()=>query(`select host_state from approvals where id='${revokeApprovalId}'`)==='invalidated'?true:undefined,'host invalidated approved but unstarted execution',2500)
+  assert.ok(Date.now()<revokeLeaseExpiry,'host waited for lease expiry instead of processing scoped revocation')
+  await assert.rejects(readFile(join(workspace,'approval-revoke.txt')),{code:'ENOENT'})
+  const revokedDump=execFileSync(pgDump,['--dbname',database,'--data-only','--no-owner'],{encoding:'utf8',maxBuffer:4*1024*1024})
+  for(const secret of [revokeMarker,(revokeContext.arguments as {command:string}).command])assert.equal(revokedDump.includes(secret),false)
+  const revocationNotice = mobile.frames.findIndex((frame,index)=>index>=revokedFrom&&frame.type==='access.revoked')
+  assert.ok(revocationNotice>=revokedFrom)
+  // A frame already authorized/queued before the grant transaction may arrive
+  // during the DELETE round trip. Nothing may follow the ordered revoke marker.
+  assert.equal(mobile.frames.slice(revocationNotice+1).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false, 'revoked phone received content after its revocation marker')
   await until(async () => query(`select count(*) from control_outbox where published_at is null and topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked')`) === '0' ? true : undefined, 'control outbox acknowledgement')
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
-  t.diagnostic(`Idle device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
+  t.diagnostic(`Device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
+  t.diagnostic('A real Bash approved through the normal plugin was held after guard; scoped grant invalidation blocked its body before the three-second lease expired and durably reported the invalidated fact.')
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')

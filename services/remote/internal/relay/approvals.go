@@ -16,6 +16,7 @@ import (
 )
 
 const approvalCapability = "approval.signed.v1"
+const approvalInvalidationCapability = "approval.invalidation.v1"
 const approvalRPCTimeout = 3 * time.Second
 
 type ApprovalRepository interface {

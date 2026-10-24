@@ -165,7 +165,12 @@ func newApprovalRelayFixture(t *testing.T, enabled bool, actions ...[]string) *a
 	t.Cleanup(httpServer.Close)
 	caps := append([]string{}, supportedCapabilities...)
 	caps = append(caps, approvalCapability)
-	host := dialRelayHost(t, httpServer.URL, key, fixture.Context.InstallationID, fixture.Context.RuntimeID, fixture.Context.RuntimeEpoch, caps...)
+	caps = append(caps, approvalInvalidationCapability)
+	hostCaps := caps
+	if len(actions) > 1 {
+		hostCaps = actions[1]
+	}
+	host := dialRelayHost(t, httpServer.URL, key, fixture.Context.InstallationID, fixture.Context.RuntimeID, fixture.Context.RuntimeEpoch, hostCaps...)
 	device := dialRelayDevice(t, httpServer.URL, key, ticket, fixture.Context.RuntimeID, caps...)
 	t.Cleanup(func() { _ = device.CloseNow(); _ = host.CloseNow() })
 	server.mu.Lock()
@@ -511,5 +516,62 @@ func TestApprovalResultDigestMatchesTypeScriptGolden(t *testing.T) {
 	}
 	if digest, err := approvalResultDigest(frame); err != nil || digest != golden.SHA256 {
 		t.Fatalf("Go/TypeScript result digest differs: %s %v", digest, err)
+	}
+}
+
+func TestApprovalInvalidationsTargetTheCurrentHostConnectionAndCarryOnlyActorMetadata(t *testing.T) {
+	for _, topic := range []string{"approval.device.revoked", "runtime_grant.updated", "runtime_grant.revoked"} {
+		t.Run(topic, func(t *testing.T) {
+			fixture := newApprovalRelayFixture(t, true)
+			other := store.ControlEvent{Topic: topic, RuntimeID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", DeviceID: fixture.repo.ticket.DeviceID, UserID: fixture.repo.ticket.UserID, GrantVersion: 2}
+			if err := fixture.server.ApplyControlEvent(t.Context(), other); err != nil {
+				t.Fatal(err)
+			}
+			writeEnvelope(t, fixture.host, "ping", map[string]any{})
+			if frame := readEnvelope(t, fixture.host); frame.Type != "pong" {
+				t.Fatalf("another runtime's invalidation leaked: %+v", frame)
+			}
+			event := other
+			event.RuntimeID = fixture.request.RuntimeID
+			if err := fixture.server.ApplyControlEvent(t.Context(), event); err != nil {
+				t.Fatal(err)
+			}
+			frame := readEnvelope(t, fixture.host)
+			fixture.repo.mu.Lock()
+			connectionID := fixture.repo.attached.ConnectionID
+			fixture.repo.mu.Unlock()
+			if frame.Type != "approval.invalidate" || frame.RuntimeEpoch != fixture.request.RuntimeEpoch || frame.Payload["connection_id"] != connectionID {
+				t.Fatalf("host invalidation lost connection fence: %+v", frame)
+			}
+			if topic == "approval.device.revoked" {
+				if frame.Payload["kind"] != "device.revoked" || frame.Payload["device_id"] != event.DeviceID {
+					t.Fatalf("device invalidation: %+v", frame)
+				}
+			} else {
+				if frame.Payload["kind"] != "grant.changed" || frame.Payload["user_id"] != event.UserID || frame.Payload["grant_version"] != float64(2) {
+					t.Fatalf("grant invalidation: %+v", frame)
+				}
+			}
+			if len(frame.Payload) != 3 && topic == "approval.device.revoked" {
+				t.Fatal("device invalidation carried unrelated fields")
+			}
+			if len(frame.Payload) != 4 && topic != "approval.device.revoked" {
+				t.Fatal("grant invalidation carried unrelated fields")
+			}
+		})
+	}
+}
+
+func TestApprovalLegacyHostClosesWhenItCannotApplyScopedInvalidation(t *testing.T) {
+	legacy := append([]string{}, supportedCapabilities...)
+	legacy = append(legacy, approvalCapability)
+	fixture := newApprovalRelayFixture(t, true, []string{"approval.decide", "session.read"}, legacy)
+	if err := fixture.server.ApplyControlEvent(t.Context(), store.ControlEvent{Topic: "approval.device.revoked", RuntimeID: fixture.request.RuntimeID, DeviceID: fixture.repo.ticket.DeviceID}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, _, err := fixture.host.Read(ctx); err == nil {
+		t.Fatal("legacy host kept cache authority after unsupported invalidation")
 	}
 }

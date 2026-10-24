@@ -106,6 +106,34 @@ test('lease verification bounds in-flight work even for concurrent retries of on
   cache.close()
 })
 
+test('actor invalidations remove only matching authority and never lower a processed grant floor', async () => {
+  const verified = await verifyApprovalLease(valid.compact, fixture.authorities[0]!, fixture.context, fixture.decision_jws, fixture.connection_id, now)
+  const cache = new ApprovalLeaseCache(connection, fixture.authorities, () => now)
+  await cache.admit(fixture.context, fixture.decision_jws, valid.compact)
+  assert.deepEqual(cache.invalidateDevice('dddddddd-dddd-4ddd-8ddd-dddddddddddd'), [])
+  assert.deepEqual(cache.invalidateGrant('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 99), [])
+  assert.deepEqual(cache.invalidateGrant(verified.key.user_id, verified.lease.grant_version), [])
+  assert.ok(cache.authorization(fixture.context, verified.decision))
+  assert.deepEqual(cache.invalidateGrant(verified.key.user_id, verified.lease.grant_version + 1), [fixture.context.approval_id])
+  assert.equal(cache.authorization(fixture.context, verified.decision), undefined)
+  cache.invalidateGrant(verified.key.user_id, verified.lease.grant_version)
+  await assert.rejects(cache.admit(fixture.context, fixture.decision_jws, valid.compact), /authorization revoked/)
+  cache.close()
+})
+
+test('a processed device or grant invalidation fences even a signature verification already in flight', async () => {
+  const verified = await verifyApprovalLease(valid.compact, fixture.authorities[0]!, fixture.context, fixture.decision_jws, fixture.connection_id, now)
+  for (const kind of ['device', 'grant'] as const) {
+    const cache = new ApprovalLeaseCache(connection, fixture.authorities, () => now)
+    const pending = cache.admit(fixture.context, fixture.decision_jws, valid.compact)
+    if (kind === 'device') cache.invalidateDevice(verified.key.device_id)
+    else cache.invalidateGrant(verified.key.user_id, verified.lease.grant_version + 1)
+    await assert.rejects(pending, /authorization revoked/)
+    await assert.rejects(cache.admit(fixture.context, fixture.decision_jws, valid.compact), /authorization revoked/)
+    cache.close()
+  }
+})
+
 test('a signed lease enables one durable guard consumption and cannot revive it after disconnect or restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-signed-approval-lease-'))
   let parent: PersistentCommandJournal | undefined

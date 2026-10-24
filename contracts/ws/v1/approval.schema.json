@@ -20,6 +20,96 @@
           "type": "string",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         },
+        "type": {
+          "type": "string",
+          "const": "approval.invalidate"
+        },
+        "payload": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "device.revoked"
+                },
+                "connection_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "device_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              },
+              "required": [
+                "kind",
+                "connection_id",
+                "device_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "grant.changed"
+                },
+                "connection_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "user_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "grant_version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "kind",
+                "connection_id",
+                "user_id",
+                "grant_version"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "runtime_epoch": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
         "session_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -1514,5 +1604,5 @@
     }
   },
   "$id": "urn:dsh-mobile-ustc:ws:approval:v1",
-  "description": "Negotiated approval.signed.v1 extension to the base Relay contract. Phone decisions use fresh HTTPS JWT/DPoP admission before the Relay forwards approval.decision to the host. Context fragments contain at most 128 KiB in total, at most four ordered parts, with a three-second assembly deadline. Host result hashes cover JCS type/runtime/epoch/session/payload, excluding request_id, v and payload_sha256. Runtime validators enforce cross-field state/result and fragment bounds beyond JSON Schema."
+  "description": "Negotiated approval.signed.v1 extension to the base Relay contract. Host actor invalidations additionally negotiate approval.invalidation.v1 and bind the exact connection. Phone decisions use fresh HTTPS JWT/DPoP admission before the Relay forwards approval.decision to the host. Context fragments contain at most 128 KiB in total, at most four ordered parts, with a three-second assembly deadline. Host result hashes cover JCS type/runtime/epoch/session/payload, excluding request_id, v and payload_sha256. Runtime validators enforce cross-field state/result and fragment bounds beyond JSON Schema."
 }

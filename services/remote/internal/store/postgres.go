@@ -411,6 +411,18 @@ func (postgres *Postgres) RevokeDevice(ctx context.Context, issuer, subject, dev
 		insert into control_outbox (topic, payload) values ('device.revoked', $1::jsonb)`, string(metadata)); err != nil {
 		return ErrDatabaseUnavailable
 	}
+	// Scope host invalidations to runtimes that actually accepted this device's
+	// unspent decision. Never broadcast another organization's device IDs.
+	if _, err := transaction.ExecContext(ctx, `
+		insert into control_outbox (org_id,topic,payload)
+		select distinct h.org_id, 'approval.device.revoked',
+		    jsonb_build_object('runtime_id',a.runtime_id::text,'device_id',$1::uuid::text)
+		from approvals a join runtimes r on r.id=a.runtime_id
+		join installations i on i.id=r.installation_id join hosts h on h.id=i.host_id
+		where a.metadata_version=1 and a.decided_device_id=$1 and a.decision='allow_once'
+		  and a.state='decision_received' and a.expires_at>clock_timestamp() and a.decision_expires_at>clock_timestamp()`, revokedID); err != nil {
+		return ErrDatabaseUnavailable
+	}
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (actor_type, actor_id, device_id, action, result, metadata)
 		values ('user', $1, $2, 'device.revoke', 'success', $3::jsonb)`, userID, revokedID, string(metadata)); err != nil {

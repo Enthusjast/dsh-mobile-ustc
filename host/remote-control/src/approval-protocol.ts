@@ -5,6 +5,7 @@ import { ApprovalAuthorization } from './approval-authorization.js'
 import { canonicalObject } from './canonical.js'
 
 export const SIGNED_APPROVAL_CAPABILITY = 'approval.signed.v1'
+export const APPROVAL_INVALIDATION_CAPABILITY = 'approval.invalidation.v1'
 const uuid = ApprovalAuthorization.shape.runtime_id
 const sha256 = ApprovalAuthorization.shape.binding_sha256
 const statusStates = ['pending', 'decision_received', 'allowed', 'denied', 'expired', 'cancelled', 'invalidated', 'outcome_unknown'] as const
@@ -24,6 +25,11 @@ const scoped = { ...runtime, runtime_epoch: uuid, session_id: uuid }
 const contextPayload = z.strictObject({ context: ApprovalContext })
 const statusPayload = z.strictObject({ status: ApprovalWireStatus })
 const compactJWS = z.string().min(1).max(16 * 1024).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
+export const ApprovalInvalidation = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('device.revoked'), connection_id: uuid, device_id: uuid }),
+  z.strictObject({ kind: z.literal('grant.changed'), connection_id: uuid, user_id: uuid, grant_version: ApprovalAuthorization.shape.grant_version }),
+])
+export type ApprovalInvalidation = z.infer<typeof ApprovalInvalidation>
 const resultPayload = z.strictObject({
   approval_id: uuid, execution_id: uuid, binding_sha256: sha256, decision_payload_sha256: sha256.optional(), state: z.enum(hostStates), execution_outcome: outcome.optional(),
 }).superRefine((result, issue) => {
@@ -50,6 +56,7 @@ export function makeApprovalResultFrame(value: ApprovalResultFacts): ApprovalRes
 }
 
 export const ApprovalWireFrame = z.discriminatedUnion('type', [
+  z.strictObject({ ...runtime, runtime_epoch: uuid, type: z.literal('approval.invalidate'), payload: ApprovalInvalidation }),
   z.strictObject({ ...scoped, type: z.literal('approval.request'), payload: contextPayload }),
   z.strictObject({ ...scoped, type: z.literal('approval.registered'), payload: statusPayload }),
   z.strictObject({ ...runtime, type: z.literal('approval.subscribe'), payload: z.strictObject({}) }),

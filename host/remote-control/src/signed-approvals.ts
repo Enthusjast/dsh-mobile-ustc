@@ -8,7 +8,8 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { z } from 'zod'
 import { ApprovalContext, approvalBinding, type ApprovalDecision } from './approval-contract.js'
-import { ApprovalLeaseCache, TrustedApprovalAuthority, type ApprovalLeaseConnection } from './approval-lease.js'
+import { ApprovalAuthorityRevokedError, ApprovalLeaseCache, TrustedApprovalAuthority, type ApprovalLeaseConnection } from './approval-lease.js'
+import type { ApprovalInvalidation } from './approval-protocol.js'
 import type { PersistentApprovalJournal } from './approval-journal.js'
 import { canonicalObject } from './canonical.js'
 import { mobileSessionId, type Workspace } from './dsh-client.js'
@@ -38,6 +39,7 @@ export interface SignedApprovalOptions {
 export interface NativeApprovalSession {
   details(approvalId: string): ApprovalContext
   decide(approvalId: string, decisionJWS: string, authorizationJWS: string): Promise<void>
+  invalidate(event: ApprovalInvalidation): void
   close(): void
 }
 interface Connection {
@@ -249,7 +251,9 @@ export class SignedApprovals {
       decide: async (id, decisionJWS, leaseJWS) => {
         const invocation = this.byID.get(id)
         if (!invocation || invocation.connection !== connection || this.connection !== connection || connection.closed || !['waiting', 'approved'].includes(invocation.phase)) throw unavailable()
-        const key = await connection.cache.admit(invocation.context, decisionJWS, leaseJWS)
+        let key
+        try { key = await connection.cache.admit(invocation.context, decisionJWS, leaseJWS) }
+        catch (error) { if (error instanceof ApprovalAuthorityRevokedError) this.end(invocation,'unavailable'); throw error }
         const decision = connection.cache.decision(invocation.context)
         if (!decision) throw unavailable()
         const status = await this.journal.decide(id, decisionJWS, key, (request, claims) => this.connection === connection && !connection.closed ? connection.cache.authorization(request, claims) : undefined)
@@ -264,6 +268,11 @@ export class SignedApprovals {
           this.resolve(invocation, 'allowed-once')
         } else this.resolve(invocation, 'rejected')
         this.changed()
+      },
+      invalidate: event => {
+        if (this.connection !== connection || connection.closed || event.connection_id !== connection.identity.connection_id) throw unavailable()
+        const ids = event.kind === 'device.revoked' ? connection.cache.invalidateDevice(event.device_id) : connection.cache.invalidateGrant(event.user_id,event.grant_version)
+        for (const id of ids) { const invocation = this.byID.get(id); if (invocation?.connection === connection && invocation.phase !== 'consumed') this.end(invocation,'unavailable') }
       },
       close: () => this.detach(connection),
     }

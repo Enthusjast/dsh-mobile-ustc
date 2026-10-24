@@ -10,6 +10,9 @@ import (
 )
 
 func (server *Server) ApplyControlEvent(ctx context.Context, event store.ControlEvent) error {
+	if event.Topic == "approval.device.revoked" {
+		return server.invalidateHostApprovals(ctx, event)
+	}
 	if strings.HasPrefix(event.Topic, "approval.") {
 		if server.approvals != nil && event.Topic != "approval.authorization.prepared" {
 			server.approvals.publish(ctx, event.RuntimeID, event.ApprovalID)
@@ -33,6 +36,53 @@ func (server *Server) ApplyControlEvent(ctx context.Context, event store.Control
 	}
 	server.mu.Unlock()
 	server.closeRevokedConnections(ctx, connections, "access.revoked")
+	if event.Topic == "runtime_grant.updated" || event.Topic == "runtime_grant.revoked" {
+		return server.invalidateHostApprovals(ctx, event)
+	}
+	return nil
+}
+
+// A host either observes this scoped negative authority fact or loses its
+// connection/cache. Transport acknowledgement is sufficient here: a lost
+// connection cannot restore authority, and leases still expire within 3 seconds.
+func (server *Server) invalidateHostApprovals(parent context.Context, event store.ControlEvent) error {
+	if server.approvals == nil {
+		return nil
+	}
+	host := server.hostForRuntime(event.RuntimeID)
+	if host == nil || !host.supports(approvalCapability) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(parent, 250*time.Millisecond)
+	defer cancel()
+	if !host.supports(approvalInvalidationCapability) {
+		_ = host.conn.CloseNow()
+		return nil
+	}
+	var payload map[string]any
+	if event.Topic == "approval.device.revoked" {
+		if !uuidPattern.MatchString(event.DeviceID) {
+			return store.ErrGrantInvalid
+		}
+		payload = map[string]any{"kind": "device.revoked", "device_id": event.DeviceID, "connection_id": host.connectionID}
+	} else {
+		if !uuidPattern.MatchString(event.UserID) || event.GrantVersion < 1 || event.GrantVersion > 9_007_199_254_740_991 {
+			return store.ErrGrantInvalid
+		}
+		payload = map[string]any{"kind": "grant.changed", "user_id": event.UserID, "grant_version": event.GrantVersion, "connection_id": host.connectionID}
+	}
+	id := event.ID
+	if !uuidPattern.MatchString(id) {
+		var err error
+		id, err = randomUUID()
+		if err != nil {
+			_ = host.conn.CloseNow()
+			return err
+		}
+	}
+	if err := host.sendJSON(ctx, map[string]any{"v": 1, "type": "approval.invalidate", "request_id": id, "runtime_id": host.runtimeID, "runtime_epoch": host.runtimeEpoch, "payload": payload}); err != nil {
+		_ = host.conn.CloseNow()
+	}
 	return nil
 }
 

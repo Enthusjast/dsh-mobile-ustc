@@ -64,7 +64,7 @@ Relay 双方协商 `question.blocking.v1` 后，普通阻塞式问题和计划�
 
 正式插件现在支持显式提供的签名审批集成：`createRemoteControlPlugin(hostCredentials, signedOptions)`。`signedOptions` 提供已登记的 host/installation 身份、匹配控制面的 policyVersion/requiredAssurance、独立安装的 authority 公钥锚，以及可选的可信 capability 分类和资源版本读取器。默认保护全部受管理调用，不把原型的 `highRiskTools` 名单当作完整企业风险分类。工作区必须带唯一 `remoteId`；实际执行目录由原生 WorkingDirectory 服务读取，并再次核对物理根目录与实时资源。示例与限制见 [原生签名审批接入](../../docs/approval-native.md)。
 
-签名模式使用真实原生审批服务并保留其拒绝策略，手机决定与原生允许必须同时成立。本机未签名 `interaction.answer` 无法批准该模式。最终 guard 校验后，公开工具定义的本体适配器在异步包装器之后提交一次性消费；signal 约束再次检查租约、目录和工具替换，阻止过期调度及重试复用。运行时 / 网络断开使未消费请求失效，不恢复旧 Promise；已开始的工具保留实际结果。SQLite schema 3 记录待确认结果，直到匹配指纹的服务端确认；重连补报事实，不重放工具。真实 Go / PostgreSQL / npm DSH CLI 已走通 Bash 允许一次、篡改签名不消费、拒绝、取消与持久结果对账，学校 IdP、Android、生产密钥供给及其它 capability / 平台路径仍有验收缺口。
+签名模式使用真实原生审批服务并保留其拒绝策略，手机决定与原生允许必须同时成立。本机未签名 `interaction.answer` 无法批准该模式。最终 guard 校验后，公开工具定义的本体适配器在异步包装器之后提交一次性消费；signal 约束再次检查租约、目录和工具替换，阻止过期调度及重试复用。签名主机还要求协商 `approval.invalidation.v1`：撤销设备或提高用户授权版本会按当前连接使受影响的未消费许可失效，异步验签不能恢复旧权限。运行时 / 网络断开使未消费请求失效，不恢复旧 Promise；已开始的工具保留实际结果。SQLite schema 3 记录待确认结果，直到匹配指纹的服务端确认；重连补报事实，不重放工具。真实 Go / PostgreSQL / npm DSH CLI 已走通 Bash 允许一次、篡改签名不消费、拒绝、取消、guard 后撤权阻止本体执行与持久结果对账，学校 IdP、Android、生产密钥供给及其它 capability / 平台路径仍有验收缺口。
 
 每个 runtime 使用独立 SQLite WAL 命令日志。修改命令在调用 DSH 前先提交 `host_accepted`；`session.create` 在创建结果 flush 成功后才返回确定结果，`message.submit` 在 DSH 接受且 `sessions.flush()` 持久检查点成功后记录 `agent_queued`，其它已完成操作记为 `settled`。日志以 request_id 和规范化操作摘要去重；同 ID 不同内容返回冲突。消息重试复用 DSH 原生 requestId，可在插件重启后再次提交并避免重复插入；其它处于 dispatching 的操作标为 `outcome_unknown`，不会自动重放。数据库保存 AES-256-GCM 加密的命令 / 结果正文，收到持久确认后清除命令正文；请求摘要和状态保留。最多保留 100,000 条幂等记录及 4,096 条未完成正文，达到上限后拒绝新修改，不淘汰旧 request_id。
 
