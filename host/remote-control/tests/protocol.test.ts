@@ -51,12 +51,32 @@ test('display projection strips configuration, metadata and provider replay cred
   assert.equal(event.type, 'cursor')
   assert.ok(!JSON.stringify(event).includes('sensitive'))
   const message = projectEvent({ type: 'user/message', seq: 6, time: 2, data: {
-    id: 'm', source: { credential: 'sensitive' }, content: [{ type: 'text', text: 'hello', secret: 'sensitive' }],
+    id: 'm', source: { kind: 'user', credential: 'sensitive' }, content: [{ type: 'text', text: 'hello', secret: 'sensitive' }],
   } })
   assert.deepEqual(message.data, { id: 'm', content: [{ type: 'text', text: 'hello' }] })
   const finish = { type: 'finish', reason: 'stop', replayState: { credential: 'sensitive' } }
   assert.deepEqual(projectChunk(finish), { type: 'finish', reason: 'stop' })
   assert.ok(!JSON.stringify(projectStream([{ type: 'chunk', time: 1, chunk: finish }])).includes('sensitive'))
+})
+
+test('injected and unattributed user-role input only advances the mobile cursor', () => {
+  for (const source of [undefined, {}, { kind: 'model-selection' }, { kind: 'future-context-producer' },
+    { kind: 'user-question-reply', outcome: 'answered' }, { kind: 'user-question-reply', outcome: 'cancelled', callId: 'call' }]) {
+    const projected = projectEvent({ type: 'user/message', seq: 8, time: 1, surfaceOp: 'append', sourceEventSeqs: [7], data: {
+      id: 'context', ...(source === undefined ? {} : { source }), content: [{ type: 'text', text: 'model-only-sensitive' }],
+    } })
+    assert.deepEqual(projected, { native_seq: 8, time: 1, type: 'cursor', data: {} })
+  }
+})
+
+test('answered native late questions remain human input without exporting source metadata', () => {
+  const projected = projectEvent({ type: 'user/message', seq: 9, time: 2, surfaceOp: 'append', data: {
+    id: 'reply', source: { kind: 'user-question-reply', callId: 'call', outcome: 'answered', credential: 'sensitive' },
+    content: [{ type: 'text', text: 'late human answer' }],
+  } })
+  assert.deepEqual(projected.data, { id: 'reply', content: [{ type: 'text', text: 'late human answer' }] })
+  assert.equal(projected.type, 'user/message'); assert.equal(projected.surface_op, 'append')
+  assert.equal(JSON.stringify(projected).includes('sensitive'), false)
 })
 
 test('local IPC paths are bound to private Unix sockets or one runtime-scoped Windows pipe', () => {

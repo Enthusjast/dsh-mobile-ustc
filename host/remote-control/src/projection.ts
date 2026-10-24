@@ -26,9 +26,15 @@ function content(value: unknown): unknown[] {
 /** Explicit display projection. Unknown/configuration events advance the cursor without exporting data. */
 export function projectEvent(event: SessionWireEvent) {
   const data = object(event.data)
+  const source = object(data.source)
+  const humanInput = source.kind === 'user' || (source.kind === 'user-question-reply' && source.outcome === 'answered'
+    && typeof source.callId === 'string' && source.callId.length > 0)
   let projected: Record<string, unknown> = {}
   if (fields[event.type]) projected = pick(data, fields[event.type]!)
-  if (event.type === 'user/message') projected = { ...pick(data, ['id']), content: content(data.content) }
+  // Native user-role messages also carry producer-injected context. Only the
+  // explicit human input and answered native question replies belong in the
+  // phone transcript. Other producers advance the cursor without a body.
+  if (event.type === 'user/message' && humanInput) projected = { ...pick(data, ['id']), content: content(data.content) }
   if (event.type === 'assistant/message' || event.type === 'tool/result') {
     const message = object(data.message)
     projected = { ...pick(data, ['turn', 'step', 'interrupted']), message: { ...pick(message, ['id', 'callId', 'isError']), content: content(message.content) } }
