@@ -287,3 +287,39 @@ func TestPostgresApprovalResultMigrationKeepsSpentExecutionClosed(t *testing.T) 
 	}
 	assertApprovalResultEvents(t, fixture, 1)
 }
+
+func TestPostgresApprovalControlEventsReplayOnlyMetadataReferences(t *testing.T) {
+	fixture := newApprovalFixture(t)
+	status := acceptResultFixture(t, fixture, "allow_once")
+	provider, _ := newTestLeaseProvider(t, fixture, time.Now().Add(time.Hour))
+	if _, err := provider.Issue(fixture.ctx, fixture.connection, 1, approvalRaw(t, fixture.request)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.control.RecordResult(fixture.ctx, fixture.connection, 1, resultFor(status, "settled", "succeeded")); err != nil {
+		t.Fatal(err)
+	}
+	events, err := fixture.database.PendingControlEvents(fixture.ctx, 128)
+	if err != nil || len(events) != 4 {
+		t.Fatalf("approval outbox references=%d error=%v", len(events), err)
+	}
+	for _, event := range events {
+		if event.ApprovalID != status.ApprovalID || event.RuntimeID != status.RuntimeID {
+			t.Fatalf("approval reference lost scope: %+v", event)
+		}
+		if err := fixture.database.MarkControlEventPublished(fixture.ctx, event.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if remaining, err := fixture.database.PendingControlEvents(fixture.ctx, 128); err != nil || len(remaining) != 0 {
+		t.Fatalf("approval event acknowledgements failed: %+v %v", remaining, err)
+	}
+	var payloads string
+	if err := fixture.database.DB.QueryRowContext(fixture.ctx, `select string_agg(payload::text,'') from control_outbox where topic like 'approval.%'`).Scan(&payloads); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{fixture.request.Nonce, fixture.request.CallID, "private-tool-argument", "decision_jws", "authorization_jws"} {
+		if strings.Contains(payloads, secret) {
+			t.Fatal("approval event exposed execution body or proof")
+		}
+	}
+}

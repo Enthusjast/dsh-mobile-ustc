@@ -394,6 +394,49 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/approvals/{id}/decisions:
+    post:
+      description: Available only when REMOTE_APPROVAL_POLICY_FILE enables the signed approval service. A fresh JWT/DPoP request is bound to a live mobile WSS connection and that socket's exact owner/read/approval scope. The service retrieves the immutable context from the current host, verifies assurance and the phone JWS, commits the decision, and independently signs a short host authorization lease. A persisted acceptance or forwarded frame is not tool execution.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [connection_id, decision_jws]
+              properties:
+                connection_id: { type: string, format: uuid, description: The currently admitted mobile socket using the same registered DPoP key. }
+                decision_jws: { type: string, minLength: 1, maxLength: 16384, description: Canonical ES256 approval decision using the separately registered approval key. }
+      responses:
+        '200':
+          description: The decision is durably recorded. delivery pending requires reconciliation; forwarded confirms a transport write, and recorded returns an existing execution/status fact. None alone proves tool success.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [status, delivery]
+                    properties:
+                      status: { $ref: '#/components/schemas/ApprovalStatus' }
+                      delivery: { enum: [pending, forwarded, recorded] }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: Signed approval service is not configured. }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/commands/{id}:
     get:
       parameters:
@@ -443,6 +486,23 @@ components:
       description: One-use nonce to include in the next DPoP proof for this key.
       schema: { type: string, minLength: 32, maxLength: 64 }
   schemas:
+    ApprovalStatus:
+      type: object
+      additionalProperties: false
+      required: [approval_id, runtime_id, runtime_epoch, session_id, execution_id, binding_sha256, state, expires_at]
+      properties:
+        approval_id: { type: string, format: uuid }
+        runtime_id: { type: string, format: uuid }
+        runtime_epoch: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        execution_id: { type: string, format: uuid }
+        binding_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        state: { enum: [pending, decision_received, allowed, denied, expired, cancelled, invalidated, outcome_unknown] }
+        decision: { enum: [allow_once, reject] }
+        decision_payload_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        expires_at: { type: string, format: date-time }
+        host_state: { enum: [approved, denied, consumed, settled, expired, cancelled, invalidated, outcome_unknown] }
+        execution_outcome: { enum: [succeeded, failed, cancelled], description: Present only for a settled native result. }
     ErrorResponse:
       type: object
       additionalProperties: false

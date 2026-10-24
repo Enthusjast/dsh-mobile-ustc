@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,6 +10,12 @@ import (
 )
 
 func (server *Server) ApplyControlEvent(ctx context.Context, event store.ControlEvent) error {
+	if strings.HasPrefix(event.Topic, "approval.") {
+		if server.approvals != nil && event.Topic != "approval.authorization.prepared" {
+			server.approvals.publish(ctx, event.RuntimeID, event.ApprovalID)
+		}
+		return nil
+	}
 	server.mu.Lock()
 	connections := []*liveConnection{}
 	for _, live := range server.connections {

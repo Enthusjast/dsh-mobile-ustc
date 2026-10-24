@@ -43,8 +43,12 @@ func run() error {
 		return errors.New("remote service database is unavailable or insecurely configured")
 	}
 	defer database.Close()
+	approvalConfig, err := loadApprovalConfig(os.Getenv("REMOTE_APPROVAL_POLICY_FILE"), database, os.Getenv("REMOTE_ISSUER"), csv(os.Getenv("REMOTE_CLIENT_IDS")))
+	if err != nil {
+		return err
+	}
 
-	handler := httpapi.New(database, verifier, httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS"))})
+	handler := httpapi.New(database, verifier, httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig})
 	server := &http.Server{
 		Addr:              envOr("REMOTE_LISTEN_ADDR", "127.0.0.1:8080"),
 		Handler:           handler,
@@ -66,11 +70,19 @@ func run() error {
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// Closing upgraded peers also cancels pending approval detail RPCs. Run
+		// this alongside HTTP shutdown so an active admission cannot hold shutdown
+		// open while waiting for a host that has not yet been drained.
+		drained := make(chan error, 1)
+		go func() {
+			var drainErr error
+			if drainer, ok := server.Handler.(interface{ Drain(context.Context) error }); ok {
+				drainErr = drainer.Drain(shutdown)
+			}
+			drained <- drainErr
+		}()
 		shutdownErr := server.Shutdown(shutdown)
-		var drainErr error
-		if drainer, ok := server.Handler.(interface{ Drain(context.Context) error }); ok {
-			drainErr = drainer.Drain(shutdown)
-		}
+		drainErr := <-drained
 		if shutdownErr != nil {
 			_ = server.Close()
 			return fmt.Errorf("remote service shutdown failed: %w", shutdownErr)

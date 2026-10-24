@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"dsh-mobile-ustc/services/remote/internal/approval"
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/relay"
 	"dsh-mobile-ustc/services/remote/internal/store"
@@ -63,6 +64,7 @@ type API struct {
 	database    Repository
 	identity    *auth.Authenticator
 	hostClients map[string]struct{}
+	realtime    *relay.Server
 }
 
 type Handler struct {
@@ -90,6 +92,7 @@ type deviceContextKey struct{}
 
 type Config struct {
 	HostClientIDs []string
+	Approvals     *relay.ApprovalConfig
 }
 
 type deviceRequest struct {
@@ -150,8 +153,16 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.Handle("PUT /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.putRuntimeGrant)))
 	mux.Handle("DELETE /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.revokeRuntimeGrant)))
 	mux.Handle("POST /v1/realtime/tickets", api.protected(http.HandlerFunc(api.issueRealtimeTicket)))
-	realtime := relay.New(database)
+	var approvalConfig []relay.ApprovalConfig
+	if len(configs) > 0 && configs[0].Approvals != nil {
+		approvalConfig = append(approvalConfig, *configs[0].Approvals)
+	}
+	realtime := relay.New(database, approvalConfig...)
+	api.realtime = realtime
 	mux.Handle("GET /v1/realtime", realtime)
+	if len(approvalConfig) > 0 && approvalConfig[0].Control != nil && approvalConfig[0].Leases != nil {
+		mux.Handle("POST /v1/approvals/{id}/decisions", api.protected(http.HandlerFunc(api.decideApproval)))
+	}
 	mux.Handle("GET /v1/commands/{id}", api.protected(http.HandlerFunc(api.commandStatus)))
 	return &Handler{router: mux, realtime: realtime}
 }
@@ -589,6 +600,18 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusTooManyRequests, "rate.limited")
 	case errors.Is(err, store.ErrGrantInvalid):
 		writeError(response, http.StatusBadRequest, "grant.invalid")
+	case errors.Is(err, store.ErrApprovalConflict):
+		writeError(response, http.StatusConflict, "approval.conflict")
+	case errors.Is(err, store.ErrApprovalExpired):
+		writeError(response, http.StatusConflict, "approval.expired")
+	case errors.Is(err, store.ErrApprovalLimit):
+		writeError(response, http.StatusTooManyRequests, "rate.limited")
+	case errors.Is(err, auth.ErrAssurance):
+		writeError(response, http.StatusForbidden, "approval.assurance_required")
+	case errors.Is(err, store.ErrApprovalInvalid):
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+	case errors.Is(err, approval.ErrDecision):
+		writeError(response, http.StatusBadRequest, "approval.decision_invalid")
 	case errors.Is(err, store.ErrDatabaseUnavailable):
 		writeError(response, http.StatusServiceUnavailable, "internal")
 	default:

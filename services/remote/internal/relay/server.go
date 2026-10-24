@@ -74,6 +74,7 @@ type Server struct {
 	draining      bool
 	catalogBytes  int
 	subscriptions map[string]*sessionSubscription
+	approvals     *approvalRouter
 }
 
 type liveConnection struct {
@@ -190,12 +191,24 @@ type normalizedMessageSubmit struct {
 	Payload   messageSubmitPayload `json:"payload"`
 }
 
-func New(database Repository) *Server {
-	return &Server{
+func New(database Repository, approvalConfigs ...ApprovalConfig) *Server {
+	server := &Server{
 		database: database, connections: make(map[*websocket.Conn]*liveConnection),
 		hosts: make(map[string]*liveConnection), devices: make(map[string]map[string]map[*liveConnection]struct{}),
 		subscriptions: make(map[string]*sessionSubscription),
 	}
+	if len(approvalConfigs) > 0 && approvalConfigs[0].Control != nil && approvalConfigs[0].Leases != nil {
+		server.approvals = newApprovalRouter(server, approvalConfigs[0])
+	}
+	return server
+}
+
+func (server *Server) capabilities() []string {
+	capabilities := append([]string{}, supportedCapabilities...)
+	if server.approvals != nil {
+		capabilities = append(capabilities, approvalCapability)
+	}
+	return capabilities
 }
 
 func (live *liveConnection) writeLoop() {
@@ -385,6 +398,9 @@ func (server *Server) registerConnection(connection *websocket.Conn, identity pe
 
 func (server *Server) unregisterConnection(live *liveConnection) {
 	server.closeConnectionSubscriptions(live)
+	if server.approvals != nil {
+		server.approvals.closeConnection(live)
+	}
 	server.mu.Lock()
 	delete(server.connections, live.conn)
 	server.catalogBytes -= live.catalogBytes
@@ -440,6 +456,9 @@ func (server *Server) Drain(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		server.active.Wait()
+		if server.approvals != nil {
+			server.approvals.workers.Wait()
+		}
 		close(done)
 	}()
 	select {
@@ -597,7 +616,7 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 	leaseExpiresAt := time.Now().UTC().Add(deviceConnectionLife)
 	leaseCtx, cancel := context.WithDeadline(parent, leaseExpiresAt)
 	defer cancel()
-	accepted := intersectCapabilities(hello.Capabilities, supportedCapabilities)
+	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
 	if writeJSON(leaseCtx, connection, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "device", "connection_id": connectionID,
@@ -716,7 +735,7 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 		closePolicy(connection, "credential expired")
 		return
 	}
-	accepted := intersectCapabilities(hello.Capabilities, supportedCapabilities)
+	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
 	if writeJSON(leaseCtx, connection, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "host", "connection_id": connectionID,
@@ -817,6 +836,16 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			} else {
 				server.routeSessionCommand(parent, live, envelope)
 			}
+		case "approval.request", "approval.fragment", "approval.details", "approval.error", "approval.result", "approval.subscribe", "approval.unsubscribe", "approval.details.get", "approval.status.get":
+			if server.approvals == nil || !live.supports(approvalCapability) {
+				server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+				continue
+			}
+			if !exactApprovalEnvelope(data, envelope.Type) {
+				server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+				continue
+			}
+			server.approvals.route(parent, live, host, envelope)
 		case "command.receipt":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
