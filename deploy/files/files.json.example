@@ -1,0 +1,29 @@
+{
+  "storage": {
+    "endpoint": "https://objects.example.edu",
+    "region": "us-east-1",
+    "bucket": "dsh-remote-files",
+    "kms_key_id": "REPLACE_WITH_EXACT_OBJECT_SERVICE_KMS_KEY_ID",
+    "credentials_file": "s3-credentials.json",
+    "ca_file": ""
+  },
+  "scanner": {
+    "network": "unix",
+    "address": "/run/clamav/clamd.sock",
+    "policy_file": "clamd.conf",
+    "timeout_seconds": 600
+  },
+  "limits": {
+    "organization_bytes": 100000000000,
+    "user_bytes": 2000000000,
+    "session_bytes": 1000000000,
+    "organization_files": 100000,
+    "user_files": 200,
+    "session_files": 50,
+    "upload_url_seconds": 900,
+    "abandon_seconds": 86400,
+    "retain_seconds": 7776000
+  },
+  "workers": 2,
+  "task_timeout_seconds": 600
+}

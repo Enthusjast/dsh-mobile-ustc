@@ -16,6 +16,7 @@ import (
 
 	"dsh-mobile-ustc/services/remote/internal/approval"
 	"dsh-mobile-ustc/services/remote/internal/auth"
+	"dsh-mobile-ustc/services/remote/internal/files"
 	"dsh-mobile-ustc/services/remote/internal/relay"
 	"dsh-mobile-ustc/services/remote/internal/store"
 )
@@ -69,6 +70,7 @@ type API struct {
 	identity    *auth.Authenticator
 	hostClients map[string]struct{}
 	realtime    *relay.Server
+	files       *files.Service
 }
 
 type Handler struct {
@@ -97,6 +99,7 @@ type deviceContextKey struct{}
 type Config struct {
 	HostClientIDs []string
 	Approvals     *relay.ApprovalConfig
+	Files         *files.Service
 }
 
 type deviceRequest struct {
@@ -171,6 +174,13 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 		mux.Handle("POST /v1/approvals/{id}/decisions", api.protected(http.HandlerFunc(api.decideApproval)))
 	}
 	mux.Handle("GET /v1/commands/{id}", api.protected(http.HandlerFunc(api.commandStatus)))
+	if len(configs) > 0 && configs[0].Files != nil {
+		api.files = configs[0].Files
+		mux.Handle("POST /v1/runtimes/{id}/sessions/{session_id}/files", api.protected(http.HandlerFunc(api.registerFile)))
+		mux.Handle("GET /v1/files/{id}", api.protected(http.HandlerFunc(api.fileStatus)))
+		mux.Handle("POST /v1/files/{id}/upload-url", api.protected(http.HandlerFunc(api.fileUploadURL)))
+		mux.Handle("POST /v1/files/{id}/commit", api.protected(http.HandlerFunc(api.commitFile)))
+	}
 	return &Handler{router: mux, realtime: realtime}
 }
 
@@ -374,6 +384,10 @@ func (api *API) ready(response http.ResponseWriter, request *http.Request) {
 	defer cancel()
 	if err := api.database.Ready(ctx); err != nil {
 		writeError(response, http.StatusServiceUnavailable, "internal")
+		return
+	}
+	if api.files != nil && !api.files.Ready() {
+		writeError(response, http.StatusServiceUnavailable, "file.scanner_unavailable")
 		return
 	}
 	response.Header().Set("Cache-Control", "no-store")
@@ -661,6 +675,20 @@ func decodeBody(response http.ResponseWriter, request *http.Request, target any)
 
 func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, files.ErrAccess):
+		writeError(response, http.StatusForbidden, "access.denied")
+	case errors.Is(err, files.ErrInvalid):
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+	case errors.Is(err, files.ErrConflict):
+		writeError(response, http.StatusConflict, "file.request_conflict")
+	case errors.Is(err, files.ErrQuota):
+		writeError(response, http.StatusTooManyRequests, "file.quota_exceeded")
+	case errors.Is(err, files.ErrStale):
+		writeError(response, http.StatusConflict, "file.state_changed")
+	case errors.Is(err, files.ErrScanUnavailable):
+		writeError(response, http.StatusServiceUnavailable, "file.scanner_unavailable")
+	case errors.Is(err, files.ErrUnavailable), errors.Is(err, files.ErrBlobUnavailable), errors.Is(err, files.ErrEncryption):
+		writeError(response, http.StatusServiceUnavailable, "file.unavailable")
 	case errors.Is(err, store.ErrIdentityNotProvisioned), errors.Is(err, store.ErrDeviceNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")
 	case errors.Is(err, store.ErrDeviceRegistrationConflict):

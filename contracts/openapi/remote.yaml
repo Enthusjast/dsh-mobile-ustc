@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: DSH Mobile Remote Control API
   version: 0.1.0
-  description: M1 authenticated control-plane surface currently implemented by the Go service.
+  description: Authenticated control plane and optional quarantined file uploads implemented by the Go service. File routes require explicit protected storage/scanner configuration and an operational scanner probe.
 servers:
   - url: https://remote.example.edu
 security:
@@ -536,6 +536,105 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes/{id}/sessions/{session_id}/files:
+    post:
+      description: Register an immutable to-host file intent and reserve organization/user/session quota. Requires the active phone device and current file.upload authority. Same-device same-ID identical retries return the original file; changed target/content conflicts. Upload URLs are ephemeral quarantine capabilities; no bytes or native receipt are accepted here. Returns 404 when files are not configured.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FileRegistration' }
+      responses:
+        '201':
+          description: Original file metadata and, only while currently authorized and uploading, a short-lived quarantine PUT capability. No capability is included for an already committed/terminal intent.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FilePreparedResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: File service is not configured. }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/files/{id}:
+    get:
+      description: Reconcile the original phone device's file metadata under current authority. Returns no object key, lease, native receipt or upload capability. Another device cannot select the original uploader via request fields. Returns 404 when files are not configured.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Current durable transfer metadata; clean means bytes/scan/storage evidence passed, not that a host received or queued a message.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileStatusResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: File service is not configured. }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/files/{id}/upload-url:
+    post:
+      description: Refresh a quarantine PUT capability for the exact original intent, device key/version and grant version. Allowed only in uploading before its original upload window expires. Signed URLs are not immediately revocable and never address committed objects. Returns 404 when files are not configured.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, maxProperties: 0 }
+      responses:
+        '200':
+          description: Original metadata and a refreshed short-lived capability within the original expiry.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FilePreparedResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: File service is not configured. }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/files/{id}/commit:
+    post:
+      description: Request a durable background scan after the client PUT. This call does not trust object HEAD as content evidence and does not mark clean. Idempotent repeats return current state. Returns 404 when files are not configured.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, maxProperties: 0 }
+      responses:
+        '202':
+          description: Scanning is pending/in progress; query original status.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileStatusResponse' }
+        '200':
+          description: Original terminal/current durable state; no scan or tool replay.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileStatusResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: File service is not configured. }
+        '503': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     DPoP:
@@ -560,6 +659,73 @@ components:
       description: One-use nonce to include in the next DPoP proof for this key.
       schema: { type: string, minLength: 32, maxLength: 64 }
   schemas:
+    FileRegistration:
+      type: object
+      additionalProperties: false
+      required: [request_id, name, size_bytes, sha256]
+      properties:
+        request_id: { type: string, format: uuid }
+        name:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Pure display filename, also bounded to 512 UTF-8 bytes by the server; no path separators, control characters, dot/dotdot or whitespace-only names.
+          pattern: '^(?!\.{1,2}$)(?!\s*$)[^/\\\u0000-\u001f\u007f-\u009f]+$'
+        size_bytes: { type: integer, minimum: 0, maximum: 200000000 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+    FileStatus:
+      type: object
+      additionalProperties: false
+      required: [file_id, runtime_id, session_id, direction, name, size_bytes, sha256, state, upload_expires_at, expires_at, created_at]
+      properties:
+        file_id: { type: string, format: uuid }
+        runtime_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        direction: { const: to_host }
+        name: { type: string, minLength: 1, maxLength: 512 }
+        size_bytes: { type: integer, minimum: 0, maximum: 200000000 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        state: { enum: [uploading, scanning, clean, rejected, expired] }
+        error_code: { enum: [integrity_mismatch, content_rejected, scan_unavailable, storage_unavailable, access_revoked, expired] }
+        upload_expires_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    FileUploadCapability:
+      type: object
+      additionalProperties: false
+      required: [url, method, headers, expires_at]
+      properties:
+        url: { type: string, format: uri, pattern: '^https://' }
+        method: { const: PUT }
+        headers:
+          type: object
+          additionalProperties: { type: string, maxLength: 4096, pattern: '^[^\r\n]*$' }
+        expires_at: { type: string, format: date-time }
+    FilePreparedResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [file]
+          properties:
+            file: { $ref: '#/components/schemas/FileStatus' }
+            upload: { $ref: '#/components/schemas/FileUploadCapability' }
+    FileStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [file]
+          properties:
+            file: { $ref: '#/components/schemas/FileStatus' }
     ApprovalStatus:
       type: object
       additionalProperties: false

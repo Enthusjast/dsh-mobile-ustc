@@ -71,6 +71,7 @@ type S3 struct {
 	client    *s3.Client
 	presigner *s3.PresignClient
 	config    S3Config
+	transport *http.Transport
 }
 
 func NewS3(config S3Config, credentials aws.CredentialsProvider) (*S3, error) {
@@ -93,8 +94,10 @@ func NewS3(config S3Config, credentials aws.CredentialsProvider) (*S3, error) {
 		options.BaseEndpoint = aws.String(config.Endpoint)
 		options.UsePathStyle = true
 	})
-	return &S3{client: client, presigner: s3.NewPresignClient(client), config: config}, nil
+	return &S3{client: client, presigner: s3.NewPresignClient(client), config: config, transport: transport}, nil
 }
+
+func (storage *S3) Close() error { storage.transport.CloseIdleConnections(); return nil }
 
 // UploadURL is a short-lived bearer capability. Never log or persist its URL.
 type UploadURL struct {

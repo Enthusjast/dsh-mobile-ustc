@@ -1,0 +1,16 @@
+# Deploy this configuration to clamd and provide the file service a protected
+# identical copy for policy hashing. Update the signature database separately.
+Foreground yes
+User clamav
+DatabaseDirectory /var/lib/clamav
+LocalSocket /run/clamav/clamd.sock
+LocalSocketMode 0660
+FixStaleSocket yes
+StreamMaxLength 200M
+MaxFileSize 200M
+MaxScanSize 400M
+AlertExceedsMax yes
+ScanArchive yes
+MaxRecursion 16
+MaxFiles 10000
+MaxScanTime 600000

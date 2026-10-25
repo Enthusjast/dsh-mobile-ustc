@@ -28,7 +28,7 @@ worker 通过 SKIP LOCKED 竞争文件，每个文件只有一个 active attempt
 
 完成操作要求可信 worker 已经通过 [存储与扫描准入](file-storage-admission.md)。数据库事务原子写入 clean、候选指针、策略摘要、保留期、审计和 `file.clean` outbox 引用。重复确认原完成事实不重复审计或发布。仓库方法本身不读取正文；仓库测试提供的是可信 worker 的完成事实，不替代真实 I/O 验证。
 
-`file.clean` 事件目前保留为 pending；已有控制 worker 只选择自己的 topic，不能提前消费或丢弃它。后续文件 Relay 必须重查当前状态 / 授权后才发 offer。
+`file.clean` 事件目前保留为 pending；已有控制 worker 只选择自己的 topic，不能提前消费或丢弃它。后续文件 Relay 必须重查当前状态 / 授权后才发 offer。后台扫描 / 清理和受保护 REST 现已由 [文件服务](file-rest-service.md) 接入正常 Go 入口。
 
 ## 过期与删除证据
 
@@ -44,4 +44,4 @@ worker 通过 SKIP LOCKED 竞争文件，每个文件只有一个 active attempt
 
 `npm run test:remote-kotlin` 还通过原有 Kotlin TLS、普通 npm DSH `0.2.1-rc.2`、聊天 / 归档 / 问题 / 审批回归。本机记录：`.local/files-ledger-final.log`；早期登记、扫描、清理分阶段记录为 `.local/files-ledger-first.log`、`.local/files-scans-first.log`、`.local/files-cleanup-first.log`。
 
-当前尚未注册文件 REST 路由或运行文件后台 worker，也未接入手机文件入口 / 原生 offer。下一步由服务层把这些事务连接到 S3、clamd 和受保护 REST，再接当前 runtime 的流式交接与 APK 组合。真实对象服务 KMS、实际病毒引擎与其限制 / 签名库仍需独立验收。
+文件后台 worker、S3 / clamd 传输和受保护 REST 现已接通。下一步接当前 runtime 的流式交接、手机文件入口与 APK 组合。真实对象服务 KMS、实际病毒引擎与其限制 / 签名库仍需独立验收。

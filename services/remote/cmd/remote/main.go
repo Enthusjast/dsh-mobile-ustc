@@ -47,8 +47,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	fileRuntime, err := loadFileRuntime(os.Getenv("REMOTE_FILES_CONFIG_FILE"), database)
+	if err != nil {
+		return err
+	}
+	defer fileRuntime.Close()
 
-	handler := httpapi.New(database, verifier, httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig})
+	apiConfig := httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig}
+	if fileRuntime != nil {
+		apiConfig.Files = fileRuntime.service
+	}
+	handler := httpapi.New(database, verifier, apiConfig)
 	server := &http.Server{
 		Addr:              envOr("REMOTE_LISTEN_ADDR", "127.0.0.1:8080"),
 		Handler:           handler,
@@ -63,7 +72,13 @@ func run() error {
 	controlCtx, stopControl := context.WithCancel(ctx)
 	controlDone := make(chan struct{})
 	go func() { defer close(controlDone); control.Run(controlCtx, database, handler) }()
-	defer func() { stopControl(); <-controlDone }()
+	filesDone := make(chan struct{})
+	if fileRuntime != nil {
+		go func() { defer close(filesDone); fileRuntime.service.Run(controlCtx) }()
+	} else {
+		close(filesDone)
+	}
+	defer func() { stopControl(); <-controlDone; <-filesDone }()
 	result := make(chan error, 1)
 	go func() { result <- server.ListenAndServe() }()
 	select {
