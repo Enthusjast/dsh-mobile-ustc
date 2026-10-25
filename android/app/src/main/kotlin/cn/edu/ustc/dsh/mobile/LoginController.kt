@@ -12,6 +12,7 @@ import cn.edu.ustc.dsh.network.*
 import cn.edu.ustc.dsh.command.*
 import cn.edu.ustc.dsh.data.SqlCommandJournal
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.session.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
@@ -87,6 +88,7 @@ class LoginController internal constructor(private val context: Context, private
     private var commandJournal: SqlCommandJournal? = null
     private var commandCollector: Job? = null
     private var commandJob: Job? = null
+    private var questionScope: CoroutineScope?=null
     private var binding: HostBindingFlow? = null
     private var bindingCollector: Job? = null
     private var bindingGeneration = 0L
@@ -513,6 +515,7 @@ class LoginController internal constructor(private val context: Context, private
     private fun retireNavigation(keepDesired: Boolean) {
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
+        questionScope?.cancel();questionScope=null
         reader?.close(); reader = null
         creationCollector?.cancel(); creationCollector=null; creationFlow?.close(); creationFlow=null
         commandJournal?.close(); commandJournal = null
@@ -645,6 +648,7 @@ class LoginController internal constructor(private val context: Context, private
                 val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId)
                     else resource.reader(saved.deviceId!!, runtimeId, id, runtime.scope!!.readSession(id, selected.workspaceId), scope)
                 commandJournal = database; database = null; reader = opened
+                questionScope=CoroutineScope(SupervisorJob(scope.coroutineContext[Job])+Dispatchers.Main.immediate)
                 opened.commands?.let { commands -> commandCollector = scope.launch {
                     commands.state.collect { outbox ->
                         if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(outbox = outbox)
@@ -683,6 +687,34 @@ class LoginController internal constructor(private val context: Context, private
     }
     fun sendPending(id: String) { reader?.commands?.sendPending(id) }
     fun queryCommands() { reader?.commands?.query() }
+    fun refreshQuestions() {reader?.refreshQuestions()}
+    fun answerQuestion(handle: QuestionHandle,answers: QuestionAnswers) {
+        if(!foreground || mutable.value.phase!=HomePhase.READY || mutable.value.submitting) return
+        val opened=reader ?: return
+        val work=questionScope ?: return
+        val stamp=generation;val view=navigationGeneration
+        mutable.value=mutable.value.copy(submitting=true,commandError=null)
+        commandJob=work.launch {
+            try {
+                opened.answerQuestion(handle,answers);current(stamp)
+                if(view==navigationGeneration) mutable.value=mutable.value.copy(outbox=opened.commands?.state?.value)
+            } catch(error: CancellationException) {throw error}
+            catch(error: Exception) {if(generation==stamp && view==navigationGeneration) mutable.value=mutable.value.copy(commandError=code(error))}
+            finally {if(generation==stamp && view==navigationGeneration) mutable.value=mutable.value.copy(submitting=false)}
+        }
+    }
+    fun claimQuestion(handle: QuestionHandle) = questionWork(handle,true)
+    fun releaseQuestion(handle: QuestionHandle) = questionWork(handle,false)
+    private fun questionWork(handle: QuestionHandle,claim: Boolean) {
+        if(!foreground || mutable.value.phase!=HomePhase.READY) return
+        val opened=reader ?: return;val work=questionScope ?: return
+        val stamp=generation;val view=navigationGeneration
+        work.launch {
+            try {if(claim) opened.claimQuestion(handle) else opened.releaseQuestion(handle)}
+            catch(error: CancellationException) {throw error}
+            catch(error: Exception) {if(generation==stamp && view==navigationGeneration) mutable.value=mutable.value.copy(commandError=code(error))}
+        }
+    }
     fun cancelSession(expectedEpoch: String) {
         if (!foreground || mutable.value.phase != HomePhase.READY) return
         val commands = reader?.commands ?: return
@@ -795,6 +827,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun code(error: Exception): String = when (error) {
         is CommandDataException -> error.code
+        is QuestionStateException -> error.code
         is LoginException -> "login.${error.failure.name.lowercase()}"
         is RemoteRequestException -> error.code
         is DeviceCryptoException -> "device.${error.failure.name.lowercase()}"
@@ -829,6 +862,10 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun submitMessage(mode: String, text: String, sendNow: Boolean = true) = login.submitMessage(mode, text, sendNow)
     fun sendPending(id: String) = login.sendPending(id)
     fun queryCommands() = login.queryCommands()
+    fun answerQuestion(handle: QuestionHandle,answers: QuestionAnswers) = login.answerQuestion(handle,answers)
+    fun claimQuestion(handle: QuestionHandle) = login.claimQuestion(handle)
+    fun releaseQuestion(handle: QuestionHandle) = login.releaseQuestion(handle)
+    fun refreshQuestions() = login.refreshQuestions()
     fun cancelSession(epoch: String) = login.cancelSession(epoch)
     fun openBinding() = login.openBinding()
     fun previewBinding(id: String, code: String) = login.previewBinding(id, code)

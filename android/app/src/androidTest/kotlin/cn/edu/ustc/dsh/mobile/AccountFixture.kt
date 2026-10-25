@@ -58,6 +58,15 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var chatMode = false
     @Volatile var creationMode = false
+    @Volatile var questionMode=false
+    @Volatile var blockingPending=true
+    @Volatile var timedQuestionState: String?=null
+    val ordinaryQuestionId="90000000-0000-4000-8000-000000000001"
+    val timedQuestionId="90000000-0000-4000-8000-000000000002"
+    val questionWrites=AtomicInteger()
+    val claimWrites=AtomicInteger()
+    val releaseWrites=AtomicInteger()
+    private val publishQuestions=AtomicReference<(() -> Unit)?>(null)
     val workspaceId="99999999-9999-4999-8999-999999999999"
     val creationWrites=AtomicInteger()
     val createdSessions=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -75,7 +84,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     @Volatile var allowSessionRead = true
     @Volatile var holdSessions = false
     private val directoryScope get() = RelayScope((if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list")) +
-        (if (chatMode || creationMode) listOf("message.submit", "command.status", "session.cancel") else emptyList())+
+        (if (chatMode || creationMode || questionMode) listOf("message.submit", "command.status", "session.cancel") else emptyList())+
+        (if(questionMode) listOf("question.answer") else emptyList())+
         (if(creationMode) listOf("session.create") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
     private val currentRelay = AtomicReference<WebSocket?>()
     @Volatile var relayProofReceived = false
@@ -192,6 +202,25 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                 private val subscription = UUID.randomUUID().toString()
                 private val sync = UUID.randomUUID().toString()
                 private var currentSession=sessionId
+                private var subscribeRequest: String?=null
+                private var questionRevision=0L
+                private var activeClaim: String?=null
+                private val questionExpiry=java.time.Instant.now().plusSeconds(180).toString()
+                private fun questionItems(timed: Boolean): JsonArray {
+                    if(if(timed) timedQuestionState==null else !blockingPending) return JsonArray(emptyList())
+                    val prompt=if(timed) jsonObject("id" to "timed".json(),"question" to "请给出后续答复".json(),"options" to JsonArray(listOf(jsonObject("label" to "回复".json()))))
+                        else jsonObject("id" to "plan".json(),"question" to "是否继续这份计划？".json(),"detail" to "请核对夹具计划后作答。".json(),"options" to JsonArray(listOf(jsonObject("label" to "继续".json()),jsonObject("label" to "停止".json()))),"intent" to jsonObject("kind" to "plan-review".json(),"approve" to "继续".json()))
+                    var item=jsonObject("question_id" to (if(timed) timedQuestionId else ordinaryQuestionId).json(),"expires_at" to (if(timed) JsonNull else questionExpiry.json()),"questions" to JsonArray(listOf(prompt)))
+                    if(timed) item=item.with("state" to timedQuestionState!!.json())
+                    return JsonArray(listOf(item))
+                }
+                private fun questions(socket: WebSocket) {
+                    val request=subscribeRequest ?: return
+                    if(!questionMode) return
+                    questionRevision++
+                    send(socket,"question.snapshot",request,jsonObject("revision" to questionRevision.json(),"items" to questionItems(false)))
+                    send(socket,"question.timed.snapshot",request,jsonObject("revision" to questionRevision.json(),"items" to questionItems(true)))
+                }
                 private fun send(socket: WebSocket, type: String, request: String, payload: JsonObject) {
                     var frame = jsonObject("v" to 1L.json(), "type" to type.json(), "request_id" to request.json(), "runtime_id" to runtimeId.json(), "runtime_epoch" to epoch.json(),
                         "session_id" to currentSession.json(), "subscription_id" to subscription.json(), "payload" to payload)
@@ -219,6 +248,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 currentSession=frame.string("session_id")
                                 require(frame.string("runtime_id") == runtimeId && (currentSession==sessionId && sessionId in subscribedScope.sessions || currentSession in createdSessions && workspaceId in subscribedScope.workspaces))
                                 val requestId = frame.string("request_id")
+                                subscribeRequest=requestId;publishQuestions.set {questions(webSocket)}
                                 if (runtimeOffline) {
                                     webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "error".json(), "request_id" to requestId.json(), "runtime_id" to runtimeId.json(), "session_id" to currentSession.json(), "payload" to jsonObject("code" to "runtime.offline".json()))).canonicalText())
                                     return
@@ -231,6 +261,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 }
                                 send(webSocket, "session.snapshot", requestId, jsonObject("cursor" to 2L.json(), "has_more" to JsonBoolean(true), "records" to JsonArray(listOf(user(2, "电脑当前消息"))), "assistant" to jsonObject("revision" to 0L.json())))
                                 send(webSocket, "session.checkpoint", requestId, jsonObject("state" to "persisted".json(), "through_seq" to 2L.json()))
+                                questions(webSocket)
                                 subscriptions.incrementAndGet()
                                 return
                             }
@@ -260,6 +291,35 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                     "payload" to JsonObject(status.fields.filterKeys {it in setOf("state","payload_sha256","updated_at","workspace_id")}))).canonicalText())
                                 return
                             }
+                            "question.claim"->{
+                                require(questionMode && "question.answer" in subscribedScope.actions && payload.string("question_id")==timedQuestionId && timedQuestionState=="open")
+                                activeClaim=frame.string("request_id");claimWrites.incrementAndGet()
+                                send(webSocket,"question.claimed",activeClaim!!,jsonObject("question_id" to timedQuestionId.json(),"remaining_ms" to 2000L.json(),"expires_at" to java.time.Instant.now().plusMillis(2000).toString().json()))
+                                return
+                            }
+                            "question.release"->{
+                                require(questionMode && payload.string("claim_id")==activeClaim)
+                                releaseWrites.incrementAndGet();send(webSocket,"question.released",frame.string("request_id"),jsonObject("claim_id" to activeClaim!!.json()))
+                                timedQuestionState="continued";questions(webSocket);return
+                            }
+                            "question.answer","question.timed.answer"->{
+                                require(questionMode && "question.answer" in subscribedScope.actions && frame.string("session_id")==sessionId)
+                                val intent=cn.edu.ustc.dsh.command.CommandIntent.parse(frame)
+                                val timed=intent.kind==cn.edu.ustc.dsh.command.CommandKind.TIMED_QUESTION
+                                val answers=QuestionAnswers.parse(intent.payload);require(answers.questionId==(if(timed) timedQuestionId else ordinaryQuestionId))
+                                val existing=commandStatuses[intent.requestId]
+                                val state=if(timed && timedQuestionState=="continued") "agent_queued" else "settled"
+                                val status=if(existing!=null) {require(existing.string("payload_sha256")==intent.digest);existing} else {
+                                    require(if(timed) timedQuestionState in setOf("open","continued") else blockingPending)
+                                    questionWrites.incrementAndGet()
+                                    if(timed) timedQuestionState=if(state=="agent_queued") "reply_queued" else null else blockingPending=false
+                                    jsonObject("request_id" to intent.requestId.json(),"session_id" to sessionId.json(),"state" to state.json(),"payload_sha256" to intent.digest.json(),"updated_at" to java.time.Instant.now().toString().json()).also {commandStatuses[intent.requestId]=it}
+                                }
+                                questions(webSocket)
+                                if(dropNextCommandReply) {dropNextCommandReply=false;webSocket.close(1001,"fixture response lost");return}
+                                webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(),"type" to "command.receipt".json(),"request_id" to intent.requestId.json(),"runtime_id" to runtimeId.json(),"runtime_epoch" to epoch.json(),"session_id" to sessionId.json(),"payload" to JsonObject(status.fields.filterKeys {it in setOf("state","payload_sha256","updated_at")}))).canonicalText())
+                                return
+                            }
                             "message.submit", "session.cancel" -> {
                                 val target=frame.string("session_id")
                                 require((chatMode || creationMode) && frame.string("runtime_id") == runtimeId && (target==sessionId || target in createdSessions))
@@ -282,7 +342,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
                         val capabilities = payload.array("capabilities").map { (it as JsonString).value }
-                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "command.relay.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1") })
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1") })
                         require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
                         relayProofReceived = true
                         webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
@@ -346,7 +406,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                 "issued_at" to java.time.Instant.ofEpochMilli(issued).toString().json(), "expires_at" to java.time.Instant.ofEpochMilli(minOf(issued + 300_000, claims.integer("exp") * 1000)).toString().json())))
         }
         if (path.startsWith("/v1/commands/")) {
-            require((chatMode || creationMode) && request.requestUrl!!.queryParameter("device_id") == deviceId)
+            require((chatMode || creationMode || questionMode) && request.requestUrl!!.queryParameter("device_id") == deviceId)
             val status = commandStatuses[path.substringAfterLast('/')]
             return if (status != null) resourceResponse(data(status)) else resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
         }
@@ -383,7 +443,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val body = JsonDocument.parse(request.body.readByteArray()).root
             require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
             relayScope = RelayScope.parse(body.obj("scope"))
-            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "command.status", "session.create") })
+            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "question.answer","command.status", "session.create") })
             relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
             relayAccessExpiresAt = claims.integer("exp") * 1000
             ticketRequests.incrementAndGet()
@@ -404,7 +464,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         require(path == "/v1/runtimes")
         if (bindingMode && (!bindingApproved || bindingConfirmedElsewhere)) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
         return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
-            "access" to jsonObject("role" to (if (bindingMode) "owner" else if (chatMode || creationMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+            "access" to jsonObject("role" to (if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
     }
 
     fun bindingDetails(): JsonObject = jsonObject("enrollment_id" to bindingId.json(), "request_id" to "99999999-9999-4999-8999-999999999999".json(), "organization_id" to organizationId.json(),
@@ -419,6 +479,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         allowSessionRead = false
         require(currentRelay.get()!!.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "access.revoked".json(), "payload" to jsonObject("code" to "access.revoked".json()))).canonicalText()))
     }
+    fun replaceQuestions() {publishQuestions.get()?.invoke()}
 
     fun seed(registering: Boolean = false, refreshing: Boolean = false) {
         val now = System.currentTimeMillis()

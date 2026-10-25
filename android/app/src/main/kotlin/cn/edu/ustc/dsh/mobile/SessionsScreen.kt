@@ -13,10 +13,12 @@ import androidx.compose.ui.unit.dp
 import cn.edu.ustc.dsh.network.*
 import cn.edu.ustc.dsh.session.*
 import cn.edu.ustc.dsh.command.*
+import cn.edu.ustc.dsh.protocol.*
 
 @Composable
 fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
-    onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}, onCreate: ()->Unit={}) {
+    onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}, onCreate: ()->Unit={},
+    onAnswer: (QuestionHandle,QuestionAnswers)->Unit={_,_->},onClaim: (QuestionHandle)->Unit={},onRelease: (QuestionHandle)->Unit={},onRefreshQuestions: ()->Unit={}) {
     val runtime = state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }
     val opened = state.selectedSessionId
     val canCompose = opened != null && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
@@ -77,6 +79,12 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         }
                     }
                     val transcript = read.window
+                    if(read.phase==SessionReadPhase.READY) {
+                        items(read.questions.items,key={"question:${it.handle.kind}:${it.batch.id}"}) {question->
+                            QuestionCard(question,read.questions.canAnswer,state.submitting,state.outbox?.records ?: emptyList(),onAnswer,onClaim,onRelease,onRefreshQuestions,onQueryCommands)
+                        }
+                        read.questions.error?.let {code->item("question-error") {Text(commandErrorText(code),color=MaterialTheme.colorScheme.error)}}
+                    }
                     state.commandError?.let { error -> item("command-error") { Text(commandErrorText(error), color = MaterialTheme.colorScheme.error) } }
                     state.outbox?.let { outbox ->
                         outbox.error?.let { error -> item("outbox-error") { Text(commandErrorText(error), color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) } }
@@ -90,10 +98,12 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                     Text(commandLabel(record), style = MaterialTheme.typography.titleSmall)
                                     if (!record.everAgentQueued) record.intent.text()?.let { ReadingText(it, 512) }
-                                    if (record.delivery == CommandDelivery.PENDING && record.attempts == 0L) {
+                                    if(record.intent.kind.question) SubmittedQuestionAnswer(record.intent)
+                                    val questionCurrent=!record.intent.kind.question || read.questions.items.any {it.batch.id==record.intent.payload.string("question_id") && it.batch.definition==record.intent.questionDefinition && it.handle.epoch==record.intent.epoch && it.answerable}
+                                    if (record.delivery == CommandDelivery.PENDING && record.attempts == 0L && questionCurrent) {
                                         OutlinedButton({ onSendPending(record.intent.requestId) }, enabled = outbox.connected, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("发送这条待发消息") }
                                     }
-                                    if (record.remote == RemoteCommandState.RECEIVED && !record.everHostSaved && record.attempts > 0) {
+                                    if (record.remote == RemoteCommandState.RECEIVED && !record.everHostSaved && record.attempts > 0 && questionCurrent) {
                                         var retry by remember { mutableStateOf(false) }
                                         OutlinedButton({ retry = true }, enabled = outbox.connected, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新转交同一请求") }
                                         if (retry) AlertDialog(onDismissRequest = { retry = false }, title = { Text("重新转交这条原请求？") },
@@ -197,8 +207,8 @@ private fun commandLabel(record: PendingCommand): String = when {
     record.remote == RemoteCommandState.RECEIVED -> "中继已接收，尚未确认主机保存"
     record.remote == RemoteCommandState.HOST_ACCEPTED -> "主机已保存"
     record.remote == RemoteCommandState.DISPATCHING -> "主机已保存，正在交给 Agent"
-    record.remote in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED) -> "Agent 已入队"
-    record.remote == RemoteCommandState.SETTLED -> if (record.intent.kind == CommandKind.CANCEL) "中断请求已确认" else "命令已完成"
+    record.remote in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED) -> if(record.intent.kind==CommandKind.TIMED_QUESTION) "后续答复已入队" else "Agent 已入队"
+    record.remote == RemoteCommandState.SETTLED -> if (record.intent.kind == CommandKind.CANCEL) "中断请求已确认" else if(record.intent.kind.question) "答复已确认" else "命令已完成"
     record.remote == RemoteCommandState.REJECTED -> "主机拒绝了此命令"
     else -> "结果待确认"
 }
@@ -210,5 +220,9 @@ private fun commandErrorText(code: String) = when (code) {
     "command.too_large", "command.invalid" -> "消息过长或格式不支持，请调整后重试。"
     "command.reconcile_required", "command.delivery_unconfirmed", "command.status_unavailable" -> "尚未核对发送结果，请查询原请求状态；不会自动重复发送。"
     "runtime.changed" -> "电脑运行环境已重新启动，原中断请求不会用于新的任务。"
+    "question.stale","question.resync_required","question.ended","interaction.stale" -> "提问状态已更新，请刷新并核对电脑上的当前问题。原答复不会自动重发。"
+    "question.invalid_answer" -> "请按当前问题的选项和要求填写完整答复。"
+    "question.reconcile_required" -> "这个问题已有答复请求，请先核对原请求的结果。"
+    "question.claim_limit","rate.limited" -> "当前等待请求较多，请结束已有答复或刷新提问状态后重试。"
     else -> "暂时无法处理此发送操作，请先核对发送状态。"
 }
