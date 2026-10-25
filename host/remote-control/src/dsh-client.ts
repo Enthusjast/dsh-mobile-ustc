@@ -3,9 +3,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionFollowFrame, SessionPageRequest } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { PromptContentPart } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload'
 import { WorkspaceActiveSessionError, workspaceDomainSpec, workspaceDomainState } from '@deepseek-ai/dsh-workspace'
 import { ProbeError } from './protocol.js'
 import { configuredCreationOptions } from './creation-options.js'
+import { admitNativeFile, releaseNativeFile, type FileManifest } from './file-admission.js'
+
+export type DshPromptPart = Extract<PromptContentPart, { type: 'text' | 'file' }>
 
 export interface Workspace { id: string; cwd: string; remoteId?: string; label?: string }
 
@@ -219,7 +224,7 @@ export class DshClient {
     id: SessionId,
     requestId: string,
     mode: 'queue' | 'steer',
-    content: string | readonly { type: 'text'; text: string }[],
+    content: string | readonly DshPromptPart[],
     signal: AbortSignal,
   ) {
     this.requireUnarchived(id)
@@ -231,6 +236,19 @@ export class DshClient {
   }
 
   cancel(id: SessionId) { return this.controller.cancel({ sessionId: id }) }
+
+  async uploadFile(sessionId: string, manifest: FileManifest, source: AsyncIterable<Uint8Array>, signal: AbortSignal) {
+    try {
+      if (signal.aborted) throw new ProbeError('file.cancelled')
+      const native = await this.resolve(sessionId, signal)
+      return await admitNativeFile(this.ctx, native, manifest, source, signal, () => this.requireUnarchived(native))
+    } catch (error) {
+      if (signal.aborted) throw new ProbeError('file.cancelled')
+      throw error
+    }
+  }
+
+  releaseFile(id: SessionId, receiptId: FileUploadReceiptId): boolean { return releaseNativeFile(this.ctx, id, receiptId) }
 
   private isArchived(id: SessionId): boolean { return this.ctx.workspaceRegistry.archivedSessionIds.includes(id) }
 

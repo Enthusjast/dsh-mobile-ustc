@@ -26,7 +26,7 @@ Loader 与 DSH CLI 测试共同覆盖工作区及 preset 白名单、opaque 原�
 ## 与发行版组合相关的发现
 
 - `SessionController` 公开 list、create、prompt、cancel、selectModel、page、follow 和 flush。归档由同一进程的 `workspaceRegistry.archiveSession/unarchiveSession` 提供；Host 本地协议现已接入原生持久归档，详见 [会话归档](session-archive.md)。
-- `fileUploads.uploadStream` 和 prompt receipt 是可用的 DSH 接口；本原型未提供文件传输命令，也没有验证 receipt 的消费、重启或回收行为。
+- `fileUploads.uploadStream` 和 prompt receipt 是可用的 DSH 接口。真实 Loader 已验证接收会话隔离、排队 / 消费、同 request ID 去重、显式回收和重建后重新交接；Host 内部适配增加 200 MB 限额和流式摘要校验。移动文件协议、隔离对象存储及扫描交接仍在实现，详见 [原生文件准入](native-file-admission.md)。
 - 子 Agent 有原生父子身份。M0 列表隐藏子 Agent；远端不能用根会话接口接管子 Agent。
 - `approval/request` 提供一次决策，但没有完整工具参数。原型将真实 Tool Runtime 执行上下文与 call ID 绑定，并在最终 guard 消费当前执行 token；没有在真实 TokenWorks / 微信组合里验证 listener 顺序或绕过路径。
 - 普通问题与工具批准走各自的 DSH 服务。Timed question 需要前台 claim 及迟到答案路径；本原型拒绝 timed question，不把它降级成普通问题。
