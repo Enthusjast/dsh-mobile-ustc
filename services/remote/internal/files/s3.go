@@ -119,8 +119,16 @@ func checksum(digest string) (string, bool) {
 }
 
 func (storage *S3) PresignUpload(ctx context.Context, key ObjectKey, size int64, digest string, lifetime time.Duration) (UploadURL, error) {
+	return storage.presign(ctx, key, size, digest, lifetime, MaxUploadBytes, 15*time.Minute)
+}
+
+func (storage *S3) PresignHostExport(ctx context.Context, key ObjectKey, size int64, digest string, lifetime time.Duration) (UploadURL, error) {
+	return storage.presign(ctx, key, size, digest, lifetime, MaxExportBytes, 5*time.Minute)
+}
+
+func (storage *S3) presign(ctx context.Context, key ObjectKey, size int64, digest string, lifetime time.Duration, limit int64, maxTTL time.Duration) (UploadURL, error) {
 	sum, valid := checksum(digest)
-	if key.value == "" || key.kind != Quarantine || size < 0 || size > MaxUploadBytes || !valid || lifetime < time.Second || lifetime > 15*time.Minute || lifetime%time.Second != 0 {
+	if key.value == "" || key.kind != Quarantine || size < 0 || size > limit || !valid || lifetime < time.Second || lifetime > maxTTL || lifetime%time.Second != 0 {
 		return UploadURL{}, ErrInvalid
 	}
 	request, err := storage.presigner.PresignPutObject(ctx, storage.putInput(key, size, sum), s3.WithPresignExpires(lifetime))
@@ -159,7 +167,7 @@ func (storage *S3) putInput(key ObjectKey, size int64, sum string) *s3.PutObject
 // PutVerified performs one immutable write of exactly the scanned stream. It
 // never copies a mutable quarantine object after scanning a different GET.
 func (storage *S3) PutVerified(ctx context.Context, key ObjectKey, reader *VerifiedReader) error {
-	if key.value == "" || key.kind != Committed || reader == nil || reader.failure != nil || reader.read != 0 {
+	if key.value == "" || key.kind != Committed || reader == nil || reader.scan == nil || reader.failure != nil || reader.read != 0 {
 		return ErrInvalid
 	}
 	sum, valid := checksum(reader.digest)
@@ -208,7 +216,7 @@ func (storage *S3) PutVerified(ctx context.Context, key ObjectKey, reader *Verif
 // OpenEncrypted is private to the transfer service. Callers still verify the
 // actual bytes against their authorized manifest, including during downloads.
 func (storage *S3) OpenEncrypted(ctx context.Context, key ObjectKey, size int64) (io.ReadCloser, error) {
-	if key.value == "" || size < 0 || size > MaxUploadBytes {
+	if key.value == "" || size < 0 || size > MaxExportBytes {
 		return nil, ErrInvalid
 	}
 	result, err := storage.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(storage.config.Bucket), Key: aws.String(key.value), ChecksumMode: types.ChecksumModeEnabled})

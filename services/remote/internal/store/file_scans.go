@@ -15,6 +15,9 @@ const fileScanMaxAttempts = 3
 const fileCleanupGrace = 15 * time.Minute
 
 func authorizeBoundFile(ctx context.Context, transaction *sql.Tx, record files.Record) (fileAuthority, error) {
+	if record.Direction == "from_host" {
+		return authorizeBoundExport(ctx, transaction, record)
+	}
 	var issuer, subject string
 	if err := transaction.QueryRowContext(ctx, `select issuer,subject from users where id=$1`, record.UploaderID).Scan(&issuer, &subject); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -68,7 +71,7 @@ func (repository *FileStore) ClaimScan(ctx context.Context, policy string) (*fil
 	}
 	defer transaction.Rollback()
 	record, err := scanFile(transaction.QueryRowContext(ctx, `select `+fileColumns+` from files f join file_transfers t on t.file_id=f.id
-	 where f.state='scanning' and f.direction='to_host' and f.expires_at>clock_timestamp() and t.scan_ready_at<=clock_timestamp()
+	 where f.state='scanning' and f.direction in ('to_host','from_host') and f.expires_at>clock_timestamp() and t.scan_ready_at<=clock_timestamp()
 	 and not exists(select 1 from file_scan_attempts a where a.file_id=f.id and a.state='active' and a.lease_until>clock_timestamp())
 	 order by t.scan_ready_at,f.id limit 1 for update of f,t skip locked`))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -181,7 +184,7 @@ func lockScan(ctx context.Context, transaction *sql.Tx, claim files.ScanClaim) (
 	if err != nil {
 		return record, until, state, files.ErrUnavailable
 	}
-	if claim.File.RequestSHA256 != record.RequestSHA256 || claim.File.OrganizationID != record.OrganizationID || claim.File.SessionID != record.SessionID || claim.File.RuntimeID != record.RuntimeID {
+	if claim.File.Direction != record.Direction || claim.File.RequestSHA256 != record.RequestSHA256 || claim.File.OrganizationID != record.OrganizationID || claim.File.SessionID != record.SessionID || claim.File.RuntimeID != record.RuntimeID {
 		return record, until, state, files.ErrStale
 	}
 	return record, until, state, nil
@@ -282,7 +285,11 @@ func (repository *FileStore) CompleteScan(ctx context.Context, claim files.ScanC
 	payload, _ := json.Marshal(map[string]any{"file_id": record.ID, "runtime_id": record.RuntimeID, "session_id": record.SessionID})
 	// Kept pending until the file-capable Relay consumer is configured. The
 	// generic control worker filters its own topics and cannot discard this.
-	if _, err := transaction.ExecContext(ctx, `insert into control_outbox(topic,payload) values('file.clean',$1::jsonb)`, string(payload)); err != nil {
+	topic := "file.clean"
+	if record.Direction == "from_host" {
+		topic = "file.export.clean"
+	}
+	if _, err := transaction.ExecContext(ctx, `insert into control_outbox(topic,payload) values($1,$2::jsonb)`, topic, string(payload)); err != nil {
 		return files.ErrUnavailable
 	}
 	if err := transaction.Commit(); err != nil {

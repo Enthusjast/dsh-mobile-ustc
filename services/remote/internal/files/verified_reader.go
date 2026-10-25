@@ -42,8 +42,28 @@ type VerifiedReader struct {
 }
 
 func NewVerifiedReader(source io.Reader, scan Scan, size int64, digest string) (*VerifiedReader, error) {
+	if scan == nil {
+		return nil, ErrInvalid
+	}
+	return newContentVerifier(source, scan, size, digest, MaxUploadBytes)
+}
+
+func NewExportVerifiedReader(source io.Reader, scan Scan, size int64, digest string) (*VerifiedReader, error) {
+	if scan == nil {
+		return nil, ErrInvalid
+	}
+	return newContentVerifier(source, scan, size, digest, MaxExportBytes)
+}
+
+// Only used after current authorization proves a committed, scanned export.
+// S3.PutVerified rejects this scan-less reader as a publication source.
+func newDownloadVerifier(source io.Reader, size int64, digest string) (*VerifiedReader, error) {
+	return newContentVerifier(source, nil, size, digest, MaxExportBytes)
+}
+
+func newContentVerifier(source io.Reader, scan Scan, size int64, digest string, limit int64) (*VerifiedReader, error) {
 	decoded, err := hex.DecodeString(digest)
-	if source == nil || scan == nil || size < 0 || size > MaxUploadBytes || err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != digest {
+	if source == nil || size < 0 || size > limit || err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != digest {
 		return nil, ErrInvalid
 	}
 	reader := &VerifiedReader{source: source, scan: scan, hash: sha256.New(), size: size, digest: digest}
@@ -91,8 +111,10 @@ func (reader *VerifiedReader) Read(target []byte) (int, error) {
 	}
 	if n > 0 {
 		_, _ = reader.hash.Write(target[:n])
-		if err := reader.scan.Write(target[:n]); err != nil {
-			return reader.fail(scanError(err))
+		if reader.scan != nil {
+			if err := reader.scan.Write(target[:n]); err != nil {
+				return reader.fail(scanError(err))
+			}
 		}
 		reader.read += int64(n)
 	}
@@ -130,8 +152,10 @@ func (reader *VerifiedReader) finish(eof bool) error {
 	if reader.read != reader.size || hex.EncodeToString(reader.hash.Sum(nil)) != reader.digest {
 		return ErrIntegrity
 	}
-	if err := reader.scan.Finish(); err != nil {
-		return scanError(err)
+	if reader.scan != nil {
+		if err := reader.scan.Finish(); err != nil {
+			return scanError(err)
+		}
 	}
 	reader.verified = true
 	return nil

@@ -57,6 +57,7 @@ func run() error {
 	if fileRuntime != nil {
 		apiConfig.Files = fileRuntime.service
 		apiConfig.FileHandoffs = fileRuntime.handoffs
+		apiConfig.FileExports = fileRuntime.exports
 	}
 	handler := httpapi.New(database, verifier, apiConfig)
 	server := &http.Server{

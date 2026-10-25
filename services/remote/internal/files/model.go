@@ -79,6 +79,7 @@ type Record struct {
 	KeyVersion, GrantVersion                           int64
 	RequestID, RequestSHA256                           string
 	Name, SHA256, State, ErrorCode                     string
+	Direction                                          string
 	SizeBytes                                          int64
 	QuarantineAttempt                                  string
 	CommittedAttempt                                   string
@@ -110,7 +111,11 @@ type Delivery struct {
 }
 
 func (record Record) Status() Status {
-	return Status{ID: record.ID, RuntimeID: record.RuntimeID, SessionID: record.SessionID, Direction: "to_host", Name: record.Name,
+	direction := record.Direction
+	if direction == "" {
+		direction = "to_host"
+	}
+	return Status{ID: record.ID, RuntimeID: record.RuntimeID, SessionID: record.SessionID, Direction: direction, Name: record.Name,
 		SizeBytes: record.SizeBytes, SHA256: record.SHA256, State: record.State, ErrorCode: record.ErrorCode, UploadExpiresAt: record.UploadExpiresAt, ExpiresAt: record.ExpiresAt, CreatedAt: record.CreatedAt}
 }
 func (record Record) MarshalJSON() ([]byte, error) { return json.Marshal(record.Status()) }

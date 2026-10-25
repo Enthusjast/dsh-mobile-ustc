@@ -40,6 +40,7 @@ type fileObjectPeer struct {
 	aead         cipher.AEAD
 	blockGet     bool
 	blockHeaders bool
+	pauseAfter   int
 	getStarted   chan struct{}
 	getCancelled chan struct{}
 	getOnce      sync.Once
@@ -101,6 +102,7 @@ func (peer *fileObjectPeer) serve(response http.ResponseWriter, request *http.Re
 	object, exists := peer.objects[request.URL.Path]
 	blockGet := peer.blockGet
 	blockHeaders := peer.blockHeaders
+	pauseAfter := peer.pauseAfter
 	peer.mu.Unlock()
 	if request.Method == "DELETE" {
 		peer.mu.Lock()
@@ -169,6 +171,16 @@ func (peer *fileObjectPeer) serve(response http.ResponseWriter, request *http.Re
 		}
 		body, err := peer.aead.Open(nil, object.nonce, object.ciphertext, []byte(request.URL.Path))
 		if err != nil {
+			return
+		}
+		if pauseAfter > 0 && pauseAfter < len(body) {
+			_, _ = response.Write(body[:pauseAfter])
+			if flush, ok := response.(http.Flusher); ok {
+				flush.Flush()
+			}
+			peer.getOnce.Do(func() { close(peer.getStarted) })
+			<-request.Context().Done()
+			close(peer.getCancelled)
 			return
 		}
 		_, _ = response.Write(body)

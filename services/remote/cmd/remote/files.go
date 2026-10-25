@@ -25,6 +25,9 @@ import (
 var errFileConfiguration = errors.New("remote service protected file storage/scanner configuration is invalid")
 
 type fileDeployment struct {
+	Exports struct {
+		Enabled bool `json:"enabled"`
+	} `json:"exports"`
 	Storage struct {
 		Endpoint        string `json:"endpoint"`
 		Region          string `json:"region"`
@@ -64,10 +67,14 @@ type fileRuntime struct {
 	service  *files.Service
 	storage  *files.S3
 	handoffs *files.Handoffs
+	exports  *files.Exports
 }
 
 func (runtime *fileRuntime) Close() {
 	if runtime != nil {
+		if runtime.exports != nil {
+			runtime.exports.Close()
+		}
 		_ = runtime.storage.Close()
 	}
 }
@@ -155,6 +162,10 @@ func fileSeconds(value int64, minimum, maximum time.Duration) (time.Duration, er
 // operator-supplied success label. Deployment must point that daemon at the
 // same file; the runtime probe also requires an actual EICAR rejection.
 func fileScannerPolicy(path string) (string, error) {
+	return fileScannerPolicyLimit(path, files.MaxUploadBytes)
+}
+
+func fileScannerPolicyLimit(path string, maximum int64) (string, error) {
 	body, err := readProtectedFile(path, 256<<10)
 	if err != nil {
 		return "", err
@@ -200,7 +211,7 @@ func fileScannerPolicy(path string) (string, error) {
 			}
 		}
 		amount, err := strconv.ParseInt(text, 10, 64)
-		if err != nil || amount <= 0 || amount > (1<<40)/factor || amount*factor < files.MaxUploadBytes {
+		if err != nil || amount <= 0 || amount > (1<<40)/factor || amount*factor < maximum {
 			return "", errFileConfiguration
 		}
 	}
@@ -253,7 +264,11 @@ func loadFileRuntime(path string, database *store.Postgres) (*fileRuntime, error
 			_ = storage.Close()
 		}
 	}()
-	policy, err := fileScannerPolicy(relativeFile(path, config.Scanner.PolicyFile))
+	maximum := files.MaxUploadBytes
+	if config.Exports.Enabled {
+		maximum = files.MaxExportBytes
+	}
+	policy, err := fileScannerPolicyLimit(relativeFile(path, config.Scanner.PolicyFile), maximum)
 	if err != nil {
 		return nil, err
 	}
@@ -304,6 +319,13 @@ func loadFileRuntime(path string, database *store.Postgres) (*fileRuntime, error
 	if err != nil {
 		return nil, errFileConfiguration
 	}
+	var exports *files.Exports
+	if config.Exports.Enabled {
+		exports, err = files.NewExports(repository, storage, service)
+		if err != nil {
+			return nil, errFileConfiguration
+		}
+	}
 	complete = true
-	return &fileRuntime{service: service, storage: storage, handoffs: handoffs}, nil
+	return &fileRuntime{service: service, storage: storage, handoffs: handoffs, exports: exports}, nil
 }

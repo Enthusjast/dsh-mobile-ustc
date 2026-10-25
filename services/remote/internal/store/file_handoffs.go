@@ -59,7 +59,7 @@ func hostFileBinding(ctx context.Context, transaction *sql.Tx, host files.HostBi
 }
 
 func cleanHandoffFile(ctx context.Context, transaction *sql.Tx, record files.Record, policy string) (fileAuthority, error) {
-	if record.State != "clean" || !validSHA256Hex(policy) || record.CommittedAttempt == "" {
+	if record.Direction != "to_host" || record.State != "clean" || !validSHA256Hex(policy) || record.CommittedAttempt == "" {
 		return fileAuthority{}, files.ErrAccess
 	}
 	var actual, stored string
@@ -250,7 +250,7 @@ func (repository *FileStore) PendingHandoffFiles(ctx context.Context, host files
 	 join users u on u.id=f.uploader_id and u.status='active'
 	 join devices d on d.id=t.uploader_device_id and d.user_id=u.id and d.revoked_at is null and d.key_version=t.device_key_version and d.proof_key_thumbprint=t.proof_key_jkt
 	 join runtime_grants g on g.runtime_id=t.runtime_id and g.user_id=u.id and g.grant_version=t.grant_version and g.revoked_at is null
-	 where t.runtime_id=$1 and f.state='clean' and f.expires_at>clock_timestamp() and t.scanner_policy_sha256=$2 and s.state in ('available','running')
+	 where t.runtime_id=$1 and f.direction='to_host' and f.state='clean' and f.expires_at>clock_timestamp() and t.scanner_policy_sha256=$2 and s.state in ('available','running')
 	 and g.role in ('operator','owner') and (g.expires_at is null or g.expires_at>clock_timestamp())
 	 and g.scope->'actions' ? 'file.upload' and ((g.scope->'sessions') ? f.session_id::text or (g.scope->'workspaces') ? s.workspace_id::text)
 	 and exists(select 1 from org_memberships m where m.org_id=t.org_id and m.user_id=u.id)

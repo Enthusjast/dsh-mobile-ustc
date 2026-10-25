@@ -567,7 +567,7 @@ paths:
         '503': { $ref: '#/components/responses/Error' }
   /v1/files/{id}:
     get:
-      description: Reconcile the original phone device's file metadata under current authority. Returns no object key, lease, native receipt or upload capability. Another device cannot select the original uploader via request fields. Returns 404 when files are not configured.
+      description: Reconcile the original phone device's file metadata under current authority. Direction to_host uses file.upload; from_host uses session.read and file.download. Returns no object key, lease, native receipt or upload capability. Another device cannot select the original requester via request fields. Returns 404 when files are not configured.
       parameters:
         - $ref: '#/components/parameters/UUID'
       responses:
@@ -606,6 +606,47 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { description: File service is not configured. }
         '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/file-exports/{id}:
+    get:
+      description: Resolve the original device's immutable export request UUID back to its file metadata after a lost registration response. Requires current session.read and file.download scope. This endpoint does not prepare a new Host source or re-admit an expired source. Export downloads must be explicitly enabled; missing and inaccessible records both fail closed.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Original from_host file metadata without private Host provenance or capabilities.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileStatusResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: Export downloads are not configured. }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/files/{id}/content:
+    get:
+      description: Phone-only JWT/DPoP proxy for an owned, clean from_host export. Rechecks current device, session.read/file.download scope and scanner policy on renewable five-second leases; grant-generation changes cancel an existing stream. The request is bounded by token expiry and five minutes. Range and query selectors are refused. Committed object bytes are checked against exact length/SHA-256 before the final chunk; an interrupted response must not be published by the client. No public object URL or bearer download capability is returned. Export downloads must be explicitly enabled.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Exact verified committed bytes; served is a server-side fact, and the phone independently verifies its saved document.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+            Content-Length: { schema: { type: integer, minimum: 0, maximum: 2000000000 } }
+            Content-Disposition: { schema: { type: string }, description: Attachment with a safely encoded display filename. }
+            X-DSH-Content-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+            Cache-Control: { schema: { const: 'no-store, no-transform' } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: Export downloads are not configured. }
+        '429': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
   /v1/files/{id}/commit:
     post:
@@ -714,15 +755,28 @@ components:
         file_id: { type: string, format: uuid }
         runtime_id: { type: string, format: uuid }
         session_id: { type: string, format: uuid }
-        direction: { const: to_host }
+        direction: { enum: [to_host, from_host] }
         name: { type: string, minLength: 1, maxLength: 512 }
-        size_bytes: { type: integer, minimum: 0, maximum: 200000000 }
+        size_bytes: { type: integer, minimum: 0, maximum: 2000000000 }
         sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
         state: { enum: [uploading, scanning, clean, rejected, expired] }
         error_code: { enum: [integrity_mismatch, content_rejected, scan_unavailable, storage_unavailable, access_revoked, expired] }
         upload_expires_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
+      allOf:
+        - if:
+            properties:
+              direction: { const: to_host }
+          then:
+            properties:
+              size_bytes: { type: integer, maximum: 200000000 }
+        - if:
+            properties:
+              direction: { const: from_host }
+          then:
+            properties:
+              delivery: false
     FileDeliveryHint:
       description: Advisory current Host readiness or the original command reference; never an admission capability. Ready expires within the current handoff lease. Every send is separately authorized.
       oneOf:
@@ -766,7 +820,12 @@ components:
           additionalProperties: false
           required: [file]
           properties:
-            file: { $ref: '#/components/schemas/FileStatus' }
+            file:
+              allOf:
+                - $ref: '#/components/schemas/FileStatus'
+                - type: object
+                  properties:
+                    direction: { const: to_host }
             upload: { $ref: '#/components/schemas/FileUploadCapability' }
     FileStatusResponse:
       type: object

@@ -306,7 +306,11 @@ func (service *Service) copyVerified(ctx context.Context, claim ScanClaim) error
 		return ErrScanUnavailable
 	}
 	defer scan.Close()
-	reader, err := NewVerifiedReader(source, scan, claim.File.SizeBytes, claim.File.SHA256)
+	verify := NewVerifiedReader
+	if claim.File.Direction == "from_host" {
+		verify = NewExportVerifiedReader
+	}
+	reader, err := verify(source, scan, claim.File.SizeBytes, claim.File.SHA256)
 	if err != nil {
 		return err
 	}

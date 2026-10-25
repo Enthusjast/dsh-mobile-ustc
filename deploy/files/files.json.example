@@ -1,4 +1,5 @@
 {
+  "exports": { "enabled": false },
   "storage": {
     "endpoint": "https://objects.example.edu",
     "region": "us-east-1",

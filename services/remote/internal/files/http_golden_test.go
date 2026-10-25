@@ -32,7 +32,7 @@ func TestFileHTTPGoldensMatchGoPublicShapesAndManifestAdmission(t *testing.T) {
 	if _, err := NormalizeRegistration(request); err != nil {
 		t.Fatal("golden request was not admitted")
 	}
-	for _, name := range []string{"prepared", "clean"} {
+	for _, name := range []string{"prepared", "clean", "export-clean"} {
 		raw := load(name)
 		var original any
 		if json.Unmarshal(raw, &original) != nil {

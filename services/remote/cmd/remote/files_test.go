@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"dsh-mobile-ustc/services/remote/internal/files"
 	"encoding/json"
 	"errors"
 	"os"
@@ -46,6 +47,36 @@ func fileDeploymentFixture(t *testing.T) (string, fileDeployment) {
 	config.Workers = 2
 	config.TaskTimeoutSeconds = 60
 	return path, config
+}
+
+func TestExportDownloadRequiresExplicitEnableAndScannerBounds(t *testing.T) {
+	path, config := fileDeploymentFixture(t)
+	writeFileDeployment(t, path, config)
+	runtime, err := loadFileRuntime(path, &store.Postgres{DB: &sql.DB{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.exports != nil {
+		t.Fatal("exports were enabled implicitly")
+	}
+	runtime.Close()
+	config.Exports.Enabled = true
+	writeFileDeployment(t, path, config)
+	if _, err := loadFileRuntime(path, &store.Postgres{DB: &sql.DB{}}); !errors.Is(err, errFileConfiguration) {
+		t.Fatal("200 MB scanner configuration advertised 2 GB exports")
+	}
+	policy := strings.ReplaceAll(strings.ReplaceAll(filePolicyFixture, "200M", "2000000000"), "400M", "4000000000")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "clamd.conf"), []byte(policy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileScannerPolicyLimit(filepath.Join(filepath.Dir(path), "clamd.conf"), files.MaxExportBytes); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err = loadFileRuntime(path, &store.Postgres{DB: &sql.DB{}})
+	if err != nil || runtime.exports == nil {
+		t.Fatalf("explicit export configuration=%v", err)
+	}
+	runtime.Close()
 }
 func writeFileDeployment(t *testing.T, path string, config fileDeployment) {
 	t.Helper()

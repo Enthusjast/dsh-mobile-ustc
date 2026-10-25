@@ -17,7 +17,7 @@ type fileRegistrationRequest struct {
 }
 
 func (api *API) fileDelivery(ctx context.Context, status *files.Status) error {
-	if api.fileHandoffs == nil {
+	if api.fileHandoffs == nil || status.Direction != "to_host" {
 		return nil
 	}
 	bound, err := api.fileHandoffs.MessageReference(ctx, status.ID)

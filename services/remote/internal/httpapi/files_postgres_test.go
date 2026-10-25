@@ -86,6 +86,7 @@ func (caller *fileHTTPCaller) call(token, method, path string, body any) (int, j
 }
 
 type fileHTTPFixture struct {
+	exports                                *files.Exports
 	ctx                                    context.Context
 	database                               *sql.DB
 	service                                *files.Service
@@ -158,14 +159,19 @@ func newFileHTTPFixture(t *testing.T) *fileHTTPFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"host-client"}, Files: service, FileHandoffs: handoffs})
+	exports, err := files.NewExports(repository, storage, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(exports.Close)
+	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"host-client"}, Files: service, FileHandoffs: handoffs, FileExports: exports})
 	token := func(client, jkt string) string {
 		now := time.Now()
 		return approvalSign(t, issuer, jose.ES256, "file-issuer", "at+jwt", map[string]any{"iss": "https://id.example.edu", "sub": "file-owner", "aud": "urn:dsh-files", "client_id": client, "jti": "file-access-" + client + jkt, "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "scope": "remote.access", "cnf": map[string]any{"jkt": jkt}}, nil)
 	}
 	caller := &fileHTTPCaller{t: t, ctx: ctx, client: server.Client(), base: server.URL, key: proof, jwk: proofJWK}
 	second := &fileHTTPCaller{t: t, ctx: ctx, client: server.Client(), base: server.URL, key: secondProof, jwk: secondJWK}
-	return &fileHTTPFixture{ctx: ctx, database: database, service: service, peer: peer, objects: objects, server: server, caller: caller, second: second, token: token("mobile", proofJKT), secondToken: token("mobile", secondJKT), hostToken: token("host-client", proofJKT), session: session, scannerAddress: scannerAddress, jwksURL: keys.URL}
+	return &fileHTTPFixture{ctx: ctx, database: database, service: service, exports: exports, peer: peer, objects: objects, server: server, caller: caller, second: second, token: token("mobile", proofJKT), secondToken: token("mobile", secondJKT), hostToken: token("host-client", proofJKT), session: session, scannerAddress: scannerAddress, jwksURL: keys.URL}
 }
 func (fixture *fileHTTPFixture) register(t *testing.T, data []byte) (files.UploadPrepared, map[string]any) {
 	t.Helper()

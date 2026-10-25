@@ -72,6 +72,7 @@ type API struct {
 	realtime     *relay.Server
 	files        *files.Service
 	fileHandoffs *files.Handoffs
+	fileExports  *files.Exports
 }
 
 type Handler struct {
@@ -102,6 +103,7 @@ type Config struct {
 	Approvals     *relay.ApprovalConfig
 	Files         *files.Service
 	FileHandoffs  *files.Handoffs
+	FileExports   *files.Exports
 }
 
 type deviceRequest struct {
@@ -182,6 +184,11 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 		mux.Handle("GET /v1/files/{id}", api.protected(http.HandlerFunc(api.fileStatus)))
 		mux.Handle("POST /v1/files/{id}/upload-url", api.protected(http.HandlerFunc(api.fileUploadURL)))
 		mux.Handle("POST /v1/files/{id}/commit", api.protected(http.HandlerFunc(api.commitFile)))
+		if configs[0].FileExports != nil {
+			api.fileExports = configs[0].FileExports
+			mux.Handle("GET /v1/file-exports/{id}", api.protected(http.HandlerFunc(api.exportStatus)))
+			mux.Handle("GET /v1/files/{id}/content", api.protected(http.HandlerFunc(api.exportContent)))
+		}
 		if configs[0].FileHandoffs != nil {
 			api.fileHandoffs = configs[0].FileHandoffs
 			realtime.EnableFiles(api.fileHandoffs)

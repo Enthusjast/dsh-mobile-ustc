@@ -127,7 +127,7 @@ func bindMessageFiles(ctx context.Context, tx *sql.Tx, ticket TicketRedemption, 
 		if err != nil {
 			return files.ErrUnavailable
 		}
-		if record.RuntimeID != host.RuntimeID || record.SessionID != status.SessionID || record.UploaderID != ticket.UserID || record.DeviceID != ticket.DeviceID || record.KeyVersion != ticket.DeviceKeyVersion || record.ProofKeyJKT != ticket.ProofKeyThumbprint || record.GrantVersion != ticket.GrantVersion {
+		if record.Direction != "to_host" || record.RuntimeID != host.RuntimeID || record.SessionID != status.SessionID || record.UploaderID != ticket.UserID || record.DeviceID != ticket.DeviceID || record.KeyVersion != ticket.DeviceKeyVersion || record.ProofKeyJKT != ticket.ProofKeyThumbprint || record.GrantVersion != ticket.GrantVersion {
 			return files.ErrAccess
 		}
 		var staged string

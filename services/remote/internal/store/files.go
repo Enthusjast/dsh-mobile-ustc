@@ -44,6 +44,10 @@ func databaseTime(ctx context.Context, transaction *sql.Tx) (time.Time, error) {
 }
 
 func authorizeFile(ctx context.Context, transaction *sql.Tx, actor files.Actor, runtimeID, sessionID string, mutate bool) (fileAuthority, error) {
+	return authorizeFileAction(ctx, transaction, actor, runtimeID, sessionID, "file.upload", mutate)
+}
+
+func authorizeFileAction(ctx context.Context, transaction *sql.Tx, actor files.Actor, runtimeID, sessionID, action string, unarchived bool) (fileAuthority, error) {
 	if actor.Issuer == "" || actor.Subject == "" || !grantUUIDPattern.MatchString(actor.DeviceID) || !fileProofKeyPattern.MatchString(actor.ProofKeyJKT) ||
 		!grantUUIDPattern.MatchString(runtimeID) || !grantUUIDPattern.MatchString(sessionID) {
 		return fileAuthority{}, files.ErrAccess
@@ -79,8 +83,8 @@ func authorizeFile(ctx context.Context, transaction *sql.Tx, actor files.Actor, 
 	if err != nil {
 		return authority, err
 	}
-	if role != "owner" && role != "operator" || !slices.Contains(scope.Actions, "file.upload") || !scopeIncludesSession(scope, sessionID, workspace) ||
-		authority.grantExpires.Valid && !authority.grantExpires.Time.After(now) || mutate && authority.sessionState == "archived" {
+	if role != "owner" && role != "operator" || !slices.Contains(scope.Actions, action) || action == "file.download" && !slices.Contains(scope.Actions, "session.read") || !scopeIncludesSession(scope, sessionID, workspace) ||
+		authority.grantExpires.Valid && !authority.grantExpires.Time.After(now) || unarchived && authority.sessionState == "archived" {
 		return authority, files.ErrAccess
 	}
 	return authority, nil
@@ -88,7 +92,7 @@ func authorizeFile(ctx context.Context, transaction *sql.Tx, actor files.Actor, 
 
 const fileColumns = `f.id::text,t.org_id::text,t.runtime_id::text,f.session_id::text,f.uploader_id::text,t.uploader_device_id::text,t.proof_key_jkt,
  t.device_key_version,t.grant_version,t.request_id::text,t.request_sha256,f.name,f.sha256,f.state,coalesce(t.error_code,''),f.size_bytes,
- t.quarantine_attempt_id::text,coalesce(t.committed_attempt_id::text,''),f.created_at,t.upload_expires_at,f.expires_at,t.retain_until`
+ t.quarantine_attempt_id::text,coalesce(t.committed_attempt_id::text,''),f.created_at,t.upload_expires_at,f.expires_at,t.retain_until,f.direction`
 
 type fileScanner interface{ Scan(...any) error }
 
@@ -96,7 +100,7 @@ func scanFile(row fileScanner) (files.Record, error) {
 	var record files.Record
 	err := row.Scan(&record.ID, &record.OrganizationID, &record.RuntimeID, &record.SessionID, &record.UploaderID, &record.DeviceID, &record.ProofKeyJKT,
 		&record.KeyVersion, &record.GrantVersion, &record.RequestID, &record.RequestSHA256, &record.Name, &record.SHA256, &record.State, &record.ErrorCode, &record.SizeBytes,
-		&record.QuarantineAttempt, &record.CommittedAttempt, &record.CreatedAt, &record.UploadExpiresAt, &record.ExpiresAt, &record.RetainUntil)
+		&record.QuarantineAttempt, &record.CommittedAttempt, &record.CreatedAt, &record.UploadExpiresAt, &record.ExpiresAt, &record.RetainUntil, &record.Direction)
 	return record, err
 }
 
@@ -180,7 +184,7 @@ func (repository *FileStore) RegisterUpload(ctx context.Context, actor files.Act
 	}
 	existing, err := scanFile(transaction.QueryRowContext(ctx, `select `+fileColumns+` from files f join file_transfers t on t.file_id=f.id where t.uploader_device_id=$1 and t.request_id=$2`, actor.DeviceID, input.RequestID))
 	if err == nil {
-		if existing.UploaderID != authority.user || existing.RuntimeID != input.RuntimeID || existing.SessionID != input.SessionID || existing.RequestSHA256 != digest {
+		if existing.Direction != "to_host" || existing.UploaderID != authority.user || existing.RuntimeID != input.RuntimeID || existing.SessionID != input.SessionID || existing.RequestSHA256 != digest {
 			return files.Record{}, files.ErrConflict
 		}
 		if err := transaction.Commit(); err != nil {
@@ -206,7 +210,7 @@ func (repository *FileStore) RegisterUpload(ctx context.Context, actor files.Act
 	}
 	record := files.Record{ID: id, OrganizationID: authority.org, RuntimeID: input.RuntimeID, SessionID: input.SessionID, UploaderID: authority.user,
 		DeviceID: actor.DeviceID, ProofKeyJKT: actor.ProofKeyJKT, KeyVersion: authority.keyVersion, GrantVersion: authority.grantVersion,
-		RequestID: input.RequestID, RequestSHA256: digest, Name: input.Name, SizeBytes: input.SizeBytes, SHA256: input.SHA256, State: "uploading", QuarantineAttempt: attempt,
+		RequestID: input.RequestID, RequestSHA256: digest, Name: input.Name, SizeBytes: input.SizeBytes, SHA256: input.SHA256, Direction: "to_host", State: "uploading", QuarantineAttempt: attempt,
 		CreatedAt: now, UploadExpiresAt: now.Add(repository.limits.UploadURLTTL), ExpiresAt: now.Add(repository.limits.AbandonAfter), RetainUntil: now.Add(repository.limits.RetainFor)}
 	key, err := record.SourceKey()
 	if err != nil {
@@ -259,7 +263,11 @@ func (repository *FileStore) Status(ctx context.Context, actor files.Actor, id s
 	if err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	authority, err := authorizeFile(ctx, transaction, actor, record.RuntimeID, record.SessionID, false)
+	action := "file.upload"
+	if record.Direction == "from_host" {
+		action = "file.download"
+	}
+	authority, err := authorizeFileAction(ctx, transaction, actor, record.RuntimeID, record.SessionID, action, false)
 	if err != nil {
 		return files.Record{}, err
 	}
@@ -302,6 +310,9 @@ func (repository *FileStore) uploadOperation(ctx context.Context, actor files.Ac
 	}
 	if err != nil {
 		return files.Record{}, files.ErrUnavailable
+	}
+	if record.Direction != "to_host" {
+		return files.Record{}, files.ErrAccess
 	}
 	authority, err := authorizeFile(ctx, transaction, actor, record.RuntimeID, record.SessionID, record.State == "uploading")
 	if err != nil {

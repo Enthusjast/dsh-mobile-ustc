@@ -41,3 +41,18 @@ test('file HTTP OpenAPI accepts public goldens and rejects authority/path smuggl
   }
   for (const path of ['/v1/runtimes/{id}/sessions/{session_id}/files', '/v1/files/{id}', '/v1/files/{id}/upload-url', '/v1/files/{id}/commit']) assert.ok(api.paths[path])
 })
+
+test('export status and downloads retain direction-specific bounds without exposing upload authority', async () => {
+  const exported = await load('export-clean')
+  assert.equal(status(exported), true, ajv.errorsText(status.errors))
+  assert.equal(status({ ...exported, data: { file: { ...exported.data.file, size_bytes: 2_000_000_000 } } }), true)
+  assert.equal(status({ ...exported, data: { file: { ...exported.data.file, size_bytes: 2_000_000_001 } } }), false)
+  assert.equal(status({ ...exported, data: { file: { ...exported.data.file, direction: 'to_host' } } }), false)
+  assert.equal(status({ ...exported, data: { file: { ...exported.data.file, delivery: { state: 'waiting' } } } }), false)
+  const capability = await load('prepared')
+  assert.equal(prepared({ ...capability, data: { ...capability.data, file: exported.data.file } }), false)
+  for (const field of ['source_id', 'runtime_epoch', 'connection_id', 'object_key']) {
+    assert.equal(status({ ...exported, data: { file: { ...exported.data.file, [field]: exported.data.file.file_id } } }), false)
+  }
+  for (const path of ['/v1/file-exports/{id}', '/v1/files/{id}/content']) assert.ok(api.paths[path])
+})
