@@ -235,6 +235,25 @@ export class DshClient {
     return { native_accepted: true, checkpoint }
   }
 
+  /** Inspect native request evidence and flush its existing state; never admit a prompt. */
+  async reconcilePrompt(id: SessionId, requestId: string, signal: AbortSignal) {
+    signal.throwIfAborted()
+    const resolved = await this.controller.resolveAgent(id)
+    signal.throwIfAborted()
+    if (!('agent' in resolved)) throw new ProbeError('command.outcome_unknown')
+    const agent = resolved.agent
+    if (this.ctx.agents.get(id) !== agent) throw new ProbeError('command.outcome_unknown')
+    const rpcId = `m0:${requestId}`
+    const matches = (source: { kind: string }) => source.kind === 'user' && 'rpcId' in source && source.rpcId === rpcId
+    const known = agent.inbox.nextTurn.some(message => matches(message.source)) || agent.inbox.nextStep.some(message => matches(message.source))
+      || agent.session.snapshotEvents().some(event => event.type === 'user/message' && matches(event.data.source))
+    if (!known) throw new ProbeError('command.outcome_unknown')
+    const checkpoint = await this.checkpoint(id)
+    signal.throwIfAborted()
+    if (this.ctx.agents.get(id) !== agent) throw new ProbeError('command.outcome_unknown')
+    return { native_accepted: true, checkpoint }
+  }
+
   cancel(id: SessionId) { return this.controller.cancel({ sessionId: id }) }
 
   async uploadFile(sessionId: string, manifest: FileManifest, source: AsyncIterable<Uint8Array>, signal: AbortSignal) {

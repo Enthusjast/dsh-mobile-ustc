@@ -24,6 +24,7 @@ export interface JournalAdmission {
 }
 
 export interface CommandJournal {
+  lookup(command: Command, owner: CommandOwner): JournalAdmission | undefined
   admit(command: Command, owner: CommandOwner): JournalAdmission
   start(requestId: string, owner: CommandOwner): void
   complete(requestId: string, owner: CommandOwner, state: 'agent_queued' | 'settled', result: unknown): void
@@ -332,27 +333,32 @@ export class PersistentCommandJournal implements CommandJournal {
     return this.approvalLog
   }
 
+  lookup(command: Command, owner: CommandOwner): JournalAdmission | undefined {
+    validateOwner(owner)
+    const digest = commandDigest(command)
+    const existing = this.database.prepare(`
+      SELECT user_id, payload_sha256, payload_nonce, payload_ciphertext, payload_tag,
+             result_nonce, result_ciphertext, result_tag, state, error_code
+      FROM commands WHERE runtime_id = ? AND device_id = ? AND request_id = ?
+    `).get(this.runtimeId, owner.deviceId, command.request_id) as JournalRow | undefined
+    if (existing === undefined) return undefined
+    if (existing.user_id !== owner.userId) throw new ProbeError('access.denied')
+    if (existing.payload_sha256 !== digest) throw new ProbeError('command.request_conflict')
+    if (!isCommandState(existing.state)) throw new ProbeError('journal.integrity_failed')
+    const encrypted = rowCiphertext(existing, 'result')
+    const result = encrypted === undefined ? undefined : decrypt<unknown>(this.key, this.runtimeId, owner, command.request_id, 'result', digest, encrypted)
+    return { inserted: false, state: existing.state, digest, result, ...(existing.error_code === null ? {} : { errorCode: existing.error_code }) }
+  }
+
   admit(command: Command, owner: CommandOwner): JournalAdmission {
     validateOwner(owner)
     if (Buffer.byteLength(JSON.stringify(canonicalValue(command))) > MAX_COMMAND_BYTES) throw new ProbeError('protocol.frame_too_large')
     const digest = commandDigest(command)
     let admission: JournalAdmission | undefined
     this.transaction(() => {
-      const existing = this.database.prepare(`
-        SELECT user_id, payload_sha256, payload_nonce, payload_ciphertext, payload_tag,
-               result_nonce, result_ciphertext, result_tag, state, error_code
-        FROM commands WHERE runtime_id = ? AND device_id = ? AND request_id = ?
-      `).get(this.runtimeId, owner.deviceId, command.request_id) as JournalRow | undefined
+      const existing = this.lookup(command, owner)
       if (existing !== undefined) {
-        if (existing.user_id !== owner.userId) throw new ProbeError('access.denied')
-        if (existing.payload_sha256 !== digest) throw new ProbeError('command.request_conflict')
-        if (!isCommandState(existing.state)) throw new ProbeError('journal.integrity_failed')
-        const encryptedResult = rowCiphertext(existing, 'result')
-        const result = encryptedResult === undefined ? undefined : decrypt<unknown>(this.key, this.runtimeId, owner, command.request_id, 'result', digest, encryptedResult)
-        admission = {
-          inserted: false, state: existing.state, digest, result,
-          ...(existing.error_code === null ? {} : { errorCode: existing.error_code }),
-        }
+        admission = existing
         return
       }
       const count = this.database.prepare('SELECT COUNT(*) AS count FROM commands WHERE runtime_id = ?').get(this.runtimeId)?.count
@@ -475,6 +481,14 @@ export class PersistentCommandJournal implements CommandJournal {
 export class MemoryCommandJournal implements CommandJournal {
   private readonly rows = new Map<string, { digest: string; state: CommandState; result?: unknown; errorCode?: string }>()
   constructor(private readonly runtimeId: string) {}
+
+  lookup(command: Command, owner: CommandOwner): JournalAdmission | undefined {
+    validateOwner(owner)
+    const existing = this.rows.get(`${this.runtimeId}\0${owner.userId}\0${owner.deviceId}\0${command.request_id}`)
+    if (existing === undefined) return undefined
+    if (existing.digest !== commandDigest(command)) throw new ProbeError('command.request_conflict')
+    return { inserted: false, ...existing }
+  }
 
   admit(command: Command, owner: CommandOwner): JournalAdmission {
     validateOwner(owner)

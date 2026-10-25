@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import type { DshClient } from './dsh-client.js'
+import type { DshClient, DshPromptPart } from './dsh-client.js'
 import type { InteractionRouter } from './interaction-router.js'
 import { commandDigest, MemoryCommandJournal, type CommandJournal, type CommandOwner, type CommandState } from './command-journal.js'
 import { type Command, type Frame, ProbeError } from './protocol.js'
 import { SessionSync } from './session-sync.js'
 import { NativeFileRegistry } from './file-registry.js'
-import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload'
 
 const localCommandOwner: CommandOwner = { userId: 'local', deviceId: 'local' }
 const definiteRejections = new Set([
@@ -35,6 +34,15 @@ export class ProbeRuntime {
   }
 
   async dispatch(command: Command, signal: AbortSignal, owner: CommandOwner = localCommandOwner, observe?: CommandStateObserver): Promise<Frame> {
+    return this.execute(command, signal, owner, observe, false)
+  }
+
+  async reconcileFileMessage(command: Extract<Command, { type: 'message.submit' }>, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<Frame> {
+    if (command.type !== 'message.submit' || !('content' in command.payload) || !command.payload.content.some(part => part.type === 'file')) throw new ProbeError('protocol.invalid')
+    return this.execute(command, signal, owner, observe, true)
+  }
+
+  private async execute(command: Command, signal: AbortSignal, owner: CommandOwner, observe: CommandStateObserver | undefined, reconciliation: boolean): Promise<Frame> {
     this.check(command)
     signal.throwIfAborted()
     const report = async (state: CommandState, result?: unknown) => {
@@ -78,23 +86,22 @@ export class ProbeRuntime {
         }
         case 'message.submit': {
           const id = await this.client.resolve(command.session_id, signal)
+          const nativeRequestId = owner.deviceId === 'local' ? command.request_id : `${owner.deviceId}:${command.request_id}`
+          if (reconciliation) return this.client.reconcilePrompt(id, nativeRequestId, signal)
           const wire = 'text' in command.payload ? command.payload.text : command.payload.content
           const files = new Set<string>()
-          const content = typeof wire === 'string' ? wire : wire.map(part => {
-            if (part.type === 'text') return part
+          let missing = false
+          const content = typeof wire === 'string' ? wire : wire.flatMap((part): DshPromptPart[] => {
+            if (part.type === 'text') return [part]
             files.add(part.file_id)
-            try { return this.files.resolve(part.file_id, command.session_id, owner) }
+            try { return [this.files.resolve(part.file_id, command.session_id, owner)] }
             catch (error) {
               if (!recoveringDispatch || !(error instanceof ProbeError) || error.code !== 'file.staging_required') throw error
-              // The native controller deduplicates a known request before it
-              // resolves receipts. An unregistered placeholder can reconcile
-              // a persisted original; it cannot admit a new file message.
-              return { type: 'file' as const, receiptId: randomUUID() as FileUploadReceiptId }
+              missing = true
+              return []
             }
           })
-          const nativeRequestId = owner.deviceId === 'local'
-            ? command.request_id
-            : `${owner.deviceId}:${command.request_id}`
+          if (missing) return this.client.reconcilePrompt(id, nativeRequestId, signal)
           try { return await this.client.prompt(id, nativeRequestId, command.payload.mode, content, signal) }
           finally { for (const file of files) this.files.drop(file) }
         }
@@ -108,10 +115,21 @@ export class ProbeRuntime {
       const flightKey = `${owner.userId}\0${owner.deviceId}\0${command.request_id}`
       const existing = this.commands.get(flightKey)
       if (existing === undefined && this.commands.size >= 2048) throw new ProbeError('rate.limited')
-      const admission = this.journal.admit(command, owner)
+      const admission = reconciliation ? this.journal.lookup(command, owner) : this.journal.admit(command, owner)
+      if (!admission) { await report('outcome_unknown'); throw new ProbeError('command.outcome_unknown') }
       if (existing) {
         if (existing.digest !== admission.digest) throw new ProbeError('command.request_conflict')
-        payload = await existing.result
+        try { payload = await existing.result }
+        finally {
+          if (reconciliation) {
+            const latest = this.journal.lookup(command, owner)
+            if (latest?.state === 'agent_queued' || latest?.state === 'settled') { await report('host_accepted'); await report(latest.state, latest.result) }
+            else {
+              if (latest?.state === 'host_accepted' || latest?.state === 'dispatching') this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
+              await report(latest?.state === 'rejected' ? 'rejected' : 'outcome_unknown')
+            }
+          }
+        }
       } else if (admission.state === 'rejected') {
         await report(admission.state)
         throw new ProbeError(admission.errorCode ?? 'command.rejected')
@@ -131,7 +149,7 @@ export class ProbeRuntime {
         throw new ProbeError('command.outcome_unknown')
       } else {
         const admittedState = admission.state === 'dispatching' ? 'host_accepted' : admission.state
-        const recoveringDispatch = admission.state === 'dispatching'
+        const recoveringDispatch = admission.state === 'dispatching' || reconciliation
         const key = 'session_id' in command ? command.session_id : command.type
         const result = (this.serial.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
           await report(admittedState)

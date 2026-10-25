@@ -28,6 +28,8 @@ test('SQLite command journal encrypts payloads and survives restart without repl
   const command = submit('this text must not appear in the database')
   let journal = await PersistentCommandJournal.open(path, runtimeId)
   try {
+    assert.equal(journal.lookup(command, owner), undefined)
+    assert.equal(journal.get(command.request_id, owner), undefined)
     const admitted = journal.admit(command, owner)
     assert.equal(admitted.inserted, true)
     assert.equal(admitted.state, 'host_accepted')
@@ -40,6 +42,7 @@ test('SQLite command journal encrypts payloads and survives restart without repl
 
     const retry = submit('this text must not appear in the database', command.request_id, randomUUID())
     const duplicate = journal.admit(retry, owner)
+    assert.deepEqual(journal.lookup(retry, owner), duplicate)
     assert.equal(duplicate.inserted, false)
     assert.equal(duplicate.state, 'agent_queued')
     assert.deepEqual(duplicate.result, { native_accepted: true, checkpoint: { state: 'persisted', through_seq: 5 } })

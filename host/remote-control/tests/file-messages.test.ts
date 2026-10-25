@@ -3,7 +3,7 @@ import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import { host } from './harness.js'
 import { DshClient } from '../src/dsh-client.js'
 import { MemoryCommandJournal, PersistentCommandJournal, type CommandJournal, type CommandState } from '../src/command-journal.js'
@@ -98,6 +98,7 @@ test('persistent dispatch recovery reconciles a native file message after losing
   f.runtime.close(); f.journal.close()
   f.replace(await PersistentCommandJournal.open(path, f.h.runtimeId))
   const retried = { ...original, runtime_epoch: f.runtime.epoch }
+  f.client.prompt = async () => { throw new Error('recovery must not call native prompt admission') }
   const states: CommandState[] = []
   const result = await f.runtime.dispatch(retried, f.life.signal, f.owner, state => { states.push(state) })
   assert.deepEqual(states, ['host_accepted', 'dispatching', 'agent_queued'])
@@ -108,7 +109,7 @@ test('persistent dispatch recovery reconciles a native file message after losing
   if (part.type === 'file') assert.equal(onDisk.includes(Buffer.from(part.receiptId)), false)
 })
 
-test('an ambiguous file dispatch without native evidence stays unknown and cannot enqueue with a placeholder receipt', async t => {
+test('an ambiguous file dispatch without native evidence stays unknown and cannot enqueue during reconciliation', async t => {
   const f = await fixture(t), file = await f.stage()
   const original = f.command([file.file_id])
   f.journal.admit(original, f.owner); f.journal.start(original.request_id, f.owner)
@@ -130,4 +131,128 @@ test('local file references reject duplicates, native receipts and paths', () =>
   for (const content of [[file, file], [{ ...file, receiptId: randomUUID() }], [{ ...file, path: '/private/file' }]]) {
     assert.throws(() => parseCommand({ ...frame, payload: { mode: 'queue', content } }), /protocol.invalid/)
   }
+})
+
+test('reconciliation of an unseen file command never allocates a journal entry or consumes a valid receipt', async t => {
+  const f = await fixture(t), file = await f.stage()
+  const command = f.command([file.file_id])
+  if (command.type !== 'message.submit') assert.fail('expected message')
+  const states: CommandState[] = []
+  await assert.rejects(f.runtime.reconcileFileMessage(command, f.life.signal, f.owner, state => { states.push(state) }), /command.outcome_unknown/)
+  assert.deepEqual(states, ['outcome_unknown'])
+  assert.equal(f.journal.lookup(command, f.owner), undefined)
+  assert.equal(f.runtime.files.available(file.file_id), true)
+  assert.equal((await f.human()).length, 0)
+})
+
+test('reconciliation cannot turn a pre-dispatch file intent into a new native prompt even with valid staged receipts', async t => {
+  const f = await fixture(t), file = await f.stage()
+  const command = f.command([file.file_id])
+  if (command.type !== 'message.submit') assert.fail('expected message')
+  f.journal.admit(command, f.owner)
+  f.client.prompt = async () => { assert.fail('reconciliation called prompt admission') }
+  await assert.rejects(f.runtime.reconcileFileMessage(command, f.life.signal, f.owner), /command.outcome_unknown/)
+  assert.equal(f.journal.lookup(command, f.owner)?.state, 'outcome_unknown')
+  assert.equal((await f.human()).length, 0)
+})
+
+test('reconciliation returns a durable original without a staged receipt and enforces the original digest', async t => {
+  const f = await fixture(t), file = await f.stage()
+  const command = f.command([file.file_id])
+  if (command.type !== 'message.submit') assert.fail('expected message')
+  const result = await f.runtime.dispatch(command, f.life.signal, f.owner)
+  f.client.prompt = async () => { assert.fail('durable retry called native prompt') }
+  assert.deepEqual(await f.runtime.reconcileFileMessage(command, f.life.signal, f.owner), result)
+  const altered = f.command([randomUUID()], command.request_id)
+  if (altered.type !== 'message.submit') assert.fail('expected message')
+  await assert.rejects(f.runtime.reconcileFileMessage(altered, f.life.signal, f.owner), /command.request_conflict/)
+  assert.equal((await f.human()).length, 1)
+})
+
+test('reconciliation joins an in-flight file admission and reports its durable result without submitting again', async t => {
+  const f = await fixture(t), file = await f.stage()
+  const command = f.command([file.file_id])
+  if (command.type !== 'message.submit') assert.fail('expected message')
+  const checkpoint = f.client.checkpoint.bind(f.client)
+  let started!: () => void, release!: () => void
+  const reached = new Promise<void>(resolve => { started = resolve })
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  f.client.checkpoint = async id => { started(); await barrier; return checkpoint(id) }
+  const first = f.runtime.dispatch(command, f.life.signal, f.owner)
+  await reached
+  const states: CommandState[] = []
+  const retry = f.runtime.reconcileFileMessage(command, f.life.signal, f.owner, state => { states.push(state) })
+  release()
+  assert.deepEqual(await retry, await first)
+  assert.deepEqual(states, ['host_accepted', 'agent_queued'])
+  assert.equal((await f.human()).length, 1)
+})
+
+test('a fresh DSH Loader reconciles the original persisted file message without calling prompt admission', async t => {
+  const first = await host({ probe: false, retainDirectory: true })
+  let closed = false
+  let next: Awaited<ReturnType<typeof host>> | undefined
+  let runtime: ProbeRuntime | undefined
+  let journal: PersistentCommandJournal | undefined
+  t.after(async () => {
+    runtime?.close(); journal?.close()
+    if (next) await next.close()
+    if (!closed) await first.close()
+    await rm(first.directory, { recursive: true, force: true })
+  })
+  const client = new DshClient(first.ctx, first.runtimeId, [{ id: 'fixture', cwd: first.cwd }], ['fixture'])
+  const created = await client.create('fixture', 'fixture')
+  const signal = new AbortController().signal
+  const native = await client.resolve(created.session_id, signal)
+  const bytes = Buffer.from('persisted file recovery')
+  const uploaded = await client.uploadFile(created.session_id, { name: 'recover.txt', size_bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }, (async function* () { yield bytes })(), signal)
+  const owner = { userId: randomUUID(), deviceId: randomUUID() }
+  const command = parseCommand({ v: 0, type: 'message.submit', request_id: randomUUID(), runtime_epoch: randomUUID(), session_id: created.session_id,
+    payload: { mode: 'queue', content: [{ type: 'file', file_id: randomUUID() }] } })
+  if (command.type !== 'message.submit') assert.fail('expected file message')
+  const path = join(first.directory, 'restore.sqlite')
+  journal = await PersistentCommandJournal.open(path, first.runtimeId)
+  journal.admit(command, owner); journal.start(command.request_id, owner)
+  await client.prompt(native, `${owner.deviceId}:${command.request_id}`, 'queue', [{ type: 'file', receiptId: uploaded.receiptId }], signal)
+  await first.ctx.agents.get(native)!.whenIdle()
+  await client.checkpoint(native)
+  journal.close(); await first.close(); closed = true
+  next = await host({ probe: false, directory: first.directory, retainDirectory: true, runtimeId: first.runtimeId })
+  const restored = new DshClient(next.ctx, next.runtimeId, [{ id: 'fixture', cwd: next.cwd }], ['fixture'])
+  journal = await PersistentCommandJournal.open(path, next.runtimeId)
+  runtime = new ProbeRuntime(restored, new InteractionRouter(next.ctx, next.runtimeId, () => true, [], 1000), journal)
+  next.ctx.sessionController.prompt = async () => { assert.fail('read-only recovery called native prompt admission') }
+  const retry = { ...command, runtime_epoch: runtime.epoch }
+  await runtime.reconcileFileMessage(retry, signal, owner)
+  assert.equal(journal.lookup(retry, owner)?.state, 'agent_queued')
+  const agent = next.ctx.agents.get(native)
+  assert.ok(agent)
+  await agent.whenIdle()
+  assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'user/message').filter(event => event.data.source.kind === 'user').length, 1)
+  assert.equal(next.errors.length, 0)
+})
+
+test('reconciliation recognizes a file request still in the durable native inbox without adding another queue item', async t => {
+  const f = await fixture(t)
+  const native = await f.client.resolve(f.session, f.life.signal)
+  const held = f.h.model.holdNext()
+  try {
+    await f.client.prompt(native, randomUUID(), 'queue', 'Hold the current model turn.', f.life.signal)
+    await held.started
+    const file = await f.stage()
+    const command = f.command([file.file_id])
+    if (command.type !== 'message.submit') assert.fail('expected message')
+    const part = f.runtime.files.resolve(file.file_id, f.session, f.owner)
+    f.journal.admit(command, f.owner); f.journal.start(command.request_id, f.owner)
+    await f.client.prompt(native, `${f.owner.deviceId}:${command.request_id}`, 'queue', [part], f.life.signal)
+    const agent = f.h.ctx.agents.get(native)!
+    const rpcId = `m0:${f.owner.deviceId}:${command.request_id}`
+    assert.equal(agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'user'
+      && 'rpcId' in event.data.source && event.data.source.rpcId === rpcId), false)
+    const before = agent.inbox.nextTurn.length + agent.inbox.nextStep.length
+    f.client.prompt = async () => { assert.fail('inbox reconciliation called prompt admission') }
+    await f.runtime.reconcileFileMessage(command, f.life.signal, f.owner)
+    assert.equal(f.journal.lookup(command, f.owner)?.state, 'agent_queued')
+    assert.equal(agent.inbox.nextTurn.length + agent.inbox.nextStep.length, before)
+  } finally { held.release() }
 })
