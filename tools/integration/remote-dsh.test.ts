@@ -325,6 +325,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     try { return await local('GET', '/m0/probe') } catch { return undefined }
   }, 'DSH readiness', 30_000)
   assert.equal(probe.payload.dsh_version, '0.2.1-rc.2')
+  await until(async () => query(`select count(*) from runtimes where id='${enrollment.runtime_id}' and epoch='${probe.runtime_epoch}' and connection_id is not null`) === '1' ? true : undefined,
+    'committed host attachment')
   const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {
     v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId === undefined ? {} : { session_id: sessionId }),
   })
