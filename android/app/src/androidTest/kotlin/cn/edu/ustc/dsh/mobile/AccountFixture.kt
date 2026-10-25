@@ -59,6 +59,18 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val commandWrites = AtomicInteger()
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var chatMode = false
+    @Volatile var fileMode = false
+    @Volatile var fileState = "scanning"
+    @Volatile var fileReady = false
+    private class FileEntry(val id: String, val requestId: String, val manifest: FileManifest, val createdAt: Long) {
+        @Volatile var uploaded = false
+        @Volatile var committed = false
+        @Volatile var messageId: String? = null
+    }
+    private val files = java.util.concurrent.ConcurrentHashMap<String, FileEntry>()
+    val fileRegistrations = AtomicInteger()
+    val filePuts = AtomicInteger()
+    val fileMessage = AtomicReference<CommandIntent?>()
     @Volatile var archiveMode = false
     @Volatile var archived = false
     val archiveWrites = AtomicInteger()
@@ -124,7 +136,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         (if(questionMode) listOf("question.answer") else emptyList())+
         (if(archiveMode) listOf("session.archive") else emptyList())+
         (if(approvalMode) listOf("approval.decide", "grant.manage") else emptyList())+
-        (if(creationMode) listOf("session.create") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
+        (if(creationMode) listOf("session.create") else emptyList()) + (if(fileMode) listOf("file.upload") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
     private val currentRelay = AtomicReference<WebSocket?>()
     @Volatile var relayProofReceived = false
     private var relayScope: RelayScope? = null
@@ -212,6 +224,16 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     }
     @Synchronized private fun respond(request: RecordedRequest): MockResponse {
         val path = request.requestUrl!!.encodedPath
+        if (path.startsWith("/quarantine/")) {
+            require(fileMode && request.method == "PUT")
+            require(listOf("Authorization", "DPoP", "Cookie").all { request.getHeader(it) == null })
+            val file = files[path.substringAfterLast('/')]!!
+            val bytes = request.body.readByteArray()
+            require(bytes.size.toLong() == file.manifest.sizeBytes && sha256(bytes) == file.manifest.sha256)
+            require(bytes.contentEquals(FixtureDocumentProvider.BYTES))
+            file.uploaded = true; filePuts.incrementAndGet()
+            return MockResponse().setResponseCode(200)
+        }
         if (path == "/issuer/.well-known/openid-configuration") return response(discovery())
         if (path == "/jwks") return response(jsonObject("keys" to JsonArray(listOf(JsonDocument.parse(issuerKey.toPublicJWK().toJSONString()).root))))
         if (path == "/token") {
@@ -392,6 +414,15 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 require((chatMode || creationMode) && frame.string("runtime_id") == runtimeId && (target==sessionId || target in createdSessions))
                                 val intent = cn.edu.ustc.dsh.command.CommandIntent.parse(frame)
                                 require(intent.kind.wire in subscribedScope.actions)
+                                if (intent.fileIds().isNotEmpty()) {
+                                    require(fileMode && fileReady && fileState == "clean")
+                                    intent.fileIds().forEach { id ->
+                                        val file = files[id]!!
+                                        require(file.committed && (file.messageId == null || file.messageId == intent.requestId))
+                                        file.messageId = intent.requestId
+                                    }
+                                    fileMessage.set(intent)
+                                }
                                 commandWrites.incrementAndGet()
                                 if (intent.kind == cn.edu.ustc.dsh.command.CommandKind.ARCHIVE) {
                                     require(archiveMode && target == sessionId && intent.epoch == epoch)
@@ -414,7 +445,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
                         val capabilities = payload.array("capabilities").map { (it as JsonString).value }
-                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.archive.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", FILE_MESSAGE_CAPABILITY, "session.archive.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
                         require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
                         relayProofReceived = true
                         if ("approval.signed.v1" in capabilities) approvalEndpoint.set(ApprovalEndpoint(connectionId, subscribedScope))
@@ -470,6 +501,28 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (fileMode && path == "/v1/runtimes/$runtimeId/sessions/$sessionId/files") {
+            require(request.method == "POST" && "file.upload" in directoryScope.actions)
+            val body = JsonDocument.parse(request.body.readByteArray()).root
+            body.exactKeys("request_id", "name", "size_bytes", "sha256")
+            val id = Contract.uuid(body.string("request_id"))
+            val manifest = FileManifest.parse(JsonObject(body.fields.filterKeys { it != "request_id" }))
+            val file = files.values.firstOrNull { it.requestId == id }?.also { require(it.manifest.same(manifest)) }
+                ?: FileEntry(UUID.randomUUID().toString(), id, manifest, System.currentTimeMillis()).also { files[it.id] = it; fileRegistrations.incrementAndGet() }
+            var reply = jsonObject("file" to fileStatus(file))
+            if (!file.committed) reply = reply.with("upload" to jsonObject("url" to "$origin/quarantine/${file.id}?fixture=public".json(), "method" to "PUT".json(),
+                "headers" to jsonObject("Content-Type" to "application/octet-stream".json(), "Content-Length" to manifest.sizeBytes.toString().json()),
+                "expires_at" to Contract.timestamp(System.currentTimeMillis() + 60_000).json()))
+            return resourceResponse(data(reply), 201)
+        }
+        if (fileMode && path.startsWith("/v1/files/")) {
+            val file = files[path.removePrefix("/v1/files/").substringBefore('/')]!!
+            if (path.endsWith("/commit")) {
+                require(request.method == "POST" && file.uploaded)
+                file.committed = true
+            } else require(request.method == "GET")
+            return resourceResponse(data(jsonObject("file" to fileStatus(file))))
+        }
         if (approvalMode && path == "/v1/approvals/${approvalBody.root.string("approval_id")}/decisions") {
             val body = JsonDocument.parse(request.body.readByteArray()).root; body.exactKeys("connection_id", "decision_jws")
             val endpoint = approvalEndpoint.get() ?: error("no current approval connection")
@@ -565,6 +618,19 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         if (bindingMode && (!bindingApproved || bindingConfirmedElsewhere)) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
         return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
             "access" to jsonObject("role" to (if (approvalMode) approvalRole else if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+    }
+
+    private fun fileStatus(file: FileEntry): JsonObject {
+        val state = if (file.committed) fileState else "uploading"
+        var status = file.manifest.json().with("file_id" to file.id.json(), "runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "direction" to "to_host".json(),
+            "state" to state.json(), "created_at" to Contract.timestamp(file.createdAt).json(), "upload_expires_at" to Contract.timestamp(file.createdAt + 300_000).json(),
+            "expires_at" to Contract.timestamp(file.createdAt + 600_000).json())
+        if (state == "clean") status = status.with("delivery" to when {
+            file.messageId != null -> jsonObject("state" to "bound".json(), "request_id" to file.messageId!!.json(), "command_state" to "agent_queued".json())
+            fileReady -> jsonObject("state" to "ready".json(), "expires_at" to Contract.timestamp(System.currentTimeMillis() + 4000).json())
+            else -> jsonObject("state" to "waiting".json())
+        })
+        return status
     }
 
     fun bindingDetails(): JsonObject = jsonObject("enrollment_id" to bindingId.json(), "request_id" to "99999999-9999-4999-8999-999999999999".json(), "organization_id" to organizationId.json(),

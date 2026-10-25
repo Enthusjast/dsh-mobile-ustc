@@ -70,5 +70,6 @@ dependencies {
     androidTestImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(libs.okhttp.tls)
     androidTestImplementation(libs.nimbus.jose)
+    androidTestImplementation(libs.room.runtime)
     debugImplementation(libs.compose.ui.test.manifest)
 }

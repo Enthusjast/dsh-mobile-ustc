@@ -31,4 +31,15 @@ class FileMessageTest {
             assertThrows(ProtocolException::class.java) { CommandIntent.parse(root.with("payload" to jsonObject("mode" to "queue".json(), "content" to JsonArray(content)))) }
         }
     }
+    @Test fun unboundFileRecoveryKeepsTheOriginalWithoutInventingAReceivedReceipt() {
+        val intent = CommandIntent.parse(golden("message-file-submit"))
+        val attempted = CommandEvolution.begin(CommandEvolution.created(intent, 1000), 1001)
+        val ready = CommandEvolution.rearmUnboundFiles(attempted, 2000)
+        assertNull(ready.remote); assertFalse(ready.everHostSaved); assertFalse(ready.everAgentQueued)
+        assertEquals(intent.digest, ready.intent.digest); assertEquals(intent.requestId, ready.intent.requestId)
+        assertEquals(2, CommandEvolution.begin(ready, 2001).attempts)
+        assertThrows(CommandDataException::class.java) { CommandEvolution.begin(ready, 7001) }
+        val text = CommandIntent.message(intent.requestId, intent.runtimeId, intent.sessionId!!, "queue", "text only")
+        assertThrows(CommandDataException::class.java) { CommandEvolution.rearmUnboundFiles(CommandEvolution.begin(CommandEvolution.created(text, 1000), 1001), 2000) }
+    }
 }

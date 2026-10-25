@@ -203,6 +203,11 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
     }
     fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
         SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
+    fun fileUploads(runtimeId: String, sessionId: String, workspace: String?, grant: RelayScope, journal: FileUploadJournal, owner: CoroutineScope): SessionUploads {
+        if (journal.owner.organizationId != config.organizationId || journal.owner.deploymentHash != config.fingerprint || mappedUserId != null && mappedUserId != journal.owner.userId) throw RemoteRequestException("auth.identity_mismatch")
+        grant.session(sessionId, workspace, setOf("file.upload"))
+        return SessionUploads(this, journal, runtimeId, sessionId, workspace, owner)
+    }
     fun sessionCreator(deviceId: String, runtimeId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope): SessionCreationFlow {
         Contract.uuid(deviceId); Contract.uuid(runtimeId)
         if(journal.owner.deviceId!=deviceId || journal.owner.organizationId!=config.organizationId || journal.owner.deploymentHash!=config.fingerprint || mappedUserId!=null && mappedUserId!=journal.owner.userId) throw RemoteRequestException("auth.identity_mismatch")

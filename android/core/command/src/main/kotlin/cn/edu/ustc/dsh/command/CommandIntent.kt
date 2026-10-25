@@ -148,13 +148,20 @@ class PendingCommand(val intent: CommandIntent, val delivery: CommandDelivery, v
 object CommandEvolution {
     fun created(intent: CommandIntent, now: Long) = PendingCommand(intent, CommandDelivery.PENDING, null, 0, 1, now, now, null, false, false, null)
     fun begin(record: PendingCommand, now: Long): PendingCommand {
-        if (record.delivery != CommandDelivery.PENDING || record.attempts > 0 && record.remote != RemoteCommandState.RECEIVED) throw CommandDataException("command.reconcile_required")
+        val fileProof = record.intent.kind == CommandKind.MESSAGE && record.intent.fileIds().isNotEmpty() && record.remote == null && !record.everHostSaved && !record.everAgentQueued &&
+            now >= record.updatedAt && now - record.updatedAt <= 5000
+        if (record.delivery != CommandDelivery.PENDING || record.attempts > 0 && record.remote != RemoteCommandState.RECEIVED && !fileProof) throw CommandDataException("command.reconcile_required")
         return copy(record, CommandDelivery.RECONCILE, attempts = record.attempts + 1, now = now, error = null)
     }
     fun rearm(record: PendingCommand, proof: CommandReceipt): PendingCommand {
         val current = receipt(record, proof)
         if (proof.state != RemoteCommandState.RECEIVED || current.remote != RemoteCommandState.RECEIVED || current.everHostSaved) throw CommandDataException("command.reconcile_required")
         return copy(current, CommandDelivery.PENDING, now = System.currentTimeMillis(), error = null)
+    }
+    /** Called only after fresh authenticated metadata proves every original file unbound and ready. */
+    fun rearmUnboundFiles(record: PendingCommand, now: Long): PendingCommand {
+        if (record.intent.kind != CommandKind.MESSAGE || record.intent.fileIds().isEmpty() || record.attempts == 0L || record.remote != null || record.everHostSaved || record.everAgentQueued || now < record.updatedAt) throw CommandDataException("command.reconcile_required")
+        return copy(record, CommandDelivery.PENDING, now = now, error = null)
     }
     fun uncertain(record: PendingCommand, code: String, now: Long): PendingCommand =
         if (record.delivery == CommandDelivery.PENDING || record.remote in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)) record
@@ -196,6 +203,7 @@ interface CommandJournal : AutoCloseable {
     suspend fun uncertain(id: String, code: String): PendingCommand?
     /** Explicit same-ID retry, only after a current-device status query still says received. */
     suspend fun rearm(id: String, proof: CommandReceipt): PendingCommand
+    suspend fun rearmUnboundFiles(id: String, now: Long = System.currentTimeMillis()): PendingCommand
     suspend fun discard(id: String)
     suspend fun revokeRuntime(runtime: String)
     suspend fun revokeSessionCommands(runtime: String)

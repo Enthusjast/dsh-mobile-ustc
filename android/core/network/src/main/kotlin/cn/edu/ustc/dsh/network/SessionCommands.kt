@@ -148,10 +148,17 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
                 if (known.intent.fileIds().isNotEmpty() && FILE_MESSAGE_CAPABILITY !in target.connection.identity.capabilities) throw CommandDataException("file.unsupported")
                 if (known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 if (known.attempts > 0) {
-                    val proof = api.commandStatus(event.id, journal.owner.deviceId)
+                    val proof = try { api.commandStatus(event.id, journal.owner.deviceId) }
+                    catch (error: RemoteRequestException) {
+                        if (known.intent.fileIds().isEmpty() || known.remote != null || known.everHostSaved || known.everAgentQueued) throw error
+                        val files = known.intent.fileIds().map { api.fileStatus(it) }
+                        if (files.any { it.runtimeId != runtime || it.sessionId != session || !it.readyForMessage() }) throw CommandDataException("command.reconcile_required")
+                        if (endpoint.get() !== target) throw RelayException("relay.disconnected")
+                        journal.rearmUnboundFiles(event.id)
+                        null
+                    }
                     if (endpoint.get() !== target) throw RelayException("relay.disconnected")
-                    journal.record(proof)
-                    journal.rearm(event.id, proof)
+                    if (proof != null) { journal.record(proof); journal.rearm(event.id, proof) }
                 }
                 if(known.intent.kind.question) (questionValidator.get() ?: throw CommandDataException("question.stale"))(known)
                 val record = journal.beginAttempt(event.id); attempted = true

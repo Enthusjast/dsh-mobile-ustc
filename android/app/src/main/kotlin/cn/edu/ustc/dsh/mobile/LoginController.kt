@@ -28,6 +28,8 @@ import javax.inject.Singleton
 enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, RECOVERING, RECOVERY_ERROR, REAUTHENTICATE, RENEWING, CLEARING, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, RECONCILING, REGISTRATION_UNKNOWN, READY }
 class BrowserLaunch(val id: Long, val uri: Uri)
 class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<*>, val title: String = "确认登记此设备", val subtitle: String = "将这部手机的独立密钥登记到学校账号")
+class DocumentPickLaunch(val id: String)
+class MessageDraft(val text: String, val mode: String, val runtimeId: String, val sessionId: String) { override fun toString() = "MessageDraft" }
 enum class ApprovalUiStage { IDLE, PREPARING, AUTHENTICATING, SENDING }
 data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String, val access: RuntimeDirectoryEntry? = null)
 data class HomeState(
@@ -38,6 +40,7 @@ data class HomeState(
     val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
+    val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composerRestore: MessageDraft? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
     val outbox: CommandOutboxState? = null, val commandError: String? = null, val submitting: Boolean = false, val composerRevision: Long = 0,
     val creation: SessionCreationState? = null,
@@ -90,6 +93,10 @@ class LoginController internal constructor(private val context: Context, private
     private var creationCollector: Job? = null
     private var commandJournal: SqlCommandJournal? = null
     private var commandCollector: Job? = null
+    private var uploads: SessionUploads? = null
+    private var uploadCollector: Job? = null
+    private class PendingDocument(val id: String, val generation: Long, val runtime: String, val session: String, val resume: String?, val draft: MessageDraft) { var result: Uri? = null }
+    private var pendingDocument: PendingDocument? = null
     private var commandJob: Job? = null
     private var questionScope: CoroutineScope?=null
     private var approvalCollector: Job? = null
@@ -542,6 +549,9 @@ class LoginController internal constructor(private val context: Context, private
     private fun retireNavigation(keepDesired: Boolean) {
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
+        uploadCollector?.cancel(); uploadCollector = null; uploads?.close(); uploads = null
+        if (!keepDesired || pendingDocument?.let { it.runtime != desired?.first || it.session != desired?.second } == true) { pendingDocument = null }
+        if (!keepDesired || mutable.value.composerRestore?.let { desired != (it.runtimeId to it.sessionId) } == true) mutable.value = mutable.value.copy(composerRestore = null)
         abortApprovalAuthentication(null)
         approvalCollector?.cancel(); approvalCollector = null; approvalActionJob?.cancel(); approvalActionJob = null
         questionScope?.cancel();questionScope=null
@@ -549,7 +559,7 @@ class LoginController internal constructor(private val context: Context, private
         approvalJournal?.close(); approvalJournal = null
         creationCollector?.cancel(); creationCollector=null; creationFlow?.close(); creationFlow=null
         commandJournal?.close(); commandJournal = null
-        mutable.value = mutable.value.copy(outbox = null, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE)
+        mutable.value = mutable.value.copy(outbox = null, uploads = null, documentPicker = if (pendingDocument == null) null else mutable.value.documentPicker, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE)
         if (!keepDesired) { desired = null; creationDesired=null }
     }
     fun foreground(active: Boolean) {
@@ -559,7 +569,7 @@ class LoginController internal constructor(private val context: Context, private
         if (!active) {
             retireNavigation(true)
             mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null, questions = SessionQuestionState()), loadingSessions = false, binding = binding?.state?.value,
-                outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1)
+                outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1, composerRestore = pendingDocument?.draft)
         } else if (mutable.value.phase == HomePhase.READY && binding == null) {
             if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
             else if(creationDesired!=null) openCreationInternal(creationDesired!!,true)
@@ -687,6 +697,12 @@ class LoginController internal constructor(private val context: Context, private
                 val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId, approvalAccount = approvalAccount)
                     else resource.reader(saved.deviceId!!, runtimeId, id, runtime.scope!!.readSession(id, selected.workspaceId), scope)
                 commandJournal = database; database = null; reader = opened
+                if (commandJournal != null && selected.state != "archived" && runtime.role in setOf("operator", "owner") && runtime.scope?.actions?.contains("file.upload") == true) {
+                    val files = resource.fileUploads(runtimeId, id, selected.workspaceId, runtime.scope!!, commandJournal!!, scope)
+                    uploads = files
+                    uploadCollector = scope.launch { files.state.collect { value -> if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(uploads = value) } }
+                    drainDocument()
+                } else { pendingDocument = null; mutable.value = mutable.value.copy(uploads = null, documentPicker = null) }
                 questionScope=CoroutineScope(SupervisorJob(scope.coroutineContext[Job])+Dispatchers.Main.immediate)
                 opened.approvals?.let { client -> approvalCollector = scope.launch {
                     client.state.collect {
@@ -727,15 +743,46 @@ class LoginController internal constructor(private val context: Context, private
         mutable.value = mutable.value.copy(submitting = true, commandError = null)
         commandJob = scope.launch {
             try {
-                commands.submit(mode, text, sendNow)
+                val attachments = uploads?.selectedFiles() ?: emptyList()
+                commands.submit(mode, text, sendNow, attachments)
                 current(stamp); if (view != navigationGeneration) return@launch
-                mutable.value = mutable.value.copy(composerRevision = mutable.value.composerRevision + 1)
+                uploads?.messageSaved()
+                mutable.value = mutable.value.copy(composerRevision = mutable.value.composerRevision + 1, composerRestore = null)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = if (error is CommandDataException) error.code else "command.invalid") }
             finally { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(submitting = false) }
         }
     }
     fun sendPending(id: String) { reader?.commands?.sendPending(id) }
+    fun pickDocument(resume: String?, text: String, mode: String) {
+        val state = mutable.value
+        if (!foreground || state.phase != HomePhase.READY || uploads == null || state.uploads?.busy == true) return
+        val runtime = state.selectedRuntimeId ?: return; val selected = state.selectedSessionId ?: return
+        val token = UUID.randomUUID().toString()
+        pendingDocument = PendingDocument(token, generation, runtime, selected, resume, MessageDraft(text, mode, runtime, selected))
+        mutable.value = state.copy(documentPicker = DocumentPickLaunch(token))
+    }
+    fun documentPicked(token: String, uri: Uri?) {
+        val pending = pendingDocument ?: return
+        if (pending.id != token || pending.generation != generation || desired != (pending.runtime to pending.session)) return
+        mutable.value = mutable.value.copy(documentPicker = null, composerRestore = pending.draft, composerRevision = mutable.value.composerRevision + 1)
+        if (uri == null) { pendingDocument = null; return }
+        pending.result = uri
+        drainDocument()
+    }
+    private fun drainDocument() {
+        val pending = pendingDocument ?: return
+        val source = pending.result ?: return
+        val files = uploads ?: return
+        if (!foreground || pending.generation != generation || desired != (pending.runtime to pending.session)) return
+        pendingDocument = null
+        try { files.select(DocumentFileSource(context, source), pending.resume) }
+        catch (error: Exception) { mutable.value = mutable.value.copy(commandError = code(error)) }
+    }
+    fun toggleUpload(id: String) = uploads?.toggle(id)
+    fun queryUpload(id: String) = uploads?.query(id)
+    fun removeUpload(id: String) = uploads?.remove(id)
+    fun cancelUpload() = uploads?.cancelTransfer()
     fun queryCommands() { reader?.commands?.query() }
     fun refreshQuestions() {reader?.refreshQuestions()}
     fun reviewApproval(id: String) {
@@ -956,6 +1003,8 @@ class LoginController internal constructor(private val context: Context, private
         }
     }
     private fun fence(closeKeys: Boolean, preserveSelection: Boolean = false): Long {
+        pendingDocument = null
+        mutable.value = mutable.value.copy(documentPicker = null, composerRestore = null)
         retireNavigation(preserveSelection)
         retireBinding(preserveSelection)
         generation++; job?.cancel(); deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
@@ -1071,6 +1120,12 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun back() = login.back()
     fun submitMessage(mode: String, text: String, sendNow: Boolean = true) = login.submitMessage(mode, text, sendNow)
     fun sendPending(id: String) = login.sendPending(id)
+    fun pickDocument(resume: String?, text: String, mode: String) = login.pickDocument(resume, text, mode)
+    fun documentPicked(token: String, uri: Uri?) = login.documentPicked(token, uri)
+    fun toggleUpload(id: String) = login.toggleUpload(id)
+    fun queryUpload(id: String) = login.queryUpload(id)
+    fun removeUpload(id: String) = login.removeUpload(id)
+    fun cancelUpload() = login.cancelUpload()
     fun queryCommands() = login.queryCommands()
     fun answerQuestion(handle: QuestionHandle,answers: QuestionAnswers) = login.answerQuestion(handle,answers)
     fun claimQuestion(handle: QuestionHandle) = login.claimQuestion(handle)

@@ -1,11 +1,15 @@
 package cn.edu.ustc.dsh.mobile
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.*
@@ -19,13 +23,25 @@ import cn.edu.ustc.dsh.protocol.*
 fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
     onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}, onCreate: ()->Unit={},
     onAnswer: (QuestionHandle,QuestionAnswers)->Unit={_,_->},onClaim: (QuestionHandle)->Unit={},onRelease: (QuestionHandle)->Unit={},onRefreshQuestions: ()->Unit={},
-    onApproval: (String) -> Unit = {}, onApprovalQuery: () -> Unit = {}, onArchive: (String, Boolean, Boolean) -> Unit = { _, _, _ -> }) {
+    onApproval: (String) -> Unit = {}, onApprovalQuery: () -> Unit = {}, onArchive: (String, Boolean, Boolean) -> Unit = { _, _, _ -> },
+    onPickFile: (String?, String, String) -> Unit = { _, _, _ -> }, onPickedFile: (String, Uri?) -> Unit = { _, _ -> }, onToggleFile: (String) -> Unit = {},
+    onQueryFile: (String) -> Unit = {}, onRemoveFile: (String) -> Unit = {}, onCancelFile: () -> Unit = {}) {
     val runtime = state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }
     val opened = state.selectedSessionId
     val archived = state.sessions.firstOrNull { it.id == opened }?.state == "archived"
     val canCompose = opened != null && !archived && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
+    var text by remember(opened, state.composerRevision) { mutableStateOf(state.composerRestore?.text ?: "") }
+    var mode by remember(opened) { mutableStateOf(state.composerRestore?.mode ?: "queue") }
+    LaunchedEffect(state.composerRevision) { state.composerRestore?.let { mode = it.mode } }
+    state.documentPicker?.let { pending -> key(pending.id) {
+        var launched by rememberSaveable { mutableStateOf(false) }
+        // Each consent has its own registry key and immutable token. A result
+        // from an older account/view cannot be relabeled as a later selection.
+        val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> onPickedFile(pending.id, uri) }
+        LaunchedEffect(pending.id) { if (!launched) { launched = true; picker.launch(arrayOf("*/*")) } }
+    } }
     Scaffold(bottomBar = {
-        if (canCompose) SessionComposer(state, onSubmit)
+        if (canCompose) SessionComposer(state, onSubmit, text, mode, { text = it }, { mode = it })
     }) { insets ->
         Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
             LazyColumn(Modifier.widthIn(max = 800.dp).fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -116,6 +132,10 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         }
                         read.questions.error?.let {code->item("question-error") {Text(commandErrorText(code),color=MaterialTheme.colorScheme.error)}}
                     }
+                    state.uploads?.takeIf { !archived && canCompose }?.let { files -> item("uploads") {
+                        UploadsPanel(files, state.outbox?.canAttachFiles == true && read.phase == SessionReadPhase.READY,
+                            { id -> onPickFile(id, text, mode) }, onToggleFile, onQueryFile, onRemoveFile, onCancelFile)
+                    } }
                     state.commandError?.let { error -> item("command-error") { Text(commandErrorText(error), color = MaterialTheme.colorScheme.error) } }
                     state.outbox?.let { outbox ->
                         outbox.error?.let { error -> item("outbox-error") { Text(commandErrorText(error), color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) } }
@@ -134,15 +154,16 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                                         if ((record.intent.payload["stop_activity"] as JsonBoolean).value) Text("已选择同时请求停止活动；实际结束状态以会话内容为准。", style = MaterialTheme.typography.bodySmall)
                                     }
                                     if (!record.everAgentQueued) record.intent.text()?.let { ReadingText(it, 512) }
+                                    if (record.intent.fileIds().isNotEmpty()) Text("附件 ${record.intent.fileIds().size} 个；状态以原请求为准。", style = MaterialTheme.typography.bodySmall)
                                     if(record.intent.kind.question) SubmittedQuestionAnswer(record.intent)
                                     val questionCurrent=!record.intent.kind.question || read.questions.items.any {it.batch.id==record.intent.payload.string("question_id") && it.batch.definition==record.intent.questionDefinition && it.handle.epoch==record.intent.epoch && it.answerable}
                                     val actionAllowed = (!archived || record.intent.kind == CommandKind.ARCHIVE) && (record.intent.epoch == null || record.intent.epoch == read.runtimeEpoch)
                                     if (record.delivery == CommandDelivery.PENDING && record.attempts == 0L && questionCurrent) {
                                         OutlinedButton({ onSendPending(record.intent.requestId) }, enabled = outbox.connected && actionAllowed, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (record.intent.kind == CommandKind.MESSAGE) "发送这条待发消息" else "发送这条待发命令") }
                                     }
-                                    if (record.remote == RemoteCommandState.RECEIVED && !record.everHostSaved && record.attempts > 0 && questionCurrent) {
+                                    if ((record.remote == RemoteCommandState.RECEIVED || record.remote == null && record.intent.fileIds().isNotEmpty()) && !record.everHostSaved && record.attempts > 0 && questionCurrent) {
                                         var retry by remember { mutableStateOf(false) }
-                                        OutlinedButton({ retry = true }, enabled = outbox.connected && actionAllowed, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新转交同一请求") }
+                                        OutlinedButton({ retry = true }, enabled = outbox.connected && actionAllowed && (record.intent.fileIds().isEmpty() || outbox.canAttachFiles), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新转交同一请求") }
                                         if (retry) AlertDialog(onDismissRequest = { retry = false }, title = { Text("重新转交这条原请求？") },
                                             text = { Text("会先核对状态并保留原请求编号。主机若已接收，将返回原状态，不会创建一条新消息。") },
                                             confirmButton = { TextButton({ retry = false; onSendPending(record.intent.requestId) }) { Text("核对并重试") } },
@@ -219,19 +240,20 @@ private fun ReadingText(text: String, initial: Int = 16 * 1024) {
 }
 
 @Composable
-private fun SessionComposer(state: HomeState, onSubmit: (String, String, Boolean) -> Unit) {
-    var text by remember(state.composerRevision) { mutableStateOf("") }
-    var mode by remember { mutableStateOf("queue") }
+private fun SessionComposer(state: HomeState, onSubmit: (String, String, Boolean) -> Unit, text: String, mode: String, onText: (String) -> Unit, onMode: (String) -> Unit) {
     val placeholder = "11111111-1111-4111-8111-111111111111"
-    val valid = text.isNotBlank() && runCatching { CommandIntent.message(placeholder, placeholder, placeholder, mode, text) }.isSuccess
+    val selected = state.uploads?.let { uploads -> uploads.selected.mapNotNull { id -> uploads.rows.firstOrNull { it.stored.intent.requestId == id } } } ?: emptyList()
+    val attachments = selected.mapNotNull { it.stored.fileId }
+    val valid = (text.isNotBlank() || attachments.isNotEmpty()) && selected.all { it.ready() } && runCatching { CommandIntent.message(placeholder, placeholder, placeholder, mode, text, attachments) }.isSuccess
     val online = state.outbox?.connected == true && state.reader?.phase == SessionReadPhase.READY
     Surface(tonalElevation = 3.dp) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(mode == "queue", { mode = "queue" }, label = { Text("排队") }, modifier = Modifier.heightIn(min = 48.dp))
-                FilterChip(mode == "steer", { mode = "steer" }, label = { Text("插入当前任务") }, modifier = Modifier.heightIn(min = 48.dp))
+                FilterChip(mode == "queue", { onMode("queue") }, label = { Text("排队") }, modifier = Modifier.heightIn(min = 48.dp))
+                FilterChip(mode == "steer", { onMode("steer") }, label = { Text("插入当前任务") }, modifier = Modifier.heightIn(min = 48.dp))
             }
-            OutlinedTextField(text, { if (it.length <= 65_536) text = it }, label = { Text("消息内容") }, minLines = 1, maxLines = 5,
+            if (attachments.isNotEmpty()) Text("已选择 ${attachments.size} 个附件，发送时仍需电脑确认。", style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(text, { if (it.length <= 65_536) onText(it) }, label = { Text("消息内容") }, minLines = 1, maxLines = 5,
                 isError = text.isNotBlank() && !valid, supportingText = { Text(if (text.isNotBlank() && !valid) "内容过长或包含不支持的字符，请调整后重试。" else if (online) "先保存在本机，再发送到电脑。" else "离线时只保存到本机，上线后可手动发送。") }, modifier = Modifier.fillMaxWidth())
             Button({ onSubmit(mode, text, online) }, enabled = valid && !state.submitting, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text(if (state.submitting) "正在保存…" else if (online) "发送" else "保存待发送")
@@ -264,5 +286,5 @@ private fun commandErrorText(code: String) = when (code) {
     "question.invalid_answer" -> "请按当前问题的选项和要求填写完整答复。"
     "question.reconcile_required" -> "这个问题已有答复请求，请先核对原请求的结果。"
     "question.claim_limit","rate.limited" -> "当前等待请求较多，请结束已有答复或刷新提问状态后重试。"
-    else -> "暂时无法处理此发送操作，请先核对发送状态。"
+    else -> if (code.startsWith("file.")) fileErrorText(code) else "暂时无法处理此发送操作，请先核对发送状态。"
 }

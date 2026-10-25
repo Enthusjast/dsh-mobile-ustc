@@ -3,6 +3,8 @@ package cn.edu.ustc.dsh.network
 import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.command.*
+import kotlinx.coroutines.flow.first
 import com.nimbusds.jose.*
 import com.nimbusds.jose.crypto.ECDSASigner
 import com.nimbusds.jose.crypto.ECDSAVerifier
@@ -52,10 +54,11 @@ class FileUploadsTest {
     }
     @After fun cleanup() { service.shutdown(); objects.shutdown() }
     private fun digest(value: ByteArray) = MessageDigest.getInstance("SHA-256").digest(value).joinToString("") { "%02x".format(it.toInt() and 255) }
-    private fun api(): RemoteApi {
+    private fun api(onConfig: (LoginConfiguration) -> Unit = {}): RemoteApi {
         val config = LoginConfiguration.parse(JsonDocument.of(jsonObject("issuer" to "$origin/issuer".json(), "client_id" to "mobile".json(), "redirect_uri" to LoginConfiguration.REDIRECT_URI.json(),
             "resource" to "urn:dsh-remote".json(), "audience" to "urn:dsh-remote".json(), "remote_origin" to origin.json(), "organization_id" to request.json(),
             "scopes" to JsonArray(listOf("openid".json(), "remote.access".json())), "endpoint_origins" to JsonArray(listOf(origin.json())), "signing_algorithms" to JsonArray(listOf("ES256".json())))).canonicalBytes())
+        onConfig(config)
         val discovery = OidcDiscovery.parse(JsonDocument.of(jsonObject("issuer" to config.issuer.json(), "authorization_endpoint" to "$origin/authorize".json(), "token_endpoint" to "$origin/token".json(),
             "jwks_uri" to "$origin/jwks".json(), "response_types_supported" to JsonArray(listOf("code".json())), "id_token_signing_alg_values_supported" to JsonArray(listOf("ES256".json())))).canonicalBytes(), config)
         val now = System.currentTimeMillis()
@@ -191,5 +194,72 @@ class FileUploadsTest {
             fail("stalled provider outlived the capability")
         } catch (error: RemoteRequestException) { assertEquals("file.upload_expired", error.code) }
         assertTrue(closed.get())
+    }
+    @Test fun workflowSavesMetadataBeforeNetworkAndReopensWithoutAStoredSourceOrCapability(): Unit = runBlocking {
+        lateinit var config: LoginConfiguration
+        val api = api { config = it }
+        val owner = CommandOwner(java.util.UUID.randomUUID().toString(), config.organizationId, config.fingerprint, session, request)
+        val saved = java.util.concurrent.ConcurrentHashMap<String, StoredFileUpload>()
+        val journal = object : FileUploadJournal {
+            override val owner = owner
+            override suspend fun createUpload(intent: FileUploadIntent, now: Long): StoredFileUpload = saved.computeIfAbsent(intent.requestId) { StoredFileUpload(intent, null, null, now, now) }
+            override suspend fun uploads(runtime: String, session: String) = saved.values.filter { it.intent.runtimeId == runtime && it.intent.sessionId == session }
+            override suspend fun registeredUpload(id: String, fileId: String, now: Long): StoredFileUpload = saved[id]!!.let { StoredFileUpload(it.intent, fileId, it.messageId, it.createdAt, now).also { next -> saved[id] = next } }
+            override suspend fun removeUpload(id: String) { saved.remove(id) }
+        }
+        val phase = java.util.concurrent.atomic.AtomicReference("scanning")
+        val ready = AtomicBoolean()
+        val registrations = java.util.concurrent.atomic.AtomicInteger()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        service.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = try {
+                when {
+                    request.path == "/v1/runtimes/$runtime/sessions/$session/files" -> {
+                        val body = JsonDocument.parse(request.body.readByteArray()).root
+                        assertNotNull(saved[body.string("request_id")]); registrations.incrementAndGet()
+                        reply(prepared(), 201)
+                    }
+                    request.path == "/v1/files/$file/commit" -> reply(jsonObject("file" to status("scanning")), 202)
+                    request.path == "/v1/files/$file" -> {
+                        val state = phase.get()
+                        val body = if (state == "clean") status(state).with("delivery" to if (ready.get()) jsonObject("state" to "ready".json(), "expires_at" to time(4000)) else jsonObject("state" to "waiting".json())) else status(state)
+                        reply(jsonObject("file" to body))
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            } catch (error: Throwable) { failure.set(error); MockResponse().setResponseCode(500) }
+        }
+        objects.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = try { assertEquals(file, saved.values.single().fileId); MockResponse().setResponseCode(200) }
+                catch (error: Throwable) { failure.set(error); MockResponse().setResponseCode(500) }
+        }
+        val closed = AtomicBoolean()
+        val source = object : FileInputSource {
+            override val name = manifest.name
+            override fun open() = ByteArrayInputStream(bytes)
+            override fun close() { closed.set(true) }
+        }
+        val grant = RelayScope(listOf("file.upload"), emptyList(), listOf(session))
+        val flow = api.fileUploads(runtime, session, null, grant, journal, this)
+        try {
+            flow.select(source)
+            val scanning = withTimeout(5000) { flow.state.first { !it.busy && it.rows.singleOrNull()?.phase == UploadPhase.SCANNING } }
+            val id = scanning.rows.single().stored.intent.requestId
+            assertTrue(closed.get()); assertEquals(1, registrations.get())
+            phase.set("clean")
+            withTimeout(4000) { flow.state.first { it.rows.singleOrNull()?.phase == UploadPhase.WAITING } }
+            flow.toggle(id); assertTrue(flow.state.value.selected.isEmpty())
+            ready.set(true)
+            withTimeout(4000) { flow.state.first { it.rows.singleOrNull()?.ready() == true } }
+            flow.toggle(id); assertEquals(listOf(file), flow.selectedFiles())
+            assertFalse(String(saved.values.single().intent.bytes()).contains("PRIVATE_CAPABILITY"))
+        } finally { flow.close() }
+        assertTrue(flow.state.value.rows.isEmpty())
+        phase.set("uploading")
+        api.fileUploads(runtime, session, null, grant, journal, this).use { reopened ->
+            withTimeout(4000) { reopened.state.first { it.rows.singleOrNull()?.phase == UploadPhase.NEEDS_SOURCE } }
+            assertEquals(1, registrations.get()); assertEquals(1, saved.size)
+        }
+        failure.get()?.let { throw AssertionError("workflow fixture failed", it) }
     }
 }

@@ -318,6 +318,8 @@ class RelayNetworkTest {
         val journal = MemoryCommandJournal(CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device))
         val feed = ReadPeer(listOf(user(0, "opening")), 0)
         val statuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
+        val fileHints = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
+        val fileLookups = java.util.concurrent.atomic.AtomicInteger()
         val writes = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
         var advertisedState = RemoteCommandState.AGENT_QUEUED
         var denyTickets = false
@@ -344,6 +346,14 @@ class RelayNetworkTest {
                     request.path!!.startsWith("/v1/commands/") -> {
                         assertEquals(device, request.requestUrl!!.queryParameter("device_id"))
                         statuses[request.requestUrl!!.pathSegments.last()]?.let(::bindingReply) ?: json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403)
+                    }
+                    request.path!!.startsWith("/v1/files/") -> {
+                        fileLookups.incrementAndGet()
+                        fileHints[request.requestUrl!!.pathSegments.last()]?.let { file ->
+                            val hint = file.obj("delivery")
+                            val current = if (hint.string("state") == "ready") file.with("delivery" to hint.with("expires_at" to time(4000))) else file
+                            bindingReply(jsonObject("file" to current))
+                        } ?: json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403)
                     }
                     else -> MockResponse().setResponseCode(404)
                 }
@@ -607,7 +617,11 @@ class RelayNetworkTest {
             assertThrows(RemoteRequestException::class.java) { runBlocking { client.submit(handle, signed) } }
             val original = fixture.journal.list(runtime, sessionId).single()
             fixture.statusOverride = null
-            assertThrows(CommandDataException::class.java) { runBlocking { client.sendPending(handle, original.intent.requestId) } }
+            // Reconciliation may retire the review before this explicit retry
+            // obtains its lease, or the retry may discover acceptance itself.
+            val failure = runCatching { client.sendPending(handle, original.intent.requestId) }.exceptionOrNull()
+            assertTrue(failure is CommandDataException && failure.code == "approval.reconcile_required" ||
+                failure is ApprovalStateException && failure.code == "approval.stale")
             client.await { it.records.singleOrNull()?.delivery == ApprovalDecisionDelivery.ACCEPTED }
             assertEquals(1, fixture.posts.get()); assertEquals(1L, fixture.journal.list(runtime, sessionId).single().attempts)
         }
@@ -1005,6 +1019,38 @@ class RelayNetworkTest {
             val commands = reader.commands!!; val id = commands.submit("queue", "original")
             val record = withTimeout(5000) { commands.state.first { it.records.any { row -> row.intent.requestId == id && row.remote == RemoteCommandState.RECEIVED } } }.records.single()
             assertFalse(record.everAgentQueued); assertFalse(record.everHostSaved)
+        }
+    }
+    @Test fun anUnrecordedFileAttemptRequiresFreshUnboundMetadataAndRetriesOnlyItsOriginalId(): Unit = runBlocking {
+        val fixture = CommandPeer()
+        val fileId = UUID.randomUUID().toString()
+        val file = jsonObject("file_id" to fileId.json(), "runtime_id" to runtime.json(), "session_id" to sessionId.json(), "direction" to "to_host".json(),
+            "name" to "fixture.txt".json(), "size_bytes" to 3L.json(), "sha256" to "a".repeat(64).json(), "state" to "clean".json(),
+            "created_at" to time(-1000), "upload_expires_at" to time(120_000), "expires_at" to time(300_000),
+            "delivery" to jsonObject("state" to "bound".json(), "request_id" to UUID.randomUUID().toString().json(), "command_state" to "received".json()))
+        fixture.fileHints[fileId] = file
+        val admit = fixture.feed.onCommand!!
+        fixture.feed.onCommand = { socket, frame ->
+            if (fixture.writes.isEmpty()) {
+                fixture.writes += frame
+                socket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "error".json(), "request_id" to frame["request_id"], "runtime_id" to runtime.json(),
+                    "session_id" to sessionId.json(), "payload" to jsonObject("code" to "file.staging_required".json()))).canonicalText())
+            } else admit(socket, frame)
+        }
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!
+            val id = commands.submit("queue", "original file message", fileIds = listOf(fileId))
+            withTimeout(5000) { commands.state.first { it.records.any { row -> row.intent.requestId == id && row.attempts == 1L && row.error != null } } }
+            commands.sendPending(id)
+            withTimeout(5000) { commands.state.first { it.error == "command.reconcile_required" } }
+            assertEquals(1, fixture.writes.size); assertNull(fixture.journal.list(runtime, sessionId).single().remote)
+            fixture.fileHints[fileId] = file.with("delivery" to jsonObject("state" to "ready".json(), "expires_at" to time(4000)))
+            commands.sendPending(id)
+            val accepted = withTimeout(5000) { commands.state.first { it.records.any { row -> row.intent.requestId == id && row.everAgentQueued } } }.records.single()
+            assertEquals(2, fixture.writes.size); assertEquals(2, accepted.attempts)
+            assertEquals(id, fixture.writes.last().string("request_id")); assertEquals(2, fixture.fileLookups.get())
+            assertEquals(JsonDocument.of(fixture.writes.first()).canonicalText(), JsonDocument.of(fixture.writes.last()).canonicalText())
         }
     }
     @Test fun failedDurableAttemptNeverWritesAndAStaleCancellationNeverTargetsANewEpoch(): Unit = runBlocking {

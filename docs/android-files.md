@@ -1,6 +1,18 @@
 # Android 文件协议、传输与附件命令
 
-Android 共享模块已提供受保护文件 API、匿名流式 PUT、严格元数据解析和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。文件选择 / 上传界面、上传意图的进程恢复、会话附件显示和受限导出尚待接入；本节不表示 APK 文件验收已经完成。
+Android 已提供系统文件选择、前台上传、受保护文件 API、匿名流式 PUT、加密上传意图和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。会话历史的附件显示、受限导出和 APK 到真实后端的文件联合验收仍待完成。
+
+## 系统选择器与恢复
+
+会话附件面板仅在当前用户具有上传权限时出现。选中的 `content://` 由 ContentResolver 分两次流式读取，先计算长度和 SHA-256，再在匿名 PUT 中核对原字节。不会申请整个存储空间权限，也不持久化 URI 或获取永久读取授权。离开前台、退出账号或切换页面会取消传输并关闭输入源。
+
+每次系统选择都有独立 UUID、Activity Result 注册键、账号代次和明确 runtime/session。过时结果不能被重新标记为新账号的选择。选择器导致应用进入后台时，只在内存保留原会话的草稿；返回原会话后恢复，离开该会话或退出账号立即清除，不写入 saved state。
+
+Room v5 在已有 SQLCipher/WAL 中新增 `file_uploads`。它只保存原 request ID、目标、名称、长度、摘要、已登记文件 ID 和原消息关联。登记前保存原意图，匿名 PUT 前保存文件 ID；不保存文件字节、URI、签名 URL、header 或原生 receipt。每个设备账号最多 64 条上传记录；撤权和账号退出按现有数据生命周期清理。
+
+重新进入会话后只查询已知 ID。中断的上传需要明确核对或重新选择原文件，按原名称、大小和摘要验证后继续同一登记。不会凭空生成新的上传 ID。扫描通过与电脑暂存分别展示；只有当前仍可发送的未绑定附件可勾选，最多 15 个，可单独发送或与文本组合。
+
+保存文件消息时，上传关联与原命令在同一数据库事务内提交。任一文件不存在、目标不符或已属于其他消息，整批回滚，避免部分关联。上传完成、绑定原请求和 Agent 入队使用不同文案；面板不会把这些状态当成任务完成。
 
 ## 元数据与传输
 
@@ -34,7 +46,7 @@ Kotlin `readyForMessage` 还限制提示的本地有效期最多五秒。没有 
 
 手机在有 message.submit 范围时提供 `message.files.v1`，实际协商成功后 `SessionCommands.state.canAttachFiles` 才为真。发送前再次检查能力；旧服务 / Host 下会保留原草稿并返回 file.unsupported，不写入不支持的文件帧。断线清除当前能力，不自动发送旧连接队列。已尝试命令继续先通过原有 REST 状态对账，再决定是否能以原 ID 重发。
 
-UI 接入还须处理投递未确认且服务端尚无命令记录的状态，结合文件是否仍未绑定来决定显式恢复，不能伪造 received 或盲目重发。文件字节与 URL 不属于消息正文，文件选择 / 本地输入源恢复需要独立、按账号隔离的保存策略。
+投递未确认且原命令没有任何远端保存证据时，用户可明确重试原文件消息。状态接口失败本身不证明命令不存在（服务端可能用 access.denied 隐藏差别）；客户端还必须逐一取得当前授权下、目标相同、未绑定且暂存仍有效的文件状态，才允许短时间内以原 ID / 摘要继续。不会伪造 received，也不会在重连时自动重发。原命令已有保存 / 入队证据、文件已绑定或无法核对时，继续保持结果待确认。
 
 ## 本地证据
 
@@ -43,4 +55,10 @@ UI 接入还须处理投递未确认且服务端尚无命令记录的状态，�
 - Kotlin 会话客户端测试确认文件命令先保存后发送，旧 peer 不接收文件帧；既有聊天、问题、审批和归档同时回归。
 - `npm run test:remote-kotlin` 增加实际文件组合：Kotlin 登记两次仍为同一文件、匿名直传、Go worker 扫描、轮询 ready、现有命令组件发送、DSH 实际附件入队。最终只有一个文件归属、一条原生用户消息和一次 prompt 调用。该 JVM 组合使用内存命令日志测试适配器，文件消息的实际 SQLCipher / WAL 生命周期仍需 APK 场景验证。
 
-本机记录为 `.local/android-files-network-first.log`、`.local/android-files-expiry-test.log`、`.local/android-files-full-check-second.log`、`.local/android-files-kotlin-chain-final.log`、`.local/android-files-host-contract-final.log`。完整 Android check、debug APK 构建和 135 项协议 / 命令 / 网络测试通过。对象 / scanner / 身份 / 模型仍是夹具；没有使用 TokenWorks，也没有声称完成实际学校、KMS、病毒签名引擎或 APK 文件实机验收。
+上述协议基线记录为 `.local/android-files-network-first.log`、`.local/android-files-expiry-test.log`、`.local/android-files-full-check-second.log`、`.local/android-files-kotlin-chain-final.log`、`.local/android-files-host-contract-final.log`。
+
+2026-10-26 的上传界面与恢复改动已通过完整 Android check、Lint、debug APK / test APK 构建，以及 138 项协议 / 命令 / 网络测试。API 26 安全模拟器的原有选择器 / 聊天 / 命令回归共 20 项通过；加密上传测试进一步覆盖 WAL / 重开、v4→v5 迁移、批量回滚、范围清理和不虚构回执的原 ID 重试。记录为 `.local/android-upload-ui-full-check-second.log`、`.local/android-upload-ui-device-second.log`。
+
+新增设备组合从选择器结果处理入口注入受控 content URI，经独立进程的真实 Binder ContentProvider、生产 DocumentFileSource / SessionUploads、TLS REST 与匿名 PUT 夹具、SQLCipher 和 Relay 命令组件完成文件单独发送。测试分别等待 scanning、clean/waiting、ready 和原命令 agent_queued，确认重进页面仍只关联原上传 / 原消息，没有再次 PUT 或提交新命令。最新选择器、上传持久性、附件面板和输入框共 13 项设备测试通过，记录为 `.local/android-upload-provider-device-second.log`。系统 DocumentsUI 的人工点选和真实对象服务仍属于后续验收范围。
+
+对象 / scanner / 身份 / 模型仍是夹具；没有使用 TokenWorks，也没有声称完成实际学校、KMS、病毒签名引擎或文件全链路实机验收。

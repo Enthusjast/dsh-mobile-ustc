@@ -15,7 +15,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Entire SQLite/WAL is SQLCipher-encrypted, under noBackupFilesDir. No plaintext fallback. */
-class SqlCommandJournal private constructor(override val owner: CommandOwner, private val database: CommandDatabase, private val password: ByteArray, private val vault: DatabaseKeyVault) : CommandJournal, TranscriptCache {
+class SqlCommandJournal private constructor(override val owner: CommandOwner, private val database: CommandDatabase, private val password: ByteArray, private val vault: DatabaseKeyVault) : CommandJournal, TranscriptCache, FileUploadJournal {
     private val closed = AtomicBoolean()
     private val lock = Any()
     internal suspend fun <T> transaction(action: (CommandDao) -> T): T = withContext(Dispatchers.IO) {
@@ -44,6 +44,11 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         val bytes = intent.storageBytes()
         if (dao.count() >= 128 || dao.bytes() + bytes.size > 8L * 1024 * 1024) dao.evictDelivered()
         if (dao.count() >= 128 || dao.bytes() + bytes.size > 8L * 1024 * 1024) throw CommandDataException("data.outbox_limit")
+        for (file in intent.fileIds()) {
+            val uploaded = dao.uploadByFile(file) ?: throw CommandDataException("file.upload_not_found")
+            if (uploaded.runtimeId != intent.runtimeId || uploaded.sessionId != intent.sessionId || uploaded.messageId != null && uploaded.messageId != intent.requestId) throw CommandDataException("file.already_bound")
+            check(dao.updateUpload(uploaded.copy(messageId = intent.requestId, updatedAt = maxOf(now, uploaded.updatedAt))) == 1)
+        }
         CommandEvolution.created(intent, now).also { dao.insert(it.encode()) }
     }
     override suspend fun list(runtime: String, session: String): List<PendingCommand> {
@@ -67,12 +72,39 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         val previous = dao.get(Contract.uuid(id))?.decode() ?: throw CommandDataException("command.not_found")
         CommandEvolution.rearm(previous, proof).also { check(dao.update(it.encode()) == 1) }
     }
+    override suspend fun rearmUnboundFiles(id: String, now: Long): PendingCommand = transaction { dao ->
+        val previous = dao.get(Contract.uuid(id))?.decode() ?: throw CommandDataException("command.not_found")
+        CommandEvolution.rearmUnboundFiles(previous, now).also { check(dao.update(it.encode()) == 1) }
+    }
     override suspend fun discard(id: String) = transaction { dao ->
         val existing = dao.get(Contract.uuid(id))?.decode() ?: return@transaction
         if (existing.attempts > 0 && existing.remote !in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)) throw CommandDataException("command.reconcile_required")
         dao.delete(id)
     }
     fun approvalDecisions(key: RegisteredApprovalKey): ApprovalDecisionJournal = SqlApprovalDecisionJournal(this, key)
+    override suspend fun createUpload(intent: FileUploadIntent, now: Long): StoredFileUpload = transaction { dao ->
+        dao.upload(intent.requestId)?.let { old ->
+            if (old.digest != intent.digest || !old.intent.contentEquals(intent.bytes())) throw CommandDataException("file.request_conflict")
+            return@transaction old.decodeUpload()
+        }
+        if (dao.uploadCount() >= 64) throw CommandDataException("file.local_limit")
+        FileUploadRow(intent.requestId, intent.runtimeId, intent.sessionId, intent.workspaceId, intent.bytes(), intent.digest, null, null, now, now).also(dao::insertUpload).decodeUpload()
+    }
+    override suspend fun uploads(runtime: String, session: String): List<StoredFileUpload> = transaction { it.uploads(Contract.uuid(runtime), Contract.uuid(session)).map(FileUploadRow::decodeUpload) }
+    override suspend fun registeredUpload(id: String, fileId: String, now: Long): StoredFileUpload = transaction { dao ->
+        val old = dao.upload(Contract.uuid(id)) ?: throw CommandDataException("file.upload_not_found")
+        Contract.uuid(fileId)
+        if (old.fileId != null && old.fileId != fileId || dao.uploadByFile(fileId)?.requestId?.let { it != id } == true) throw CommandDataException("file.request_conflict")
+        old.copy(fileId = fileId, updatedAt = maxOf(now, old.updatedAt)).also { check(dao.updateUpload(it) == 1) }.decodeUpload()
+    }
+    override suspend fun removeUpload(id: String) = transaction { it.deleteUpload(Contract.uuid(id)) }
+    suspend fun retainUploads(scopes: Map<String, RelayScope>) = transaction { dao ->
+        for (runtime in dao.uploadRuntimes()) {
+            val grant = scopes[runtime]
+            if (grant == null || !grant.actions.containsAll(setOf("file.upload", "session.read"))) dao.revokeUploads(runtime)
+            else dao.restrictUploads(runtime, grant.sessions.toList(), grant.workspaces.toList())
+        }
+    }
     suspend fun retainApprovals(scopes: Map<String, RelayScope>) = transaction { dao ->
         scopes.keys.forEach(Contract::uuid)
         for (runtime in dao.approvalRuntimes()) {
@@ -81,8 +113,8 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             else dao.restrictApprovals(runtime, grant.sessions.toList(), grant.workspaces.toList())
         }
     }
-    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime) }
-    override suspend fun revokeSessionCommands(runtime: String) = transaction { dao -> dao.revokeSessionCommands(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime) }
+    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime); dao.revokeUploads(runtime) }
+    override suspend fun revokeSessionCommands(runtime: String) = transaction { dao -> dao.revokeSessionCommands(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime); dao.revokeUploads(runtime) }
     suspend fun retainCreations(scopes: Map<String, RelayScope>) = transaction { dao ->
         scopes.keys.forEach(Contract::uuid)
         for(runtime in dao.creationRuntimes()) {
@@ -142,6 +174,13 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         synchronized(lock) { try { database.close() } finally { password.fill(0) } }
     }
     companion object {
+        private val migration4To5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS file_uploads (requestId TEXT NOT NULL, runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, workspaceId TEXT, intent BLOB NOT NULL, digest TEXT NOT NULL, fileId TEXT, messageId TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(requestId))")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_file_uploads_fileId ON file_uploads(fileId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_file_uploads_runtimeId_sessionId_createdAt ON file_uploads(runtimeId,sessionId,createdAt)")
+            }
+        }
         const val CACHE_RETENTION_MILLIS = 30L * 24 * 60 * 60 * 1000
         const val CACHE_SESSIONS = 128
         const val CACHE_SESSION_BYTES = 8L * 1024 * 1024
@@ -181,7 +220,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             var database: CommandDatabase? = null
             try {
                 database = Room.databaseBuilder(context.applicationContext, CommandDatabase::class.java, file.absolutePath)
-                    .addMigrations(migration1To2, migration2To3, migration3To4)
+                    .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5)
                     .openHelperFactory(SupportOpenHelperFactory(password, null, true))
                     .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING).build()
                 database.openHelper.writableDatabase.execSQL("PRAGMA synchronous=FULL")
@@ -205,13 +244,20 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
     }
 }
 
+private fun FileUploadRow.decodeUpload(): StoredFileUpload {
+    val parsed = FileUploadIntent.parse(intent)
+    if (parsed.requestId != requestId || parsed.runtimeId != runtimeId || parsed.sessionId != sessionId || parsed.workspaceId != workspaceId || parsed.digest != digest) throw CommandDataException("data.corrupt")
+    return StoredFileUpload(parsed, fileId, messageId, createdAt, updatedAt)
+}
+
 private fun PendingCommand.encode() = CommandRow(intent.requestId, intent.runtimeId, intent.sessionId, intent.storageBytes(), intent.digest, delivery.name, remote?.name,
     attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, intent.workspaceId, createdSessionId)
 private fun CommandRow.decode(): PendingCommand {
     val parsed = CommandIntent.stored(intent)
+    val unboundFileRetry = parsed.kind == CommandKind.MESSAGE && parsed.fileIds().isNotEmpty() && remote == null && !everHostSaved && !everAgentQueued
     if(parsed.kind.question && parsed.questionDefinition==null) throw CommandDataException("data.corrupt")
     if (parsed.requestId != requestId || parsed.runtimeId != runtimeId || parsed.sessionId != sessionId || parsed.workspaceId != workspaceId || parsed.digest != digest || attempts < 0 || revision < 1 ||
-        delivery == CommandDelivery.PENDING.name && attempts != 0L && remote != RemoteCommandState.RECEIVED.name) throw CommandDataException("data.corrupt")
+        delivery == CommandDelivery.PENDING.name && attempts != 0L && remote != RemoteCommandState.RECEIVED.name && !unboundFileRetry) throw CommandDataException("data.corrupt")
     createdSessionId?.let(Contract::uuid)
     if ((parsed.kind == CommandKind.CREATE && remote == RemoteCommandState.SETTLED.name) != (createdSessionId != null)) throw CommandDataException("data.corrupt")
     return PendingCommand(parsed, CommandDelivery.valueOf(delivery), remote?.let(RemoteCommandState::valueOf), attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, createdSessionId)

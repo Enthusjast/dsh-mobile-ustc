@@ -24,6 +24,7 @@ internal class MemoryCommandJournal(override val owner: CommandOwner) : CommandJ
     override suspend fun record(receipt: CommandReceipt): PendingCommand? = mutex.withLock { rows[receipt.requestId]?.let { CommandEvolution.receipt(it, receipt).also { next -> rows[receipt.requestId] = next } } }
     override suspend fun uncertain(id: String, code: String): PendingCommand? = mutex.withLock { rows[id]?.let { CommandEvolution.uncertain(it, code, System.currentTimeMillis()).also { next -> rows[id] = next } } }
     override suspend fun rearm(id: String, proof: CommandReceipt) = mutex.withLock { CommandEvolution.rearm(rows[id]!!, proof).also { rows[id] = it } }
+    override suspend fun rearmUnboundFiles(id: String, now: Long) = mutex.withLock { CommandEvolution.rearmUnboundFiles(rows[id]!!, now).also { rows[id] = it } }
     override suspend fun discard(id: String) { mutex.withLock { rows.remove(id) } }
     override suspend fun revokeRuntime(runtime: String) { mutex.withLock { rows.entries.removeAll { it.value.intent.runtimeId == runtime } } }
     override suspend fun revokeSessionCommands(runtime: String) { mutex.withLock { rows.entries.removeAll { it.value.intent.runtimeId == runtime && it.value.intent.kind != CommandKind.CREATE } } }

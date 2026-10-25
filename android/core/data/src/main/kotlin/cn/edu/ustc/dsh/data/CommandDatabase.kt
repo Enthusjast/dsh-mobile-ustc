@@ -26,7 +26,21 @@ internal data class CachedSessionRow(val runtimeId: String, val sessionId: Strin
     parentColumns = ["runtimeId", "sessionId"], childColumns = ["runtimeId", "sessionId"], onDelete = ForeignKey.CASCADE)])
 internal data class CachedRecordRow(val runtimeId: String, val sessionId: String, val seq: Long, val body: ByteArray)
 
+@Entity(tableName = "file_uploads", indices = [Index(value = ["fileId"], unique = true), Index(value = ["runtimeId", "sessionId", "createdAt"])])
+internal data class FileUploadRow(@PrimaryKey val requestId: String, val runtimeId: String, val sessionId: String, val workspaceId: String?, val intent: ByteArray,
+    val digest: String, val fileId: String?, val messageId: String?, val createdAt: Long, val updatedAt: Long)
+
 @Dao internal interface CommandDao {
+    @Query("SELECT * FROM file_uploads WHERE requestId=:id") fun upload(id: String): FileUploadRow?
+    @Query("SELECT * FROM file_uploads WHERE fileId=:id") fun uploadByFile(id: String): FileUploadRow?
+    @Query("SELECT * FROM file_uploads WHERE runtimeId=:runtime AND sessionId=:session ORDER BY createdAt,requestId") fun uploads(runtime: String, session: String): List<FileUploadRow>
+    @Query("SELECT COUNT(*) FROM file_uploads") fun uploadCount(): Int
+    @Query("SELECT DISTINCT runtimeId FROM file_uploads") fun uploadRuntimes(): List<String>
+    @Query("DELETE FROM file_uploads WHERE runtimeId=:runtime") fun revokeUploads(runtime: String)
+    @Query("DELETE FROM file_uploads WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))") fun restrictUploads(runtime: String, sessions: List<String>, workspaces: List<String>)
+    @Query("DELETE FROM file_uploads WHERE requestId=:id") fun deleteUpload(id: String)
+    @Insert fun insertUpload(row: FileUploadRow)
+    @Update fun updateUpload(row: FileUploadRow): Int
     @Query("SELECT * FROM database_identity WHERE slot=1") fun identity(): DatabaseIdentity?
     @Insert fun identity(value: DatabaseIdentity)
     @Query("SELECT * FROM commands WHERE requestId=:id") fun get(id: String): CommandRow?
@@ -70,5 +84,5 @@ internal data class CachedRecordRow(val runtimeId: String, val sessionId: String
     @Query("DELETE FROM cached_sessions WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))") fun restrictCache(runtime: String, sessions: List<String>, workspaces: List<String>)
 }
 
-@Database(entities = [DatabaseIdentity::class, CommandRow::class, ApprovalDecisionRow::class, CachedSessionRow::class, CachedRecordRow::class], version = 4, exportSchema = true)
+@Database(entities = [DatabaseIdentity::class, CommandRow::class, ApprovalDecisionRow::class, CachedSessionRow::class, CachedRecordRow::class, FileUploadRow::class], version = 5, exportSchema = true)
 internal abstract class CommandDatabase : RoomDatabase() { abstract fun commands(): CommandDao }

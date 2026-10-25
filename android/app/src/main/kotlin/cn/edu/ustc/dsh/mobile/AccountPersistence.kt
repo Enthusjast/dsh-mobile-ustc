@@ -111,7 +111,7 @@ internal class AccountPersistence(private val context: Context, slot: String, pr
     }
     suspend fun retainHistory(owner: CommandOwner, scopes: Map<String, RelayScope>, stamp: Long, approvalRuntimes: Set<String> = emptySet()) = transaction(stamp) {
         SqlCommandJournal.open(context, owner).use { journal -> runBlocking {
-            journal.retainTranscripts(scopes); journal.retainCreations(scopes); journal.retainApprovals(scopes.filterKeys { it in approvalRuntimes })
+            journal.retainTranscripts(scopes); journal.retainCreations(scopes); journal.retainApprovals(scopes.filterKeys { it in approvalRuntimes }); journal.retainUploads(scopes)
         } }
     }
 
