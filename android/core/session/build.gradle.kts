@@ -10,5 +10,6 @@ dependencies {
 }
 tasks.test {
     inputs.dir(rootProject.file("../contracts/ws/v1"))
+    inputs.file(rootProject.file("../contracts/security/approval-signatures.json"))
     systemProperty("contracts.root", rootProject.file("../contracts").absolutePath)
 }
