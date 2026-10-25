@@ -81,4 +81,29 @@ class CommandPersistenceTest {
         assertFalse(File(context.noBackupFilesDir, "mobile-data/${owner.scopeHash}").exists())
         assertTrue(open().list(otherRuntime, session).isEmpty())
     }
+    @Test fun creationRecoveryPreservesTheWorkspaceIntentAndASeparateSettledSession(): Unit=runBlocking {
+        val command=CommandIntent.createSession(UUID.randomUUID().toString(),runtime,session,"standard",UUID.randomUUID().toString())
+        val result=UUID.randomUUID().toString();val journal=open()
+        journal.create(command);journal.beginAttempt(command.requestId);journal.close()
+        val recovered=open();val pending=recovered.listCreations(runtime).single()
+        assertNull(pending.intent.sessionId);assertEquals(session,pending.intent.workspaceId);assertEquals(1L,pending.attempts)
+        assertEquals(CommandDelivery.RECONCILE,pending.delivery)
+        recovered.record(CommandReceipt(command.requestId,result,command.digest,RemoteCommandState.SETTLED,java.time.Instant.now().toString(),workspaceId=session))
+        recovered.close()
+        val restored=open().listCreations(runtime).single()
+        assertEquals(result,restored.createdSessionId);assertNull(restored.intent.sessionId)
+        assertArrayEquals(command.storageBytes(),restored.intent.storageBytes());assertFalse(restored.everAgentQueued)
+    }
+    @Test fun readRevocationPreservesAuthorizedCreationAndAllOperationsShareTheSameRequestNamespace(): Unit=runBlocking {
+        val journal=open();val message=intent();journal.create(message)
+        val creation=CommandIntent.createSession(UUID.randomUUID().toString(),runtime,session,"standard",UUID.randomUUID().toString())
+        journal.create(creation);journal.beginAttempt(creation.requestId)
+        assertThrows(CommandDataException::class.java) {runBlocking {journal.create(intent("changed operation",creation.requestId))}}
+        journal.revokeSessionCommands(runtime)
+        assertTrue(journal.list(runtime,session).isEmpty());assertEquals(creation.requestId,journal.listCreations(runtime).single().intent.requestId)
+        journal.retainCreations(mapOf(runtime to cn.edu.ustc.dsh.protocol.RelayScope(listOf("command.status"),listOf(session),emptyList())))
+        assertEquals(1,journal.listCreations(runtime).size)
+        journal.retainCreations(mapOf(runtime to cn.edu.ustc.dsh.protocol.RelayScope(listOf("command.status"),emptyList(),emptyList())))
+        assertTrue(journal.listCreations(runtime).isEmpty())
+    }
 }

@@ -47,6 +47,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         Contract.uuid(runtime); Contract.uuid(session)
         return transaction { it.list(runtime, session).map(CommandRow::decode) }
     }
+    override suspend fun listCreations(runtime: String): List<PendingCommand> = transaction { it.creations(Contract.uuid(runtime)).map(CommandRow::decode) }
     override suspend fun beginAttempt(id: String, now: Long) = transaction { dao ->
         val previous = dao.get(Contract.uuid(id))?.decode() ?: throw CommandDataException("command.not_found")
         CommandEvolution.begin(previous, now).also { check(dao.update(it.encode()) == 1) }
@@ -69,6 +70,15 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         dao.delete(id)
     }
     override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.deleteRuntimeCache(runtime) }
+    override suspend fun revokeSessionCommands(runtime: String) = transaction { dao -> dao.revokeSessionCommands(Contract.uuid(runtime)); dao.deleteRuntimeCache(runtime) }
+    suspend fun retainCreations(scopes: Map<String, RelayScope>) = transaction { dao ->
+        scopes.keys.forEach(Contract::uuid)
+        for(runtime in dao.creationRuntimes()) {
+            val granted=scopes[runtime]
+            if(granted==null || "command.status" !in granted.actions) dao.revokeCreations(runtime)
+            else dao.restrictCreations(runtime,granted.workspaces.toList())
+        }
+    }
     override suspend fun loadTranscript(runtime: String, session: String, workspace: String?): CachedTranscript? = transaction { dao ->
         Contract.uuid(runtime); Contract.uuid(session); workspace?.let(Contract::uuid)
         val now = System.currentTimeMillis()
@@ -132,6 +142,16 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
                 db.execSQL("CREATE TABLE IF NOT EXISTS cached_records (runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, seq INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(runtimeId,sessionId,seq), FOREIGN KEY(runtimeId,sessionId) REFERENCES cached_sessions(runtimeId,sessionId) ON UPDATE NO ACTION ON DELETE CASCADE)")
             }
         }
+        private val migration2To3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE commands_v3 (requestId TEXT NOT NULL, runtimeId TEXT NOT NULL, sessionId TEXT, intent BLOB NOT NULL, digest TEXT NOT NULL, delivery TEXT NOT NULL, remote TEXT, attempts INTEGER NOT NULL, revision INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, remoteTimestamp TEXT, everHostSaved INTEGER NOT NULL, everAgentQueued INTEGER NOT NULL, error TEXT, workspaceId TEXT, createdSessionId TEXT, PRIMARY KEY(requestId))")
+                db.execSQL("INSERT INTO commands_v3(requestId,runtimeId,sessionId,intent,digest,delivery,remote,attempts,revision,createdAt,updatedAt,remoteTimestamp,everHostSaved,everAgentQueued,error) SELECT requestId,runtimeId,sessionId,intent,digest,delivery,remote,attempts,revision,createdAt,updatedAt,remoteTimestamp,everHostSaved,everAgentQueued,error FROM commands")
+                db.execSQL("DROP TABLE commands")
+                db.execSQL("ALTER TABLE commands_v3 RENAME TO commands")
+                db.execSQL("CREATE INDEX index_commands_runtimeId_sessionId_createdAt ON commands(runtimeId,sessionId,createdAt)")
+                db.execSQL("CREATE INDEX index_commands_runtimeId_workspaceId_createdAt ON commands(runtimeId,workspaceId,createdAt)")
+            }
+        }
         fun open(context: Context, owner: CommandOwner): SqlCommandJournal = checked {
             System.loadLibrary("sqlcipher")
             val directory = directory(context, owner.accountId, owner.organizationId).resolve(owner.fingerprint)
@@ -142,7 +162,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             var database: CommandDatabase? = null
             try {
                 database = Room.databaseBuilder(context.applicationContext, CommandDatabase::class.java, file.absolutePath)
-                    .addMigrations(migration1To2)
+                    .addMigrations(migration1To2, migration2To3)
                     .openHelperFactory(SupportOpenHelperFactory(password, null, true))
                     .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING).build()
                 database.openHelper.writableDatabase.execSQL("PRAGMA synchronous=FULL")
@@ -167,10 +187,12 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
 }
 
 private fun PendingCommand.encode() = CommandRow(intent.requestId, intent.runtimeId, intent.sessionId, intent.storageBytes(), intent.digest, delivery.name, remote?.name,
-    attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error)
+    attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, intent.workspaceId, createdSessionId)
 private fun CommandRow.decode(): PendingCommand {
     val parsed = CommandIntent.parse(JsonDocument.parse(intent).root)
-    if (parsed.requestId != requestId || parsed.runtimeId != runtimeId || parsed.sessionId != sessionId || parsed.digest != digest || attempts < 0 || revision < 1 ||
+    if (parsed.requestId != requestId || parsed.runtimeId != runtimeId || parsed.sessionId != sessionId || parsed.workspaceId != workspaceId || parsed.digest != digest || attempts < 0 || revision < 1 ||
         delivery == CommandDelivery.PENDING.name && attempts != 0L && remote != RemoteCommandState.RECEIVED.name) throw CommandDataException("data.corrupt")
-    return PendingCommand(parsed, CommandDelivery.valueOf(delivery), remote?.let(RemoteCommandState::valueOf), attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error)
+    createdSessionId?.let(Contract::uuid)
+    if ((parsed.kind == CommandKind.CREATE && remote == RemoteCommandState.SETTLED.name) != (createdSessionId != null)) throw CommandDataException("data.corrupt")
+    return PendingCommand(parsed, CommandDelivery.valueOf(delivery), remote?.let(RemoteCommandState::valueOf), attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, createdSessionId)
 }

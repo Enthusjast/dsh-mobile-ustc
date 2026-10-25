@@ -5,11 +5,11 @@ import androidx.room.*
 @Entity(tableName = "database_identity")
 internal data class DatabaseIdentity(@PrimaryKey val slot: Int = 1, val ownerHash: String)
 
-@Entity(tableName = "commands", indices = [Index(value = ["runtimeId", "sessionId", "createdAt"])])
+@Entity(tableName = "commands", indices = [Index(value = ["runtimeId", "sessionId", "createdAt"]), Index(value = ["runtimeId", "workspaceId", "createdAt"])])
 internal data class CommandRow(
-    @PrimaryKey val requestId: String, val runtimeId: String, val sessionId: String, val intent: ByteArray, val digest: String,
+    @PrimaryKey val requestId: String, val runtimeId: String, val sessionId: String?, val intent: ByteArray, val digest: String,
     val delivery: String, val remote: String?, val attempts: Long, val revision: Long, val createdAt: Long, val updatedAt: Long,
-    val remoteTimestamp: String?, val everHostSaved: Boolean, val everAgentQueued: Boolean, val error: String?,
+    val remoteTimestamp: String?, val everHostSaved: Boolean, val everAgentQueued: Boolean, val error: String?, val workspaceId: String? = null, val createdSessionId: String? = null,
 )
 
 @Entity(tableName = "cached_sessions", primaryKeys = ["runtimeId", "sessionId"], indices = [Index(value = ["savedAt"]), Index(value = ["accessedAt"])])
@@ -24,12 +24,17 @@ internal data class CachedRecordRow(val runtimeId: String, val sessionId: String
     @Insert fun identity(value: DatabaseIdentity)
     @Query("SELECT * FROM commands WHERE requestId=:id") fun get(id: String): CommandRow?
     @Query("SELECT * FROM commands WHERE runtimeId=:runtime AND sessionId=:session ORDER BY createdAt,requestId") fun list(runtime: String, session: String): List<CommandRow>
+    @Query("SELECT * FROM commands WHERE runtimeId=:runtime AND workspaceId IS NOT NULL ORDER BY createdAt,requestId") fun creations(runtime: String): List<CommandRow>
     @Query("SELECT COUNT(*) FROM commands") fun count(): Int
     @Query("SELECT COALESCE(SUM(length(intent)),0) FROM commands") fun bytes(): Long
     @Insert fun insert(row: CommandRow)
     @Update fun update(row: CommandRow): Int
     @Query("DELETE FROM commands WHERE requestId=:id") fun delete(id: String)
     @Query("DELETE FROM commands WHERE runtimeId=:runtime") fun revokeRuntime(runtime: String)
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND workspaceId IS NULL") fun revokeSessionCommands(runtime: String)
+    @Query("SELECT DISTINCT runtimeId FROM commands WHERE workspaceId IS NOT NULL") fun creationRuntimes(): List<String>
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND workspaceId IS NOT NULL") fun revokeCreations(runtime: String)
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND workspaceId IS NOT NULL AND workspaceId NOT IN (:workspaces)") fun restrictCreations(runtime: String, workspaces: List<String>)
     @Query("DELETE FROM commands WHERE requestId IN (SELECT requestId FROM commands WHERE delivery='CONFIRMED' AND remote IN ('AGENT_QUEUED','OBSERVED','SETTLED','REJECTED') ORDER BY createdAt,requestId LIMIT 32)") fun evictDelivered()
     @Query("SELECT * FROM cached_sessions WHERE runtimeId=:runtime AND sessionId=:session") fun cachedSession(runtime: String, session: String): CachedSessionRow?
     @Query("SELECT * FROM cached_records WHERE runtimeId=:runtime AND sessionId=:session ORDER BY seq") fun cachedRecords(runtime: String, session: String): List<CachedRecordRow>
@@ -46,5 +51,5 @@ internal data class CachedRecordRow(val runtimeId: String, val sessionId: String
     @Query("DELETE FROM cached_sessions WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))") fun restrictCache(runtime: String, sessions: List<String>, workspaces: List<String>)
 }
 
-@Database(entities = [DatabaseIdentity::class, CommandRow::class, CachedSessionRow::class, CachedRecordRow::class], version = 2, exportSchema = true)
+@Database(entities = [DatabaseIdentity::class, CommandRow::class, CachedSessionRow::class, CachedRecordRow::class], version = 3, exportSchema = true)
 internal abstract class CommandDatabase : RoomDatabase() { abstract fun commands(): CommandDao }

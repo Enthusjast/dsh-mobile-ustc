@@ -11,10 +11,11 @@ internal class MemoryCommandJournal(override val owner: CommandOwner) : CommandJ
     var failBegin = false
     override suspend fun create(intent: CommandIntent, now: Long): PendingCommand = mutex.withLock {
         val old = rows[intent.requestId]
-        if (old != null) { if (old.intent.digest != intent.digest) throw CommandDataException("command.request_conflict"); return@withLock old }
+        if (old != null) { if (old.intent.digest != intent.digest || !old.intent.storageBytes().contentEquals(intent.storageBytes())) throw CommandDataException("command.request_conflict"); return@withLock old }
         CommandEvolution.created(intent, now).also { rows[intent.requestId] = it }
     }
     override suspend fun list(runtime: String, session: String) = mutex.withLock { rows.values.filter { it.intent.runtimeId == runtime && it.intent.sessionId == session } }
+    override suspend fun listCreations(runtime: String) = mutex.withLock { rows.values.filter { it.intent.runtimeId == runtime && it.intent.kind == CommandKind.CREATE } }
     override suspend fun beginAttempt(id: String, now: Long): PendingCommand = mutex.withLock {
         if (failBegin) throw CommandDataException("data.unavailable")
         CommandEvolution.begin(rows[id]!!, now).also { rows[id] = it }
@@ -24,5 +25,6 @@ internal class MemoryCommandJournal(override val owner: CommandOwner) : CommandJ
     override suspend fun rearm(id: String, proof: CommandReceipt) = mutex.withLock { CommandEvolution.rearm(rows[id]!!, proof).also { rows[id] = it } }
     override suspend fun discard(id: String) { mutex.withLock { rows.remove(id) } }
     override suspend fun revokeRuntime(runtime: String) { mutex.withLock { rows.entries.removeAll { it.value.intent.runtimeId == runtime } } }
+    override suspend fun revokeSessionCommands(runtime: String) { mutex.withLock { rows.entries.removeAll { it.value.intent.runtimeId == runtime && it.value.intent.kind != CommandKind.CREATE } } }
     override fun close() = Unit
 }

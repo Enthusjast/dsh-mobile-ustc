@@ -1,0 +1,302 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "b572999ebd5ef3957e94a440810ff9e3",
+    "entities": [
+      {
+        "tableName": "database_identity",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`slot` INTEGER NOT NULL, `ownerHash` TEXT NOT NULL, PRIMARY KEY(`slot`))",
+        "fields": [
+          {
+            "fieldPath": "slot",
+            "columnName": "slot",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerHash",
+            "columnName": "ownerHash",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "slot"
+          ]
+        }
+      },
+      {
+        "tableName": "commands",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`requestId` TEXT NOT NULL, `runtimeId` TEXT NOT NULL, `sessionId` TEXT, `intent` BLOB NOT NULL, `digest` TEXT NOT NULL, `delivery` TEXT NOT NULL, `remote` TEXT, `attempts` INTEGER NOT NULL, `revision` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `remoteTimestamp` TEXT, `everHostSaved` INTEGER NOT NULL, `everAgentQueued` INTEGER NOT NULL, `error` TEXT, `workspaceId` TEXT, `createdSessionId` TEXT, PRIMARY KEY(`requestId`))",
+        "fields": [
+          {
+            "fieldPath": "requestId",
+            "columnName": "requestId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "runtimeId",
+            "columnName": "runtimeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "intent",
+            "columnName": "intent",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "digest",
+            "columnName": "digest",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "delivery",
+            "columnName": "delivery",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remote",
+            "columnName": "remote",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attempts",
+            "columnName": "attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteTimestamp",
+            "columnName": "remoteTimestamp",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "everHostSaved",
+            "columnName": "everHostSaved",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "everAgentQueued",
+            "columnName": "everAgentQueued",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "error",
+            "columnName": "error",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "workspaceId",
+            "columnName": "workspaceId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdSessionId",
+            "columnName": "createdSessionId",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "requestId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_commands_runtimeId_sessionId_createdAt",
+            "unique": false,
+            "columnNames": [
+              "runtimeId",
+              "sessionId",
+              "createdAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_commands_runtimeId_sessionId_createdAt` ON `${TABLE_NAME}` (`runtimeId`, `sessionId`, `createdAt`)"
+          },
+          {
+            "name": "index_commands_runtimeId_workspaceId_createdAt",
+            "unique": false,
+            "columnNames": [
+              "runtimeId",
+              "workspaceId",
+              "createdAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_commands_runtimeId_workspaceId_createdAt` ON `${TABLE_NAME}` (`runtimeId`, `workspaceId`, `createdAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "cached_sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`runtimeId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `workspaceId` TEXT, `epoch` TEXT NOT NULL, `savedAt` INTEGER NOT NULL, `accessedAt` INTEGER NOT NULL, `recordCount` INTEGER NOT NULL, `bytes` INTEGER NOT NULL, PRIMARY KEY(`runtimeId`, `sessionId`))",
+        "fields": [
+          {
+            "fieldPath": "runtimeId",
+            "columnName": "runtimeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "workspaceId",
+            "columnName": "workspaceId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "epoch",
+            "columnName": "epoch",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "savedAt",
+            "columnName": "savedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accessedAt",
+            "columnName": "accessedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordCount",
+            "columnName": "recordCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytes",
+            "columnName": "bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "runtimeId",
+            "sessionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_cached_sessions_savedAt",
+            "unique": false,
+            "columnNames": [
+              "savedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_cached_sessions_savedAt` ON `${TABLE_NAME}` (`savedAt`)"
+          },
+          {
+            "name": "index_cached_sessions_accessedAt",
+            "unique": false,
+            "columnNames": [
+              "accessedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_cached_sessions_accessedAt` ON `${TABLE_NAME}` (`accessedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "cached_records",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`runtimeId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `seq` INTEGER NOT NULL, `body` BLOB NOT NULL, PRIMARY KEY(`runtimeId`, `sessionId`, `seq`), FOREIGN KEY(`runtimeId`, `sessionId`) REFERENCES `cached_sessions`(`runtimeId`, `sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "runtimeId",
+            "columnName": "runtimeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "seq",
+            "columnName": "seq",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "body",
+            "columnName": "body",
+            "affinity": "BLOB",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "runtimeId",
+            "sessionId",
+            "seq"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "cached_sessions",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "runtimeId",
+              "sessionId"
+            ],
+            "referencedColumns": [
+              "runtimeId",
+              "sessionId"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b572999ebd5ef3957e94a440810ff9e3')"
+    ]
+  }
+}
