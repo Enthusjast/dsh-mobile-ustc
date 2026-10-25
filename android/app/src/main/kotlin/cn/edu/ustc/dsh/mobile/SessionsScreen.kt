@@ -18,7 +18,8 @@ import cn.edu.ustc.dsh.protocol.*
 @Composable
 fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
     onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}, onCreate: ()->Unit={},
-    onAnswer: (QuestionHandle,QuestionAnswers)->Unit={_,_->},onClaim: (QuestionHandle)->Unit={},onRelease: (QuestionHandle)->Unit={},onRefreshQuestions: ()->Unit={}) {
+    onAnswer: (QuestionHandle,QuestionAnswers)->Unit={_,_->},onClaim: (QuestionHandle)->Unit={},onRelease: (QuestionHandle)->Unit={},onRefreshQuestions: ()->Unit={},
+    onApproval: (String) -> Unit = {}, onApprovalQuery: () -> Unit = {}) {
     val runtime = state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }
     val opened = state.selectedSessionId
     val canCompose = opened != null && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
@@ -79,6 +80,28 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         }
                     }
                     val transcript = read.window
+                    state.approvals?.takeIf { runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true }?.let { approvals ->
+                        approvals.error?.let { code -> item("approval-error") { Text(approvalErrorText(code), color = MaterialTheme.colorScheme.error) } }
+                        val pending = approvals.view.items.filter { it.canReview || it.handle != null || it.remainingMillis > 0 && it.status.state in setOf(ApprovalRemoteState.PENDING, ApprovalRemoteState.DECISION_RECEIVED) }
+                        items(pending, key = { "approval:${it.status.id}" }) { view ->
+                            OutlinedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text("待处理工具审批", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+                                Text("先在线核对完整动作与参数，再为本次调用作出决定。")
+                                OutlinedButton({ onApproval(view.status.id) }, enabled = approvals.connected && approvals.contentReady, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("核对工具审批") }
+                            } }
+                        }
+                        if (approvals.records.isNotEmpty()) item("approval-records-heading") {
+                            Text("本机审批记录", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+                            TextButton(onApprovalQuery, Modifier.heightIn(min = 48.dp)) { Text("核对审批结果") }
+                        }
+                        items(approvals.records, key = { "approval-original:${it.intent.requestId}" }) { row ->
+                            OutlinedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text(if (row.intent.decision.choice == ApprovalChoice.ALLOW_ONCE) "原决定：仅本次允许" else "原决定：拒绝", style = MaterialTheme.typography.titleSmall)
+                                Text(approvalRecordLabel(row))
+                                OutlinedButton({ onApproval(row.intent.approvalId) }, enabled = approvals.connected, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看原决定与当前详情") }
+                            } }
+                        }
+                    }
                     if(read.phase==SessionReadPhase.READY) {
                         items(read.questions.items,key={"question:${it.handle.kind}:${it.batch.id}"}) {question->
                             QuestionCard(question,read.questions.canAnswer,state.submitting,state.outbox?.records ?: emptyList(),onAnswer,onClaim,onRelease,onRefreshQuestions,onQueryCommands)

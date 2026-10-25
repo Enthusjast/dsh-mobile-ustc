@@ -27,7 +27,8 @@ import javax.inject.Singleton
 
 enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, RECOVERING, RECOVERY_ERROR, REAUTHENTICATE, RENEWING, CLEARING, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, RECONCILING, REGISTRATION_UNKNOWN, READY }
 class BrowserLaunch(val id: Long, val uri: Uri)
-class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<DeviceRegistrationProof>)
+class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<*>, val title: String = "确认登记此设备", val subtitle: String = "将这部手机的独立密钥登记到学校账号")
+enum class ApprovalUiStage { IDLE, PREPARING, AUTHENTICATING, SENDING }
 data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String, val access: RuntimeDirectoryEntry? = null)
 data class HomeState(
     val phase: HomePhase = HomePhase.LOADING, val issuer: String = "", val error: String? = null,
@@ -40,6 +41,7 @@ data class HomeState(
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
     val outbox: CommandOutboxState? = null, val commandError: String? = null, val submitting: Boolean = false, val composerRevision: Long = 0,
     val creation: SessionCreationState? = null,
+    val approvals: ApprovalClientState? = null, val reviewingApprovalId: String? = null, val approvalStage: ApprovalUiStage = ApprovalUiStage.IDLE, val approvalError: String? = null,
 )
 
 internal class LoginEnvironment(
@@ -49,7 +51,8 @@ internal class LoginEnvironment(
     val now: () -> Long = System::currentTimeMillis,
     val refreshLeadMillis: Long = 30_000,
     val minimumValidityMillis: Long = 60_000,
-)
+    val approvalPromptMillis: Long = MAX_DECISION_AGE_MS,
+) { init { require(approvalPromptMillis in 1..MAX_DECISION_AGE_MS) } }
 
 @Singleton
 class LoginController internal constructor(private val context: Context, private val http: LoginHttp, private val environment: LoginEnvironment) : AutoCloseable {
@@ -89,6 +92,16 @@ class LoginController internal constructor(private val context: Context, private
     private var commandCollector: Job? = null
     private var commandJob: Job? = null
     private var questionScope: CoroutineScope?=null
+    private var approvalCollector: Job? = null
+    private var approvalActionJob: Job? = null
+    private var approvalTimeout: Job? = null
+    private var approvalJournal: ApprovalDecisionJournal? = null
+    private var approvalPreparingHandle: ApprovalReviewHandle? = null
+    private var approvalPrepared: PreparedApprovalSignature? = null
+    private var approvalActionGeneration = 0L
+    private class ApprovalAuthentication(val id: Long, val stamp: Long, val view: Long, val action: Long, val client: SessionApprovalClient, val handle: ApprovalReviewHandle,
+        val prepared: PreparedApprovalSignature, val operation: ApprovalKeyOperation)
+    private var approvalAuthentication: ApprovalAuthentication? = null
     private var binding: HostBindingFlow? = null
     private var bindingCollector: Job? = null
     private var bindingGeneration = 0L
@@ -135,6 +148,14 @@ class LoginController internal constructor(private val context: Context, private
         current(stamp)
         checkpoint = next
     }
+    private suspend fun <T> beginKeyOperation(stamp: Long, begin: () -> AuthenticatedKeyOperation<T>): AuthenticatedKeyOperation<T> {
+        var opened: AuthenticatedKeyOperation<T>? = null
+        try {
+            withContext(NonCancellable + Dispatchers.Default) { opened = begin() }
+            current(stamp)
+            return opened!!.also { opened = null }
+        } finally { opened?.close() }
+    }
 
     private suspend fun restore(stamp: Long) {
         val config = configuration ?: return
@@ -172,6 +193,7 @@ class LoginController internal constructor(private val context: Context, private
         }
         if (mutable.value.phase !in setOf(HomePhase.SIGNED_OUT, HomePhase.REAUTHENTICATE)) return
         val saved = checkpoint
+        val forceAuthentication = mutable.value.error == "approval.assurance_required"
         val stamp = fence(closeKeys = false)
         mutable.value = HomeState(HomePhase.STARTING, config.issuer)
         work {
@@ -194,7 +216,8 @@ class LoginController internal constructor(private val context: Context, private
                     config.clientId, ResponseTypeValues.CODE, config.redirectUri.toUri(),
                 ).setScopes(config.scopes).setState(attempt.state).setNonce(attempt.nonce)
                     .setCodeVerifier(attempt.verifierForAuthorizationRequest(), attempt.codeChallenge, "S256")
-                    .setAdditionalParameters(mapOf("resource" to config.resource, "dpop_jkt" to proof!!.thumbprint)).build()
+                    .setAdditionalParameters(mapOf("resource" to config.resource, "dpop_jkt" to proof!!.thumbprint))
+                    .apply { if (forceAuthentication) setPrompt("login") }.build()
                 mutable.value = HomeState(HomePhase.BROWSER, config.issuer, browser = BrowserLaunch(stamp, browserRequest.toUri()))
                 deadline = scope.launch { delay(600_000); if (generation == stamp && pending != null) browserFailed("login.expired") }
             } catch (error: CancellationException) { throw error }
@@ -313,7 +336,7 @@ class LoginController internal constructor(private val context: Context, private
                 val request = api!!.prepareRegistration(PublicProofKey(local.publicJwk), actualName)
                 current(stamp)
                 registration = request
-                operation = withContext(Dispatchers.Default) { local.beginRegistration(request.signatureRequest) }
+                operation = beginKeyOperation(stamp) { local.beginRegistration(request.signatureRequest) }
                 current(stamp)
                 val id = ++nextAuthenticationId
                 mutable.value = mutable.value.copy(phase = HomePhase.AUTHENTICATING, authenticationId = id, biometric = BiometricLaunch(id, operation!!), deviceName = actualName)
@@ -330,6 +353,7 @@ class LoginController internal constructor(private val context: Context, private
 
     fun promptOpened(id: Long) { if (mutable.value.biometric?.id == id) mutable.value = mutable.value.copy(biometric = null) }
     fun authenticated(id: Long, result: BiometricPrompt.AuthenticationResult) {
+        approvalAuthentication?.takeIf { it.id == id }?.let { authenticatedApproval(it, result); return }
         if (mutable.value.authenticationId != id) return
         val active = operation ?: return
         val request = registration ?: return
@@ -369,6 +393,7 @@ class LoginController internal constructor(private val context: Context, private
     }
 
     fun authenticationCancelled(id: Long) {
+        if (approvalAuthentication?.id == id) { abortApprovalAuthentication("approval.authentication_cancelled"); return }
         if (mutable.value.authenticationId != id) return
         discardRegistration()
         if (mutable.value.phase == HomePhase.AUTHENTICATING) showEnrollment("login.authentication_cancelled")
@@ -472,7 +497,7 @@ class LoginController internal constructor(private val context: Context, private
             }.map { it.id }
             mutable.value = mutable.value.copy(runtimes = items, error = null)
             val activeAccess = items.firstOrNull { it.id == selectedContext }?.access
-            if (oldAccess != null && activeAccess != null && (oldAccess.grantVersion != activeAccess.grantVersion || activeAccess.scope?.let { oldAccess.scope?.same(it) } != true)) retireNavigation(true)
+            if (oldAccess != null && activeAccess != null && (oldAccess.role != activeAccess.role || oldAccess.grantVersion != activeAccess.grantVersion || activeAccess.scope?.let { oldAccess.scope?.same(it) } != true)) retireNavigation(true)
             if (removedRead.isNotEmpty()) {
                 val saved = checkpoint!!
                 val owner = CommandOwner(saved.accountId, saved.organizationId, configuration!!.fingerprint, saved.userId, saved.deviceId!!)
@@ -517,11 +542,14 @@ class LoginController internal constructor(private val context: Context, private
     private fun retireNavigation(keepDesired: Boolean) {
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
+        abortApprovalAuthentication(null)
+        approvalCollector?.cancel(); approvalCollector = null; approvalActionJob?.cancel(); approvalActionJob = null
         questionScope?.cancel();questionScope=null
         reader?.close(); reader = null
+        approvalJournal?.close(); approvalJournal = null
         creationCollector?.cancel(); creationCollector=null; creationFlow?.close(); creationFlow=null
         commandJournal?.close(); commandJournal = null
-        mutable.value = mutable.value.copy(outbox = null, commandError = null, submitting = false, creation=null)
+        mutable.value = mutable.value.copy(outbox = null, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE)
         if (!keepDesired) { desired = null; creationDesired=null }
     }
     fun foreground(active: Boolean) {
@@ -530,7 +558,7 @@ class LoginController internal constructor(private val context: Context, private
         binding?.foreground(active)
         if (!active) {
             retireNavigation(true)
-            mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null), loadingSessions = false, binding = binding?.state?.value,
+            mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null, questions = SessionQuestionState()), loadingSessions = false, binding = binding?.state?.value,
                 outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1)
         } else if (mutable.value.phase == HomePhase.READY && binding == null) {
             if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
@@ -629,7 +657,7 @@ class LoginController internal constructor(private val context: Context, private
         val runtimeId = mutable.value.selectedRuntimeId ?: return
         val runtime = mutable.value.runtimes.firstOrNull { it.id == runtimeId }?.access ?: return
         val selected = mutable.value.sessions.firstOrNull { it.id == id } ?: return
-        val allowed = selected.viewScope(runtime) ?: return
+        val allowed = selected.viewScope(runtime, includeApprovals = approval != null) ?: return
         desired = runtimeId to id
         if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
         retireNavigation(true)
@@ -647,10 +675,29 @@ class LoginController internal constructor(private val context: Context, private
                     mutable.value = mutable.value.copy(commandError = if (error is CommandDataException) error.code else "data.unavailable")
                 }
                 current(stamp); if (view != navigationGeneration) return@navigation
-                val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId)
+                val approvalAccount = if (database != null && "approval.decide" in allowed.actions) {
+                    val local = approval ?: throw DeviceCryptoException(DeviceCryptoFailure.KEY_MISSING)
+                    if (local.thumbprint != saved.approvalKeyJkt) throw DeviceCryptoException(DeviceCryptoFailure.WRONG_KEY)
+                    val key = RegisteredApprovalKey.parse(jsonObject("user_id" to saved.userId.json(), "device_id" to saved.deviceId!!.json(), "key_version" to 1L.json(),
+                        "active" to JsonBoolean(true), "public_jwk" to local.publicJwk, "approval_key_jkt" to local.thumbprint.json()))
+                    val decisions = database!!.approvalDecisions(key)
+                    approvalJournal = decisions
+                    SessionApprovalAccount(runtime.hostId, key, decisions)
+                } else null
+                val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId, approvalAccount = approvalAccount)
                     else resource.reader(saved.deviceId!!, runtimeId, id, runtime.scope!!.readSession(id, selected.workspaceId), scope)
                 commandJournal = database; database = null; reader = opened
                 questionScope=CoroutineScope(SupervisorJob(scope.coroutineContext[Job])+Dispatchers.Main.immediate)
+                opened.approvals?.let { client -> approvalCollector = scope.launch {
+                    client.state.collect {
+                        if (generation != stamp || navigationGeneration != view || !foreground) return@collect
+                        val next = client.state.value
+                        mutable.value = mutable.value.copy(approvals = next)
+                        val handle = approvalPreparingHandle ?: approvalAuthentication?.handle
+                        if (handle != null && (!next.connected || !next.contentReady || next.view.items.none { it.handle == handle } ||
+                                approvalAuthentication != null && !next.signing)) abortApprovalAuthentication("approval.stale")
+                    }
+                } }
                 opened.commands?.let { commands -> commandCollector = scope.launch {
                     commands.state.collect { outbox ->
                         if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(outbox = outbox)
@@ -690,6 +737,126 @@ class LoginController internal constructor(private val context: Context, private
     fun sendPending(id: String) { reader?.commands?.sendPending(id) }
     fun queryCommands() { reader?.commands?.query() }
     fun refreshQuestions() {reader?.refreshQuestions()}
+    fun reviewApproval(id: String) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.approvalStage != ApprovalUiStage.IDLE) return
+        val client = reader?.approvals ?: return
+        Contract.uuid(id)
+        mutable.value = mutable.value.copy(reviewingApprovalId = id, approvalError = null)
+        approvalWork { client.requestDetails(id) }
+    }
+    fun closeApprovalReview() {
+        abortApprovalAuthentication(null)
+        mutable.value = mutable.value.copy(reviewingApprovalId = null, approvalError = null)
+        approvalWork { it.dismissReview() }
+    }
+    fun queryApprovals() { reader?.approvals?.query() }
+    fun refreshApprovals() { closeApprovalReview(); reader?.refreshQuestions() }
+    fun discardUnsentApproval(id: String) = approvalWork { it.discardUnsent(id) }
+    private fun approvalWork(action: suspend (SessionApprovalClient) -> Unit) {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        val client = reader?.approvals ?: return; val work = questionScope ?: return
+        val stamp = generation; val view = navigationGeneration; val selection = mutable.value.reviewingApprovalId
+        work.launch {
+            try { action(client) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { if (generation == stamp && view == navigationGeneration && mutable.value.reviewingApprovalId == selection && reader?.approvals === client) mutable.value = mutable.value.copy(approvalError = code(error)) }
+        }
+    }
+    private fun approvalCurrent(stamp: Long, view: Long, client: SessionApprovalClient, handle: ApprovalReviewHandle) {
+        current(stamp)
+        val authority = mutable.value.runtimes.firstOrNull { it.id == handle.runtimeId }?.access
+        if (!foreground || navigationGeneration != view || mutable.value.phase != HomePhase.READY || reader?.approvals !== client ||
+            authority?.role != "owner" || authority.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) != true || authority.expiresAt?.let { it <= now() } == true ||
+            mutable.value.selectedRuntimeId != handle.runtimeId || mutable.value.selectedSessionId != handle.sessionId ||
+            mutable.value.reviewingApprovalId != handle.approvalId || !client.state.value.connected || !client.state.value.contentReady ||
+            client.state.value.view.items.none { it.handle == handle && it.context?.current(System.currentTimeMillis()) == true }) throw ApprovalStateException("approval.stale")
+    }
+    fun decideApproval(handle: ApprovalReviewHandle, choice: ApprovalChoice) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.approvalStage != ApprovalUiStage.IDLE || mutable.value.reviewingApprovalId != handle.approvalId) return
+        val client = reader?.approvals ?: return; val work = questionScope ?: return
+        val local = approval ?: return
+        val stamp = generation; val view = navigationGeneration; val began = System.nanoTime(); val action = ++approvalActionGeneration
+        approvalPreparingHandle = handle
+        mutable.value = mutable.value.copy(approvalStage = ApprovalUiStage.PREPARING, approvalError = null)
+        approvalActionJob = work.launch {
+            var opened: ApprovalKeyOperation? = null
+            try {
+                approvalCurrent(stamp, view, client, handle)
+                val prepared = client.prepareSignature(handle, choice)
+                approvalPrepared = prepared
+                opened = beginKeyOperation(stamp) { local.beginApproval(prepared) }
+                approvalCurrent(stamp, view, client, handle)
+                if (!client.state.value.signing) throw ApprovalStateException("approval.stale")
+                if ((System.nanoTime() - began) / 1_000_000 >= environment.approvalPromptMillis) throw ApprovalStateException("approval.authentication_expired")
+                val id = ++nextAuthenticationId
+                val active = ApprovalAuthentication(id, stamp, view, action, client, handle, prepared, opened!!)
+                approvalAuthentication = active; opened = null; approvalPreparingHandle = null; approvalPrepared = null
+                mutable.value = mutable.value.copy(approvalStage = ApprovalUiStage.AUTHENTICATING, authenticationId = id,
+                    biometric = BiometricLaunch(id, active.operation, if (choice == ApprovalChoice.ALLOW_ONCE) "仅本次允许此工具" else "确认拒绝此工具", "签署当前电脑会话中的这一次决定"))
+                approvalTimeout = work.launch {
+                    delay((environment.approvalPromptMillis - (System.nanoTime() - began) / 1_000_000).coerceAtLeast(1))
+                    if (approvalAuthentication === active) abortApprovalAuthentication("approval.authentication_expired")
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp && navigationGeneration == view && approvalActionGeneration == action) abortApprovalAuthentication(code(error))
+            } finally { opened?.close() }
+        }
+    }
+    private fun abortApprovalAuthentication(error: String?) {
+        val active = approvalAuthentication
+        val prepared = active?.prepared ?: approvalPrepared
+        approvalActionGeneration++
+        approvalAuthentication = null; approvalPreparingHandle = null; approvalPrepared = null
+        approvalTimeout?.cancel(); approvalTimeout = null
+        approvalActionJob?.cancel(); approvalActionJob = null
+        active?.operation?.close()
+        val ownsPrompt = active != null && mutable.value.authenticationId == active.id
+        mutable.value = mutable.value.copy(approvalStage = ApprovalUiStage.IDLE, approvalError = error,
+            authenticationId = if (ownsPrompt) null else mutable.value.authenticationId,
+            biometric = if (ownsPrompt) null else mutable.value.biometric)
+        val client = active?.client ?: reader?.approvals
+        if (prepared != null) questionScope?.launch { client?.cancelSignature(prepared) }
+    }
+    private fun authenticatedApproval(active: ApprovalAuthentication, result: BiometricPrompt.AuthenticationResult) {
+        if (runCatching { result.cryptoObject?.signature === active.operation.cryptoObject.signature }.getOrDefault(false).not()) return
+        val work = questionScope ?: return
+        try { approvalCurrent(active.stamp, active.view, active.client, active.handle) }
+        catch (_: Exception) { abortApprovalAuthentication("approval.stale"); return }
+        approvalAuthentication = null; approvalTimeout?.cancel(); approvalTimeout = null
+        mutable.value = mutable.value.copy(approvalStage = ApprovalUiStage.SENDING, authenticationId = null, biometric = null, approvalError = null)
+        approvalActionJob = work.launch {
+            try {
+                val signed = withContext(Dispatchers.Default) { active.operation.finish(result) }
+                approvalCurrent(active.stamp, active.view, active.client, active.handle)
+                active.client.submit(active.handle, signed)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { if (generation == active.stamp && navigationGeneration == active.view && approvalActionGeneration == active.action) mutable.value = mutable.value.copy(approvalError = code(error)) }
+            finally {
+                active.operation.close()
+                withContext(NonCancellable) { active.client.cancelSignature(active.prepared) }
+                if (generation == active.stamp && navigationGeneration == active.view && approvalActionGeneration == active.action) mutable.value = mutable.value.copy(approvalStage = ApprovalUiStage.IDLE)
+            }
+        }
+    }
+    fun sendOriginalApproval(handle: ApprovalReviewHandle, id: String) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.approvalStage != ApprovalUiStage.IDLE) return
+        val client = reader?.approvals ?: return; val work = questionScope ?: return
+        val stamp = generation; val view = navigationGeneration; val action = ++approvalActionGeneration
+        mutable.value = mutable.value.copy(approvalStage = ApprovalUiStage.SENDING, approvalError = null)
+        approvalActionJob = work.launch {
+            try { approvalCurrent(stamp, view, client, handle); client.sendPending(handle, id) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { if (generation == stamp && navigationGeneration == view && approvalActionGeneration == action) mutable.value = mutable.value.copy(approvalError = code(error)) }
+            finally { if (generation == stamp && navigationGeneration == view && approvalActionGeneration == action) mutable.value = mutable.value.copy(approvalStage = ApprovalUiStage.IDLE) }
+        }
+    }
+    fun reauthenticateApproval() {
+        if (mutable.value.phase != HomePhase.READY || mutable.value.approvalError != "approval.assurance_required" && mutable.value.approvals?.error != "approval.assurance_required") return
+        val stamp = fence(closeKeys = false)
+        mutable.value = HomeState(HomePhase.RENEWING, configuration!!.issuer)
+        work { try { requireReauthentication(stamp, "approval.assurance_required") } catch (error: CancellationException) { throw error } catch (error: Exception) { handle(error, stamp) } }
+    }
     fun answerQuestion(handle: QuestionHandle,answers: QuestionAnswers) {
         if(!foreground || mutable.value.phase!=HomePhase.READY || mutable.value.submitting) return
         val opened=reader ?: return
@@ -830,6 +997,8 @@ class LoginController internal constructor(private val context: Context, private
     private fun code(error: Exception): String = when (error) {
         is CommandDataException -> error.code
         is QuestionStateException -> error.code
+        is ApprovalStateException -> error.code
+        is ApprovalSignatureException -> "approval.signature_unavailable"
         is LoginException -> "login.${error.failure.name.lowercase()}"
         is RemoteRequestException -> error.code
         is DeviceCryptoException -> "device.${error.failure.name.lowercase()}"
@@ -868,6 +1037,14 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun claimQuestion(handle: QuestionHandle) = login.claimQuestion(handle)
     fun releaseQuestion(handle: QuestionHandle) = login.releaseQuestion(handle)
     fun refreshQuestions() = login.refreshQuestions()
+    fun reviewApproval(id: String) = login.reviewApproval(id)
+    fun closeApprovalReview() = login.closeApprovalReview()
+    fun decideApproval(handle: ApprovalReviewHandle, choice: ApprovalChoice) = login.decideApproval(handle, choice)
+    fun sendOriginalApproval(handle: ApprovalReviewHandle, id: String) = login.sendOriginalApproval(handle, id)
+    fun queryApprovals() = login.queryApprovals()
+    fun refreshApprovals() = login.refreshApprovals()
+    fun discardUnsentApproval(id: String) = login.discardUnsentApproval(id)
+    fun reauthenticateApproval() = login.reauthenticateApproval()
     fun cancelSession(epoch: String) = login.cancelSession(epoch)
     fun openBinding() = login.openBinding()
     fun previewBinding(id: String, code: String) = login.previewBinding(id, code)

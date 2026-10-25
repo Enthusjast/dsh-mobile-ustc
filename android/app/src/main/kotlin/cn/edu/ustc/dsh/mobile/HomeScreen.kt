@@ -24,7 +24,11 @@ import androidx.activity.compose.BackHandler
 fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
     val state by model.state.collectAsStateWithLifecycle()
     val bindingState = state.binding
-    if (state.phase == HomePhase.READY && bindingState != null) {
+    if (state.phase == HomePhase.READY && state.reviewingApprovalId != null) {
+        BackHandler { model.closeApprovalReview() }
+        ApprovalReviewScreen(state, model::closeApprovalReview, model::reviewApproval, model::decideApproval, model::sendOriginalApproval,
+            model::queryApprovals, model::discardUnsentApproval, model::refreshApprovals, model::reauthenticateApproval)
+    } else if (state.phase == HomePhase.READY && bindingState != null) {
         BackHandler { model.closeBinding() }
         HostBindingScreen(bindingState, state.subject, model::previewBinding, model::queryBinding, model::confirmBinding, model::refreshBinding, model::enterAnotherBinding, model::closeBinding, onCancel)
     } else if(state.phase==HomePhase.READY && state.creation!=null) {
@@ -33,7 +37,8 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
     } else if (state.phase == HomePhase.READY && state.selectedRuntimeId != null) {
         BackHandler { model.back() }
         SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
-            model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, {state.selectedRuntimeId?.let(model::openCreation)},model::answerQuestion,model::claimQuestion,model::releaseQuestion,model::refreshQuestions)
+            model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, {state.selectedRuntimeId?.let(model::openCreation)},model::answerQuestion,model::claimQuestion,model::releaseQuestion,model::refreshQuestions,
+            model::reviewApproval, model::queryApprovals)
     } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding,model::openCreation)
 }
 

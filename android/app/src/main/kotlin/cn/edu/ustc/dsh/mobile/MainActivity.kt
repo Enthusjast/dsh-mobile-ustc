@@ -9,9 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
 import androidx.browser.customtabs.CustomTabsIntent
-import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -30,33 +28,19 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         enableEdgeToEdge()
-        fun attachPrompt(id: Long) = BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) { model.authenticated(id, result) }
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { model.authenticationCancelled(id) }
-        })
-        var prompt: BiometricPrompt? = model.state.value.authenticationId?.let(::attachPrompt)
+        val biometrics = BiometricUi(this, model::promptOpened, model::authenticated, model::authenticationCancelled)
+        biometrics.update(model.state.value.authenticationId, null)
         setContent {
-            DshTheme { HomeRoute(model, onSecuritySettings = ::securitySettings) { prompt?.cancelAuthentication(); model.cancel() } }
+            DshTheme { HomeRoute(model, onSecuritySettings = ::securitySettings) { biometrics.cancel(); model.cancel() } }
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 model.state.collect { state ->
-                    if (state.authenticationId == null && prompt != null) { prompt?.cancelAuthentication(); prompt = null }
+                    biometrics.update(state.authenticationId, state.biometric)
                     state.browser?.let { browser ->
                         model.browserOpened(browser.id)
                         try { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(this@MainActivity, browser.uri) }
                         catch (_: Exception) { model.browserUnavailable() }
-                    }
-                    state.biometric?.let { biometric ->
-                        val activePrompt = attachPrompt(biometric.id)
-                        prompt = activePrompt
-                        model.promptOpened(biometric.id)
-                        try {
-                            activePrompt.authenticate(BiometricPrompt.PromptInfo.Builder().setTitle("确认登记此设备")
-                                .setSubtitle("将这部手机的独立密钥登记到学校账号")
-                                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                                .setNegativeButtonText("取消").build(), biometric.operation.cryptoObject)
-                        } catch (_: Exception) { model.authenticationCancelled(biometric.id) }
                     }
                 }
             }

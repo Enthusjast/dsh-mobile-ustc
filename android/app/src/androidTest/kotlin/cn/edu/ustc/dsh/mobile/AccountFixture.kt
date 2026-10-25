@@ -2,7 +2,9 @@ package cn.edu.ustc.dsh.mobile
 
 import android.content.Context
 import cn.edu.ustc.dsh.auth.*
-import cn.edu.ustc.dsh.crypto.PublicProofKey
+import cn.edu.ustc.dsh.command.*
+import cn.edu.ustc.dsh.data.SqlCommandJournal
+import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.keystore.*
 import cn.edu.ustc.dsh.network.LoginHttp
 import cn.edu.ustc.dsh.network.RemoteApi
@@ -59,6 +61,37 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     @Volatile var chatMode = false
     @Volatile var creationMode = false
     @Volatile var questionMode=false
+    @Volatile var approvalMode = false
+    @Volatile var approvalRole = "owner"
+    @Volatile var approvalAssurance = true
+    @Volatile var dropApprovalReply = false
+    @Volatile var approvalNativeResult = true
+    val approvalWrites = AtomicInteger()
+    val approvalQueries = AtomicInteger()
+    val approvalDetails = AtomicInteger()
+    val lastApproval = AtomicReference<SignedApprovalDecision?>()
+    private var approvalPublic: JsonObject? = null
+    private class ApprovalEndpoint(val id: String, val scope: RelayScope)
+    private val approvalEndpoint = AtomicReference<ApprovalEndpoint?>()
+    private val publishApproval = AtomicReference<(() -> Unit)?>(null)
+    val approvalBody: ApprovalContext by lazy {
+        val now = System.currentTimeMillis()
+        ApprovalContext.from(JsonDocument.of(jsonObject("domain" to APPROVAL_CONTEXT_DOMAIN.json(), "protocol_version" to 1L.json(),
+            "host_id" to "44444444-4444-4444-8444-444444444444".json(), "installation_id" to "77777777-7777-4777-8777-777777777777".json(),
+            "runtime_id" to runtimeId.json(), "runtime_epoch" to "77777777-7777-4777-8777-777777777777".json(), "session_id" to sessionId.json(),
+            "dsh_session_id" to "native-platform-approval".json(), "approval_id" to UUID.randomUUID().toString().json(), "execution_id" to UUID.randomUUID().toString().json(),
+            "call_id" to "platform-call".json(), "tool" to "bash".json(), "arguments" to jsonObject("command" to "printf platform-fixture".json()),
+            "workspace" to jsonObject("workspace_id" to workspaceId.json(), "root_sha256" to "a".repeat(64).json()), "resources" to JsonArray(emptyList()),
+            "nonce" to Contract.base64url(ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }).json(), "policy_version" to 7L.json(),
+            "required_assurance" to jsonObject("profile" to "fixture/step-up".json(), "max_auth_age_seconds" to 60L.json()),
+            "created_at" to Contract.timestamp(now).json(), "expires_at" to Contract.timestamp(now + 120_000).json())))
+    }
+    val approvalStatus = AtomicReference<JsonObject?>()
+    fun currentApprovalStatus(): JsonObject = approvalStatus.get() ?: jsonObject("approval_id" to approvalBody.root["approval_id"], "runtime_id" to runtimeId.json(),
+        "runtime_epoch" to approvalBody.root["runtime_epoch"], "session_id" to sessionId.json(), "execution_id" to approvalBody.root["execution_id"],
+        "binding_sha256" to approvalBody.bindingSha256.json(), "expires_at" to Contract.timestamp(approvalBody.expiresAt).json(), "state" to "pending".json())
+    fun reportApproval(status: JsonObject) { approvalStatus.set(status); publishApproval.get()?.invoke() }
+    fun endApproval(state: String = "cancelled") = reportApproval(currentApprovalStatus().with("state" to state.json()))
     @Volatile var blockingPending=true
     @Volatile var timedQuestionState: String?=null
     val ordinaryQuestionId="90000000-0000-4000-8000-000000000001"
@@ -86,6 +119,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     private val directoryScope get() = RelayScope((if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list")) +
         (if (chatMode || creationMode || questionMode) listOf("message.submit", "command.status", "session.cancel") else emptyList())+
         (if(questionMode) listOf("question.answer") else emptyList())+
+        (if(approvalMode) listOf("approval.decide", "grant.manage") else emptyList())+
         (if(creationMode) listOf("session.create") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
     private val currentRelay = AtomicReference<WebSocket?>()
     @Volatile var relayProofReceived = false
@@ -105,6 +139,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     @Volatile var holdRefresh = false
     @Volatile var proofJkt: String? = null
     @Volatile var approvalJkt: String? = null
+    private var schoolAuthenticatedAt = System.currentTimeMillis() / 1000
     private var refreshSecret = "fixture-refresh-1"
     private var grantNumber = 1
     private val seenProofs = hashSetOf<String>()
@@ -142,7 +177,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         // The production factory still trusts system TLS only. Reflection is confined to this test APK.
         http = LoginHttp::class.java.getDeclaredConstructor(OkHttpClient::class.java).apply { isAccessible = true }.newInstance(transport)
     }
-    fun environment(minimumValidity: Long = 0) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity)
+    fun environment(minimumValidity: Long = 0, approvalPromptMillis: Long = MAX_DECISION_AGE_MS) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity, approvalPromptMillis = approvalPromptMillis)
     private fun discovery() = jsonObject("issuer" to issuer.json(), "authorization_endpoint" to "$origin/authorize".json(),
         "token_endpoint" to "$origin/token".json(), "jwks_uri" to "$origin/jwks".json(),
         "response_types_supported" to JsonArray(listOf("code".json())), "id_token_signing_alg_values_supported" to JsonArray(listOf("ES256".json())))
@@ -150,7 +185,10 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     private fun tokenReply(jkt: String, userSubject: String, nonce: String?, ttl: Long): JsonObject {
         val now = System.currentTimeMillis() / 1000
         val common = jsonObject("iss" to issuer.json(), "sub" to userSubject.json(), "iat" to now.json(), "exp" to (now + ttl).json())
-        val access = jwt(common.with("aud" to config.audience.json(), "client_id" to config.clientId.json(), "jti" to UUID.randomUUID().toString().json(), "scope" to "remote.access".json(), "cnf" to jsonObject("jkt" to jkt.json())), "at+jwt")
+        if (nonce != null) schoolAuthenticatedAt = now
+        var resource = common.with("aud" to config.audience.json(), "client_id" to config.clientId.json(), "jti" to UUID.randomUUID().toString().json(), "scope" to "remote.access".json(), "cnf" to jsonObject("jkt" to jkt.json()))
+        if (approvalMode) resource = resource.with("auth_time" to schoolAuthenticatedAt.json(), "acr" to (if (approvalAssurance) "fixture:2" else "fixture:1").json(), "amr" to JsonArray(listOf((if (approvalAssurance) "otp" else "pwd").json())))
+        val access = jwt(resource, "at+jwt")
         var reply = jsonObject("access_token" to access.json(), "token_type" to "DPoP".json(), "expires_in" to ttl.json(), "refresh_token" to refreshSecret.json())
         if (nonce != null) reply = reply.with("id_token" to jwt(common.with("aud" to config.clientId.json(), "nonce" to nonce.json()), "JWT").json())
         return reply
@@ -205,6 +243,12 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                 private var subscribeRequest: String?=null
                 private var questionRevision=0L
                 private var activeClaim: String?=null
+                private var approvalWatch: String? = null
+                private fun approvalFrame(socket: WebSocket, type: String, request: String, payload: JsonObject, scoped: Boolean = true) {
+                    var frame = jsonObject("v" to 1L.json(), "type" to type.json(), "request_id" to request.json(), "runtime_id" to runtimeId.json(), "payload" to payload)
+                    if (scoped) frame = frame.with("runtime_epoch" to epoch.json(), "session_id" to sessionId.json())
+                    socket.send(JsonDocument.of(frame).canonicalText())
+                }
                 private val questionExpiry=java.time.Instant.now().plusSeconds(180).toString()
                 private fun questionItems(timed: Boolean): JsonArray {
                     if(if(timed) timedQuestionState==null else !blockingPending) return JsonArray(emptyList())
@@ -240,6 +284,25 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         val frame = JsonDocument.parse(text).root
                         val payload = frame.obj("payload")
                         when (frame.string("type")) {
+                            "approval.subscribe" -> {
+                                require(approvalMode && approvalRole == "owner" && "approval.decide" in subscribedScope.actions)
+                                approvalWatch = frame.string("request_id")
+                                publishApproval.set { approvalFrame(webSocket, "approval.reference", approvalWatch!!, jsonObject("status" to currentApprovalStatus())) }
+                                val status = currentApprovalStatus()
+                                val items = if (status.string("state") in setOf("pending", "decision_received")) listOf(status) else emptyList()
+                                approvalFrame(webSocket, "approval.snapshot", approvalWatch!!, jsonObject("items" to JsonArray(items)), scoped = false)
+                                return
+                            }
+                            "approval.status.get" -> {
+                                require(approvalMode && payload.string("approval_id") == approvalBody.root.string("approval_id"))
+                                approvalQueries.incrementAndGet()
+                                approvalFrame(webSocket, "approval.reference", frame.string("request_id"), jsonObject("status" to currentApprovalStatus())); return
+                            }
+                            "approval.details.get" -> {
+                                require(approvalMode && !runtimeOffline && approvalRole == "owner" && payload.string("approval_id") == approvalBody.root.string("approval_id"))
+                                approvalDetails.incrementAndGet()
+                                approvalFrame(webSocket, "approval.details", frame.string("request_id"), jsonObject("context" to approvalBody.root)); return
+                            }
                             "ping" -> {
                                 webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "pong".json(), "payload" to jsonObject("connection_id" to connectionId.json(), "server_time" to java.time.Instant.now().toString().json()))).canonicalText())
                                 return
@@ -342,9 +405,10 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
                         val capabilities = payload.array("capabilities").map { (it as JsonString).value }
-                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1") })
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
                         require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
                         relayProofReceived = true
+                        if ("approval.signed.v1" in capabilities) approvalEndpoint.set(ApprovalEndpoint(connectionId, subscribedScope))
                         webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
                             "role" to "device".json(), "connection_id" to connectionId.json(), "device_id" to deviceId.json(), "runtime_id" to "55555555-5555-4555-8555-555555555555".json(),
                             "grant_version" to 7L.json(), "scope" to subscribedScope.json(), "protocols" to JsonArray(listOf(1L.json())),
@@ -352,8 +416,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                             "server_time" to java.time.Instant.now().toString().json(), "lease_expires_at" to java.time.Instant.ofEpochMilli(leaseExpires).toString().json()))).canonicalText())
                     } catch (_: Exception) { failure.set("native Relay proof validation failed"); webSocket.cancel() }
                 }
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { relayClosures.incrementAndGet() }
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { relayClosures.incrementAndGet() }
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { relayClosures.incrementAndGet(); if (currentRelay.compareAndSet(webSocket, null)) approvalEndpoint.set(null) }
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { relayClosures.incrementAndGet(); if (currentRelay.compareAndSet(webSocket, null)) approvalEndpoint.set(null) }
             }).setHeader("Sec-WebSocket-Protocol", RELAY_SUBPROTOCOL)
         }
         require(path.startsWith("/v1/"))
@@ -386,7 +450,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val binding = JsonDocument.parse(possession.payload.toBytes()).root
             require(binding.string("dpop_jti") == proof.string("jti") && binding.string("proof_key_jkt") == requestJkt && binding.string("approval_key_jkt") == approval.computeThumbprint().toString())
             require(binding.string("device_name_sha256") == hash(body.string("name")) && binding.string("iss") == issuer && binding.string("sub") == subject)
-            proofJkt = requestJkt; approvalJkt = approval.computeThumbprint().toString(); active = true
+            proofJkt = requestJkt; approvalJkt = approval.computeThumbprint().toString(); approvalPublic = body.obj("approval_public_jwk"); active = true
             registrationRequests.incrementAndGet()
             val reply = resourceResponse(data(jsonObject("device_id" to deviceId.json(), "key_version" to 1L.json())), 201)
             return if (dropRegistrationReply) reply.setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else reply
@@ -397,6 +461,32 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (approvalMode && path == "/v1/approvals/${approvalBody.root.string("approval_id")}/decisions") {
+            val body = JsonDocument.parse(request.body.readByteArray()).root; body.exactKeys("connection_id", "decision_jws")
+            val endpoint = approvalEndpoint.get() ?: error("no current approval connection")
+            require(!runtimeOffline && approvalRole == "owner" && body.string("connection_id") == endpoint.id && "approval.decide" in endpoint.scope.actions)
+            if (claims.fields["acr"] != "fixture:2".json() || claims.array("amr") != listOf("otp".json()) || System.currentTimeMillis() / 1000 - claims.integer("auth_time", 0) > 60)
+                return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "approval.assurance_required".json())), 403)
+            val registered = RegisteredApprovalKey.parse(jsonObject("user_id" to userId.json(), "device_id" to deviceId.json(), "key_version" to 1L.json(), "active" to JsonBoolean(true),
+                "public_jwk" to approvalPublic!!, "approval_key_jkt" to approvalJkt!!.json()))
+            val signed = ApprovalSignatures.verify(body.string("decision_jws"), registered, approvalBody, System.currentTimeMillis())
+            val owner = CommandOwner(accountId, organizationId, config.fingerprint, userId, deviceId)
+            SqlCommandJournal.open(context, owner).use { database -> database.approvalDecisions(registered).use { journal ->
+                val original = kotlinx.coroutines.runBlocking { journal.list(runtimeId, sessionId).single() }
+                require(original.attempts > 0 && original.delivery == ApprovalDecisionDelivery.RECONCILE && original.intent.signed.compact == signed.compact)
+            } }
+            require(approvalStatus.get() == null || currentApprovalStatus().string("decision_payload_sha256") == signed.payloadSha256)
+            if (approvalStatus.get() == null) { approvalWrites.incrementAndGet(); lastApproval.set(signed) }
+            var status = currentApprovalStatus().with("decision" to signed.decision.choice.wire.json(), "decision_payload_sha256" to signed.payloadSha256.json(),
+                "state" to (if (approvalNativeResult) if (signed.decision.choice == ApprovalChoice.ALLOW_ONCE) "allowed" else "denied" else "decision_received").json())
+            if (approvalNativeResult) {
+                status = status.with("host_state" to (if (signed.decision.choice == ApprovalChoice.ALLOW_ONCE) "settled" else "denied").json())
+                if (signed.decision.choice == ApprovalChoice.ALLOW_ONCE) status = status.with("execution_outcome" to "succeeded".json())
+            }
+            approvalStatus.set(status); publishApproval.get()?.invoke()
+            val reply = resourceResponse(data(jsonObject("status" to status, "delivery" to "forwarded".json())))
+            return if (dropApprovalReply) reply.setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else reply
+        }
         if (path.startsWith("/v1/runtimes/$runtimeId/sessions/") && path.endsWith("/read-access")) {
             val selected=path.substringAfter("/sessions/").substringBefore('/')
             require(selected==sessionId || selected in createdSessions)
@@ -443,7 +533,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val body = JsonDocument.parse(request.body.readByteArray()).root
             require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
             relayScope = RelayScope.parse(body.obj("scope"))
-            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "question.answer","command.status", "session.create") })
+            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "question.answer","command.status", "session.create", "approval.decide") })
+            if ("approval.decide" in relayScope!!.actions) require(approvalMode && approvalRole == "owner")
             relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
             relayAccessExpiresAt = claims.integer("exp") * 1000
             ticketRequests.incrementAndGet()
@@ -464,7 +555,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         require(path == "/v1/runtimes")
         if (bindingMode && (!bindingApproved || bindingConfirmedElsewhere)) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
         return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
-            "access" to jsonObject("role" to (if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+            "access" to jsonObject("role" to (if (approvalMode) approvalRole else if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
     }
 
     fun bindingDetails(): JsonObject = jsonObject("enrollment_id" to bindingId.json(), "request_id" to "99999999-9999-4999-8999-999999999999".json(), "organization_id" to organizationId.json(),
@@ -487,7 +578,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         DeviceKeyStore(context).use { owner ->
             val proof = owner.create(reference.scope(), DeviceKeyPurpose.PROOF, 1)
             val approval = owner.create(reference.scope(), DeviceKeyPurpose.APPROVAL, 1)
-            proofJkt = proof.thumbprint; approvalJkt = approval.thumbprint; active = true
+            proofJkt = proof.thumbprint; approvalJkt = approval.thumbprint; approvalPublic = approval.publicJwk; active = true
             val attempt = PendingLogin(OidcDiscovery.parse(JsonDocument.of(discovery()).canonicalBytes(), config), proof.thumbprint, now)
             val exchange = attempt.acceptCallback(LoginConfiguration.REDIRECT_URI + "?state=${attempt.state}&code=seed", now)
             val session = TokenVerifier.authorizationCodeResponse(JsonDocument.of(tokenReply(proof.thumbprint, subject, attempt.nonce, 120)).canonicalBytes(), exchange, IssuerKeys.parse(JsonDocument.of(jsonObject("keys" to JsonArray(listOf(JsonDocument.parse(issuerKey.toPublicJWK().toJSONString()).root)))).canonicalBytes()), System.currentTimeMillis())
