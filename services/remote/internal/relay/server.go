@@ -42,7 +42,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", "session.read.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", creationOptionsCapability, "session.read.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -65,38 +65,41 @@ type Repository interface {
 }
 
 type Server struct {
-	database      Repository
-	mu            sync.Mutex
-	connections   map[*websocket.Conn]*liveConnection
-	hosts         map[string]*liveConnection
-	devices       map[string]map[string]map[*liveConnection]struct{}
-	active        sync.WaitGroup
-	draining      bool
-	catalogBytes  int
-	subscriptions map[string]*sessionSubscription
-	approvals     *approvalRouter
+	database             Repository
+	mu                   sync.Mutex
+	connections          map[*websocket.Conn]*liveConnection
+	hosts                map[string]*liveConnection
+	devices              map[string]map[string]map[*liveConnection]struct{}
+	active               sync.WaitGroup
+	draining             bool
+	catalogBytes         int
+	creationOptionsBytes int
+	subscriptions        map[string]*sessionSubscription
+	approvals            *approvalRouter
 }
 
 type liveConnection struct {
-	conn               *websocket.Conn
-	peer               peer
-	connectionID       string
-	runtimeID          string
-	runtimeEpoch       string
-	capabilities       map[string]struct{}
-	sendQueue          chan outboundFrame
-	done               chan struct{}
-	stopOnce           sync.Once
-	lastHeartbeat      time.Time
-	commandWindowStart time.Time
-	commandWindowCount int
-	catalogSnapshotID  string
-	catalogMode        string
-	catalogNextIndex   int
-	catalogBytes       int
-	catalogItems       []store.SessionCatalogItem
-	subscriptions      map[string]*sessionSubscription
-	closing            bool // Protected by Server.mu; prevents admission during unregister.
+	conn                 *websocket.Conn
+	peer                 peer
+	connectionID         string
+	runtimeID            string
+	runtimeEpoch         string
+	capabilities         map[string]struct{}
+	sendQueue            chan outboundFrame
+	done                 chan struct{}
+	stopOnce             sync.Once
+	lastHeartbeat        time.Time
+	commandWindowStart   time.Time
+	commandWindowCount   int
+	catalogSnapshotID    string
+	catalogMode          string
+	catalogNextIndex     int
+	catalogBytes         int
+	catalogItems         []store.SessionCatalogItem
+	creationOptions      *sessionCreationOptions
+	creationOptionsBytes int
+	subscriptions        map[string]*sessionSubscription
+	closing              bool // Protected by Server.mu; prevents admission during unregister.
 }
 
 type outboundFrame struct {
@@ -404,6 +407,9 @@ func (server *Server) unregisterConnection(live *liveConnection) {
 	server.mu.Lock()
 	delete(server.connections, live.conn)
 	server.catalogBytes -= live.catalogBytes
+	server.creationOptionsBytes -= live.creationOptionsBytes
+	live.creationOptionsBytes = 0
+	live.creationOptions = nil
 	if server.catalogBytes < 0 {
 		server.catalogBytes = 0
 	}
@@ -811,7 +817,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			}) != nil {
 				return
 			}
-		case "message.submit", "session.cancel", "session.create", "question.answer", "question.timed.answer":
+		case "message.submit", "session.cancel", "session.create", "session.create.options.get", "question.answer", "question.timed.answer":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				closePolicy(connection, "operation denied")
@@ -831,7 +837,9 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				server.sendProtocolError(parent, live, "rate.limited", &envelope)
 				continue
 			}
-			if envelope.Type == "session.create" {
+			if envelope.Type == "session.create.options.get" {
+				server.readCreationOptions(parent, live, envelope)
+			} else if envelope.Type == "session.create" {
 				server.routeSessionCreate(parent, live, envelope)
 			} else {
 				server.routeSessionCommand(parent, live, envelope)
@@ -887,6 +895,8 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeSessionContent(parent, live, envelope)
+		case "session.create.options":
+			server.publishCreationOptions(parent, live, envelope)
 		case "session.catalog":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)

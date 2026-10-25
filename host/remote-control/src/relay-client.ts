@@ -10,6 +10,7 @@ import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
 import { questionAnswerPayload } from './questions.js'
 import { APPROVAL_INVALIDATION_CAPABILITY, SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
 import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approvals.js'
+import { CREATION_OPTIONS_CAPABILITY, creationOptionsSchema, type SessionCreationOptions } from './creation-options.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
@@ -57,6 +58,10 @@ const sessionCatalogAckSchema = z.strictObject({
   runtime_id: uuid,
   runtime_epoch: uuid,
   payload: z.strictObject({ session_count: z.number().int().min(0).max(20_000), server_time: z.string().datetime({ offset: true }) }),
+})
+const creationOptionsAckSchema = z.strictObject({
+  v: z.literal(1), type: z.literal('session.create.options.ack'), request_id: uuid, runtime_id: uuid, runtime_epoch: uuid,
+  payload: z.strictObject({ workspace_count: z.number().int().min(0).max(128), preset_count: z.number().int().min(0).max(128), server_time: z.string().datetime({ offset: true }) }),
 })
 const submitSchema = z.strictObject({
   v: z.literal(1),
@@ -113,6 +118,7 @@ export interface HostRelayOptions {
       runtimeId: string
       sessionCatalog(signal: AbortSignal, sessionIds?: readonly string[]): Promise<SessionCatalogItem[]>
       watchSessionCatalog(onChange: (change: SessionCatalogChange) => void): () => void
+      creationOptions?(): SessionCreationOptions
     }
     dispatch(command: Command, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
     follow: SessionReaderRuntime['follow']
@@ -401,6 +407,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   const connection = new AbortController()
   let stopWatchingCatalog = () => {}
   let catalogRetryTimer: NodeJS.Timeout | undefined
+  let creationOptionsTimer: NodeJS.Timeout | undefined
   let sessions: RelaySessions | undefined
   let approvals: HostApprovalPeer | undefined
   const abortConnection = () => {
@@ -416,7 +423,12 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       throw new ProbeError('auth.proof_invalid')
     }
     const challenge = challengeEnvelope.data.payload
-    const offered = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
+    let sourceOptions: SessionCreationOptions | undefined
+    try {
+      if (options.runtime.client.creationOptions) sourceOptions = creationOptionsSchema.parse(options.runtime.client.creationOptions())
+    } catch { /* The bounded metadata extension is unavailable; core Relay operations remain independent. */ }
+    const offered: string[] = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
+    if (sourceOptions) offered.push(CREATION_OPTIONS_CAPABILITY)
     const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
@@ -547,6 +559,16 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       ? options.runtime.client.watchSessionCatalog(requestCatalogRefresh)
       : () => {}
     if (catalogEnabled) requestCatalogRefresh()
+    let creationRequest: string | undefined
+    const publishCreationOptions = () => {
+      if (!sourceOptions || !ack.data.payload.capabilities.includes(CREATION_OPTIONS_CAPABILITY) || !ack.data.payload.capabilities.includes('session.create.v1') || connection.signal.aborted) return
+      creationRequest = randomUUID()
+      creationOptionsTimer = setTimeout(publishCreationOptions, 30_000 + Math.floor(Math.random() * 15_000))
+      creationOptionsTimer.unref()
+      void sendFrame(socket, { v: 1, type: 'session.create.options', request_id: creationRequest,
+        runtime_id: options.runtime.client.runtimeId, runtime_epoch: options.runtime.epoch, payload: sourceOptions }).catch(abortConnection)
+    }
+    publishCreationOptions()
 
     if (options.approvals) approvals = options.approvals({
       installationId: credential.installationId, connectionId: ack.data.payload.connection_id, signal: connection.signal,
@@ -574,6 +596,16 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
           const pending = pendingCatalogAcks.get(parsed.data.request_id)
           if (pending && pending.count !== parsed.data.payload.session_count) throw new ProbeError('protocol.invalid')
           pending?.resolve()
+          return
+        }
+        if (frame.type === 'session.create.options.ack') {
+          const parsed = creationOptionsAckSchema.safeParse(value)
+          if (!parsed.success || parsed.data.runtime_id !== options.runtime.client.runtimeId || parsed.data.runtime_epoch !== options.runtime.epoch) throw new ProbeError('protocol.invalid')
+          if (parsed.data.request_id === creationRequest) {
+            if (parsed.data.payload.workspace_count !== sourceOptions?.workspaces.length || parsed.data.payload.preset_count !== sourceOptions?.presets.length) throw new ProbeError('protocol.invalid')
+            if (creationOptionsTimer) clearTimeout(creationOptionsTimer)
+            creationOptionsTimer = undefined; creationRequest = undefined
+          }
           return
         }
         if (frame.type === 'error') {
@@ -644,6 +676,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     approvals?.close()
     sessions?.close()
     if (catalogRetryTimer) clearTimeout(catalogRetryTimer)
+    if (creationOptionsTimer) clearTimeout(creationOptionsTimer)
     stopWatchingCatalog()
     signal.removeEventListener('abort', abortConnection)
     connection.abort()

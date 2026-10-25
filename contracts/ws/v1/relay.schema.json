@@ -28,6 +28,10 @@
     { "$ref": "#/$defs/questionReleased" },
     { "$ref": "#/$defs/questionClaimed" },
     { "$ref": "#/$defs/questionClaimClosed" },
+    { "$ref": "#/$defs/creationOptionsPublish" },
+    { "$ref": "#/$defs/creationOptionsGet" },
+    { "$ref": "#/$defs/creationOptionsResult" },
+    { "$ref": "#/$defs/creationOptionsAck" },
     { "$ref": "#/$defs/sessionCreate" },
     { "$ref": "#/$defs/sessionCreateToHost" },
     { "$ref": "#/$defs/hostCreationReceipt" },
@@ -231,6 +235,196 @@
         "runtime_epoch": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" },
         "user_id": { "$ref": "#/$defs/uuid" }, "device_id": { "$ref": "#/$defs/uuid" },
         "payload_sha256": { "$ref": "#/$defs/sha256" }, "payload": { "type": "object", "maxProperties": 0 }
+      }
+    },
+    "creationOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspaces",
+        "presets"
+      ],
+      "properties": {
+        "workspaces": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "workspace_id",
+              "label"
+            ],
+            "properties": {
+              "workspace_id": {
+                "$ref": "#/$defs/uuid"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32,
+                "pattern": "\\S"
+              }
+            }
+          }
+        },
+        "presets": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          }
+        }
+      }
+    },
+    "creationOptionsPublish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "payload",
+        "runtime_epoch"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.create.options"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/creationOptions"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "creationOptionsGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.create.options.get"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        }
+      }
+    },
+    "creationOptionsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "payload",
+        "runtime_epoch"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.create.options.result"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/creationOptions"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "creationOptionsAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "payload",
+        "runtime_epoch"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.create.options.ack"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "workspace_count",
+            "preset_count",
+            "server_time"
+          ],
+          "properties": {
+            "workspace_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 128
+            },
+            "preset_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 128
+            },
+            "server_time": {
+              "type": "string"
+            }
+          }
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        }
       }
     },
     "sessionCreate": {

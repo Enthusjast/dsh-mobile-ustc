@@ -122,6 +122,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
   const relayReceipts: any[] = []
   const relaySessionFrames: any[] = []
   let relayCatalog: any[] = []
+  let relayCreationOptions: any
   const relayCatalogSnapshots = new Map<string, any[]>()
   let resolveRelayConnected!: () => void
   let rejectRelayConnected!: (error: Error) => void
@@ -151,7 +152,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           relayRuntimeEpoch = proof.runtime_epoch
           const helloDigest = hostHelloDigest([
             'host', runtimeId, relayRuntimeEpoch, '0.2.1-rc.2', 'dsh-cli-integration', '0.0.1', '1',
-            ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'].join('\n'),
+            ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1'].join('\n'),
           ])
           const valid = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')).typ === 'dsh-relay-handshake-proof+jwt'
             && proof.iss === installationId && proof.aud === 'urn:dsh-mobile-ustc:realtime'
@@ -163,10 +164,17 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolveRelayConnected()
+        } else if(frame.type === 'session.create.options') {
+          assert.equal(relayValidator(frame),true,JSON.stringify(relayValidator.errors))
+          assert.equal(frame.runtime_epoch,relayRuntimeEpoch)
+          assert.equal(JSON.stringify(frame).includes(workspace),false)
+          relayCreationOptions=frame.payload
+          socket.send(JSON.stringify({v:1,type:'session.create.options.ack',request_id:frame.request_id,runtime_id:runtimeId,runtime_epoch:relayRuntimeEpoch,
+            payload:{workspace_count:frame.payload.workspaces.length,preset_count:frame.payload.presets.length,server_time:new Date().toISOString()}}))
         } else if (frame.type === 'session.catalog') {
           const items = relayCatalogSnapshots.get(frame.request_id) ?? []
           items.push(...frame.payload.items)
@@ -228,6 +236,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     '          - id: probe',
     `            remoteId: ${quote('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')}`,
     `            cwd: ${quote(workspace)}`,
+    '            label: 测试工作区',
     '        presets: [standard]',
     '        highRiskTools: [bash, pwsh, run_code]',
     '- id: agent-default-model',
@@ -279,6 +288,9 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     assert.ok(probe, `DSH CLI did not open its probe before timeout; ${safeTail(stdout)} ${safeTail(stderr)}`)
     assert.equal(probe.payload.dsh_version, '0.2.1-rc.2')
     await Promise.race([relayConnected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('DSH plugin Relay handshake timed out')), 3000))])
+    const optionsDeadline=Date.now()+3000
+    while(!relayCreationOptions && Date.now()<optionsDeadline) await new Promise(resolve=>setTimeout(resolve,10))
+    assert.deepEqual(relayCreationOptions,{workspaces:[{workspace_id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',label:'测试工作区'}],presets:['standard']})
     assert.equal(relayRuntimeEpoch, probe.runtime_epoch)
     assert.equal(relayFailure, undefined)
 

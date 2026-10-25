@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "request_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_id": "33333333-3333-4333-8333-333333333333",
+  "type": "session.create.options.ack",
+  "payload": {
+    "workspace_count": 1,
+    "preset_count": 2,
+    "server_time": "2026-10-25T12:00:00Z"
+  },
+  "runtime_epoch": "44444444-4444-4444-8444-444444444444"
+}

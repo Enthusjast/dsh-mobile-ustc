@@ -4,8 +4,9 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionFollowFrame, SessionPageRequest } from '@deepseek-ai/dsh-api-session-controller/types'
 import { ProbeError } from './protocol.js'
+import { configuredCreationOptions } from './creation-options.js'
 
-export interface Workspace { id: string; cwd: string; remoteId?: string }
+export interface Workspace { id: string; cwd: string; remoteId?: string; label?: string }
 
 export interface SessionCatalogItem {
   session_id: string
@@ -37,6 +38,7 @@ export class DshClient {
   ) {}
 
   private get controller(): SessionController { return this.ctx.sessionController }
+  creationOptions() { return configuredCreationOptions(this.workspaces, this.presets) }
 
   async list(signal: AbortSignal) {
     const { items } = await this.controller.list({}, signal)
