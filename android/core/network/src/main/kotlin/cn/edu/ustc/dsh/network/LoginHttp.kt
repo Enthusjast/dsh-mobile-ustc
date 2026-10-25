@@ -196,16 +196,34 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
     }
     fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
         SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
-    fun chatReader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope): SessionReader {
+    fun chatReader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope,
+        transcripts: cn.edu.ustc.dsh.session.TranscriptCache? = null, workspaceId: String? = null): SessionReader {
         if (journal.owner.deviceId != deviceId || journal.owner.organizationId != config.organizationId || journal.owner.deploymentHash != config.fingerprint ||
             mappedUserId != null && mappedUserId != journal.owner.userId) throw RemoteRequestException("auth.identity_mismatch")
-        return SessionReader(this, deviceId, runtimeId, sessionId, scope, owner, journal = journal)
+        if (transcripts != null && transcripts.owner.fingerprint != journal.owner.fingerprint) throw RemoteRequestException("auth.identity_mismatch")
+        if (transcripts != null) scope.session(sessionId, workspaceId, setOf("session.read"))
+        return SessionReader(this, deviceId, runtimeId, sessionId, scope, owner, journal = journal, transcripts = transcripts, workspaceId = workspaceId)
     }
     suspend fun commandStatus(id: String, deviceId: String): CommandReceipt = mutex.withLock {
         Contract.uuid(id); Contract.uuid(deviceId)
         val root = JsonDocument.parse(read("/v1/commands/$id?device_id=$deviceId")).root; root.exactKeys("ok", "data")
         if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
         CommandReceipt.status(root.obj("data")).also { if (it.requestId != id) throw RemoteRequestException("network.invalid_response") }
+    }
+    /** Current session membership and read permission, including when its host is offline. */
+    internal suspend fun cachedReadUntil(runtime: String, sessionId: String, workspace: String?, grantVersion: Long): Long = mutex.withLock {
+        Contract.uuid(runtime); Contract.uuid(sessionId); workspace?.let(Contract::uuid)
+        val requestedAt = System.currentTimeMillis(); val started = System.nanoTime()
+        val root = JsonDocument.parse(read("/v1/runtimes/$runtime/sessions/$sessionId/read-access")).root
+        root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+        val data = root.obj("data"); data.exactKeys("runtime_id", "session_id", "workspace_id", "grant_version", "issued_at", "expires_at")
+        val actualWorkspace = when (val value = data["workspace_id"]) { JsonNull -> null; is JsonString -> Contract.uuid(value.value); else -> throw ProtocolException() }
+        if (data.string("runtime_id") != runtime || data.string("session_id") != sessionId || actualWorkspace != workspace || data.integer("grant_version", 1) != grantVersion) throw RemoteRequestException("access.denied")
+        val issued = relayTime(data.string("issued_at")); val expires = relayTime(data.string("expires_at")); val now = System.currentTimeMillis()
+        val remaining = expires - issued - (System.nanoTime() - started) / 1_000_000
+        if (issued < requestedAt - 30_000 || issued > now + 30_000 || expires <= issued || expires - issued > 300_000 || remaining <= 0) throw RemoteRequestException("auth.expired")
+        now + remaining
     }
     fun hostBinding(owner: CoroutineScope, resumeId: String? = null, onAuthorityFailure: (String) -> Unit = {}, onReady: () -> Unit = {}): HostBindingFlow =
         HostBindingFlow(this, owner, resumeId, onAuthorityFailure, onReady)

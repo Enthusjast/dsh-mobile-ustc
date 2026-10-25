@@ -271,12 +271,17 @@ class RelayNetworkTest {
         lateinit var request: String
         var onPage: (JsonObject) -> Unit = {}
         var onCommand: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected command") }
+        var offline = false
         fun receive(socket: WebSocket, frame: JsonObject) {
             this.socket = socket
             when (frame.string("type")) {
                 "session.subscribe" -> {
                     assertEquals(runtime, frame.string("runtime_id")); assertEquals(sessionId, frame.string("session_id"))
                     request = frame.string("request_id")
+                    if (offline) {
+                        socket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "error".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to sessionId.json(), "payload" to jsonObject("code" to "runtime.offline".json()))).canonicalText())
+                        return
+                    }
                     send("session.subscribed", jsonObject(), syncId = false)
                     send("session.snapshot", jsonObject("cursor" to cut.json(), "has_more" to JsonBoolean(more), "records" to JsonArray(records), "assistant" to jsonObject("revision" to 0L.json())))
                     send("session.checkpoint", jsonObject("state" to "persisted".json(), "through_seq" to cut.json()))
@@ -310,14 +315,25 @@ class RelayNetworkTest {
         val statuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
         val writes = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
         var advertisedState = RemoteCommandState.AGENT_QUEUED
+        var denyTickets = false
+        var leaseMillis = 299_000L
+        var cacheWorkspace: String? = null
+        var accessUnavailable = false
+        var readLeaseMillis = 299_000L
+        val accessReads = java.util.concurrent.atomic.AtomicInteger()
         init {
             val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "command.relay.v1", "session.cancel.v1")
             server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when {
                     request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
                         "user_id" to journal.owner.userId.json(), "memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json())))))
-                    request.path == "/v1/realtime/tickets" -> ticketResponse().setBody(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))).canonicalText())
-                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.map(String::json)))), expectedCapabilities = capabilities, onContent = feed::receive)
+                    request.path == "/v1/realtime/tickets" -> if (denyTickets) json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403) else ticketResponse().setBody(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))).canonicalText())
+                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.map(String::json)), "lease_expires_at" to time(leaseMillis))), expectedCapabilities = capabilities, onContent = feed::receive)
+                    request.path == "/v1/runtimes/$runtime/sessions/$sessionId/read-access" -> {
+                        accessReads.incrementAndGet()
+                        if (accessUnavailable) json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "internal".json()))).setResponseCode(503)
+                        else bindingReply(jsonObject("runtime_id" to runtime.json(), "session_id" to sessionId.json(), "workspace_id" to (cacheWorkspace?.json() ?: JsonNull), "grant_version" to 7L.json(), "issued_at" to time(0), "expires_at" to time(readLeaseMillis)))
+                    }
                     request.path!!.startsWith("/v1/commands/") -> {
                         assertEquals(device, request.requestUrl!!.queryParameter("device_id"))
                         statuses[request.requestUrl!!.pathSegments.last()]?.let(::bindingReply) ?: json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403)
@@ -335,7 +351,105 @@ class RelayNetworkTest {
                     "session_id" to sessionId.json(), "request_id" to intent.requestId.json(), "payload" to jsonObject("state" to "agent_queued".json(), "payload_sha256" to intent.digest.json(), "updated_at" to time(0)))).canonicalText())
             }
         }
-        fun reader(owner: CoroutineScope) = api().chatReader(device, runtime, sessionId, granted, journal, owner)
+        fun reader(owner: CoroutineScope, transcripts: TranscriptCache? = null) = api().chatReader(device, runtime, sessionId, granted, journal, owner, transcripts = transcripts)
+    }
+    private inner class MemoryTranscriptCache(override val owner: LocalDataOwner) : TranscriptCache {
+        val loads = java.util.concurrent.atomic.AtomicInteger()
+        @Volatile var value: CachedTranscript? = CachedTranscript("77777777-7777-4777-8777-777777777777", System.currentTimeMillis(), listOf(SessionRecord.parse(user(0, "disk history"))))
+        var holdWrites = false
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        override suspend fun loadTranscript(runtime: String, session: String, workspace: String?): CachedTranscript? { loads.incrementAndGet(); return value }
+        override suspend fun saveTranscript(runtime: String, session: String, workspace: String?, epoch: String, transcript: SessionTranscript, now: Long) {
+            writing.complete(Unit); if (holdWrites) release.await()
+            assertTrue(transcript.durableOnly); value = CachedTranscript(epoch, now, transcript.records)
+        }
+        override suspend fun removeTranscript(runtime: String, session: String) { value = null }
+        override suspend fun removeRuntimeTranscripts(runtime: String) { value = null }
+        override suspend fun retainTranscripts(scopes: Map<String, RelayScope>) = Unit
+    }
+    @Test fun aFreshKeyProvedConnectionAuthorizesDiskHistoryWhileTheHostIsOffline(): Unit = runBlocking {
+        val fixture = CommandPeer(); val disk = MemoryTranscriptCache(fixture.journal.owner); fixture.feed.offline = true
+        fixture.reader(this, disk).use { reader ->
+            val offline = reader.await { it.phase == SessionReadPhase.OFFLINE && it.window != null }
+            assertEquals("disk history", offline.window!!.items.single().blocks.single().text)
+            assertEquals(1, disk.loads.get()); assertTrue(fixture.writes.isEmpty())
+        }
+    }
+    @Test fun aDeniedCurrentTicketNeverLoadsTheOldEncryptedHistory(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.denyTickets = true; val disk = MemoryTranscriptCache(fixture.journal.owner)
+        fixture.reader(this, disk).use { reader ->
+            val revoked = reader.await { it.phase == SessionReadPhase.REVOKED }
+            assertNull(revoked.window); assertEquals(0, disk.loads.get()); assertNull(disk.value)
+        }
+    }
+    @Test fun aSuccessfulWorkspaceHelloCannotExposeHistoryAfterTheSessionsWorkspaceChanged(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.cacheWorkspace = UUID.randomUUID().toString(); fixture.feed.offline = true
+        val disk = MemoryTranscriptCache(fixture.journal.owner)
+        assertThrows(ProtocolException::class.java) { api().chatReader(device, runtime, UUID.randomUUID().toString(), fixture.granted, fixture.journal, this, transcripts = disk) }
+        fixture.reader(this, disk).use { reader ->
+            reader.await { it.phase == SessionReadPhase.REVOKED }
+            assertEquals(1, fixture.accessReads.get()); assertEquals(0, disk.loads.get()); assertNull(reader.state.value.window)
+        }
+    }
+    @Test fun aCacheAuthorizationOutageKeepsLiveReadAvailableWithoutUsingDiskHistory(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.accessUnavailable = true; val disk = MemoryTranscriptCache(fixture.journal.owner)
+        fixture.reader(this, disk).use { reader ->
+            val ready = reader.await { it.phase == SessionReadPhase.READY }
+            assertEquals("opening", ready.window!!.items.single().blocks.single().text)
+            assertEquals(0, disk.loads.get()); assertEquals("cache.authorization_unavailable", ready.cacheError)
+            fixture.feed.control("server.draining", jsonObject("reason" to "server_draining".json()))
+            assertNull(reader.await { it.phase == SessionReadPhase.BACKOFF }.window)
+        }
+    }
+    @Test fun anOfflineCacheViewExpiresWithItsCurrentAuthorityLease(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.feed.offline = true; fixture.leaseMillis = 1500
+        val disk = MemoryTranscriptCache(fixture.journal.owner)
+        fixture.reader(this, disk).use { reader ->
+            reader.await { it.phase == SessionReadPhase.OFFLINE && it.window != null }
+            reader.await { it.window == null }
+            assertNotNull(disk.value) // Retention is separate from permission to display.
+        }
+    }
+    @Test fun revocationWaitsForAnInflightCacheWriteThenErasesItsResult(): Unit = runBlocking {
+        val fixture = CommandPeer(); val disk = MemoryTranscriptCache(fixture.journal.owner); disk.holdWrites = true
+        fixture.reader(this, disk).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            withTimeout(5000) { disk.writing.await() }
+            fixture.feed.control("access.revoked", jsonObject("code" to "grant_revoked".json()))
+            withTimeout(5000) { reader.commands!!.state.first { !it.connected } }
+            assertNull(reader.state.value.window)
+            disk.release.complete(Unit)
+            reader.await { it.phase == SessionReadPhase.REVOKED }
+            assertNull(disk.value); assertNull(reader.state.value.window)
+        }
+    }
+    @Test fun anOnlinePhoneKeepsReceivingRevocationsWhileItsHostIsOffline(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.feed.offline = true; val disk = MemoryTranscriptCache(fixture.journal.owner)
+        fixture.reader(this, disk).use { reader ->
+            reader.await { it.phase == SessionReadPhase.OFFLINE && it.window != null }
+            fixture.feed.control("access.revoked", jsonObject("code" to "grant_revoked".json()))
+            reader.await { it.phase == SessionReadPhase.REVOKED }
+            assertNull(reader.state.value.window); assertNull(disk.value)
+        }
+    }
+    @Test fun aCatalogOnlyWorkspaceMoveRetiresAnIdleCachedViewWithoutWaitingForLeaseExpiry(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.feed.offline = true; val disk = MemoryTranscriptCache(fixture.journal.owner)
+        fixture.reader(this, disk).use { reader ->
+            reader.await { it.phase == SessionReadPhase.OFFLINE && it.window != null }
+            fixture.cacheWorkspace = UUID.randomUUID().toString()
+            reader.await { it.phase == SessionReadPhase.REVOKED }
+            assertNull(reader.state.value.window); assertNull(disk.value); assertTrue(fixture.accessReads.get() >= 2)
+        }
+    }
+    @Test fun periodicAuthorityChecksCannotExtendTheOriginalCachedViewLease(): Unit = runBlocking {
+        val fixture = CommandPeer(); fixture.feed.offline = true; fixture.readLeaseMillis = 2500
+        val disk = MemoryTranscriptCache(fixture.journal.owner)
+        fixture.reader(this, disk).use { reader ->
+            reader.await { it.phase == SessionReadPhase.OFFLINE && it.window != null }
+            reader.await { it.phase == SessionReadPhase.OFFLINE && it.window == null }
+            assertTrue(fixture.accessReads.get() >= 2); assertNotNull(disk.value)
+        }
     }
     @Test fun chatPersistsBeforeWritingAndUsesOneSocketForReadAndCommandFacts(): Unit = runBlocking {
         val fixture = CommandPeer()
@@ -381,6 +495,24 @@ class RelayNetworkTest {
             withTimeout(5000) { while (fixture.writes.size < 2) delay(10) }
             assertEquals(2, fixture.writes.size)
             assertEquals(original, JsonDocument.of(fixture.writes.last()).canonicalText())
+        }
+    }
+    @Test fun aCorrelatedCommandErrorKeepsTheReaderAndOriginalIntentAlive(): Unit = runBlocking {
+        val fixture = CommandPeer()
+        fixture.feed.onCommand = { socket, frame ->
+            fixture.writes += frame
+            val intent = CommandIntent.parse(frame)
+            fixture.statuses[intent.requestId] = jsonObject("request_id" to intent.requestId.json(), "session_id" to sessionId.json(), "state" to "received".json(), "payload_sha256" to intent.digest.json(), "updated_at" to time(0))
+            socket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "error".json(), "request_id" to intent.requestId.json(), "runtime_id" to runtime.json(), "session_id" to sessionId.json(), "payload" to jsonObject("code" to "rate.limited".json()))).canonicalText())
+            fixture.feed.send("session.event", user(1, "after command error"))
+        }
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val id = reader.commands!!.submit("queue", "original body")
+            reader.await { it.window?.items?.any { item -> item.blocks.any { block -> block.text == "after command error" } } == true }
+            assertEquals(SessionReadPhase.READY, reader.state.value.phase)
+            assertEquals(id, fixture.journal.list(runtime, sessionId).single().intent.requestId)
+            assertEquals(1L, fixture.journal.list(runtime, sessionId).single().attempts); assertEquals(1, fixture.writes.size)
         }
     }
 

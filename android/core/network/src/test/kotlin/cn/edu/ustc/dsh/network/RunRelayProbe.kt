@@ -74,6 +74,9 @@ object RunRelayProbe {
             withTimeout(15_000) { ticket.connect() }.use { connection ->
                 require(connection.identity.deviceId == fixture.string("device_id"))
                 require(connection.identity.runtimeId == fixture.string("runtime_id"))
+                phase = "cache-read-authority"
+                val until = api.cachedReadUntil(ticket.runtimeId, fixture.string("session_id"), fixture.string("workspace_id"), connection.identity.grantVersion)
+                require(until > System.currentTimeMillis() && until <= System.currentTimeMillis() + 300_000)
                 phase = "heartbeat"
                 connection.send(jsonObject("v" to 1L.json(), "type" to "ping".json(), "payload" to jsonObject()))
                 val pong = withTimeout(5000) { connection.receive() }
@@ -126,6 +129,7 @@ object RunRelayProbe {
         }
         val scope = entry.readScope(runtimeAccess) ?: error("directory did not authorize the fixture read")
         check(scope.same(RelayScope(listOf("session.read"), listOf(fixture.string("workspace_id")), emptyList())))
+        check(api.cachedReadUntil(runtime, session, entry.workspaceId, runtimeAccess.grantVersion!!) > System.currentTimeMillis())
         var settledCursor = -1L
         api.reader(fixture.string("device_id"), runtime, session, scope, owner).use { reader ->
             suspend fun await(test: (SessionReadState) -> Boolean) = withTimeout(20_000) { reader.state.first { state ->

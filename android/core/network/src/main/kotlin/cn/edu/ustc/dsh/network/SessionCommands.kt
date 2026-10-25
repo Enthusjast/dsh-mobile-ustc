@@ -74,6 +74,13 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         // facts using REST, which independently binds the registered DPoP device.
         if (receipt.sessionId == session && mutable.value.records.any { it.intent.requestId == receipt.requestId && it.attempts > 0 }) query()
     }
+    internal suspend fun failed(id: String, code: String): Boolean {
+        Contract.uuid(id)
+        val record = journal.list(runtime, session).firstOrNull { it.intent.requestId == id && it.attempts > 0 } ?: return false
+        journal.uncertain(record.intent.requestId, if (code == "runtime.changed") code else "command.delivery_unconfirmed")
+        query()
+        return true
+    }
     suspend fun discard(id: String) { journal.discard(id); refreshQueue.trySend(Unit) }
     private suspend fun sender() {
         for (event in sendQueue) {
