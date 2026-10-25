@@ -635,7 +635,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
           let item: z.infer<typeof catalogItemSchema> | undefined
           if (forwarded.type === 'session.create' && state === 'settled') {
             const parsed = catalogItemSchema.safeParse((result as { catalog_item?: unknown } | undefined)?.catalog_item)
-            if (!parsed.success || parsed.data.workspace_id !== forwarded.payload.workspace_id || (parsed.data.state !== 'available' && parsed.data.state !== 'running')) throw new ProbeError('journal.integrity_failed')
+            if (!parsed.success || parsed.data.workspace_id !== forwarded.payload.workspace_id || parsed.data.state === 'unavailable') throw new ProbeError('journal.integrity_failed')
             item = parsed.data
           }
           await sendFrame(socket, {

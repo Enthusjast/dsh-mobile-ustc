@@ -635,7 +635,8 @@
                     "state": {
                       "enum": [
                         "available",
-                        "running"
+                        "running",
+                        "archived"
                       ]
                     }
                   }

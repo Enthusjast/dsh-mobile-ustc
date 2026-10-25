@@ -58,7 +58,7 @@ func (postgres *Postgres) RecordRealtimeSessionCreate(ctx context.Context, ticke
 func validateCreatedSession(receipt RelayCommandReceipt) error {
 	item := receipt.CreatedSession
 	if item == nil || item.WorkspaceID == nil || *item.WorkspaceID != receipt.WorkspaceID ||
-		item.SessionID != receipt.SessionID || item.LastPersistedSeq < -1 || (item.State != "available" && item.State != "running") {
+		item.SessionID != receipt.SessionID || item.LastPersistedSeq < -1 || (item.State != "available" && item.State != "running" && item.State != "archived") {
 		return ErrCommandTransition
 	}
 	mapped, err := MobileSessionID(receipt.RuntimeID, item.DSHSessionID)

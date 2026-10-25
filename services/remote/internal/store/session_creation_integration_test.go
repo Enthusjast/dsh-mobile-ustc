@@ -118,6 +118,9 @@ func testPostgresSessionCreation(t *testing.T, ctx context.Context, postgres *Po
 	if _, err := postgres.DB.ExecContext(ctx, `drop trigger reject_creation on commands; drop function reject_creation_settlement()`); err != nil {
 		t.Fatal(err)
 	}
+	// A native creation may be archived before its result is captured, then
+	// restored by the desktop before the historical receipt reaches the Relay.
+	item.State = "archived"
 	newer := item
 	newer.State, newer.LastPersistedSeq = "running", 4
 	if err := postgres.SyncRealtimeSessionCatalog(ctx, RuntimeConnection{InstallationID: receipt.InstallationID, RuntimeID: receipt.RuntimeID, RuntimeEpoch: receipt.RuntimeEpoch, ConnectionID: receipt.ConnectionID}, receipt.KeyVersion, false, []SessionCatalogItem{newer}); err != nil {

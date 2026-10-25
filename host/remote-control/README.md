@@ -83,6 +83,8 @@ Relay 双方协商 `session.read.v1` 后，可打开按连接隔离的会话订�
 
 双方协商 `session.cancel.v1` 后，手机可用独立的 `session.cancel` 权限中断当前会话；请求须绑定当前 `runtime_epoch`。已完成的请求重试只返回持久回执，不能再次中断后续任务。`settled` 表示原生 cancel 已应答，任务停止应以随后的 `turn/end` 为准。详见 [远程中断协议](../../docs/session-cancel-protocol.md)。
 
+双方协商 `session.archive.v1` 后，可用 `session.archive` 权限归档或恢复同一会话。命令绑定原始 epoch 和显式的 `archived` / `stop_activity` 选项，调用当前进程的原生 Workspace Registry；`settled` 表示归档状态持久保存。归档保留历史；活动会话默认拒绝归档，明确选择停止也不等待执行结束。详见 [会话归档](../../docs/session-archive.md)。
+
 另运行 `npm run test:remote-dsh` 可启动真实 Go 服务、隔离 PostgreSQL 和同一本机 npm DSH，验证完整的登记、双端绑定、密钥证明、目录、聊天读取与撤权链路。该测试已通过；身份、模型和密钥 provider 使用本地夹具，学校 IdP、Android 和生产密钥库仍待验收。运行条件及数据边界见 [联合测试记录](../../docs/go-dsh-integration.md)。
 
 手机创建选项通过 `session.create_options.v1` 发布到当前主机连接，包含已登记工作区 UUID、公开 label 和允许的 preset token。每个快照最多 128 个工作区和 128 个 preset，label 最多 32 个 Unicode 字符／128 字节。未配置 label 时只使用工作区 UUID 的短标识；不导出本地工作区引用、路径、preset 定义或模型凭据。详情见 [创建协议](../../docs/session-create-protocol.md) 和 [Android 创建流程](../../docs/android-session-creation.md)。

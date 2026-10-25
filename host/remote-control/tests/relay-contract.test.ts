@@ -89,6 +89,7 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   assert.equal(validate({ ...creation, session_id: creation.request_id }), false)
   assert.equal(validate({ ...creation, payload: { workspace_id: creation.request_id, preset: '../standard' } }), false)
   const settledCreation = await load('../../../contracts/ws/v1/golden/host-session-create.settled.json') as { payload: Record<string, unknown> }
+  assert.equal(validate({ ...settledCreation, payload: { ...settledCreation.payload, created_session: { ...(settledCreation.payload.created_session as object), state: 'archived' } } }), true)
   assert.equal(validate({ ...settledCreation, payload: { ...settledCreation.payload, created_session: undefined } }), false)
 })
 

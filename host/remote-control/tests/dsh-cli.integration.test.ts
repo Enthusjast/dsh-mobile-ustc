@@ -287,6 +287,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     }
     assert.ok(probe, `DSH CLI did not open its probe before timeout; ${safeTail(stdout)} ${safeTail(stderr)}`)
     assert.equal(probe.payload.dsh_version, '0.2.1-rc.2')
+    assert.ok(probe.payload.capabilities.includes('session.archive'))
     await Promise.race([relayConnected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('DSH plugin Relay handshake timed out')), 3000))])
     const optionsDeadline=Date.now()+3000
     while(!relayCreationOptions && Date.now()<optionsDeadline) await new Promise(resolve=>setTimeout(resolve,10))

@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { readFileSync } from 'node:fs'
-import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, startHostRelay } from '../src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, relayCreateDigest, startHostRelay } from '../src/relay-client.js'
 import { mobileSessionId, type SessionCatalogChange } from '../src/dsh-client.js'
 
 const ws = createRequire(import.meta.url)('ws') as { WebSocketServer: new (options: object) => any }
@@ -53,7 +53,7 @@ test('Relay shutdown does not wait on a credential provider that ignores cancell
   await relay.close()
 })
 
-test('Relay host client proves the installation key and routes only digest-matching text frames', async t => {
+test('Relay host client proves the installation key and routes only digest-matching commands', async t => {
   const { publicKey, privateKey: generatedPrivateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
   const privateJwk = generatedPrivateKey.export({ format: 'jwk' })
   const privateKey = createPrivateKey({ key: privateJwk, format: 'jwk' })
@@ -150,12 +150,13 @@ test('Relay host client proves the installation key and routes only digest-match
       watchSessionCatalog(onChange: (change: SessionCatalogChange) => void) { catalogChanged = onChange; return () => { catalogChanged = undefined } },
     },
     async *follow() {},
-    async dispatch(command: unknown, signal: AbortSignal, owner: unknown, observe?: (state: 'host_accepted' | 'dispatching' | 'agent_queued' | 'settled') => void | Promise<void>) {
+    async dispatch(command: unknown, signal: AbortSignal, owner: unknown, observe?: (state: 'host_accepted' | 'dispatching' | 'agent_queued' | 'settled', result?: unknown) => void | Promise<void>) {
       signal.throwIfAborted()
       routed.push({ command, owner })
       await observe?.('host_accepted')
       await observe?.('dispatching')
-      await observe?.((command as { type: string }).type !== 'message.submit' ? 'settled' : 'agent_queued')
+      if ((command as { type: string }).type === 'session.create') await observe?.('settled', { catalog_item: { ...catalog[0], state: 'archived' } })
+      else await observe?.((command as { type: string }).type !== 'message.submit' ? 'settled' : 'agent_queued')
     },
   }
   const relay = startHostRelay({
@@ -200,9 +201,18 @@ test('Relay host client proves the installation key and routes only digest-match
     await waitFor(() => routed.length === 3)
     assert.deepEqual(routed[2]?.command, { v: 0, type: 'session.archive', request_id: archiveId, runtime_epoch: runtimeEpoch, session_id: sessionId, payload: archivePayload })
 
+    const createId = 'bbbbbbbb-3333-4333-8333-333333333333'
+    const createPayload = { workspace_id: catalog[0]!.workspace_id, preset: 'fixture' }
+    const { session_id: _sessionId, ...baseCreate } = forwarded
+    relaySocket.send(JSON.stringify({ ...baseCreate, type: 'session.create', request_id: createId, payload: createPayload, payload_sha256: relayCreateDigest(runtimeEpoch, createPayload) }))
+    await waitFor(() => received.some((frame: any) => frame.type === 'command.receipt' && frame.request_id === createId && frame.payload.state === 'settled'))
+    const created = received.find((frame: any) => frame.type === 'command.receipt' && frame.request_id === createId && frame.payload.state === 'settled') as any
+    assert.equal(created.payload.created_session.state, 'archived')
+    assert.equal(created.session_id, catalog[0]!.session_id)
+
     relaySocket.send(JSON.stringify({ ...forwarded, payload_sha256: createHash('sha256').update('tampered').digest('hex') }))
     await waitFor(() => relaySocket.readyState !== 1)
-    assert.equal(routed.length, 3)
+    assert.equal(routed.length, 4)
   } finally {
     await relay.close()
   }
