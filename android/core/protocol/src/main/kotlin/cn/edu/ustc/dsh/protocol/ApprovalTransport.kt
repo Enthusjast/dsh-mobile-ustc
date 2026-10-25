@@ -43,12 +43,13 @@ class ApprovalStatus private constructor(val document: JsonDocument) {
     fun advance(next: ApprovalStatus): ApprovalStatus {
         if (!sameRequest(next) || decision != null && next.decision != null && decision != next.decision ||
             decisionSha256 != null && next.decisionSha256 != null && decisionSha256 != next.decisionSha256) throw ProtocolException()
-        if (decision != null && next.decision == null || decisionSha256 != null && next.decisionSha256 == null) return this
         val terminal = setOf(ApprovalHostState.SETTLED, ApprovalHostState.DENIED, ApprovalHostState.EXPIRED, ApprovalHostState.CANCELLED, ApprovalHostState.INVALIDATED)
         if (hostState in terminal) {
             if (next.hostState in terminal && (hostState != next.hostState || outcome != next.outcome)) throw ProtocolException()
             return this
         }
+        if (hostState in setOf(ApprovalHostState.CONSUMED, ApprovalHostState.OUTCOME_UNKNOWN) && next.hostState in terminal && next.hostState != ApprovalHostState.SETTLED) throw ProtocolException()
+        if (decision != null && next.decision == null || decisionSha256 != null && next.decisionSha256 == null) return this
         if (hostState in setOf(ApprovalHostState.CONSUMED, ApprovalHostState.OUTCOME_UNKNOWN) && next.hostState in setOf(null, ApprovalHostState.APPROVED)) return this
         if (state != ApprovalRemoteState.PENDING && next.state == ApprovalRemoteState.PENDING) return this
         if (state == ApprovalRemoteState.OUTCOME_UNKNOWN && next.state == ApprovalRemoteState.ALLOWED && next.hostState != ApprovalHostState.SETTLED) return this

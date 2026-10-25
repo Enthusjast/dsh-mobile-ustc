@@ -165,4 +165,19 @@ class ApprovalTransportTest {
         detail.obj("payload").exactKeys("approval_id")
         assertEquals(reference.epoch, detail.string("runtime_epoch")); assertEquals(reference.sessionId, detail.string("session_id"))
     }
+
+    @Test fun `weaker or contradictory metadata cannot erase proved consumption or a final result`() {
+        val consumed = ApprovalStatus.parse(status().with("state" to "allowed".json(), "decision" to "allow_once".json(),
+            "decision_payload_sha256" to decisionDigest.json(), "host_state" to "consumed".json()))
+        assertSame(consumed, consumed.advance(ApprovalStatus.parse(status())))
+        val settled = ApprovalStatus.parse(consumed.root.with("host_state" to "settled".json(), "execution_outcome" to "succeeded".json()))
+        for (host in listOf("denied", "expired", "cancelled", "invalidated")) {
+            val ending = ApprovalStatus.parse(status().with("state" to host.json(), "host_state" to host.json()))
+            invalid { consumed.advance(ending) }
+            invalid { settled.advance(ending) }
+        }
+        val contradictory = ApprovalStatus.parse(status().with("state" to "allowed".json(), "host_state" to "settled".json(), "execution_outcome" to "failed".json()))
+        invalid { settled.advance(contradictory) }
+        assertSame(settled, settled.advance(consumed))
+    }
 }
