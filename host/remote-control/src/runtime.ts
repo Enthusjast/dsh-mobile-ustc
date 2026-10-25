@@ -9,6 +9,7 @@ const localCommandOwner: CommandOwner = { userId: 'local', deviceId: 'local' }
 const definiteRejections = new Set([
   'access.denied', 'model.not_available', 'protocol.invalid', 'runtime.changed', 'runtime.offline', 'session.not_found',
   'interaction.stale', 'interaction.invalid_answer',
+  'session.active', 'session.archived',
 ])
 
 export type CommandStateObserver = (state: CommandState, result?: unknown) => void | Promise<void>
@@ -51,6 +52,7 @@ export class ProbeRuntime {
           })
         }
         case 'session.cancel': return this.client.cancel(await this.client.resolve(command.session_id, signal))
+        case 'session.archive': return this.client.archive(await this.client.resolve(command.session_id, signal), command.payload.archived, command.payload.stop_activity)
         case 'question.answer': return this.interactions.answerQuestion(command.session_id, command.payload.question_id, {
           answers: command.payload.answers.map(item => ({ id: item.id, selected: item.selected, ...(item.custom === undefined ? {} : { custom: item.custom }) })),
         })
@@ -80,7 +82,7 @@ export class ProbeRuntime {
         case 'session.subscribe': throw new ProbeError('protocol.streaming_required')
       }
     }
-    const mutating = ['session.create', 'message.submit', 'session.cancel', 'session.model.select', 'interaction.answer', 'question.answer', 'question.timed.answer'].includes(command.type)
+    const mutating = ['session.create', 'message.submit', 'session.cancel', 'session.archive', 'session.model.select', 'interaction.answer', 'question.answer', 'question.timed.answer'].includes(command.type)
     let payload: unknown
     if (!mutating) payload = await run()
     else {

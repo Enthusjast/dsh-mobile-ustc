@@ -14,7 +14,7 @@ export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSig
 export type { SignedApprovalOptions } from './signed-approvals.js'
 
 export const name = 'ustc-remote-control'
-export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections']
+export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections', 'workspaceRegistry']
 
 export interface Config {
   enabled?: boolean

@@ -12,6 +12,10 @@ const command = <T extends string, P extends z.ZodType>(type: T, payload: P) =>
 const sessionCommand = <T extends string, P extends z.ZodType>(type: T, payload: P) =>
   z.strictObject({ ...session, type: z.literal(type), payload })
 const textContent = z.strictObject({ type: z.literal('text'), text: z.string().min(1).max(32_768).regex(/\S/) })
+export const archivePayload = z.discriminatedUnion('archived', [
+  z.strictObject({ archived: z.literal(true), stop_activity: z.boolean() }),
+  z.strictObject({ archived: z.literal(false), stop_activity: z.literal(false) }),
+])
 
 /** M0 local probe protocol. It is deliberately separate from mobile protocol v1. */
 export const Command = z.discriminatedUnion('type', [
@@ -26,6 +30,7 @@ export const Command = z.discriminatedUnion('type', [
     z.strictObject({ mode: z.enum(['queue', 'steer']), content: z.array(textContent).min(1).max(16) }),
   ])),
   sessionCommand('session.cancel', empty),
+  sessionCommand('session.archive', archivePayload),
   sessionCommand('question.answer', questionAnswerPayload),
   sessionCommand('question.timed.answer', questionAnswerPayload),
   sessionCommand('session.model.select', z.strictObject({

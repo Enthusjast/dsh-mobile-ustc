@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionFollowFrame, SessionPageRequest } from '@deepseek-ai/dsh-api-session-controller/types'
+import { WorkspaceActiveSessionError, workspaceDomainSpec, workspaceDomainState } from '@deepseek-ai/dsh-workspace'
 import { ProbeError } from './protocol.js'
 import { configuredCreationOptions } from './creation-options.js'
 
@@ -12,7 +13,7 @@ export interface SessionCatalogItem {
   session_id: string
   dsh_session_id: string
   workspace_id: string | null
-  state: 'available' | 'running' | 'unavailable'
+  state: 'available' | 'running' | 'archived' | 'unavailable'
   last_persisted_seq: number
 }
 export type SessionCatalogChange = { kind: 'snapshot' } | { kind: 'delta'; sessionIds: readonly string[] }
@@ -51,7 +52,7 @@ export class DshClient {
       if (inspection.meta.parentSession !== undefined || inspection.meta.origin === 'subagent') continue
       const id = mobileSessionId(this.runtimeId, item.sessionId)
       ids.set(id, item.sessionId)
-      roots.push({ session_id: id, running: item.running, agent_available: item.agentAvailable, updated_at: item.updatedAt })
+      roots.push({ session_id: id, running: item.running, archived: this.isArchived(item.sessionId), agent_available: item.agentAvailable, updated_at: item.updatedAt })
     }
     this.ids = ids
     return { items: roots }
@@ -94,7 +95,7 @@ export class DshClient {
         session_id: sessionId,
         dsh_session_id: nativeId,
         workspace_id: workspace?.remoteId ?? null,
-        state: item.running ? 'running' : 'available',
+        state: this.isArchived(item.sessionId) ? 'archived' : item.running ? 'running' : 'available',
         last_persisted_seq: persisted.through_seq,
       })
     }
@@ -111,6 +112,7 @@ export class DshClient {
   }
 
   watchSessionCatalog(onChange: (change: SessionCatalogChange) => void): () => void {
+    let archived = new Set<string>(this.ctx.workspaceRegistry.archivedSessionIds)
     let timer: NodeJS.Timeout | undefined
     let fullSnapshot = false
     const sessionIds = new Set<string>()
@@ -136,6 +138,17 @@ export class DshClient {
       this.ctx.on('api-session/removed', sessionId => schedule(true, String(sessionId)), { global: true }),
       this.ctx.on('api-session/status', sessionId => schedule(false, String(sessionId)), { global: true }),
       this.ctx.on('api-session/activity', sessionId => schedule(false, String(sessionId)), { global: true }),
+      this.ctx.on('domain/changed', change => {
+        if (change.domain !== workspaceDomainSpec.name || change.table !== '' || change.operation !== 'put') return
+        // The domain emits before the registry updates its own cache. Diff the
+        // durable event snapshot, then publish through the existing window.
+        const state = workspaceDomainState.parse(change.value)
+        const next = new Set<string>(state.archivedSessionIds)
+        for (const id of new Set([...archived, ...next])) {
+          if (archived.has(id) !== next.has(id)) schedule(false, id)
+        }
+        archived = next
+      }, { global: true }),
     ]
     return () => {
       if (timer) clearTimeout(timer)
@@ -191,6 +204,7 @@ export class DshClient {
   }
 
   async selectModel(id: SessionId, selection: { provider: string; model: string; reasoning_effort?: string }) {
+    this.requireUnarchived(id)
     const catalog = await this.controller.modelCatalog()
     const model = catalog.groups.find(group => group.id === selection.provider)?.models.find(item => item.id === selection.model)
     if (model === undefined || (selection.reasoning_effort !== undefined
@@ -208,6 +222,7 @@ export class DshClient {
     content: string | readonly { type: 'text'; text: string }[],
     signal: AbortSignal,
   ) {
+    this.requireUnarchived(id)
     // Native requestId is namespaced away from other desktop/remote input channels.
     const blocks = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : content
     await this.controller.prompt({ sessionId: id, requestId: `m0:${requestId}` as never, mode, content: [...blocks] }, signal)
@@ -216,6 +231,26 @@ export class DshClient {
   }
 
   cancel(id: SessionId) { return this.controller.cancel({ sessionId: id }) }
+
+  private isArchived(id: SessionId): boolean { return this.ctx.workspaceRegistry.archivedSessionIds.includes(id) }
+
+  private requireUnarchived(id: SessionId): void {
+    if (this.isArchived(id)) throw new ProbeError('session.archived')
+  }
+
+  async archive(id: SessionId, archived: boolean, stopActivity: boolean) {
+    if (!archived && stopActivity) throw new ProbeError('protocol.invalid')
+    try {
+      if (archived) await this.ctx.workspaceRegistry.archiveSession(id, { stopActivity })
+      else await this.ctx.workspaceRegistry.unarchiveSession(id)
+    } catch (error) {
+      if (error instanceof WorkspaceActiveSessionError) throw new ProbeError('session.active')
+      throw error
+    }
+    // This is a workspace-domain durability barrier. Session-log flush and
+    // activity settlement are separate operations and are not implied here.
+    return { archived }
+  }
 
   follow(id: SessionId, maxMessages: number, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
     return this.controller.follow({ address: { kind: 'session', sessionId: id }, maxMessages, assistantStream: true }, signal)
