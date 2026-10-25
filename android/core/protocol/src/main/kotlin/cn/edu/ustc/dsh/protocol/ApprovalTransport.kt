@@ -39,6 +39,21 @@ class ApprovalStatus private constructor(val document: JsonDocument) {
     fun matches(context: ApprovalContext): Boolean = root.string("approval_id") == context.root.string("approval_id") &&
         runtimeId == context.root.string("runtime_id") && epoch == context.root.string("runtime_epoch") && sessionId == context.root.string("session_id") &&
         executionId == context.root.string("execution_id") && bindingSha256 == context.bindingSha256 && expiresAt == context.expiresAt
+    /** Status RPCs can race watch delivery. An older fact cannot erase stronger evidence. */
+    fun advance(next: ApprovalStatus): ApprovalStatus {
+        if (!sameRequest(next) || decision != null && next.decision != null && decision != next.decision ||
+            decisionSha256 != null && next.decisionSha256 != null && decisionSha256 != next.decisionSha256) throw ProtocolException()
+        if (decision != null && next.decision == null || decisionSha256 != null && next.decisionSha256 == null) return this
+        val terminal = setOf(ApprovalHostState.SETTLED, ApprovalHostState.DENIED, ApprovalHostState.EXPIRED, ApprovalHostState.CANCELLED, ApprovalHostState.INVALIDATED)
+        if (hostState in terminal) {
+            if (next.hostState in terminal && (hostState != next.hostState || outcome != next.outcome)) throw ProtocolException()
+            return this
+        }
+        if (hostState in setOf(ApprovalHostState.CONSUMED, ApprovalHostState.OUTCOME_UNKNOWN) && next.hostState in setOf(null, ApprovalHostState.APPROVED)) return this
+        if (state != ApprovalRemoteState.PENDING && next.state == ApprovalRemoteState.PENDING) return this
+        if (state == ApprovalRemoteState.OUTCOME_UNKNOWN && next.state == ApprovalRemoteState.ALLOWED && next.hostState != ApprovalHostState.SETTLED) return this
+        return next
+    }
     override fun toString() = "ApprovalStatus(${state.wire})"
 
     companion object {

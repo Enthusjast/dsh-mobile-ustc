@@ -3,6 +3,7 @@
 # This file is expected to be part of source control.
 com.fasterxml.jackson.core:jackson-core:2.20.1=runtimeClasspath,testRuntimeClasspath
 com.fasterxml.jackson:jackson-bom:2.20.1=runtimeClasspath,testRuntimeClasspath
+com.nimbusds:nimbus-jose-jwt:10.5=runtimeClasspath,testRuntimeClasspath
 io.github.erdtman:java-json-canonicalization:1.1=runtimeClasspath,testRuntimeClasspath
 io.github.java-diff-utils:java-diff-utils:4.12=kotlinInternalAbiValidation
 junit:junit:4.13.2=testCompileClasspath,testRuntimeClasspath

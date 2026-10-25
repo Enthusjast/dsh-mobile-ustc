@@ -139,18 +139,6 @@ class SessionApprovals(private val route: SessionRoute, private val hostId: Stri
     override fun close() { closed = true; clearReview(); entries.clear(); loaded = false; error = null }
 
     /** Metadata has no sequence. Preserve proved decisions/results when a racing RPC returns an older fact. */
-    private fun advance(old: ApprovalStatus, next: ApprovalStatus): ApprovalStatus {
-        if (old.decision != null && next.decision != null && old.decision != next.decision || old.decisionSha256 != null && next.decisionSha256 != null && old.decisionSha256 != next.decisionSha256)
-            throw ApprovalStateException("approval.resync_required")
-        if (old.decision != null && next.decision == null || old.decisionSha256 != null && next.decisionSha256 == null) return old
-        val terminal = setOf(ApprovalHostState.SETTLED, ApprovalHostState.DENIED, ApprovalHostState.EXPIRED, ApprovalHostState.CANCELLED, ApprovalHostState.INVALIDATED)
-        if (old.hostState in terminal) {
-            if (next.hostState in terminal && (old.hostState != next.hostState || old.outcome != next.outcome)) throw ApprovalStateException("approval.resync_required")
-            return old
-        }
-        if (old.hostState in setOf(ApprovalHostState.CONSUMED, ApprovalHostState.OUTCOME_UNKNOWN) && next.hostState in setOf(null, ApprovalHostState.APPROVED)) return old
-        if (old.state != ApprovalRemoteState.PENDING && next.state == ApprovalRemoteState.PENDING) return old
-        if (old.state == ApprovalRemoteState.OUTCOME_UNKNOWN && next.state == ApprovalRemoteState.ALLOWED && next.hostState != ApprovalHostState.SETTLED) return old
-        return next
-    }
+    private fun advance(old: ApprovalStatus, next: ApprovalStatus): ApprovalStatus = try { old.advance(next) }
+        catch (_: ProtocolException) { throw ApprovalStateException("approval.resync_required") }
 }
