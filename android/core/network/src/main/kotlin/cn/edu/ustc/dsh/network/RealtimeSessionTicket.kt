@@ -32,6 +32,7 @@ class RealtimeSessionTicket internal constructor(
                 if (scope.actions.any { it in setOf("message.submit", "session.cancel", "session.create", "question.answer") }) capabilities += "command.relay.v1"
                 if ("session.cancel" in scope.actions) capabilities += "session.cancel.v1"
                 if ("session.create" in scope.actions) capabilities += listOf("session.create.v1", "session.create_options.v1")
+                if ("approval.decide" in scope.actions) capabilities += SIGNED_APPROVAL_CAPABILITY
                 val hello = DeviceHello(deviceId, capabilities)
                 val proof = withContext(Dispatchers.Default) { DeviceProofs.relayHandshake(signer, hello, challenge, runtimeId, System.currentTimeMillis()) }
                 link.send(hello.frame(proof))
@@ -49,16 +50,16 @@ class RealtimeSessionTicket internal constructor(
 class SessionRelayConnection internal constructor(val identity: DeviceConnection, private val socket: BoundedWebSocket) : AutoCloseable {
     private val started = System.nanoTime()
     private val lifetime = identity.leaseExpiresAt - identity.connectedAt
-    private fun current() {
+    internal fun checkCurrent() {
         val now = System.currentTimeMillis()
         if (now < identity.connectedAt || now >= identity.leaseExpiresAt || (System.nanoTime() - started) / 1_000_000 >= lifetime) { close(); throw RelayException("relay.lease_expired") }
     }
     internal suspend fun receive(): JsonObject {
-        current()
+        checkCurrent()
         val frame = withTimeoutOrNull((identity.leaseExpiresAt - System.currentTimeMillis()).coerceAtLeast(1)) { socket.receive() }
             ?: run { close(); throw RelayException("relay.lease_expired") }
-        current(); return frame
+        checkCurrent(); return frame
     }
-    internal suspend fun send(frame: JsonObject) { current(); socket.send(frame) }
+    internal suspend fun send(frame: JsonObject) { checkCurrent(); socket.send(frame) }
     override fun close() = socket.close()
 }

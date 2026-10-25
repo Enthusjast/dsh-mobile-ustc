@@ -36,4 +36,14 @@ class DirectoryRowsTest {
             assertThrows(ProtocolException::class.java) { RuntimeDirectoryEntry.parse(bad) }
         }
     }
+    @Test fun approvalScopeRequiresExplicitClientOptInAndCurrentOwnerAuthority() {
+        val scope = access(listOf("session.list", "session.read", "approval.decide"))
+        val owner = RuntimeDirectoryEntry.parse(row().with("access" to scope.with("role" to "owner".json())))
+        assertEquals(setOf("session.read"), session().viewScope(owner)!!.actions)
+        assertEquals(setOf("session.read", "approval.decide"), session().viewScope(owner, includeApprovals = true)!!.actions)
+        for (role in listOf("viewer", "operator")) {
+            val grant = RuntimeDirectoryEntry.parse(row().with("access" to scope.with("role" to role.json())))
+            assertEquals(setOf("session.read"), session().viewScope(grant, includeApprovals = true)!!.actions)
+        }
+    }
 }

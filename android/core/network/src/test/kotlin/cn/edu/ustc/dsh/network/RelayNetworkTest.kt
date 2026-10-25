@@ -272,6 +272,7 @@ class RelayNetworkTest {
         var onPage: (JsonObject) -> Unit = {}
         var onCommand: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected command") }
         var onClaim: (WebSocket,JsonObject)->Unit={_,_->error("unexpected claim")}
+        var onApproval: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected approval") }
         var offline = false
         fun receive(socket: WebSocket, frame: JsonObject) {
             this.socket = socket
@@ -293,6 +294,7 @@ class RelayNetworkTest {
                 }
                 "message.submit", "session.cancel","question.answer","question.timed.answer" -> onCommand(socket, frame)
                 "question.claim","question.release"->onClaim(socket,frame)
+                "approval.subscribe", "approval.status.get", "approval.details.get" -> onApproval(socket, frame)
                 else -> error("unexpected client frame")
             }
         }
@@ -355,6 +357,298 @@ class RelayNetworkTest {
         }
         fun reader(owner: CoroutineScope, transcripts: TranscriptCache? = null) = api().chatReader(device, runtime, sessionId, granted, journal, owner, transcripts = transcripts)
     }
+    private inner class ApprovalPeer(large: Boolean = false, workspaceScope: Boolean = false) {
+        val owner = CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device)
+        val commands = MemoryCommandJournal(owner)
+        val journal = MemoryApprovalDecisionJournal(owner)
+        val approvalKey = ECKeyGenerator(Curve.P_256).generate()
+        val registered = RegisteredApprovalKey.parse(jsonObject("user_id" to owner.userId.json(), "device_id" to device.json(), "key_version" to 1L.json(),
+            "active" to JsonBoolean(true), "public_jwk" to JsonDocument.parse(approvalKey.toPublicJWK().toJSONString()).root, "approval_key_jkt" to approvalKey.computeThumbprint().toString().json()))
+        val granted = RelayScope(listOf("session.read", "approval.decide"), if (workspaceScope) listOf(sessionId) else emptyList(), if (workspaceScope) emptyList() else listOf(sessionId))
+        val feed = ReadPeer(listOf(user(0, "opening")), 0)
+        val resource = api()
+        val body = run {
+            val now = System.currentTimeMillis()
+            ApprovalContext.from(JsonDocument.of(jsonObject("domain" to APPROVAL_CONTEXT_DOMAIN.json(), "protocol_version" to 1L.json(), "host_id" to bindingId.json(),
+                "installation_id" to UUID.randomUUID().toString().json(), "runtime_id" to runtime.json(), "runtime_epoch" to owner.userId.json(), "session_id" to sessionId.json(),
+                "dsh_session_id" to "opaque-fixture-native".json(), "approval_id" to UUID.randomUUID().toString().json(), "execution_id" to UUID.randomUUID().toString().json(),
+                "call_id" to "native-call".json(), "tool" to "bash".json(), "arguments" to jsonObject("command" to (if (large) "中🙂".repeat(17_500) else "echo fixture").json()),
+                "workspace" to jsonObject("workspace_id" to sessionId.json(), "root_sha256" to "c".repeat(64).json()), "resources" to JsonArray(emptyList()),
+                "nonce" to Contract.base64url(ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }).json(), "policy_version" to 1L.json(),
+                "required_assurance" to jsonObject("profile" to "fixture/step-up".json(), "max_auth_age_seconds" to 60L.json()),
+                "created_at" to Contract.timestamp(now).json(), "expires_at" to Contract.timestamp(now + 120_000).json())))
+        }
+        val pending = jsonObject("approval_id" to body.root["approval_id"], "runtime_id" to runtime.json(), "runtime_epoch" to body.root["runtime_epoch"], "session_id" to sessionId.json(),
+            "execution_id" to body.root["execution_id"], "binding_sha256" to body.bindingSha256.json(), "expires_at" to Contract.timestamp(body.expiresAt).json(), "state" to "pending".json())
+        val status = AtomicReference(pending)
+        val posts = java.util.concurrent.atomic.AtomicInteger()
+        val queries = java.util.concurrent.atomic.AtomicInteger()
+        val proofs = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val requestedStatuses = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val posted = java.util.concurrent.CountDownLatch(1)
+        var waitPost: java.util.concurrent.CountDownLatch? = null
+        var waitDirectory: java.util.concurrent.CountDownLatch? = null
+        val directoryEntered = java.util.concurrent.CountDownLatch(1)
+        @Volatile var nonceChallenge = false
+        @Volatile var loseReply = false
+        @Volatile var publishDecision = true
+        @Volatile var support = true
+        @Volatile var denyApproval: String? = null
+        @Volatile var dropBeforeCommit = false
+        @Volatile var holdDetails = false
+        @Volatile var lateDetails: JsonObject? = null
+        @Volatile var statusOverride: JsonObject? = null
+        @Volatile var denyStatus = false
+        private var watch: String? = null
+        private lateinit var socket: WebSocket
+        init {
+            val requested = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", SIGNED_APPROVAL_CAPABILITY)
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = try { when {
+                    request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(),
+                        "scopes" to JsonArray(listOf("remote.access".json())), "user_id" to owner.userId.json(), "memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json())))))
+                    request.path == "/v1/realtime/tickets" -> bindingReply(jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))
+                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(),
+                        "capabilities" to JsonArray(requested.filter { support || it != SIGNED_APPROVAL_CAPABILITY }.map(String::json)))), expectedCapabilities = requested, onContent = feed::receive)
+                    request.path == "/v1/runtimes" -> { directoryEntered.countDown(); check(waitDirectory!!.await(10, java.util.concurrent.TimeUnit.SECONDS)); bindingReply(jsonObject("items" to JsonArray(emptyList()))) }
+                    request.path == "/v1/approvals/${body.root.string("approval_id")}/decisions" -> post(request)
+                    else -> MockResponse().setResponseCode(404)
+                } } catch (failure: Throwable) { peerFailure.set(failure); MockResponse().setResponseCode(500) }
+            }
+            feed.onApproval = approval@ { link, frame ->
+                socket = link
+                when (frame.string("type")) {
+                    "approval.subscribe" -> {
+                        watch = frame.string("request_id")
+                        val items = if (status.get().string("state") in setOf("pending", "decision_received")) listOf(status.get()) else emptyList()
+                        send("approval.snapshot", frame.string("request_id"), jsonObject("items" to JsonArray(items)), scoped = false)
+                    }
+                    "approval.status.get" -> {
+                        queries.incrementAndGet(); requestedStatuses += frame.obj("payload").string("approval_id")
+                        if (denyStatus) send("error", frame.string("request_id"), jsonObject("code" to "access.denied".json()), scoped = false)
+                        else send("approval.reference", frame.string("request_id"), jsonObject("status" to (statusOverride ?: status.get())))
+                    }
+                    "approval.details.get" -> {
+                        if (holdDetails) { lateDetails = frame; return@approval }
+                        val bytes = body.document.canonicalBytes()
+                        if (bytes.size < 50 * 1024) send("approval.details", frame.string("request_id"), jsonObject("context" to body.root))
+                        else {
+                            val parts = bytes.toList().chunked(40 * 1024).map { it.toByteArray() }; val transfer = UUID.randomUUID().toString()
+                            parts.forEachIndexed { index, part -> send("approval.fragment", frame.string("request_id"), jsonObject("kind" to "approval.details".json(), "transfer_id" to transfer.json(),
+                                "index" to index.toLong().json(), "count" to parts.size.toLong().json(), "data" to java.util.Base64.getEncoder().encodeToString(part).json())) }
+                        }
+                    }
+                    else -> error("unexpected approval control")
+                }
+            }
+        }
+        private fun post(request: RecordedRequest): MockResponse {
+            val proof = JWSObject.parse(request.getHeader("DPoP")); assertTrue(proof.verify(ECDSAVerifier(key)))
+            val claims = JsonDocument.parse(proof.payload.toBytes()).root
+            assertEquals("POST", claims.string("htm")); assertEquals(origin + request.path, claims.string("htu")); proofs += claims.string("jti")
+            val input = JsonDocument.parse(request.body.readByteArray()).root; input.exactKeys("connection_id", "decision_jws"); assertEquals(connection, input.string("connection_id"))
+            val signed = ApprovalSignatures.verify(input.string("decision_jws"), registered, body, System.currentTimeMillis())
+            val local = runBlocking { journal.list(runtime, sessionId).single() }
+            assertTrue(local.attempts > 0); assertEquals(ApprovalDecisionDelivery.RECONCILE, local.delivery); assertTrue(local.intent.signed.compact == signed.compact)
+            val number = posts.incrementAndGet()
+            denyApproval?.let { return json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to it.json()))).setResponseCode(403) }
+            if (nonceChallenge && number == 1) return json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "auth.proof_invalid".json())))
+                .setResponseCode(401).setHeader("DPoP-Nonce", "N".repeat(42) + "A").setHeader("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\"")
+            if (nonceChallenge) assertEquals("N".repeat(42) + "A", claims.string("nonce"))
+            if (dropBeforeCommit) return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+            posted.countDown(); waitPost?.let { check(it.await(10, java.util.concurrent.TimeUnit.SECONDS)) }
+            val accepted = pending.with("state" to "decision_received".json(), "decision" to signed.decision.choice.wire.json(), "decision_payload_sha256" to signed.payloadSha256.json())
+            status.set(accepted)
+            if (publishDecision) reference(accepted)
+            val result = bindingReply(jsonObject("status" to accepted, "delivery" to "forwarded".json()))
+            return if (loseReply) result.setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else result
+        }
+        fun reference(value: JsonObject) { status.set(value); watch?.let { send("approval.reference", it, jsonObject("status" to value)) } }
+        fun finishLateDetails() { send("approval.details", lateDetails!!.string("request_id"), jsonObject("context" to body.root)) }
+        private fun send(type: String, request: String, payload: JsonObject, scoped: Boolean = true) {
+            var frame = jsonObject("v" to 1L.json(), "type" to type.json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "payload" to payload)
+            if (scoped) frame = frame.with("runtime_epoch" to body.root["runtime_epoch"], "session_id" to sessionId.json())
+            check(socket.send(JsonDocument.of(frame).canonicalText()))
+        }
+        fun reader(scope: CoroutineScope) = resource.chatReader(device, runtime, sessionId, granted, commands, scope, approvalAccount = SessionApprovalAccount(bindingId, registered, journal))
+        fun finish(prepared: PreparedApprovalSignature): SignedApprovalDecision {
+            val signature = java.security.Signature.getInstance("SHA256withECDSA").run { initSign(approvalKey.toECPrivateKey()); update(prepared.signingInput()); sign() }
+            return prepared.finishDerSignature(signature, System.currentTimeMillis())
+        }
+        suspend fun seed(context: ApprovalContext = body): ApprovalDecisionIntent {
+            val signed = finish(ApprovalSignatures.prepare(context, ApprovalChoice.ALLOW_ONCE, registered, System.currentTimeMillis()))
+            val intent = ApprovalDecisionIntent.create(UUID.randomUUID().toString(), owner, registered, context, signed, System.currentTimeMillis())
+            journal.create(intent); journal.beginAttempt(intent.requestId)
+            return intent
+        }
+        suspend fun review(reader: SessionReader): Pair<SessionApprovalClient, ApprovalReviewHandle> {
+            val client = reader.approvals!!
+            client.await { it.connected && it.contentReady && it.view.loaded && it.view.items.isNotEmpty() }
+            client.requestDetails(body.root.string("approval_id"))
+            val view = client.await { it.view.items.any { item -> item.handle != null } }.view.items.single { it.handle != null }
+            assertEquals(body.bindingSha256, view.context!!.bindingSha256)
+            return client to view.handle!!
+        }
+    }
+    private suspend fun SessionApprovalClient.await(test: (ApprovalClientState) -> Boolean) = withTimeout(8000) { state.first(test) }.also { peerFailure.get()?.let { throw AssertionError(it) } }
+
+    @Test fun approvalUsesCompleteFragmentedContextAndAPersistedOriginalWithFreshHttpProofs(): Unit = runBlocking {
+        val fixture = ApprovalPeer(large = true); fixture.nonceChallenge = true
+        fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.ALLOW_ONCE))
+            val id = client.submit(handle, signed)
+            val accepted = client.await { it.records.any { row -> row.intent.requestId == id && row.delivery == ApprovalDecisionDelivery.ACCEPTED } }.records.single()
+            val remote = accepted.remote!!
+            assertTrue(accepted.intent.signed.compact == signed.compact); assertNull(remote.hostState); assertNull(remote.outcome)
+            assertEquals(2, fixture.posts.get()); assertEquals(2, fixture.proofs.toSet().size)
+            assertTrue(client.state.value.view.items.all { it.context == null })
+            assertEquals(0L, reader.state.value.window!!.cursor)
+        }
+    }
+    @Test fun anApprovalAttemptCommitFailureNeverPostsTheSignedDecision(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.journal.failBegin = true
+        fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.REJECT))
+            assertThrows(CommandDataException::class.java) { runBlocking { client.submit(handle, signed) } }
+            assertEquals(0, fixture.posts.get()); assertEquals(0L, fixture.journal.list(runtime, sessionId).single().attempts)
+        }
+    }
+    @Test fun aLostApprovalReplyAndReaderReplacementRecoverTheOriginalWithoutReposting(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.loseReply = true; fixture.publishDecision = false
+        val original = fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.REJECT))
+            assertThrows(RemoteRequestException::class.java) { runBlocking { client.submit(handle, signed) } }
+            client.await { it.records.singleOrNull()?.delivery == ApprovalDecisionDelivery.ACCEPTED }.records.single().intent
+        }
+        fixture.feed.offline = true
+        fixture.status.set(fixture.status.get().with("state" to "allowed".json(), "host_state" to "consumed".json()))
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.OFFLINE }
+            val restored = reader.approvals!!.await { it.records.singleOrNull()?.remote?.hostState == ApprovalHostState.CONSUMED }.records.single()
+            assertEquals(original.requestId, restored.intent.requestId); assertTrue(original.signed.compact == restored.intent.signed.compact)
+            assertEquals(1L, restored.attempts); assertEquals(1, fixture.posts.get())
+            assertTrue(reader.approvals.state.value.view.items.all { it.context == null })
+            assertFalse(reader.approvals.state.value.contentReady)
+        }
+    }
+    @Test fun revocationIsProcessedWhileAnApprovalHttpResponseIsHeld(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); val release = java.util.concurrent.CountDownLatch(1); fixture.waitPost = release; fixture.publishDecision = false
+        try { fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.ALLOW_ONCE))
+            val send = async { runCatching { client.submit(handle, signed) } }
+            withTimeout(5000) { while (fixture.posted.count != 0L) delay(5) }
+            fixture.feed.control("access.revoked", jsonObject("code" to "access.revoked".json()))
+            reader.await { it.phase == SessionReadPhase.REVOKED }
+            assertTrue(client.state.value.view.items.isEmpty())
+            release.countDown(); withTimeout(5000) { send.await() }
+        } } finally { release.countDown() }
+    }
+    @Test fun aCompetingDecisionWhileHttpIsQueuedRetiresTheSignatureBeforeAnyPost(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); val release = java.util.concurrent.CountDownLatch(1); fixture.waitDirectory = release
+        try { fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.ALLOW_ONCE))
+            val directory = async(Dispatchers.IO) { fixture.resource.runtimes() }
+            withTimeout(5000) { while (fixture.directoryEntered.count != 0L) delay(5) }
+            val send = async { runCatching { client.submit(handle, signed) } }
+            withTimeout(5000) { while (fixture.journal.list(runtime, sessionId).singleOrNull()?.attempts != 1L) delay(5) }
+            fixture.reference(fixture.pending.with("state" to "denied".json(), "decision" to "reject".json(), "decision_payload_sha256" to "d".repeat(64).json()))
+            client.await { it.view.items.all { item -> item.context == null } }
+            release.countDown(); directory.await()
+            assertTrue(send.await().isFailure); assertEquals(0, fixture.posts.get())
+        } } finally { release.countDown() }
+    }
+    @Test fun anUnnegotiatedApprovalCapabilityKeepsReadingAvailableWithoutLoadingAForm(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.support = false
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            assertFalse(reader.approvals!!.state.value.supported)
+            assertThrows(ApprovalStateException::class.java) { runBlocking { reader.approvals.requestDetails(fixture.body.root.string("approval_id")) } }
+            assertEquals(0, fixture.posts.get())
+        }
+    }
+    @Test fun schoolAssuranceFailureRemainsAnUnconfirmedOriginalWithoutInventingLocalMfa(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.denyApproval = "approval.assurance_required"
+        fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.ALLOW_ONCE))
+            val rejected = assertThrows(RemoteRequestException::class.java) { runBlocking { client.submit(handle, signed) } }
+            assertEquals("approval.assurance_required", rejected.code)
+            assertEquals(ApprovalDecisionDelivery.RECONCILE, fixture.journal.list(runtime, sessionId).single().delivery)
+            assertEquals(1, fixture.posts.get()); assertTrue(client.state.value.view.items.any { it.context != null })
+        }
+    }
+    @Test fun anExplicitPendingRetryReusesTheSameSignedBytesAndRequiresANewAttemptCommit(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.dropBeforeCommit = true
+        fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.REJECT))
+            assertThrows(RemoteRequestException::class.java) { runBlocking { client.submit(handle, signed) } }
+            val original = fixture.journal.list(runtime, sessionId).single()
+            fixture.dropBeforeCommit = false
+            client.sendPending(handle, original.intent.requestId)
+            val confirmed = client.await { it.records.singleOrNull()?.delivery == ApprovalDecisionDelivery.ACCEPTED }.records.single()
+            assertEquals(original.intent.requestId, confirmed.intent.requestId); assertTrue(confirmed.intent.signed.compact == signed.compact)
+            assertEquals(2L, confirmed.attempts); assertEquals(2, fixture.posts.get())
+        }
+    }
+    @Test fun aRetryThatDiscoversAcceptanceSavesItWithoutAnotherPost(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.loseReply = true; fixture.publishDecision = false; fixture.statusOverride = fixture.pending
+        fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.ALLOW_ONCE))
+            assertThrows(RemoteRequestException::class.java) { runBlocking { client.submit(handle, signed) } }
+            val original = fixture.journal.list(runtime, sessionId).single()
+            fixture.statusOverride = null
+            assertThrows(CommandDataException::class.java) { runBlocking { client.sendPending(handle, original.intent.requestId) } }
+            client.await { it.records.singleOrNull()?.delivery == ApprovalDecisionDelivery.ACCEPTED }
+            assertEquals(1, fixture.posts.get()); assertEquals(1L, fixture.journal.list(runtime, sessionId).single().attempts)
+        }
+    }
+    @Test fun aCompetingDecisionRetiresAnInflightDetailResponseBeforeItCanExposeArguments(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.holdDetails = true
+        fixture.reader(this).use { reader ->
+            val client = reader.approvals!!
+            client.await { it.connected && it.contentReady && it.view.loaded }
+            client.requestDetails(fixture.body.root.string("approval_id"))
+            withTimeout(5000) { while (fixture.lateDetails == null) delay(5) }
+            fixture.reference(fixture.pending.with("state" to "cancelled".json()))
+            client.await { it.view.loadingId == null && it.view.items.none { item -> item.canReview } }
+            fixture.finishLateDetails()
+            fixture.feed.send("session.event", user(1, "after retired details"))
+            reader.await { it.window?.cursor == 1L }
+            assertTrue(client.state.value.view.items.all { it.context == null }); assertEquals(0, fixture.posts.get())
+        }
+    }
+    @Test fun anUnavailableOriginalStatusDoesNotRevokeAnOtherwiseAuthorizedSessionRead(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.seed(); fixture.denyStatus = true
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            reader.approvals!!.await { it.error == "approval.status_unavailable" }
+            assertEquals(SessionReadPhase.READY, reader.state.value.phase)
+            assertEquals(1, reader.approvals.state.value.records.size)
+        }
+    }
+    @Test fun currentTicketResourcesFilterStoredApprovalBodiesAndAutomaticStatusQueries(): Unit = runBlocking {
+        val fixture = ApprovalPeer(workspaceScope = true); val visible = fixture.seed()
+        val foreign = ApprovalContext.from(JsonDocument.of(fixture.body.root.with("approval_id" to UUID.randomUUID().toString().json(), "execution_id" to UUID.randomUUID().toString().json(),
+            "workspace" to fixture.body.root.obj("workspace").with("workspace_id" to bindingId.json()),
+            "nonce" to Contract.base64url(ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }).json())))
+        fixture.seed(foreign)
+        fixture.reader(this).use { reader ->
+            val client = reader.approvals!!
+            val retained = client.await { it.connected && it.contentReady && it.records.singleOrNull()?.remote != null }.records.single()
+            assertEquals(visible.requestId, retained.intent.requestId)
+            client.query(); withTimeout(5000) { while (fixture.queries.get() < 2) delay(5) }
+            assertTrue(fixture.requestedStatuses.all { it == visible.approvalId })
+            assertEquals(2, fixture.journal.list(runtime, sessionId).size)
+        }
+    }
+
     private fun questionPayload(timed: Boolean=false,phase: String="open",revision: Long=1,detail: String="Review this plan") : JsonObject {
         var item=jsonObject("question_id" to "99999999-9999-4999-8999-999999999999".json(),"expires_at" to (if(timed) JsonNull else time(60_000)),"questions" to JsonArray(listOf(jsonObject("id" to "plan".json(),"question" to "Continue?".json(),"detail" to detail.json(),"options" to JsonArray(listOf(jsonObject("label" to "Continue".json()),jsonObject("label" to "Cancel".json()))),"intent" to jsonObject("kind" to "plan-review".json(),"approve" to "Continue".json())))))
         if(timed) item=item.with("state" to phase.json())

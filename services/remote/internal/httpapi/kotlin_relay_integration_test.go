@@ -18,8 +18,10 @@ import (
 	"testing"
 	"time"
 
+	"dsh-mobile-ustc/services/remote/internal/approval"
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/httpapi"
+	"dsh-mobile-ustc/services/remote/internal/relay"
 	"dsh-mobile-ustc/services/remote/internal/store"
 	"dsh-mobile-ustc/services/remote/internal/testsupport"
 	jose "github.com/go-jose/go-jose/v4"
@@ -50,7 +52,8 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	)
 	proof := approvalKey(t)
 	proofJWK, proofJKT := approvalPublic(t, proof)
-	approvalJWK, approvalJKT := approvalPublic(t, approvalKey(t))
+	phoneApprovalKey := approvalKey(t)
+	approvalJWK, approvalJKT := approvalPublic(t, phoneApprovalKey)
 	installationKey := approvalKey(t)
 	installationJWK, installationJKT := approvalPublic(t, installationKey)
 	statements := []struct {
@@ -65,7 +68,7 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 		{`insert into runtimes(id,installation_id,profile_ref,protocol_version) values($1,$2,'kotlin-fixture',1)`, []any{runtimeID, installationID}},
 		{`insert into workspaces(id,runtime_id,workspace_ref) values($1,$2,'opaque-fixture-workspace')`, []any{workspaceID, runtimeID}},
 		{`insert into sessions(id,runtime_id,workspace_id,dsh_session_id) values($1,$2,$3,'opaque-fixture-native')`, []any{sessionID, runtimeID, workspaceID}},
-		{`insert into runtime_grants(runtime_id,user_id,role,scope,granted_by) values($1,$2,'operator',$3::jsonb,$2)`, []any{runtimeID, userID, `{"actions":["host.list","session.list","session.read","message.submit","session.cancel","session.create","question.answer","command.status"],"workspaces":["` + workspaceID + `"],"sessions":["` + sessionID + `"]}`}},
+		{`insert into runtime_grants(runtime_id,user_id,role,scope,granted_by) values($1,$2,'owner',$3::jsonb,$2)`, []any{runtimeID, userID, `{"actions":["host.list","session.list","session.read","message.submit","session.cancel","session.create","question.answer","command.status","approval.decide","grant.manage"],"workspaces":["` + workspaceID + `"],"sessions":["` + sessionID + `"]}`}},
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement.query, statement.args...); err != nil {
@@ -95,10 +98,28 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"fixture-host"}})
+	assurance, err := auth.NewAssuranceVerifier([]auth.AssuranceMapping{{Issuer: issuer, ClientID: "mobile", Profile: "fixture/step-up", ACR: "fixture:2", RequiredAMR: []string{"otp"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := store.NewApprovalControl(postgres, store.ApprovalPolicy{Version: 7, AssuranceProfile: "fixture/step-up", MaxAuthAgeSeconds: 60}, assurance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityKey := approvalKey(t)
+	validFrom, validUntil := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond), time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+	authority, err := approval.NewAuthorizationSigner(server.URL, "dsh-approval-authority/kotlin-fixture", authorityKey, validFrom, validUntil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := store.NewApprovalLeaseProvider(control, authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"fixture-host"}, Approvals: &relay.ApprovalConfig{Control: control, Leases: leases}})
 	now := time.Now().UTC().Truncate(time.Second)
 	access := approvalSign(t, signing, jose.ES256, "kotlin-issuer", "at+jwt", map[string]any{"iss": issuer, "sub": "kotlin-fixture", "aud": "urn:dsh-kotlin-relay", "client_id": "mobile",
-		"jti": "kotlin-composition-access-token", "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "scope": "remote.access", "cnf": map[string]any{"jkt": proofJKT}}, nil)
+		"jti": "kotlin-composition-access-token", "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "scope": "remote.access", "cnf": map[string]any{"jkt": proofJKT}, "auth_time": now.Unix(), "acr": "fixture:2", "amr": []string{"otp"}}, nil)
 	private, err := json.Marshal(jose.JSONWebKey{Key: proof})
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +130,16 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 		"proof_jwk": json.RawMessage(private), "access_token": access, "issuer_jwks": jwks, "device_id": deviceID, "runtime_id": runtimeID, "session_id": sessionID, "workspace_id": workspaceID, "subject": "kotlin-fixture",
 		"access_expires_at": now.Add(5 * time.Minute).UnixMilli(), "ca_pem": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})),
 	}
+	approvalPrivate, err := json.Marshal(jose.JSONWebKey{Key: phoneApprovalKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityPublic, authorityJKT := approvalPublic(t, authorityKey)
+	fixture["approval_host_id"] = hostID
+	fixture["approval_jwk"] = json.RawMessage(approvalPrivate)
+	fixture["registered_approval"] = map[string]any{"user_id": userID, "device_id": deviceID, "key_version": 1, "active": true, "public_jwk": json.RawMessage(approvalJWK), "approval_key_jkt": approvalJKT}
+	fixture["approval_authority"] = map[string]any{"issuer": server.URL, "key_id": "dsh-approval-authority/kotlin-fixture", "public_jwk": json.RawMessage(authorityPublic), "key_jkt": authorityJKT, "active": true,
+		"valid_from": validFrom.Format("2006-01-02T15:04:05.000Z"), "valid_until": validUntil.Format("2006-01-02T15:04:05.000Z")}
 	directory, err := os.MkdirTemp(cluster, "kotlin-relay-")
 	if err != nil {
 		t.Fatal(err)

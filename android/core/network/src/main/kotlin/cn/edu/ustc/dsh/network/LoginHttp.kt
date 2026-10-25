@@ -4,6 +4,7 @@ import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.command.*
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.session.ApprovalStateException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -121,7 +122,8 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
         if (reply.status !in 200..299) {
             val code = runCatching { JsonDocument.parse(reply.bytes).root.obj("error").string("code") }.getOrNull()
             // Only protocol codes reach presentation; untrusted error bodies/messages do not.
-            throw RemoteRequestException(if (code in setOf("auth.expired", "auth.proof_invalid", "access.denied", "access.revoked", "device.invalid", "device.registration_conflict", "internal")) code!! else "network.request_failed")
+            throw RemoteRequestException(if (code in setOf("auth.expired", "auth.proof_invalid", "access.denied", "access.revoked", "device.invalid", "device.registration_conflict", "internal",
+                    "approval.conflict", "approval.expired", "approval.assurance_required", "rate.limited")) code!! else "network.request_failed")
         }
         return reply
     }
@@ -203,12 +205,27 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         return SessionCreationFlow(this,deviceId,runtimeId,scope,journal,owner)
     }
     fun chatReader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope,
-        transcripts: cn.edu.ustc.dsh.session.TranscriptCache? = null, workspaceId: String? = null): SessionReader {
+        transcripts: cn.edu.ustc.dsh.session.TranscriptCache? = null, workspaceId: String? = null, approvalAccount: SessionApprovalAccount? = null): SessionReader {
         if (journal.owner.deviceId != deviceId || journal.owner.organizationId != config.organizationId || journal.owner.deploymentHash != config.fingerprint ||
             mappedUserId != null && mappedUserId != journal.owner.userId) throw RemoteRequestException("auth.identity_mismatch")
         if (transcripts != null && transcripts.owner.fingerprint != journal.owner.fingerprint) throw RemoteRequestException("auth.identity_mismatch")
+        if (approvalAccount != null && approvalAccount.journal.owner.fingerprint != journal.owner.fingerprint) throw RemoteRequestException("auth.identity_mismatch")
         if (transcripts != null) scope.session(sessionId, workspaceId, setOf("session.read"))
-        return SessionReader(this, deviceId, runtimeId, sessionId, scope, owner, journal = journal, transcripts = transcripts, workspaceId = workspaceId)
+        return SessionReader(this, deviceId, runtimeId, sessionId, scope, owner, journal = journal, transcripts = transcripts, workspaceId = workspaceId, approvalAccount = approvalAccount)
+    }
+    internal suspend fun submitApproval(connection: String, intent: ApprovalDecisionIntent, owner: LocalDataOwner, current: () -> Unit): ApprovalAdmission = mutex.withLock {
+        Contract.uuid(connection)
+        if (owner.fingerprint != intent.ownerHash || owner.organizationId != config.organizationId || owner.deploymentHash != config.fingerprint || owner.userId != mappedUserId ||
+            intent.decision.root.string("user_id") != owner.userId || intent.decision.root.string("device_id") != owner.deviceId) throw RemoteRequestException("auth.identity_mismatch")
+        val root = JsonDocument.parse(request("POST", "/v1/approvals/${intent.approvalId}/decisions", jsonObject("connection_id" to connection.json(), "decision_jws" to intent.signed.compact.json())) {
+            current(); if (!intent.current(System.currentTimeMillis())) throw ApprovalStateException("approval.expired")
+        }).root
+        root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+        val expected = ApprovalStatus.parse(jsonObject("approval_id" to intent.context.root["approval_id"], "runtime_id" to intent.context.root["runtime_id"],
+            "runtime_epoch" to intent.context.root["runtime_epoch"], "session_id" to intent.context.root["session_id"], "execution_id" to intent.context.root["execution_id"],
+            "binding_sha256" to intent.context.bindingSha256.json(), "expires_at" to Contract.timestamp(intent.context.expiresAt).json(), "state" to "pending".json()))
+        ApprovalAdmission.parse(root.obj("data"), expected, intent.decision.choice, intent.signed.payloadSha256)
     }
     suspend fun commandStatus(id: String, deviceId: String): CommandReceipt = mutex.withLock {
         Contract.uuid(id); Contract.uuid(deviceId)
@@ -276,7 +293,7 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     suspend fun sessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
-        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "question.answer", "command.status") } ||
+        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "question.answer", "command.status", "approval.decide") } ||
             scope.actions.any { it in setOf("message.submit", "session.cancel", "question.answer") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
         issueSessionTicket(runtimeId, deviceId, scope)
     }

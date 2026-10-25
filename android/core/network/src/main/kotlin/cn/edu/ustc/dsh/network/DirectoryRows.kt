@@ -26,9 +26,10 @@ class RuntimeDirectoryEntry private constructor(val id: String, val hostId: Stri
 }
 
 class SessionDirectoryEntry private constructor(val id: String, val workspaceId: String?, val state: String, val lastPersisted: Long, val updatedAt: Long) {
-    fun viewScope(grant: RuntimeDirectoryEntry): RelayScope? = try {
+    fun viewScope(grant: RuntimeDirectoryEntry, includeApprovals: Boolean = false): RelayScope? = try {
         if (!grant.canList() || grant.scope == null || "session.read" !in grant.scope.actions) null else {
             val actions = mutableSetOf("session.read")
+            if (includeApprovals && grant.role == "owner" && "approval.decide" in grant.scope.actions) actions += "approval.decide"
             if ("command.status" in grant.scope.actions) {
                 actions += "command.status"
                 if (grant.role in setOf("operator", "owner")) {

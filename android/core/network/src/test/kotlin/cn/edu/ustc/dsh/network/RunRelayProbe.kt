@@ -250,5 +250,36 @@ object RunRelayProbe {
             withTimeout(10_000) {writer.state.first {it.records.any {row->row.intent.requestId==late && row.everAgentQueued}}}
             withTimeout(10_000) {reader.state.first {it.window?.items?.any {item->item.blocks.any {block->block.text.contains("KOTLIN_TIMED_LATE_REPLY")}}==true}}
         }
+        val approvalKey = ECKey.parse(JsonDocument.of(fixture.obj("approval_jwk")).canonicalText())
+        val registered = RegisteredApprovalKey.parse(fixture.obj("registered_approval"))
+        val approvalJournal = MemoryApprovalDecisionJournal(journal.owner)
+        val approvalScope = runtimeAccess.scope!!.session(result.id, workspace, setOf("session.read", "message.submit", "command.status", "approval.decide"))
+        api.chatReader(fixture.string("device_id"), runtime, result.id, approvalScope, journal, owner,
+            approvalAccount = SessionApprovalAccount(fixture.string("approval_host_id"), registered, approvalJournal)).use { reader ->
+            val client = reader.approvals!!
+            withTimeout(10_000) { client.state.first { it.connected && it.contentReady && it.view.loaded } }
+            for (choice in ApprovalChoice.entries) {
+                val mode = if (choice == ApprovalChoice.ALLOW_ONCE) "ALLOW" else "REJECT"
+                reader.commands!!.submit("queue", "REMOTE_APPROVAL_${mode}_KOTLIN")
+                val reference = withTimeout(10_000) { client.state.first { it.view.items.any { item -> item.canReview } } }.view.items.single { it.canReview }
+                client.requestDetails(reference.status.id)
+                val review = withTimeout(10_000) { client.state.first { it.view.items.any { item -> item.handle != null } } }.view.items.single { it.handle != null }
+                val context = review.context!!; val handle = review.handle!!
+                check(context.root.string("tool") == "bash")
+                check(context.root.obj("arguments").string("command") == "printf authorized >> approval-${mode.lowercase()}.txt")
+                val prepared = client.prepareSignature(handle, choice)
+                val der = java.security.Signature.getInstance("SHA256withECDSA").run { initSign(approvalKey.toECPrivateKey()); update(prepared.signingInput()); sign() }
+                val signed = prepared.finishDerSignature(der, System.currentTimeMillis())
+                val localId = client.submit(handle, signed)
+                val finished = withTimeout(15_000) { client.state.first { it.records.any { row -> row.intent.requestId == localId &&
+                    row.remote?.hostState == if (choice == ApprovalChoice.ALLOW_ONCE) cn.edu.ustc.dsh.protocol.ApprovalHostState.SETTLED else cn.edu.ustc.dsh.protocol.ApprovalHostState.DENIED } } }
+                    .records.single { it.intent.requestId == localId }
+                check(finished.delivery == ApprovalDecisionDelivery.ACCEPTED && finished.attempts == 1L)
+                if (choice == ApprovalChoice.ALLOW_ONCE) check(finished.remote!!.outcome == ApprovalExecutionOutcome.SUCCEEDED)
+                withTimeout(10_000) { reader.state.first { it.window?.let { window -> !window.taskRunning && window.items.any { item -> item.blocks.any { block -> block.text == "REMOTE_APPROVAL_${mode}_KOTLIN" } } } == true } }
+            }
+            check(approvalJournal.list(runtime, result.id).size == 2)
+        }
+        println("Kotlin signed approvals / TLS Go admission / actual npm DSH Bash: one allow execution, one rejected invocation and durable native results passed")
     }
 }

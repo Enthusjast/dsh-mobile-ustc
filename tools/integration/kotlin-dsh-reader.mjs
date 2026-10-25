@@ -24,7 +24,7 @@ await writeFile(wrapper, [
   "import {createPrivateKey,sign} from 'node:crypto'",
   `import {createRemoteControlPlugin} from ${JSON.stringify(pathToFileURL(resolve('host/remote-control/lib/index.js')).href)}`,
   `const key=createPrivateKey({format:'jwk',key:${JSON.stringify(fixture.host_private_jwk)}})`,
-  `const plugin=createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(fixture.host_installation_id)},credential:${JSON.stringify(fixture.host_credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key,dsaEncoding:'ieee-p1363'})}}}}})`,
+  `const plugin=createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(fixture.host_installation_id)},credential:${JSON.stringify(fixture.host_credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key,dsaEncoding:'ieee-p1363'})}}}}},{hostId:${JSON.stringify(fixture.approval_host_id)},installationId:${JSON.stringify(fixture.host_installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(fixture.approval_authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
   'export const {name,inject,apply}=plugin', '',
 ].join('\n'), { mode: 0o600 })
 const patch = join(root, 'host.patch.yml')
@@ -123,6 +123,8 @@ try {
   await command('message.submit', { mode: 'queue', text: 'KOTLIN_LIVE_MARKER' }, sessionId)
   const [code] = await javaExit
   assert.equal(code, 0, 'Kotlin content probe failed: ' + output)
+  assert.equal(await readFile(join(workspace, 'approval-allow.txt'), 'utf8'), 'authorized')
+  await assert.rejects(access(join(workspace, 'approval-reject.txt')))
   process.stdout.write(output)
 } catch (error) {
   throw new Error(`Kotlin/Go/DSH composition failed at ${phase}`, { cause: error })
