@@ -191,6 +191,7 @@ class SessionApprovalClient internal constructor(private val api: RemoteApi, pri
     suspend fun prepareSignature(handle: ApprovalReviewHandle, choice: ApprovalChoice): PreparedApprovalSignature {
         val ep = current(true)
         return lock.withLock {
+            currentCoroutineContext().ensureActive()
             requireCurrent(ep, true)
             if (ep.signing != null || ep.sending) throw ApprovalStateException("approval.busy")
             if (mutable.value.records.any { it.intent.approvalId == handle.approvalId }) throw CommandDataException("approval.reconcile_required")
@@ -200,7 +201,9 @@ class SessionApprovalClient internal constructor(private val api: RemoteApi, pri
             prepared
         }
     }
-    suspend fun cancelSignature() = lock.withLock { endpoint.get()?.let { it.signing?.prepared?.cancel(); it.signing = null; publish(it) } }
+    suspend fun cancelSignature(expected: PreparedApprovalSignature? = null) = lock.withLock { endpoint.get()?.let {
+        if (expected == null || it.signing?.prepared === expected) { it.signing?.prepared?.cancel(); it.signing = null; publish(it) }
+    } }
 
     suspend fun submit(handle: ApprovalReviewHandle, signed: SignedApprovalDecision): String {
         val ep = current(true)
@@ -270,6 +273,20 @@ class SessionApprovalClient internal constructor(private val api: RemoteApi, pri
         lock.withLock { publish(ep, error = code) }
     }
     fun query() { endpoint.get()?.refresh?.trySend(Unit) }
+    suspend fun discardUnsent(id: String) {
+        val ep = current()
+        val original = recordsLock.withLock {
+            requireCurrent(ep)
+            val original = load(ep).singleOrNull { it.intent.requestId == Contract.uuid(id) } ?: throw CommandDataException("approval.not_found")
+            account.journal.discard(id)
+            original
+        }
+        lock.withLock { if (endpoint.get() === ep) {
+            if (ep.book?.state()?.items?.any { it.handle?.approvalId == original.intent.approvalId } == true) clearReview(ep)
+            publish(ep)
+        } }
+        syncRows(ep)
+    }
     private suspend fun status(ep: Endpoint, approval: String): ApprovalStatus {
         val id = UUID.randomUUID().toString(); val result = CompletableDeferred<ApprovalStatus>(ep.scope.coroutineContext[Job])
         lock.withLock { requireCurrent(ep); if (ep.statusRequests.size >= 4) throw ApprovalStateException("approval.busy"); ep.statusRequests[id] = StatusRpc(approval, result) }

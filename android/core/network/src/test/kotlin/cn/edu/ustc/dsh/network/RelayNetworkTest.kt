@@ -648,6 +648,38 @@ class RelayNetworkTest {
             assertEquals(2, fixture.journal.list(runtime, sessionId).size)
         }
     }
+    @Test fun aLateSignatureCancellationCannotCancelANewerPerUsePreparation(): Unit = runBlocking {
+        val fixture = ApprovalPeer()
+        fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val first = client.prepareSignature(handle, ApprovalChoice.ALLOW_ONCE)
+            client.cancelSignature(first)
+            val second = client.prepareSignature(handle, ApprovalChoice.REJECT)
+            client.cancelSignature(first)
+            assertTrue(client.state.value.signing)
+            client.submit(handle, fixture.finish(second))
+            client.await { it.records.singleOrNull()?.delivery == ApprovalDecisionDelivery.ACCEPTED }
+            assertEquals(1, fixture.posts.get())
+        }
+    }
+    @Test fun discardingOnlyAnUnattemptedOriginalRequiresAnotherOnlineReview(): Unit = runBlocking {
+        val fixture = ApprovalPeer(); fixture.journal.failBegin = true
+        fixture.reader(this).use { reader ->
+            val (client, handle) = fixture.review(reader)
+            val signed = fixture.finish(client.prepareSignature(handle, ApprovalChoice.ALLOW_ONCE))
+            assertThrows(CommandDataException::class.java) { runBlocking { client.submit(handle, signed) } }
+            val local = fixture.journal.list(runtime, sessionId).single()
+            client.discardUnsent(local.intent.requestId)
+            assertTrue(fixture.journal.list(runtime, sessionId).isEmpty()); assertTrue(client.state.value.view.items.all { it.handle == null })
+            fixture.journal.failBegin = false
+            val (_, fresh) = fixture.review(reader)
+            assertNotEquals(handle, fresh)
+            client.submit(fresh, fixture.finish(client.prepareSignature(fresh, ApprovalChoice.REJECT)))
+            val attempted = fixture.journal.list(runtime, sessionId).single()
+            assertThrows(CommandDataException::class.java) { runBlocking { client.discardUnsent(attempted.intent.requestId) } }
+            assertEquals(1, fixture.posts.get())
+        }
+    }
 
     private fun questionPayload(timed: Boolean=false,phase: String="open",revision: Long=1,detail: String="Review this plan") : JsonObject {
         var item=jsonObject("question_id" to "99999999-9999-4999-8999-999999999999".json(),"expires_at" to (if(timed) JsonNull else time(60_000)),"questions" to JsonArray(listOf(jsonObject("id" to "plan".json(),"question" to "Continue?".json(),"detail" to detail.json(),"options" to JsonArray(listOf(jsonObject("label" to "Continue".json()),jsonObject("label" to "Cancel".json()))),"intent" to jsonObject("kind" to "plan-review".json(),"approve" to "Continue".json())))))
