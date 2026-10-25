@@ -8,13 +8,18 @@ class CommandDataException(val code: String) : IllegalStateException(code)
 
 typealias CommandOwner = LocalDataOwner
 
-enum class CommandKind(val wire: String) { MESSAGE("message.submit"), CANCEL("session.cancel"), CREATE("session.create") }
+enum class CommandKind(val wire: String) {
+    MESSAGE("message.submit"), CANCEL("session.cancel"), CREATE("session.create"), QUESTION("question.answer"), TIMED_QUESTION("question.timed.answer");
+    val action get()=if(this==TIMED_QUESTION) "question.answer" else wire
+    val question get()=this==QUESTION || this==TIMED_QUESTION
+}
 
 /** An immutable original intent; epochs may never be changed to force a cancellation through. */
-class CommandIntent private constructor(val requestId: String, val runtimeId: String, val sessionId: String?, val kind: CommandKind, val epoch: String?, val payload: JsonObject, val workspaceId: String? = null) {
+class CommandIntent private constructor(val requestId: String, val runtimeId: String, val sessionId: String?, val kind: CommandKind, val epoch: String?, val payload: JsonObject, val workspaceId: String? = null, val questionDefinition: String? = null) {
     val digest: String
     init {
         listOfNotNull(requestId, runtimeId, sessionId, workspaceId).forEach(Contract::uuid)
+        questionDefinition?.let { Contract.digest(it); if(!kind.question) throw ProtocolException() }
         var body = jsonObject("type" to kind.wire.json(), "payload" to payload)
         if (sessionId != null) body = body.with("session_id" to sessionId.json())
         if (epoch != null) body = body.with("runtime_epoch" to Contract.uuid(epoch).json())
@@ -27,7 +32,7 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
         if (epoch != null) frame = frame.with("runtime_epoch" to epoch.json())
         return frame
     }
-    fun storageBytes(): ByteArray = JsonDocument.of(frame()).canonicalBytes()
+    fun storageBytes(): ByteArray = JsonDocument.of(if(questionDefinition==null) frame() else frame().with("local_context_sha256" to questionDefinition.json())).canonicalBytes()
     fun text(): String? = if (kind == CommandKind.MESSAGE) payload.array("content").joinToString("\n") { (it as JsonObject).string("text") } else null
     override fun toString() = "CommandIntent(${kind.wire})"
     companion object {
@@ -39,13 +44,26 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
         fun createSession(request: String, runtime: String, workspace: String, preset: String, epoch: String): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "session.create".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "runtime_epoch" to epoch.json(),
                 "payload" to jsonObject("workspace_id" to workspace.json(), "preset" to preset.json())))
+        fun answerQuestion(request: String,runtime: String,session: String,epoch: String,timed: Boolean,answers: QuestionAnswers,definition: String): CommandIntent {
+            val parsed=parse(jsonObject("v" to 1L.json(),"type" to (if(timed) "question.timed.answer" else "question.answer").json(),"request_id" to request.json(),"runtime_id" to runtime.json(),"session_id" to session.json(),"runtime_epoch" to epoch.json(),"payload" to answers.json()))
+            return CommandIntent(parsed.requestId,parsed.runtimeId,parsed.sessionId,parsed.kind,parsed.epoch,parsed.payload,questionDefinition=Contract.digest(definition))
+        }
+        fun stored(bytes: ByteArray): CommandIntent {
+            val root=JsonDocument.parse(bytes).root
+            val context=root.fields["local_context_sha256"]
+            val parsed=parse(if(context==null) root else JsonObject(root.fields.filterKeys {it!="local_context_sha256"}))
+            if(context==null) return parsed
+            if(!parsed.kind.question) throw ProtocolException()
+            return CommandIntent(parsed.requestId,parsed.runtimeId,parsed.sessionId,parsed.kind,parsed.epoch,parsed.payload,questionDefinition=Contract.digest((context as? JsonString)?.value ?: throw ProtocolException()))
+        }
         fun parse(root: JsonObject): CommandIntent {
             val kind = CommandKind.entries.firstOrNull { it.wire == root.string("type") } ?: throw ProtocolException()
             val fields = setOf("v", "type", "request_id", "runtime_id", "payload") + if (kind == CommandKind.CREATE) setOf("runtime_epoch")
-                else setOf("session_id") + if (kind == CommandKind.CANCEL) setOf("runtime_epoch") else emptySet()
+                else setOf("session_id") + if (kind != CommandKind.MESSAGE) setOf("runtime_epoch") else emptySet()
             if (root.fields.keys != fields || root.integer("v", 1, 1) != 1L) throw ProtocolException()
             val payload = root.obj("payload")
-            if (kind == CommandKind.CREATE) {
+            if(kind.question) { QuestionAnswers.parse(payload) }
+            else if (kind == CommandKind.CREATE) {
                 payload.exactKeys("workspace_id", "preset"); Contract.uuid(payload.string("workspace_id"))
                 if (!Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}").matches(payload.string("preset"))) throw ProtocolException()
             } else if (kind == CommandKind.CANCEL) payload.exactKeys() else {
@@ -130,6 +148,7 @@ object CommandEvolution {
             receipt.epoch != null && record.intent.epoch != null && receipt.epoch != record.intent.epoch) throw CommandDataException("command.request_conflict")
         if (record.createdSessionId != null && receipt.sessionId != null && receipt.sessionId != record.createdSessionId) throw CommandDataException("command.request_conflict")
         if (record.attempts == 0L) throw CommandDataException("command.unsent_receipt")
+        if(record.intent.kind in setOf(CommandKind.QUESTION,CommandKind.CANCEL) && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED,RemoteCommandState.OBSERVED)) throw CommandDataException("command.state_conflict")
         val previous = record.remoteTimestamp?.let { OffsetDateTime.parse(it).toInstant() }
         if (previous != null && receipt.instant < previous) return record
         if (previous == receipt.instant && record.remote == receipt.state) return record
@@ -138,7 +157,8 @@ object CommandEvolution {
         // outcome and make an attempted command eligible for replay.
         if (record.remote == RemoteCommandState.OUTCOME_UNKNOWN && receipt.state == RemoteCommandState.RECEIVED) return record
         val saved = record.everHostSaved || receipt.state in setOf(RemoteCommandState.HOST_ACCEPTED, RemoteCommandState.DISPATCHING, RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED)
-        val queued = record.everAgentQueued || record.intent.kind == CommandKind.MESSAGE && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED)
+        val queued = record.everAgentQueued || record.intent.kind == CommandKind.MESSAGE && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED) ||
+            record.intent.kind==CommandKind.TIMED_QUESTION && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED,RemoteCommandState.OBSERVED)
         if (saved && receipt.state == RemoteCommandState.RECEIVED || queued && receipt.state in setOf(RemoteCommandState.HOST_ACCEPTED, RemoteCommandState.DISPATCHING)) return record
         return PendingCommand(record.intent, if (receipt.state == RemoteCommandState.OUTCOME_UNKNOWN) CommandDelivery.RECONCILE else CommandDelivery.CONFIRMED,
             receipt.state, record.attempts, record.revision + 1, record.createdAt, maxOf(record.updatedAt, receipt.updatedAt), receipt.timestamp, saved, queued, null,

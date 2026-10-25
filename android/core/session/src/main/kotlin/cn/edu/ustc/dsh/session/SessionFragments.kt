@@ -14,7 +14,7 @@ class SessionContent(val type: String, val requestId: String, val syncId: String
 /** One logical content group per subscription. Incomplete payloads never reach the window. */
 class SessionFragments(private val route: SessionRoute) {
     companion object {
-        private val types = setOf("session.snapshot", "session.event", "session.checkpoint", "session.page.result", "assistant.start", "assistant.chunk", "assistant.end")
+        private val types = setOf("session.snapshot", "session.event", "session.checkpoint", "session.page.result", "assistant.start", "assistant.chunk", "assistant.end","question.snapshot","question.timed.snapshot")
         private val fields = setOf("v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "subscription_id", "payload", "sync_id")
     }
     private class Partial(val id: String, val type: String, val request: String, val sync: String, val count: Int, val started: Long) {

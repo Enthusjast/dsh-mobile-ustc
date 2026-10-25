@@ -34,6 +34,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         }
     }
     override suspend fun create(intent: CommandIntent, now: Long): PendingCommand = transaction { dao ->
+        if(intent.kind.question && intent.questionDefinition==null) throw CommandDataException("question.context_required")
         dao.get(intent.requestId)?.let { existing ->
             if (existing.digest != intent.digest || !existing.intent.contentEquals(intent.storageBytes())) throw CommandDataException("command.request_conflict")
             return@transaction existing.decode()
@@ -189,7 +190,8 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
 private fun PendingCommand.encode() = CommandRow(intent.requestId, intent.runtimeId, intent.sessionId, intent.storageBytes(), intent.digest, delivery.name, remote?.name,
     attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, intent.workspaceId, createdSessionId)
 private fun CommandRow.decode(): PendingCommand {
-    val parsed = CommandIntent.parse(JsonDocument.parse(intent).root)
+    val parsed = CommandIntent.stored(intent)
+    if(parsed.kind.question && parsed.questionDefinition==null) throw CommandDataException("data.corrupt")
     if (parsed.requestId != requestId || parsed.runtimeId != runtimeId || parsed.sessionId != sessionId || parsed.workspaceId != workspaceId || parsed.digest != digest || attempts < 0 || revision < 1 ||
         delivery == CommandDelivery.PENDING.name && attempts != 0L && remote != RemoteCommandState.RECEIVED.name) throw CommandDataException("data.corrupt")
     createdSessionId?.let(Contract::uuid)

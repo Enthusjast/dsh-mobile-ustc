@@ -10,6 +10,7 @@ internal class MemoryCommandJournal(override val owner: CommandOwner) : CommandJ
     private val mutex = Mutex()
     var failBegin = false
     override suspend fun create(intent: CommandIntent, now: Long): PendingCommand = mutex.withLock {
+        if(intent.kind.question && intent.questionDefinition==null) throw CommandDataException("question.context_required")
         val old = rows[intent.requestId]
         if (old != null) { if (old.intent.digest != intent.digest || !old.intent.storageBytes().contentEquals(intent.storageBytes())) throw CommandDataException("command.request_conflict"); return@withLock old }
         CommandEvolution.created(intent, now).also { rows[intent.requestId] = it }

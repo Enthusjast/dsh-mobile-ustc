@@ -95,6 +95,7 @@ class SessionWindow(private val subscribeRequest: String) {
     val ready get() = sync != null
     val paging get() = page != null
     val syncId get() = sync
+    fun acceptsSync(value: String): Boolean = if(value==sync) true else if(value in retiredSyncs) false else throw SessionDataException()
     fun settlementMillis(nowNanos: Long = System.nanoTime()): Long? = held?.let { ((heldAt + 10_000_000_000 - nowNanos) / 1_000_000).coerceAtLeast(0) }
 
     fun accept(content: SessionContent, nowNanos: Long = System.nanoTime()): Boolean {

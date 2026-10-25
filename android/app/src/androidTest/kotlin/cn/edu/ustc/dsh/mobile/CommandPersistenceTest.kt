@@ -106,4 +106,25 @@ class CommandPersistenceTest {
         journal.retainCreations(mapOf(runtime to cn.edu.ustc.dsh.protocol.RelayScope(listOf("command.status"),emptyList(),emptyList())))
         assertTrue(journal.listCreations(runtime).isEmpty())
     }
+    @Test fun questionAnswersReopenWithExactTextAndTheirLocalDefinitionWithoutAReplay(): Unit=runBlocking {
+        val answers=cn.edu.ustc.dsh.protocol.QuestionAnswers(UUID.randomUUID().toString(),listOf(cn.edu.ustc.dsh.protocol.QuestionAnswer("plan",listOf("继续"),"中文 < & \\ line\n")))
+        val command=CommandIntent.answerQuestion(UUID.randomUUID().toString(),runtime,session,UUID.randomUUID().toString(),false,answers,"b".repeat(64))
+        val journal=open();journal.create(command);journal.beginAttempt(command.requestId);journal.close()
+        val restored=open().list(runtime,session).single()
+        assertEquals("b".repeat(64),restored.intent.questionDefinition);assertArrayEquals(command.storageBytes(),restored.intent.storageBytes())
+        assertEquals(cn.edu.ustc.dsh.protocol.JsonDocument.of(answers.json()).canonicalText(),cn.edu.ustc.dsh.protocol.JsonDocument.of(cn.edu.ustc.dsh.protocol.QuestionAnswers.parse(restored.intent.payload).json()).canonicalText())
+        assertFalse(restored.intent.frame().fields.containsKey("local_context_sha256"));assertEquals(CommandDelivery.RECONCILE,restored.delivery)
+        assertThrows(CommandDataException::class.java) {runBlocking {opened.last().beginAttempt(command.requestId)}}
+    }
+    @Test fun aQuestionCannotBePersistedWithoutContextOrReplaceItsContextUnderTheSameId(): Unit=runBlocking {
+        val answers=cn.edu.ustc.dsh.protocol.QuestionAnswers(UUID.randomUUID().toString(),listOf(cn.edu.ustc.dsh.protocol.QuestionAnswer("x",emptyList(),"answer")))
+        val command=CommandIntent.answerQuestion(UUID.randomUUID().toString(),runtime,session,UUID.randomUUID().toString(),true,answers,"b".repeat(64))
+        val journal=open()
+        assertEquals("question.context_required",assertThrows(CommandDataException::class.java) {runBlocking {journal.create(CommandIntent.parse(command.frame()))}}.code)
+        journal.create(command)
+        val changed=CommandIntent.answerQuestion(command.requestId,runtime,session,command.epoch!!,true,answers,"c".repeat(64))
+        assertEquals(command.digest,changed.digest)
+        assertThrows(CommandDataException::class.java) {runBlocking {journal.create(changed)}}
+        assertEquals(command.questionDefinition,journal.list(runtime,session).single().intent.questionDefinition)
+    }
 }
