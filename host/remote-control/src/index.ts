@@ -11,6 +11,8 @@ import { startHostRelay, type HostCredentialProvider } from './relay-client.js'
 import { SignedApprovals, type SignedApprovalOptions } from './signed-approvals.js'
 import { RelayApprovals } from './relay-approvals.js'
 import { RelayFiles } from './relay-files.js'
+import { RelayExports } from './relay-exports.js'
+import { PinnedExportSource } from './file-export-source.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
 
@@ -82,6 +84,7 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
       const interactions = new InteractionRouter(ctx, options.runtimeId!, managed, signedOptions ? [] : options.highRiskTools!, options.interactionTimeoutMs!)
       if (signedOptions) signed = new SignedApprovals(ctx, options.runtimeId!, epoch, journal.approvals(epoch), workspaces, managed, options.interactionTimeoutMs!, signedOptions)
       runtime = new ProbeRuntime(client, interactions, journal, epoch)
+      const exportSupported=await PinnedExportSource.supported()
       let server: Awaited<ReturnType<typeof startDebugServer>> | undefined
       let relay: Awaited<ReturnType<typeof startHostRelay>> | undefined
       try {
@@ -91,6 +94,7 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
           dshVersion: '0.2.1-rc.2', applicationVersion: options.applicationVersion!, pluginVersion: '0.0.1',
           ...(signed ? { approvals: binding => new RelayApprovals(signed!, binding) } : {}),
           files: binding => new RelayFiles(runtime!.files, binding),
+          ...(exportSupported?{exports:binding=>new RelayExports(runtime!.exports,client,epoch,binding)}:{}),
         })
       } catch (error) {
         await relay?.close()

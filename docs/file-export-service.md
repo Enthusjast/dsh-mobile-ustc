@@ -1,6 +1,6 @@
 # 导出登记、扫描与手机鉴权下载
 
-Go 服务已实现 `from_host` 导出账本、Host 上传能力、共享扫描 / 对象清理和手机 JWT/DPoP 下载。Host 的 [受限来源层](file-export-sources.md) 已单独验证；把来源选择、准备和上传接入 Relay 的协调协议，以及 Android 保存文档入口仍待完成。当前没有向手机开放任意路径或自行提交 Host manifest 的创建接口。
+Go 服务已实现 `from_host` 导出账本、Host 上传能力、共享扫描 / 对象清理和手机 JWT/DPoP 下载。Host 的 [受限来源层](file-export-sources.md) 已经通过 [file.export.v1 Relay 协调](file-export-relay.md) 接通，Android 保存文档入口仍待完成。当前没有向手机开放任意路径或自行提交 Host manifest 的创建接口。
 
 ## 开关和大小
 
@@ -65,4 +65,4 @@ down 迁移只使导出失效、终止扫描并保留对象与配额追踪，不
 
 本机记录为 `.local/file-export-postgres-http-second.log`、`.local/file-export-reader-unit-final.log`、`.local/file-export-backend-host-verify.log`、`.local/file-export-backend-vet.log`。完整 `npm run test:remote-kotlin` 的 Go race、现有 Kotlin 文件 / 聊天 / 审批 / 提问 / 归档和真实 npm DSH 回归也已通过，记录为 `.local/file-export-backend-full-chain.log`。
 
-Host 来源到后端的实际导出 Relay 协调、Android 导出 / 保存 / 恢复、APK 文件联合链路及跨平台来源适配仍需继续实现。2 GB 目前有边界与签名检查，尚未做该尺寸的真实扫描 / 下载性能验收。对象、scanner、身份与模型仍为本地夹具；这些结果不证明真实 KMS、病毒签名引擎、学校 IdP 或公开网络验收。
+后续 [Relay 组合](file-export-relay.md) 已验证来源到后端的实际导出；Android 导出 / 保存 / 恢复、APK 文件联合链路及跨平台来源适配仍需继续实现。2 GB 目前有边界与签名检查，尚未做该尺寸的真实扫描 / 下载性能验收。对象、scanner、身份与模型仍为本地夹具；这些结果不证明真实 KMS、病毒签名引擎、学校 IdP 或公开网络验收。

@@ -1,6 +1,6 @@
 # 受限导出的 Host 来源层
 
-本阶段实现真实 npm DSH `0.2.1-rc.2` 的导出来源解析、受限文件读取和运行时条目。它已接入 `ProbeRuntime` 的清理生命周期，尚未在 Relay 宣告导出能力。[服务端导出账本、扫描与鉴权下载](file-export-service.md) 已实现；来源请求 / 上传的 Relay 协调和 Android 保存入口仍需接入。现有文件上传 / 消息链路见 [Android 文件](android-files.md)。
+本阶段实现真实 npm DSH `0.2.1-rc.2` 的导出来源解析、受限文件读取和运行时条目。它已接入 `ProbeRuntime` 的清理生命周期和 [file.export.v1 Relay 协调](file-export-relay.md)，并连接 [服务端导出账本、扫描与鉴权下载](file-export-service.md)。Android 保存入口仍需接入。现有文件上传 / 消息链路见 [Android 文件](android-files.md)。
 
 ## 两类来源
 

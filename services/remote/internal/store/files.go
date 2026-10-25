@@ -29,6 +29,8 @@ func NewFileStore(database *Postgres, limits files.Limits) (*FileStore, error) {
 }
 
 type fileAuthority struct {
+	scope                    GrantScope
+	workspace                sql.NullString
 	org, user                string
 	keyVersion, grantVersion int64
 	grantExpires             sql.NullTime
@@ -87,6 +89,7 @@ func authorizeFileAction(ctx context.Context, transaction *sql.Tx, actor files.A
 		authority.grantExpires.Valid && !authority.grantExpires.Time.After(now) || unarchived && authority.sessionState == "archived" {
 		return authority, files.ErrAccess
 	}
+	authority.scope, authority.workspace = scope, workspace
 	return authority, nil
 }
 

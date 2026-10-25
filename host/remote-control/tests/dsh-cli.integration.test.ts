@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { PinnedExportSource } from '../src/file-export-source.js'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
@@ -91,6 +92,7 @@ async function waitForInteraction(command: (type: string, payload: unknown, sess
 }
 
 test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round trip', async t => {
+  const exportSupported = await PinnedExportSource.supported()
   const root = await mkdtemp(join(tmpdir(), 'dsh-mobile-cli-integration-'))
   const home = join(root, 'dsh-home')
   const workspace = join(root, 'workspace')
@@ -150,9 +152,13 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           const proof = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'))
           const signingInput = Buffer.from(`${headerPart}.${payloadPart}`)
           relayRuntimeEpoch = proof.runtime_epoch
+          const expectedCapabilities=['command.relay.v1', 'connection.heartbeat.v1', 'file.handoff.v1', 'message.files.reconcile.v1', 'message.files.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1']
+          if(exportSupported)expectedCapabilities.push('file.export.v1')
+          expectedCapabilities.sort()
+          assert.deepEqual([...frame.payload.capabilities].sort(),expectedCapabilities)
           const helloDigest = hostHelloDigest([
             'host', runtimeId, relayRuntimeEpoch, '0.2.1-rc.2', 'dsh-cli-integration', '0.0.1', '1',
-            ['command.relay.v1', 'connection.heartbeat.v1', 'file.handoff.v1', 'message.files.reconcile.v1', 'message.files.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1'].join('\n'),
+            expectedCapabilities.join('\n'),
           ])
           const valid = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')).typ === 'dsh-relay-handshake-proof+jwt'
             && proof.iss === installationId && proof.aud === 'urn:dsh-mobile-ustc:realtime'

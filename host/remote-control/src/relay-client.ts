@@ -13,6 +13,8 @@ import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approval
 import { CREATION_OPTIONS_CAPABILITY, creationOptionsSchema, type SessionCreationOptions } from './creation-options.js'
 import { FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY, FILE_RECONCILE_CAPABILITY, fileReference } from './file-protocol.js'
 import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
+import type { HostExportPeer } from './relay-exports.js'
+import { EXPORT_CAPABILITY } from './export-protocol.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
@@ -139,6 +141,7 @@ export interface HostRelayOptions {
   pluginVersion: string
   approvals?: HostApprovalPeerFactory
   files?: (binding: FileTransportBinding) => HostFilePeer
+  exports?: (binding: FileTransportBinding) => HostExportPeer
 }
 
 interface RelaySocket {
@@ -423,6 +426,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   let sessions: RelaySessions | undefined
   let approvals: HostApprovalPeer | undefined
   let files: HostFilePeer | undefined
+  let exports: HostExportPeer | undefined
   const abortConnection = () => {
     connection.abort()
     socket.terminate()
@@ -444,6 +448,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     if (sourceOptions) offered.push(CREATION_OPTIONS_CAPABILITY)
     if (options.files) offered.push(FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY)
     if (options.files && options.runtime.reconcileFileMessage) offered.push(FILE_RECONCILE_CAPABILITY)
+    if(options.exports)offered.push(EXPORT_CAPABILITY)
     const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
@@ -478,6 +483,11 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       files = options.files({ installationId: credential.installationId, connectionId: challenge.connection_id,
         origin: origin.origin, signer: credential.signer, signal: connection.signal,
         send: frame => sendFrame(socket, frame), fail: abortConnection })
+    }
+    if(options.exports&&ack.data.payload.capabilities.includes(EXPORT_CAPABILITY)){
+      if(!ack.data.payload.capabilities.includes('session.catalog.v1'))throw new ProbeError('protocol.unsupported')
+      const origin=new URL(url);origin.protocol=origin.protocol==='wss:'?'https:':'http:'
+      exports=options.exports({installationId:credential.installationId,connectionId:challenge.connection_id,origin:origin.origin,signer:credential.signer,signal:connection.signal,send:frame=>sendFrame(socket,frame),fail:abortConnection})
     }
 
     const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
@@ -610,6 +620,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     const handleFrame = async (value: unknown) => {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const frame = value as Record<string, unknown>
+        if (exports && await exports.handle(value)) return
         if (files && await files.handle(value)) return
         if (approvals && await approvals.handle(value)) return
         if (frame.v === 1 && frame.type === 'pong') return
@@ -707,6 +718,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     try { await reader }
     finally { clearInterval(heartbeat) }
   } finally {
+    await exports?.close()
     files?.close()
     approvals?.close()
     sessions?.close()

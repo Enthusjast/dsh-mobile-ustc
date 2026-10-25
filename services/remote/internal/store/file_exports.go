@@ -6,16 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"time"
 
 	"dsh-mobile-ustc/services/remote/internal/files"
 )
 
 type exportOrigin struct {
-	source   string
-	host     files.HostBinding
-	expires  time.Time
-	uploaded sql.NullTime
+	kind      string
+	workspace sql.NullString
+	source    string
+	host      files.HostBinding
+	expires   time.Time
+	uploaded  sql.NullTime
 }
 
 func (repository *FileStore) ExportStatusByRequest(ctx context.Context, actor files.Actor, request string) (files.Record, error) {
@@ -81,9 +84,9 @@ func loadExportOrigin(ctx context.Context, tx *sql.Tx, file files.Record) (expor
 	var origin exportOrigin
 	origin.host.RuntimeID = file.RuntimeID
 	err := tx.QueryRowContext(ctx, `select source_id::text,installation_id::text,installation_key_version,runtime_epoch::text,connection_id::text,
-	 credential_expires_at,source_expires_at,uploaded_at from file_exports where file_id=$1`, file.ID).
+	 credential_expires_at,source_expires_at,uploaded_at,origin,workspace_id::text from file_exports where file_id=$1`, file.ID).
 		Scan(&origin.source, &origin.host.InstallationID, &origin.host.KeyVersion, &origin.host.RuntimeEpoch, &origin.host.ConnectionID,
-			&origin.host.CredentialExpiresAt, &origin.expires, &origin.uploaded)
+			&origin.host.CredentialExpiresAt, &origin.expires, &origin.uploaded, &origin.kind, &origin.workspace)
 	if errors.Is(err, sql.ErrNoRows) {
 		return origin, files.ErrAccess
 	}
@@ -105,6 +108,13 @@ func authorizeExportOwner(ctx context.Context, tx *sql.Tx, actor files.Actor, re
 		return authority, err
 	}
 	if record.KeyVersion != authority.keyVersion || record.ProofKeyJKT != actor.ProofKeyJKT {
+		return authority, files.ErrAccess
+	}
+	origin, err := loadExportOrigin(ctx, tx, record)
+	if err != nil {
+		return authority, err
+	}
+	if origin.kind != "session_attachment" && origin.kind != "workspace_artifact" || origin.kind == "workspace_artifact" && (!authority.workspace.Valid || origin.workspace != authority.workspace || !slices.Contains(authority.scope.Workspaces, origin.workspace.String)) {
 		return authority, files.ErrAccess
 	}
 	return authority, nil
@@ -144,6 +154,9 @@ func (repository *FileStore) RegisterExport(ctx context.Context, actor files.Act
 		return files.Record{}, err
 	}
 	if authority.sessionState != "available" && authority.sessionState != "running" && authority.sessionState != "archived" {
+		return files.Record{}, files.ErrAccess
+	}
+	if input.Origin == "workspace_artifact" && (!authority.workspace.Valid || !slices.Contains(authority.scope.Workspaces, authority.workspace.String)) {
 		return files.Record{}, files.ErrAccess
 	}
 	if _, _, err := hostFileBinding(ctx, tx, host); err != nil {
@@ -220,8 +233,12 @@ func (repository *FileStore) RegisterExport(ctx context.Context, actor files.Act
 	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, id, authority.org, input.RuntimeID, actor.DeviceID, authority.keyVersion, actor.ProofKeyJKT, authority.grantVersion, input.RequestID, digest, attempt, until, record.RetainUntil); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	if _, err := tx.ExecContext(ctx, `insert into file_exports(file_id,source_id,installation_id,installation_key_version,runtime_epoch,connection_id,credential_expires_at,source_expires_at)
-	 values($1,$2,$3,$4,$5,$6,$7,$8)`, id, input.SourceID, host.InstallationID, host.KeyVersion, host.RuntimeEpoch, host.ConnectionID, host.CredentialExpiresAt, until); err != nil {
+	var workspace any
+	if input.Origin == "workspace_artifact" {
+		workspace = authority.workspace.String
+	}
+	if _, err := tx.ExecContext(ctx, `insert into file_exports(file_id,source_id,installation_id,installation_key_version,runtime_epoch,connection_id,credential_expires_at,source_expires_at,origin,workspace_id)
+	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, id, input.SourceID, host.InstallationID, host.KeyVersion, host.RuntimeEpoch, host.ConnectionID, host.CredentialExpiresAt, until, input.Origin, workspace); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
 	if _, err := tx.ExecContext(ctx, `insert into file_objects(file_id,kind,attempt_id,object_key,cleanup_after) values($1,'quarantine',$2,$3,$4)`, id, attempt, key.StorageKey(), until.Add(fileCleanupGrace)); err != nil {

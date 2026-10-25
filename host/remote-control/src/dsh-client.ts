@@ -10,13 +10,15 @@ import { ProbeError } from './protocol.js'
 import { configuredCreationOptions } from './creation-options.js'
 import { admitNativeFile, fileManifest, releaseNativeFile, type FileManifest } from './file-admission.js'
 import { PinnedExportSource } from './file-export-source.js'
-import { sessionAttachmentSource } from './session-file-export.js'
+import { sessionAttachmentSource,sessionAttachmentManifest } from './session-file-export.js'
+import { ExportDirectory } from './export-directory.js'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 
 export type DshPromptPart = Extract<PromptContentPart, { type: 'text' | 'file' }>
 
 export interface WorkspaceExportRoot { id: string; directory: string }
+export interface AttachmentExportCursor { through:number;before:number;skipSeq?:number;skipIndex?:number }
 export interface Workspace { id: string; cwd: string; remoteId?: string; label?: string; exportRoots?: WorkspaceExportRoot[] }
 
 export interface SessionCatalogItem {
@@ -190,7 +192,7 @@ export class DshClient {
   }
 
   /** Host-selected artifact under an explicitly configured root; never decode this from a phone path. */
-  async workspaceExportSource(id: string, rootId: string, parts: readonly string[], signal: AbortSignal, current: () => void): Promise<PinnedExportSource> {
+  private async workspaceExportLocation(id: string, rootId: string, parts: readonly string[], signal: AbortSignal, current: () => void) {
     signal.throwIfAborted(); current()
     const { workspace } = await this.exportWorkspace(id, signal)
     const roots = workspace.exportRoots?.filter(root => root.id === rootId) ?? []
@@ -214,7 +216,49 @@ export class DshClient {
       const allowed = matches.length === 1 ? matches[0]!.exportRoots?.filter(root => root.id === rootId && root.directory === directory) : []
       if (allowed?.length !== 1) throw new ProbeError('access.denied')
     }
-    return PinnedExportSource.open({ root: cwd, parts: [...prefix, ...parts] }, signal, guard)
+    return {root:cwd,parts:[...prefix,...parts],guard}
+  }
+  async workspaceExportSource(id: string, rootId: string, parts: readonly string[], signal: AbortSignal, current: () => void): Promise<PinnedExportSource> {
+    const location=await this.workspaceExportLocation(id,rootId,parts,signal,current)
+    return PinnedExportSource.open({root:location.root,parts:location.parts},signal,location.guard)
+  }
+  async workspaceExportRootIds(id:string,signal:AbortSignal,current:()=>void):Promise<string[]> {
+    current();signal.throwIfAborted();const {workspace}=await this.exportWorkspace(id,signal);current()
+    return (workspace.exportRoots??[]).map(root=>root.id)
+  }
+  async workspaceExportPage(id:string,root:string,parts:readonly string[],signal:AbortSignal,current:()=>void,reader?:ExportDirectory) {
+    const location=await this.workspaceExportLocation(id,root,parts,signal,current)
+    if(reader&&!reader.matches(location.root,location.parts))throw new ProbeError('file.export_changed')
+    const directory=reader??await ExportDirectory.open(location.root,location.parts,signal,location.guard)
+    try {const page=await directory.page(signal,location.guard);return {...page,reader:directory}}
+    catch(error){await directory.close();throw error}
+  }
+  async attachmentExportPage(id:string,signal:AbortSignal,current:()=>void,cursor?:AttachmentExportCursor) {
+    current();signal.throwIfAborted();const {native}=await this.exportWorkspace(id,signal)
+    let through:number,records:readonly import('@deepseek-ai/dsh-api-session-controller/types').SessionHistoryRecord[],more:boolean
+    if(cursor){through=cursor.through;const page=await this.page(native,{throughSeq:through,beforeSeq:cursor.before,maxMessages:10},signal);records=page.records;more=page.hasMore}
+    else {
+      const iterator=this.follow(native,10,signal)[Symbol.asyncIterator]()
+      try {const opening=await iterator.next();if(opening.done||opening.value.type!=='snapshot')throw new ProbeError('file.export_unavailable');through=opening.value.cursor;records=opening.value.records;more=opening.value.hasMore}
+      finally {await iterator.return?.()}
+      if(this.ctx.sessions.get(native)!==undefined){const saved=await this.checkpoint(native);if(saved.state!=='persisted'||saved.through_seq<through)throw new ProbeError('session.persistence_unavailable')}
+    }
+    const items:Array<{seq:number;index:number;manifest:FileManifest}>=[]
+    for(const {event} of [...records].reverse()) {
+      current();signal.throwIfAborted()
+      const data=event.data as Record<string,unknown>
+      const body=event.type==='user/message'?data:(data?.message as Record<string,unknown>|undefined)
+      const content=body?.content
+      if(!Array.isArray(content))continue
+      for(let index=cursor?.skipSeq===event.seq?cursor.skipIndex??0:0;index<content.length;index++) {
+        let manifest:FileManifest
+        try {manifest=sessionAttachmentManifest(event,index)}catch{continue}
+        items.push({seq:event.seq,index,manifest})
+        if(items.length===16)return {items,cursor:{through,before:event.seq+1,skipSeq:event.seq,skipIndex:index+1} satisfies AttachmentExportCursor}
+      }
+    }
+    current();signal.throwIfAborted()
+    return {items,cursor:more&&records.length?{through,before:records[0]!.event.seq} satisfies AttachmentExportCursor:undefined}
   }
 
   /** File/image selection is a log position in this scoped Session, never a caller-supplied native reference. */

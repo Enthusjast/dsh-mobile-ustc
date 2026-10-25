@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
-import { constants, type BigIntStats } from 'node:fs'
-import { open, statfs, type FileHandle } from 'node:fs/promises'
-import { isAbsolute, normalize } from 'node:path'
+import type { BigIntStats } from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import { fileManifest, type FileManifest } from './file-admission.js'
 import { ProbeError } from './protocol.js'
+import { exportFilesystemSupported, exportVersion, openExportHandle } from './export-fs.js'
 
 export const MAX_EXPORT_FILE_BYTES = 2_000_000_000
 const CHUNK_BYTES = 64 * 1024
@@ -16,7 +16,6 @@ export interface ExportSourceSpec {
   attachment?: FileManifest
 }
 
-function validPart(value: string): boolean { return fileManifest.shape.name.safeParse(value).success }
 function same(left: BigIntStats, right: BigIntStats): boolean {
   return right.isFile() && left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mode === right.mode
     && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.nlink === right.nlink
@@ -58,34 +57,16 @@ export class PinnedExportSource {
   }
 
   static async supported(): Promise<boolean> {
-    return process.platform === 'linux' && await statfs('/proc/self/fd').then(info => info.type === 0x9fa0, () => false)
+    return exportFilesystemSupported()
   }
 
   static async open(spec: ExportSourceSpec, signal: AbortSignal, current: () => void): Promise<PinnedExportSource> {
     signal.throwIfAborted(); current()
     const root = spec.root, selected = [...spec.parts], attachment = spec.attachment ? { ...spec.attachment } : undefined
-    const rootParts = root === '/' ? [] : root.split('/').slice(1)
-    if (!isAbsolute(root) || normalize(root) !== root || selected.length === 0 || selected.length > 32
-      || !selected.every(validPart) || rootParts.some(part => !validPart(part))) throw new ProbeError('file.export_invalid')
     if (attachment && !fileManifest.safeParse(attachment).success) throw new ProbeError('file.export_invalid')
-    if (!await this.supported()) throw new ProbeError('file.export_unsupported')
-    const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-    let directory: FileHandle | undefined
     let file: FileHandle | undefined
     try {
-      directory = await open('/', flags | constants.O_DIRECTORY)
-      // Opening through each live directory descriptor pins its identity even
-      // if a repository process swaps a lexical ancestor during traversal.
-      const parts = [...rootParts, ...selected]
-      for (let index = 0; index < parts.length; index++) {
-        signal.throwIfAborted(); current()
-        if (!directory) throw new ProbeError('file.export_unavailable')
-        const next = await open(`/proc/self/fd/${directory.fd}/${parts[index]!}`, flags | (index + 1 === parts.length ? 0 : constants.O_DIRECTORY))
-        const previous = directory; directory = undefined
-        if (index + 1 === parts.length) file = next
-        else directory = next
-        await previous.close()
-      }
+      file = await openExportHandle(root, selected, false, signal, current)
       signal.throwIfAborted(); current()
       signal.throwIfAborted()
       const info = await file!.stat({ bigint: true })
@@ -97,8 +78,9 @@ export class PinnedExportSource {
       file = undefined
       return source
     } catch (error) { return failure(error, signal) }
-    finally { await directory?.close().catch(() => {}); await file?.close().catch(() => {}) }
+    finally { await file?.close().catch(() => {}) }
   }
+  version(): string { return exportVersion(this.#version) }
 
   async #check(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted(); this.#current()

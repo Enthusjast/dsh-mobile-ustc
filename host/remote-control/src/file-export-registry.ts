@@ -54,9 +54,13 @@ export class FileExportRegistry {
   }
 
   /** Called by a trusted Host artifact selector under a configured root, never with a phone-supplied path. */
-  registerWorkspaceArtifact(session: string, root: string, parts: readonly string[], authority: ExportAuthority): Promise<ExportEntry> {
+  registerWorkspaceArtifact(session: string, root: string, parts: readonly string[], authority: ExportAuthority,version?:string): Promise<ExportEntry> {
     const selected = [...parts]
-    return this.#register(session, 'workspace_artifact', authority, (signal, current) => this.sources.workspaceExportSource(session, root, selected, signal, current))
+    return this.#register(session, 'workspace_artifact', authority, async (signal, current) => {
+      const source=await this.sources.workspaceExportSource(session,root,selected,signal,current)
+      if(version!==undefined&&source.version()!==version){await source.close();throw new ProbeError('file.export_changed')}
+      return source
+    })
   }
   registerSessionAttachment(session: string, seq: number, index: number, authority: ExportAuthority): Promise<ExportEntry> {
     return this.#register(session, 'session_attachment', authority, (signal, current) => this.sources.attachmentExportSource(session, seq, index, signal, current))

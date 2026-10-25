@@ -2,6 +2,7 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -11,7 +12,7 @@ import (
 
 func TestExportManifestBindsSourceEpochAndBytesWithoutWideningPhoneUploads(t *testing.T) {
 	host := HostBinding{RuntimeID: "22222222-2222-4222-8222-222222222222", RuntimeEpoch: "44444444-4444-4444-8444-444444444444"}
-	input := ExportRegistration{RequestID: "11111111-1111-4111-8111-111111111111", RuntimeID: host.RuntimeID, SessionID: "33333333-3333-4333-8333-333333333333", SourceID: "55555555-5555-4555-8555-555555555555", Name: "导出.bin", SizeBytes: MaxExportBytes, SHA256: strings.Repeat("a", 64), SourceExpiresAt: time.Now().Add(time.Minute)}
+	input := ExportRegistration{Origin: "session_attachment", RequestID: "11111111-1111-4111-8111-111111111111", RuntimeID: host.RuntimeID, SessionID: "33333333-3333-4333-8333-333333333333", SourceID: "55555555-5555-4555-8555-555555555555", Name: "导出.bin", SizeBytes: MaxExportBytes, SHA256: strings.Repeat("a", 64), SourceExpiresAt: time.Now().Add(time.Minute)}
 	first, err := NormalizeExport(input, host)
 	if err != nil {
 		t.Fatal(err)
@@ -89,5 +90,11 @@ func TestExportAndDownloadVerifiersRetainFinalBytesAndCannotReplaceScanAdmission
 	}
 	if _, err := storage.PresignHostExport(t.Context(), quarantine, 1, digest(body), 6*time.Minute); err == nil {
 		t.Fatal("export capability exceeded five minutes")
+	}
+	for _, sign := range []func(context.Context, ObjectKey, int64, string, time.Duration) (UploadURL, error){storage.PresignUpload, storage.PresignHostExport} {
+		capability, err := sign(t.Context(), quarantine, 0, digest(nil), time.Minute)
+		if err != nil || capability.Headers["Content-Type"] != "application/octet-stream" {
+			t.Fatal("empty signed upload omitted its required binary transport header")
+		}
 	}
 }

@@ -1,6 +1,6 @@
 # Android 文件协议、传输与附件命令
 
-Android 已提供系统文件选择、前台上传、受保护文件 API、匿名流式 PUT、加密上传意图和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。会话历史已显示受限附件摘要；[导出的 Host 来源层](file-export-sources.md) 和 [服务端鉴权下载](file-export-service.md) 已实现，来源 Relay 协调、Android 保存和 APK 到真实后端的文件联合验收仍待完成。
+Android 已提供系统文件选择、前台上传、受保护文件 API、匿名流式 PUT、加密上传意图和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。会话历史已显示受限附件摘要；[导出的 Host 来源层](file-export-sources.md)、[服务端鉴权下载](file-export-service.md) 和 [Relay 协调](file-export-relay.md) 已实现，Android 保存和 APK 到真实后端的文件联合验收仍待完成。
 
 ## 系统选择器与恢复
 

@@ -4,7 +4,7 @@
 
 to_host 公共状态另提供可选 delivery 提示，区分 clean 后的 waiting、当前短租约下的 ready，以及已归属原命令的 bound。该提示不授予任何新权限；发送时仍执行完整事务检查。[Android 共享客户端](android-files.md) 已解析该状态，并接入匿名 PUT、选择器和加密恢复 UI。
 
-新增 [Host 导出账本与手机鉴权下载](file-export-service.md) 使用 from_host 方向，没有 message delivery 提示。下载需单独开启 exports.enabled，并验证扫描配置覆盖导出上限。Host 导出 Relay 协调和手机保存入口尚待接入。
+新增 [Host 导出账本与手机鉴权下载](file-export-service.md) 使用 from_host 方向，没有 message delivery 提示。下载需单独开启 exports.enabled，并验证扫描配置覆盖导出上限。[Host 导出 Relay 协调](file-export-relay.md) 已接入，手机保存入口尚待实现。
 
 ## 启用与配置
 

@@ -59,7 +59,7 @@ func prepareHTTPExport(t *testing.T, h *fileHTTPFixture, body []byte) (files.Upl
 	actor := files.Actor{Issuer: "https://id.example.edu", Subject: "file-owner", DeviceID: "33333333-3333-4333-8333-333333333333", ProofKeyJKT: jkt}
 	sha := sha256.Sum256(body)
 	prepared, err := h.exports.Register(h.ctx, actor, files.HostBinding{InstallationID: host.installation, KeyVersion: 1, RuntimeID: fileRuntimeID, RuntimeEpoch: host.epoch, ConnectionID: host.connectionID, CredentialExpiresAt: time.Now().Add(5 * time.Minute)},
-		files.ExportRegistration{RequestID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab", RuntimeID: fileRuntimeID, SessionID: h.session, SourceID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Name: "PRIVATE_EXPORT_资料.bin", SizeBytes: int64(len(body)), SHA256: hex.EncodeToString(sha[:]), SourceExpiresAt: time.Now().Add(2 * time.Minute)})
+		files.ExportRegistration{Origin: "session_attachment", RequestID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab", RuntimeID: fileRuntimeID, SessionID: h.session, SourceID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Name: "PRIVATE_EXPORT_资料.bin", SizeBytes: int64(len(body)), SHA256: hex.EncodeToString(sha[:]), SourceExpiresAt: time.Now().Add(2 * time.Minute)})
 	if err != nil || prepared.Upload == nil {
 		t.Fatalf("export preparation=%v", err)
 	}

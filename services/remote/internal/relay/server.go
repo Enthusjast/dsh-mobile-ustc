@@ -79,6 +79,7 @@ type Server struct {
 	approvals            *approvalRouter
 	fileHandoffs         *files.Handoffs
 	fileMessages         fileMessageRecorder
+	exports              *exportRouter
 }
 
 type liveConnection struct {
@@ -256,6 +257,9 @@ func (server *Server) capabilities() []string {
 		if server.fileMessages != nil {
 			capabilities = append(capabilities, files.MessageCapability, files.ReconcileCapability)
 		}
+	}
+	if server.exports != nil {
+		capabilities = append(capabilities, files.ExportCapability)
 	}
 	return capabilities
 }
@@ -473,6 +477,9 @@ func (server *Server) registerConnection(connection *websocket.Conn, identity pe
 }
 
 func (server *Server) unregisterConnection(live *liveConnection) {
+	if server.exports != nil {
+		server.exports.closeConnection(live)
+	}
 	server.closeConnectionSubscriptions(live)
 	if server.approvals != nil {
 		server.approvals.closeConnection(live)
@@ -537,6 +544,9 @@ func (server *Server) Drain(ctx context.Context) error {
 		server.active.Wait()
 		if server.approvals != nil {
 			server.approvals.workers.Wait()
+		}
+		if server.exports != nil {
+			server.exports.workers.Wait()
 		}
 		close(done)
 	}()
@@ -865,6 +875,28 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			return
 		}
 		switch envelope.Type {
+		case "file.exports.list", "file.export.request", "file.export.cancel":
+			if server.exports == nil || !live.supports(files.ExportCapability) || live.peer.role != "device" {
+				server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+				continue
+			}
+			now := time.Now()
+			if live.commandWindowStart.IsZero() || now.Sub(live.commandWindowStart) >= time.Second {
+				live.commandWindowStart = now
+				live.commandWindowCount = 0
+			}
+			live.commandWindowCount++
+			if live.commandWindowCount > commandsPerSecond {
+				server.sendProtocolError(parent, live, "rate.limited", &envelope)
+				continue
+			}
+			server.exports.request(parent, live, envelope)
+		case "file.exports.result", "file.export.manifest", "file.export.uploaded", "file.export.error", "file.export.renew":
+			if server.exports == nil || live.peer.role != "installation" {
+				server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+				continue
+			}
+			server.exports.hostFrame(parent, live, envelope)
 		case "file.renew", "file.staged", "file.release":
 			if live.filePeer == nil || live.peer.role != "installation" {
 				server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)

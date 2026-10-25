@@ -32,8 +32,8 @@ func TestPostgresExportRollbackPreservesCleanupButCannotReviveDownloadAuthority(
 	if !ok {
 		t.Fatal("migration path unavailable")
 	}
-	for _, direction := range []string{"down", "up"} {
-		body, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../deploy/sql/012_file_exports."+direction+".sql"))
+	for _, name := range []string{"013_export_scope.down", "012_file_exports.down", "012_file_exports.up", "013_export_scope.up"} {
+		body, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../deploy/sql/"+name+".sql"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,6 +51,54 @@ func TestPostgresExportRollbackPreservesCleanupButCannotReviveDownloadAuthority(
 	var objects, count int
 	if err := h.database.DB.QueryRowContext(h.ctx, `select (select count(*) from file_objects where file_id=$1),reserved_files from file_quota_usage where kind='session'`, record.ID).Scan(&objects, &count); err != nil || objects != 2 || count != 1 {
 		t.Fatal("rollback lost object cleanup/quota evidence")
+	}
+}
+
+func TestPostgresWorkspaceExportsRequireLiteralWorkspaceScopeAtEveryPhase(t *testing.T) {
+	for _, phase := range []string{"register", "commit", "scan", "download"} {
+		t.Run(phase, func(t *testing.T) {
+			h := newExportFixture(t)
+			h.input.Origin = "workspace_artifact"
+			var record files.Record
+			if phase != "register" {
+				record = h.register(t)
+			}
+			if phase == "scan" || phase == "download" {
+				if _, err := h.repository.BeginExportScan(h.ctx, h.actor, h.host, record.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "download" {
+				claim := h.claim(t)
+				if err := h.repository.CompleteScan(h.ctx, claim); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.exec(t, `update runtime_grants set scope=jsonb_set(jsonb_set(scope,'{workspaces}','[]'::jsonb),'{sessions}',jsonb_build_array($1::text))`, h.input.SessionID)
+			switch phase {
+			case "register":
+				if _, err := h.repository.RegisterExport(h.ctx, h.actor, h.host, h.input); !errors.Is(err, files.ErrAccess) {
+					t.Fatal("session-only grant published workspace bytes")
+				}
+			case "commit":
+				if _, err := h.repository.BeginExportScan(h.ctx, h.actor, h.host, record.ID); !errors.Is(err, files.ErrAccess) {
+					t.Fatal("session-only grant attested workspace upload")
+				}
+			case "scan":
+				if claim, err := h.repository.ClaimScan(h.ctx, fileTestPolicy); err != nil || claim != nil {
+					t.Fatal("session-only grant acquired workspace scan")
+				}
+			case "download":
+				if _, err := h.repository.AuthorizeExportDownload(h.ctx, h.actor, record.ID, fileTestPolicy); !errors.Is(err, files.ErrAccess) {
+					t.Fatal("session-only grant downloaded workspace bytes")
+				}
+			}
+			h.input.RequestID = approvalTestUUID(t)
+			h.input.Origin = "session_attachment"
+			if _, err := h.repository.RegisterExport(h.ctx, h.actor, h.host, h.input); err != nil {
+				t.Fatal("exact session attachment was blocked by workspace restrictions")
+			}
+		})
 	}
 }
 
@@ -92,7 +140,7 @@ func newExportFixture(t *testing.T) *exportFixture {
 	}
 	h.exec(t, `update sessions set state='available' where id=$1`, h.input.SessionID)
 	return &exportFixture{fileFixture: h, host: files.HostBinding{InstallationID: connection.InstallationID, KeyVersion: 1, RuntimeID: connection.RuntimeID, RuntimeEpoch: connection.RuntimeEpoch,
-		ConnectionID: connection.ConnectionID, CredentialExpiresAt: time.Now().Add(5 * time.Minute)}, input: files.ExportRegistration{RequestID: h.input.RequestID, RuntimeID: h.input.RuntimeID, SessionID: h.input.SessionID,
+		ConnectionID: connection.ConnectionID, CredentialExpiresAt: time.Now().Add(5 * time.Minute)}, input: files.ExportRegistration{Origin: "session_attachment", RequestID: h.input.RequestID, RuntimeID: h.input.RuntimeID, SessionID: h.input.SessionID,
 		SourceID: approvalTestUUID(t), Name: h.input.Name, SizeBytes: h.input.SizeBytes, SHA256: h.input.SHA256, SourceExpiresAt: time.Now().Add(2 * time.Minute)}}
 }
 func (h *exportFixture) register(t *testing.T) files.Record {

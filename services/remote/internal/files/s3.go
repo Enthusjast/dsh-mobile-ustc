@@ -136,6 +136,7 @@ func (storage *S3) presign(ctx context.Context, key ObjectKey, size int64, diges
 		return UploadURL{}, ErrBlobUnavailable
 	}
 	headers := make(map[string]string)
+	binaryType := false
 	for name, values := range request.SignedHeader {
 		if len(values) != 1 {
 			return UploadURL{}, ErrBlobUnavailable
@@ -144,6 +145,14 @@ func (storage *S3) presign(ctx context.Context, key ObjectKey, size int64, diges
 			continue
 		}
 		headers[name] = values[0]
+		if strings.EqualFold(name, "content-type") {
+			binaryType = true
+		}
+	}
+	// The SDK omits Content-Type from known empty PUT signatures. Consumers
+	// still require this fixed binary transport header; it grants no authority.
+	if !binaryType {
+		headers["Content-Type"] = "application/octet-stream"
 	}
 	location, err := url.Parse(request.URL)
 	if err != nil {
