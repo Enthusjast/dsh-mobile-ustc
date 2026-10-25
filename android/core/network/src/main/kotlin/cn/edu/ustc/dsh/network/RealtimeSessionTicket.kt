@@ -27,9 +27,11 @@ class RealtimeSessionTicket internal constructor(
                 link.awaitOpen()
                 val now = System.currentTimeMillis()
                 val challenge = DeviceChallenge.parse(link.receive(), now, expiresAt)
-                val capabilities = mutableListOf("connection.heartbeat.v1", "session.read.v1")
-                if (scope.actions.any { it in setOf("message.submit", "session.cancel") }) capabilities += "command.relay.v1"
+                val capabilities = mutableListOf("connection.heartbeat.v1")
+                if ("session.read" in scope.actions) capabilities += "session.read.v1"
+                if (scope.actions.any { it in setOf("message.submit", "session.cancel", "session.create") }) capabilities += "command.relay.v1"
                 if ("session.cancel" in scope.actions) capabilities += "session.cancel.v1"
+                if ("session.create" in scope.actions) capabilities += listOf("session.create.v1", "session.create_options.v1")
                 val hello = DeviceHello(deviceId, capabilities)
                 val proof = withContext(Dispatchers.Default) { DeviceProofs.relayHandshake(signer, hello, challenge, runtimeId, System.currentTimeMillis()) }
                 link.send(hello.frame(proof))

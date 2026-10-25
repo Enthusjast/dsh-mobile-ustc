@@ -5,6 +5,9 @@ import cn.edu.ustc.dsh.protocol.*
 class RuntimeDirectoryEntry private constructor(val id: String, val hostId: String, val organizationId: String?, val dshVersion: String,
     val protocolVersion: Long?, val scope: RelayScope?, val grantVersion: Long?, val role: String?, val expiresAt: Long?) {
     fun canList(now: Long = System.currentTimeMillis()): Boolean = protocolVersion == 1L && scope?.actions?.contains("session.list") == true && (expiresAt == null || expiresAt > now)
+    fun creationScope(now: Long = System.currentTimeMillis()): RelayScope? = if (protocolVersion == 1L && role in setOf("operator", "owner") &&
+        (expiresAt == null || expiresAt > now) && scope?.actions?.containsAll(setOf("session.create", "command.status")) == true && scope.workspaces.isNotEmpty())
+        RelayScope(listOf("session.create", "command.status"), scope.workspaces, emptyList()) else null
     companion object {
         fun parse(root: JsonObject): RuntimeDirectoryEntry {
             val organization = if ("organization_id" in root.fields) Contract.uuid(root.string("organization_id")) else null

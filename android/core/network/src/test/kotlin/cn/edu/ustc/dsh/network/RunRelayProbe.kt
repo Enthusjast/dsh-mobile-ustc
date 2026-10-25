@@ -187,5 +187,29 @@ object RunRelayProbe {
             withTimeout(10_000) { writer.state.first { it.records.any { command -> command.intent.requestId == cancellation && command.remote == RemoteCommandState.SETTLED } } }
             withTimeout(10_000) { chat.state.first { it.window?.let { window -> !window.taskRunning && window.items.any { item -> item.interrupted } } == true } }
         }
+        val workspace=entry.workspaceId ?: error("registered creation workspace required")
+        val creationScope=RelayScope(listOf("session.create","command.status"),listOf(workspace),emptyList())
+        var created: String?=null
+        api.sessionCreator(fixture.string("device_id"),runtime,creationScope,journal,owner).use { flow ->
+            val options=withTimeout(10_000) {flow.state.first {it.phase==SessionCreationPhase.READY}}.options!!
+            check(options.workspaces.any {it.id==workspace} && "standard" in options.presets)
+            val request=flow.create(workspace,"standard",options.epoch)
+            val record=withTimeout(15_000) {flow.state.first {it.outbox.records.any {row->row.intent.requestId==request && row.createdSessionId!=null}}}.outbox.records.single {it.intent.requestId==request}
+            check(record.intent.sessionId==null && record.intent.workspaceId==workspace && record.attempts==1L)
+            created=record.createdSessionId
+            flow.sendPending(request)
+            withTimeout(5000) {flow.state.first {it.outbox.error=="command.reconcile_required"}}
+            check(journal.listCreations(runtime).single().attempts==1L)
+        }
+        val result=api.sessions(runtime).obj("data").array("items").map {SessionDirectoryEntry.parse(it as JsonObject)}.single {it.id==created}
+        val createdScope=runtimeAccess.scope!!.session(result.id,result.workspaceId,setOf("session.read","message.submit","command.status"))
+        api.chatReader(fixture.string("device_id"),runtime,result.id,createdScope,journal,owner).use {reader->
+            withTimeout(10_000) {reader.state.first {it.phase==SessionReadPhase.READY}}
+            val writer=reader.commands!!
+            val request=writer.submit("queue","KOTLIN_CREATED_SESSION_CONTINUE")
+            withTimeout(15_000) {writer.state.first {it.records.any {row->row.intent.requestId==request && row.everAgentQueued}}}
+            val completed=withTimeout(15_000) {reader.state.first {it.window?.items?.any {item->item.role==cn.edu.ustc.dsh.session.ConversationRole.ASSISTANT && item.persisted && item.blocks.any {block->block.text=="DSH local integration fixture response"}}==true}}
+            check(completed.window!!.items.count {item->item.blocks.any {block->block.text=="KOTLIN_CREATED_SESSION_CONTINUE"}}==1)
+        }
     }
 }

@@ -353,6 +353,97 @@ class RelayNetworkTest {
         }
         fun reader(owner: CoroutineScope, transcripts: TranscriptCache? = null) = api().chatReader(device, runtime, sessionId, granted, journal, owner, transcripts = transcripts)
     }
+    private inner class CreationPeer {
+        val workspace="88888888-8888-4888-8888-888888888888"
+        val granted=RelayScope(listOf("session.create","command.status"),listOf(workspace),emptyList())
+        val journal=MemoryCommandJournal(CommandOwner("99999999-9999-4999-8999-999999999999",config.organizationId,config.fingerprint,"77777777-7777-4777-8777-777777777777",device))
+        val statuses=java.util.concurrent.ConcurrentHashMap<String,JsonObject>()
+        val writes=java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
+        var epoch="44444444-4444-4444-8444-444444444444"
+        var offline=false
+        var loseReply=false
+        val nativeCreates=java.util.concurrent.atomic.AtomicInteger()
+        private val caps=listOf("connection.heartbeat.v1","command.relay.v1","session.create.v1","session.create_options.v1")
+        init {
+            server.dispatcher=object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse=when {
+                    request.path=="/v1/me"->bindingReply(jsonObject("issuer" to config.issuer.json(),"subject" to "school-user".json(),"client_id" to config.clientId.json(),"scopes" to JsonArray(listOf("remote.access".json())),"user_id" to journal.owner.userId.json(),"memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(),"role" to "member".json())))))
+                    request.path=="/v1/realtime/tickets"->bindingReply(jsonObject("ticket" to token.json(),"runtime_id" to runtime.json(),"grant_version" to 7L.json(),"scope" to granted.json(),"expires_at" to time(30_000))).setResponseCode(201)
+                    request.path=="/v1/realtime"->peer(accepted=helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(),"capabilities" to JsonArray(caps.map(String::json)))),expectedCapabilities=caps,onContent=::receive)
+                    request.path!!.startsWith("/v1/commands/")->{
+                        assertEquals(device,request.requestUrl!!.queryParameter("device_id"))
+                        statuses[request.requestUrl!!.pathSegments.last()]?.let(::bindingReply) ?: json(jsonObject("ok" to JsonBoolean(false),"error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403)
+                    }
+                    else->MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        private fun receive(socket: WebSocket,frame: JsonObject) {
+            when(frame.string("type")) {
+                "session.create.options.get"->{
+                    val result=if(offline) jsonObject("v" to 1L.json(),"type" to "error".json(),"request_id" to frame.string("request_id").json(),"runtime_id" to runtime.json(),"payload" to jsonObject("code" to "runtime.offline".json())) else jsonObject("v" to 1L.json(),"type" to "session.create.options.result".json(),"request_id" to frame.string("request_id").json(),"runtime_id" to runtime.json(),"runtime_epoch" to epoch.json(),"payload" to jsonObject("workspaces" to JsonArray(listOf(jsonObject("workspace_id" to workspace.json(),"label" to "Project".json()))),"presets" to JsonArray(listOf("standard".json()))))
+                    socket.send(JsonDocument.of(result).canonicalText())
+                }
+                "session.create"->{
+                    val intent=CommandIntent.parse(frame); writes+=frame
+                    assertEquals(epoch,intent.epoch); assertEquals(workspace,intent.workspaceId)
+                    assertTrue(runBlocking {journal.listCreations(runtime).single {it.intent.requestId==intent.requestId}.attempts}>0)
+                    statuses.computeIfAbsent(intent.requestId) {nativeCreates.incrementAndGet();status(intent)}
+                    if(loseReply) {loseReply=false;socket.close(1001,"fixture receipt lost");return}
+                    val proof=statuses[intent.requestId]!!
+                    socket.send(JsonDocument.of(jsonObject("v" to 1L.json(),"type" to "command.receipt".json(),"request_id" to intent.requestId.json(),"runtime_id" to runtime.json(),"runtime_epoch" to epoch.json(),"session_id" to sessionId.json(),"payload" to JsonObject(proof.fields.filterKeys {it in setOf("state","payload_sha256","updated_at","workspace_id")}))).canonicalText())
+                }
+                else->error("unexpected creation frame")
+            }
+        }
+        fun status(intent: CommandIntent)=jsonObject("request_id" to intent.requestId.json(),"workspace_id" to workspace.json(),"session_id" to sessionId.json(),"state" to "settled".json(),"payload_sha256" to intent.digest.json(),"updated_at" to time(0))
+        fun flow(owner: CoroutineScope)=api().sessionCreator(device,runtime,granted,journal,owner)
+    }
+    private suspend fun SessionCreationFlow.await(test: (SessionCreationState)->Boolean)=withTimeout(10_000) {state.first(test)}.also {peerFailure.get()?.let {throw AssertionError(it)}}
+    @Test fun creationUsesWorkspaceOptionsAndPersistsASeparateResultWithoutAReadSubscription(): Unit=runBlocking {
+        val fixture=CreationPeer()
+        fixture.flow(this).use {flow->
+            val options=flow.await {it.phase==SessionCreationPhase.READY}.options!!
+            assertThrows(RemoteRequestException::class.java) {runBlocking {flow.create(fixture.workspace,"../standard",options.epoch)}}
+            val id=flow.create(fixture.workspace,"standard",options.epoch)
+            assertEquals(id,flow.state.value.outbox.records.single().intent.requestId)
+            val settled=flow.await {it.outbox.records.singleOrNull()?.createdSessionId==sessionId}.outbox.records.single()
+            assertNull(settled.intent.sessionId); assertEquals(fixture.workspace,settled.intent.workspaceId); assertEquals(1,fixture.nativeCreates.get())
+            assertFalse(settled.everAgentQueued); assertEquals(1L,settled.attempts)
+        }
+    }
+    @Test fun aLostCreationReceiptReconcilesTheSameIdAndCannotReplayItsSettledResult(): Unit=runBlocking {
+        val fixture=CreationPeer(); fixture.loseReply=true
+        fixture.flow(this).use {flow->
+            val options=flow.await {it.phase==SessionCreationPhase.READY}.options!!
+            val id=flow.create(fixture.workspace,"standard",options.epoch)
+            flow.await {it.phase==SessionCreationPhase.READY && it.outbox.records.singleOrNull()?.createdSessionId==sessionId}
+            flow.sendPending(id)
+            flow.await {it.outbox.error=="command.reconcile_required"}
+            assertEquals(1,fixture.nativeCreates.get());assertEquals(1,fixture.writes.size);assertEquals(1L,fixture.journal.listCreations(runtime).single().attempts)
+        }
+    }
+    @Test fun anOldEpochCreationIsNotRetargetedToANewOptionsSnapshot(): Unit=runBlocking {
+        val fixture=CreationPeer()
+        val original=CommandIntent.createSession(UUID.randomUUID().toString(),runtime,fixture.workspace,"standard",fixture.epoch)
+        fixture.journal.create(original); fixture.epoch=UUID.randomUUID().toString()
+        fixture.flow(this).use {flow->
+            flow.await {it.phase==SessionCreationPhase.READY && it.outbox.records.isNotEmpty()}
+            flow.sendPending(original.requestId)
+            assertEquals("runtime.changed",flow.state.value.error)
+            assertTrue(fixture.writes.isEmpty());assertEquals(0L,fixture.journal.listCreations(runtime).single().attempts)
+            assertEquals(original.epoch,fixture.journal.listCreations(runtime).single().intent.epoch)
+        }
+    }
+    @Test fun creationStatusReconciliationWorksEvenWhenTheHostCannotProvideOptions(): Unit=runBlocking {
+        val fixture=CreationPeer();fixture.offline=true
+        val original=CommandIntent.createSession(UUID.randomUUID().toString(),runtime,fixture.workspace,"standard",fixture.epoch)
+        fixture.journal.create(original);fixture.journal.beginAttempt(original.requestId);fixture.statuses[original.requestId]=fixture.status(original)
+        fixture.flow(this).use {flow->
+            flow.await {it.phase==SessionCreationPhase.OFFLINE && it.outbox.records.singleOrNull()?.createdSessionId==sessionId}
+            assertTrue(fixture.writes.isEmpty());assertEquals(0,fixture.nativeCreates.get())
+        }
+    }
     private inner class MemoryTranscriptCache(override val owner: LocalDataOwner) : TranscriptCache {
         val loads = java.util.concurrent.atomic.AtomicInteger()
         @Volatile var value: CachedTranscript? = CachedTranscript("77777777-7777-4777-8777-777777777777", System.currentTimeMillis(), listOf(SessionRecord.parse(user(0, "disk history"))))

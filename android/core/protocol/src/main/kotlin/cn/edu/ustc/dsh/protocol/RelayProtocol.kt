@@ -106,7 +106,8 @@ class DeviceConnection private constructor(
                 payload.string("runtime_id") != runtimeId || payload.integer("grant_version") != grantVersion || !scope.same(returnedScope) ||
                 payload.array("protocols") != listOf(1L.json()) || payload.integer("heartbeat_seconds") != 20L || payload.integer("max_frame_bytes") != RELAY_FRAME_BYTES.toLong()) throw ProtocolException()
             val capabilities = payload.array("capabilities").map { (it as? JsonString)?.value ?: throw ProtocolException() }
-            if (capabilities.toSet().size != capabilities.size || !hello.capabilities.containsAll(capabilities) || !capabilities.containsAll(listOf("connection.heartbeat.v1", "session.read.v1"))) throw ProtocolException()
+            val required = setOf("connection.heartbeat.v1") + if ("session.read" in scope.actions) setOf("session.read.v1") else emptySet()
+            if (capabilities.toSet().size != capabilities.size || !hello.capabilities.containsAll(capabilities) || !capabilities.containsAll(required)) throw ProtocolException()
             val serverTime = relayTime(payload.string("server_time"))
             val expires = relayTime(payload.string("lease_expires_at"))
             if (now < 0 || kotlin.math.abs(serverTime - now) > 30_000 || expires <= serverTime || expires - serverTime > 300_000 || expires <= now || credentialExpiresAt <= now) throw ProtocolException()

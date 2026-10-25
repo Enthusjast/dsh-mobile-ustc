@@ -196,6 +196,12 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
     }
     fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
         SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
+    fun sessionCreator(deviceId: String, runtimeId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope): SessionCreationFlow {
+        Contract.uuid(deviceId); Contract.uuid(runtimeId)
+        if(journal.owner.deviceId!=deviceId || journal.owner.organizationId!=config.organizationId || journal.owner.deploymentHash!=config.fingerprint || mappedUserId!=null && mappedUserId!=journal.owner.userId) throw RemoteRequestException("auth.identity_mismatch")
+        if(scope.actions!=setOf("session.create","command.status") || scope.workspaces.isEmpty() || scope.sessions.isNotEmpty()) throw RemoteRequestException("access.denied")
+        return SessionCreationFlow(this,deviceId,runtimeId,scope,journal,owner)
+    }
     fun chatReader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope,
         transcripts: cn.edu.ustc.dsh.session.TranscriptCache? = null, workspaceId: String? = null): SessionReader {
         if (journal.owner.deviceId != deviceId || journal.owner.organizationId != config.organizationId || journal.owner.deploymentHash != config.fingerprint ||
@@ -272,6 +278,10 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
     suspend fun sessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
         if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "command.status") } ||
             scope.actions.any { it in setOf("message.submit", "session.cancel") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
+        issueSessionTicket(runtimeId, deviceId, scope)
+    }
+    internal suspend fun creationTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
+        if (scope.actions != setOf("session.create", "command.status") || scope.workspaces.isEmpty() || scope.sessions.isNotEmpty()) throw RemoteRequestException("access.denied")
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     private suspend fun issueSessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket {

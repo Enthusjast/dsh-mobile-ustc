@@ -100,7 +100,7 @@ class SessionReader internal constructor(
         while (cacheWrites.tryReceive().isSuccess) { /* Retire pre-revocation snapshots. */ }
         cacheLock.withLock {
             try {
-                if (runtime) { journal?.revokeRuntime(runtimeId); transcripts?.removeRuntimeTranscripts(runtimeId) }
+                if (runtime) { journal?.revokeSessionCommands(runtimeId); transcripts?.removeRuntimeTranscripts(runtimeId) }
                 else transcripts?.removeTranscript(runtimeId, sessionId)
             } catch (error: CancellationException) { throw error }
             catch (_: Exception) { cacheProblem.set("data.cache_unavailable") }
@@ -127,6 +127,7 @@ class SessionReader internal constructor(
                 val connected = ticket.connect()
                 connection.set(connected)
                 currentCoroutineContext().ensureActive()
+                commands?.authorizeStatusReads()
                 var cacheUntil: Long? = connected.identity.leaseExpiresAt
                 if (transcripts != null) {
                     try {
