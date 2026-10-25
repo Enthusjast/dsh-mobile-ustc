@@ -43,6 +43,9 @@ type ObjectKey struct {
 	kind  ObjectKind
 }
 
+// StorageKey is persisted only by the server metadata repository.
+func (key ObjectKey) StorageKey() string { return key.value }
+
 func NewObjectKey(org, session, file, attempt string, kind ObjectKind) (ObjectKey, error) {
 	if kind != Quarantine && kind != Committed {
 		return ObjectKey{}, ErrInvalid

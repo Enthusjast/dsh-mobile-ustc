@@ -1,6 +1,6 @@
 # 文件隔离存储与扫描准入
 
-此阶段实现 Go 内部文件组件，尚未注册文件 REST 路由、扫描后台作业、元数据 / 配额事务、Relay offer 或 Android 文件入口。原生 DSH 文件准入见 [native-file-admission.md](native-file-admission.md)。
+此阶段实现 Go 内部文件 I/O 组件。元数据、配额及扫描 / 清理租约已由 [文件事务账本](file-transfer-ledger.md) 实现；尚未注册文件 REST 路由、运行后台 worker、接入 Relay offer 或 Android 文件入口。原生 DSH 文件准入见 [native-file-admission.md](native-file-admission.md)。
 
 ## 完整字节验证
 
