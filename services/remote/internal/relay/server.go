@@ -83,6 +83,7 @@ type Server struct {
 
 type liveConnection struct {
 	conn                 *websocket.Conn
+	closeTransport       func() error
 	peer                 peer
 	connectionID         string
 	runtimeID            string
@@ -432,7 +433,8 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		server.writeAuthenticationError(response, err)
 		return
 	}
-	connection, err := websocket.Accept(response, request, &websocket.AcceptOptions{
+	upgraded := &upgradeWriter{ResponseWriter: response}
+	connection, err := websocket.Accept(upgraded, request, &websocket.AcceptOptions{
 		Subprotocols:    []string{protocolName},
 		CompressionMode: websocket.CompressionDisabled,
 	})
@@ -440,28 +442,29 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	connection.SetReadLimit(maxFrameBytes)
-	live, registered := server.registerConnection(connection, peer)
+	transportClose := forceTransportCloser(upgraded.transport)
+	live, registered := server.registerConnection(connection, peer, transportClose)
 	if !registered {
-		closePolicy(connection, "server draining")
+		closePolicy(connection, "server draining", transportClose)
 		_ = connection.CloseNow()
 		return
 	}
 	defer server.unregisterConnection(live)
 	defer connection.Close(websocket.StatusNormalClosure, "connection closed")
 	if connection.Subprotocol() != protocolName {
-		closePolicy(connection, "protocol required")
+		server.closePolicy(live, "protocol required")
 		return
 	}
 	server.runHandshake(request.Context(), live)
 }
 
-func (server *Server) registerConnection(connection *websocket.Conn, identity peer) (*liveConnection, bool) {
+func (server *Server) registerConnection(connection *websocket.Conn, identity peer, closeTransport func() error) (*liveConnection, bool) {
 	server.mu.Lock()
 	if server.draining {
 		server.mu.Unlock()
 		return nil, false
 	}
-	live := &liveConnection{conn: connection, peer: identity, sendQueue: make(chan outboundFrame, 16), done: make(chan struct{})}
+	live := &liveConnection{conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, 16), done: make(chan struct{})}
 	server.active.Add(1)
 	server.connections[connection] = live
 	server.mu.Unlock()
@@ -592,17 +595,17 @@ func (server *Server) runHandshake(parent context.Context, live *liveConnection)
 	peer := live.peer
 	connectionID, err := randomUUID()
 	if err != nil {
-		closePolicy(connection, "handshake unavailable")
+		server.closePolicy(live, "handshake unavailable")
 		return
 	}
 	challengeID, err := randomUUID()
 	if err != nil {
-		closePolicy(connection, "handshake unavailable")
+		server.closePolicy(live, "handshake unavailable")
 		return
 	}
 	nonceBytes := make([]byte, 32)
 	if _, err := rand.Read(nonceBytes); err != nil {
-		closePolicy(connection, "handshake unavailable")
+		server.closePolicy(live, "handshake unavailable")
 		return
 	}
 	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
@@ -618,7 +621,7 @@ func (server *Server) runHandshake(parent context.Context, live *liveConnection)
 		challengeExpires = peer.installation.ExpiresAt
 	}
 	if !challengeExpires.After(now) {
-		closePolicy(connection, "credential expired")
+		server.closePolicy(live, "credential expired")
 		return
 	}
 	if writeJSON(parent, connection, map[string]any{
@@ -633,12 +636,12 @@ func (server *Server) runHandshake(parent context.Context, live *liveConnection)
 	messageType, data, err := connection.Read(proofCtx)
 	cancel()
 	if err != nil || messageType != websocket.MessageText || int64(len(data)) > maxFrameBytes {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	envelope, err := decodeEnvelope(data, "hello.proof")
 	if err != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	if peer.role == "device" {
@@ -649,16 +652,15 @@ func (server *Server) runHandshake(parent context.Context, live *liveConnection)
 }
 
 func (server *Server) finishDeviceHandshake(parent context.Context, live *liveConnection, connectionID, challengeID, nonce string, envelope wireEnvelope) {
-	connection := live.conn
 	peer := live.peer
 	var payload deviceHandshakePayload
 	if decodePayload(envelope.Payload, &payload) != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	hello, err := normalizeDeviceHello(payload, peer.deviceID)
 	if err != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	helloDigest := hello.digest()
@@ -672,7 +674,7 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 		HelloSHA256:   helloDigest,
 	}
 	if auth.VerifyRelayHandshakeProof(payload.Proof, peer.redemption.ProofPublicJWK, expected) != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	redemption, err := server.database.ConsumeRealtimeTicket(parent, peer.ticket)
@@ -681,12 +683,12 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 		redemption.DeviceKeyVersion != peer.redemption.DeviceKeyVersion ||
 		redemption.ProofKeyThumbprint != peer.redemption.ProofKeyThumbprint ||
 		redemption.GrantVersion != peer.redemption.GrantVersion {
-		closePolicy(connection, "ticket expired")
+		server.closePolicy(live, "ticket expired")
 		return
 	}
 	thumbprint, err := auth.PublicP256JWKThumbprintJSON(redemption.ProofPublicJWK)
 	if err != nil || thumbprint != peer.redemption.ProofKeyThumbprint {
-		closePolicy(connection, "device key changed")
+		server.closePolicy(live, "device key changed")
 		return
 	}
 	leaseExpiresAt := time.Now().UTC().Add(deviceConnectionLife)
@@ -758,16 +760,15 @@ func containsInt(values []int, want int) bool {
 }
 
 func (server *Server) finishHostHandshake(parent context.Context, live *liveConnection, connectionID, challengeID, nonce string, envelope wireEnvelope) {
-	connection := live.conn
 	peer := live.peer
 	var payload hostHandshakePayload
 	if decodePayload(envelope.Payload, &payload) != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	hello, err := normalizeHostHello(payload)
 	if err != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	helloDigest := hello.digest()
@@ -782,11 +783,11 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 		HelloSHA256:   helloDigest,
 	}
 	if auth.VerifyRelayHandshakeProof(payload.Proof, peer.installation.PublicJWK, expected) != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	if !peer.installation.ExpiresAt.After(time.Now()) {
-		closePolicy(connection, "credential expired")
+		server.closePolicy(live, "credential expired")
 		return
 	}
 	registered, err := server.database.AttachRuntimeConnection(parent, store.RuntimeConnectionInput{
@@ -796,7 +797,7 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 		PluginVersion: hello.PluginVersion, ProtocolVersion: hello.ProtocolVersion,
 	})
 	if err != nil {
-		closePolicy(connection, "handshake rejected")
+		server.closePolicy(live, "handshake rejected")
 		return
 	}
 	defer func() {
@@ -807,7 +808,7 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 	leaseCtx, cancel := context.WithDeadline(parent, peer.installation.ExpiresAt)
 	defer cancel()
 	if err := leaseCtx.Err(); err != nil {
-		closePolicy(connection, "credential expired")
+		server.closePolicy(live, "credential expired")
 		return
 	}
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
@@ -854,13 +855,13 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			return
 		}
 		if messageType != websocket.MessageText || int64(len(data)) > maxFrameBytes {
-			closePolicy(connection, "invalid frame")
+			server.closePolicy(live, "invalid frame")
 			return
 		}
 		envelope, err := decodeWireFrame(data)
 		if err != nil {
 			server.sendProtocolError(parent, live, "protocol.invalid", nil)
-			closePolicy(connection, "invalid frame")
+			server.closePolicy(live, "invalid frame")
 			return
 		}
 		switch envelope.Type {
@@ -875,19 +876,19 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 		case "ping":
 			if !frameHasNoRoutingFields(envelope) {
 				server.sendProtocolError(parent, live, "protocol.invalid", nil)
-				closePolicy(connection, "invalid heartbeat")
+				server.closePolicy(live, "invalid heartbeat")
 				return
 			}
 			var empty struct{}
 			if decodePayload(envelope.Payload, &empty) != nil {
 				server.sendProtocolError(parent, live, "protocol.invalid", nil)
-				closePolicy(connection, "invalid heartbeat")
+				server.closePolicy(live, "invalid heartbeat")
 				return
 			}
 			now := time.Now()
 			if !live.lastHeartbeat.IsZero() && now.Sub(live.lastHeartbeat) < time.Second {
 				server.sendProtocolError(parent, live, "rate.limited", nil)
-				closePolicy(connection, "heartbeat rate exceeded")
+				server.closePolicy(live, "heartbeat rate exceeded")
 				return
 			}
 			live.lastHeartbeat = now
@@ -897,7 +898,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 					host.InstallationID, host.RuntimeID, host.RuntimeEpoch, host.ConnectionID)
 				touchCancel()
 				if err != nil {
-					closePolicy(connection, "runtime connection expired")
+					server.closePolicy(live, "runtime connection expired")
 					return
 				}
 			}
@@ -911,7 +912,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 		case "message.submit", "session.cancel", "session.archive", "session.create", "session.create.options.get", "question.answer", "question.timed.answer":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
-				closePolicy(connection, "operation denied")
+				server.closePolicy(live, "operation denied")
 				return
 			}
 			if len(data) > maxMobileCommandFrame {
@@ -948,14 +949,14 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 		case "command.receipt":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
-				closePolicy(connection, "operation denied")
+				server.closePolicy(live, "operation denied")
 				return
 			}
 			server.routeCommandReceipt(parent, live, host, envelope)
 		case "session.subscribe", "session.unsubscribe", "session.page", "question.claim", "question.release":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
-				closePolicy(connection, "operation denied")
+				server.closePolicy(live, "operation denied")
 				return
 			}
 			now := time.Now()
@@ -975,14 +976,14 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 		case "question.claimed", "question.claim.closed":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
-				closePolicy(connection, "operation denied")
+				server.closePolicy(live, "operation denied")
 				return
 			}
 			server.routeQuestionClaimResult(parent, live, envelope)
 		case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "session.fragment", "session.error", "session.closed", "question.snapshot", "question.timed.snapshot":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
-				closePolicy(connection, "operation denied")
+				server.closePolicy(live, "operation denied")
 				return
 			}
 			server.routeSessionContent(parent, live, envelope)
@@ -991,13 +992,13 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 		case "session.catalog":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
-				closePolicy(connection, "operation denied")
+				server.closePolicy(live, "operation denied")
 				return
 			}
 			server.routeSessionCatalog(parent, live, host, envelope, data)
 		default:
 			server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
-			closePolicy(connection, "unsupported frame")
+			server.closePolicy(live, "unsupported frame")
 			return
 		}
 	}
@@ -1090,7 +1091,7 @@ func (server *Server) routeSessionCatalog(parent context.Context, live *liveConn
 	}()
 	if err := server.database.SyncRealtimeSessionCatalog(parent, *host, live.peer.installation.KeyVersion, replace, items); err != nil {
 		if errors.Is(err, store.ErrRuntimeConnectionStale) {
-			closePolicy(live.conn, "runtime connection expired")
+			server.closePolicy(live, "runtime connection expired")
 			return
 		}
 		code := "internal"
@@ -1298,7 +1299,7 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 	}
 	for _, device := range server.devicesForRuntime(live.runtimeID, envelope.DeviceID) {
 		if err := server.sendCommandReceipt(parent, device, status, live.runtimeEpoch); err != nil {
-			_ = device.conn.CloseNow()
+			server.abortConnection(device)
 		}
 	}
 }
@@ -1611,12 +1612,6 @@ func writeErrorFrame(parent context.Context, connection *websocket.Conn, code st
 	_ = writeJSON(parent, connection, map[string]any{
 		"v": 1, "type": "error", "payload": map[string]string{"code": code},
 	})
-}
-
-func closePolicy(connection *websocket.Conn, reason string) {
-	timer := time.AfterFunc(closeHandshakeGrace, func() { _ = connection.CloseNow() })
-	defer timer.Stop()
-	_ = connection.Close(websocket.StatusPolicyViolation, reason)
 }
 
 func writeError(response http.ResponseWriter, status int, code string) {
