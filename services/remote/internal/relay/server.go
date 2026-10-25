@@ -78,6 +78,7 @@ type Server struct {
 	subscriptions        map[string]*sessionSubscription
 	approvals            *approvalRouter
 	fileHandoffs         *files.Handoffs
+	fileMessages         fileMessageRecorder
 }
 
 type liveConnection struct {
@@ -169,8 +170,42 @@ type normalizedHostHello struct {
 }
 
 type messageContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type   string `json:"type"`
+	Text   string `json:"text,omitempty"`
+	FileID string `json:"file_id,omitempty"`
+}
+
+// Disallow fields belonging to another content variant, including empty ones.
+func (item *messageContent) UnmarshalJSON(raw []byte) error {
+	var discriminator struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &discriminator) != nil {
+		return errors.New("relay: invalid content")
+	}
+	switch discriminator.Type {
+	case "text":
+		var value struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := decodePayload(raw, &value); err != nil {
+			return err
+		}
+		*item = messageContent{Type: value.Type, Text: value.Text}
+	case "file":
+		var value struct {
+			Type   string `json:"type"`
+			FileID string `json:"file_id"`
+		}
+		if err := decodePayload(raw, &value); err != nil {
+			return err
+		}
+		*item = messageContent{Type: value.Type, FileID: value.FileID}
+	default:
+		return errors.New("relay: unsupported content")
+	}
+	return nil
 }
 
 type messageSubmitPayload struct {
@@ -217,6 +252,9 @@ func (server *Server) capabilities() []string {
 	}
 	if server.fileHandoffs != nil {
 		capabilities = append(capabilities, files.HandoffCapability)
+		if server.fileMessages != nil {
+			capabilities = append(capabilities, files.MessageCapability)
+		}
 	}
 	return capabilities
 }
@@ -772,7 +810,12 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 	}
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
 	if !slices.Contains(accepted, "session.catalog.v1") {
-		accepted = slices.DeleteFunc(accepted, func(capability string) bool { return capability == files.HandoffCapability })
+		accepted = slices.DeleteFunc(accepted, func(capability string) bool {
+			return capability == files.HandoffCapability || capability == files.MessageCapability
+		})
+	}
+	if !slices.Contains(accepted, files.HandoffCapability) || !slices.Contains(accepted, "command.relay.v1") {
+		accepted = slices.DeleteFunc(accepted, func(capability string) bool { return capability == files.MessageCapability })
 	}
 	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
@@ -792,7 +835,9 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 func (server *Server) runHeartbeat(parent context.Context, live *liveConnection, host *store.RuntimeConnection) {
 	if host != nil && server.fileHandoffs != nil && live.supports(files.HandoffCapability) {
 		peer := server.startFilePeer(parent, live)
+		server.mu.Lock()
 		live.filePeer = peer
+		server.mu.Unlock()
 		defer peer.close()
 	}
 	connection := live.conn
@@ -1087,6 +1132,7 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		return
 	}
 	var payload any
+	var fileIDs []string
 	var digest string
 	if envelope.Type == "message.submit" {
 		var submit messageSubmitPayload
@@ -1095,6 +1141,11 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 			return
 		}
 		payload = submit
+		for _, item := range submit.Content {
+			if item.Type == "file" {
+				fileIDs = append(fileIDs, item.FileID)
+			}
+		}
 		digest, _ = messageSubmitDigest(envelope.SessionID, submit)
 	} else if envelope.Type == "session.archive" {
 		var archive sessionArchivePayload
@@ -1129,6 +1180,10 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
 		return
 	}
+	if len(fileIDs) > 0 && (server.fileHandoffs == nil || server.fileMessages == nil || !live.supports(files.MessageCapability) || !host.supports(files.MessageCapability) || !host.supports(files.HandoffCapability)) {
+		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+		return
+	}
 	if envelope.Type != "message.submit" && envelope.RuntimeEpoch != host.runtimeEpoch {
 		server.sendProtocolError(parent, live, "runtime.changed", &envelope)
 		return
@@ -1146,7 +1201,14 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 	if action == "question.timed.answer" {
 		action = "question.answer"
 	}
-	status, err := server.database.RecordRealtimeCommand(parent, live.peer.redemption, action, envelope.RequestID, envelope.SessionID, digest)
+	var status store.CommandStatus
+	if len(fileIDs) > 0 {
+		operation, cancel := context.WithTimeout(parent, 3*time.Second)
+		status, err = server.fileMessages.RecordRealtimeFileCommand(operation, live.peer.redemption, files.HostBinding{InstallationID: host.peer.installation.InstallationID, KeyVersion: host.peer.installation.KeyVersion, RuntimeID: host.runtimeID, RuntimeEpoch: host.runtimeEpoch, ConnectionID: host.connectionID, CredentialExpiresAt: host.peer.installation.ExpiresAt}, envelope.RequestID, envelope.SessionID, digest, server.fileHandoffs.PolicySHA256(), fileIDs, func() bool { return server.filesReady(host, envelope.SessionID, fileIDs) })
+		cancel()
+	} else {
+		status, err = server.database.RecordRealtimeCommand(parent, live.peer.redemption, action, envelope.RequestID, envelope.SessionID, digest)
+	}
 	if err != nil {
 		server.sendProtocolError(parent, live, commandErrorCode(err), &envelope)
 		return
@@ -1284,6 +1346,14 @@ func (server *Server) sendProtocolError(ctx context.Context, live *liveConnectio
 
 func commandErrorCode(err error) string {
 	switch {
+	case errors.Is(err, files.ErrConflict):
+		return "file.already_bound"
+	case errors.Is(err, files.ErrStale):
+		return "file.staging_required"
+	case errors.Is(err, files.ErrAccess):
+		return "access.denied"
+	case errors.Is(err, files.ErrInvalid):
+		return "protocol.invalid"
 	case errors.Is(err, store.ErrCommandConflict):
 		return "command.request_conflict"
 	case errors.Is(err, store.ErrRuntimeConnectionStale):
@@ -1305,8 +1375,16 @@ func normalizeMessageSubmit(payload messageSubmitPayload) error {
 	if payload.Mode != "queue" && payload.Mode != "steer" || len(payload.Content) == 0 || len(payload.Content) > 16 {
 		return errors.New("relay: invalid message submit payload")
 	}
+	seen := map[string]bool{}
 	for _, item := range payload.Content {
-		if item.Type != "text" || len(item.Text) == 0 || utf8.RuneCountInString(item.Text) > 32_768 || strings.TrimSpace(item.Text) == "" {
+		if item.Type == "file" {
+			if item.Text != "" || !uuidPattern.MatchString(item.FileID) || seen[item.FileID] {
+				return errors.New("relay: invalid file content")
+			}
+			seen[item.FileID] = true
+			continue
+		}
+		if item.Type != "text" || item.FileID != "" || len(item.Text) == 0 || utf8.RuneCountInString(item.Text) > 32_768 || strings.TrimSpace(item.Text) == "" {
 			return errors.New("relay: invalid text content")
 		}
 		for _, char := range item.Text {
@@ -1319,16 +1397,21 @@ func normalizeMessageSubmit(payload messageSubmitPayload) error {
 }
 
 func messageSubmitDigest(sessionID string, payload messageSubmitPayload) (string, error) {
-	// JCS order for this text-only command is fixed: top-level payload/session/type,
-	// payload content/mode, and each text block text/type.
+	// JCS order: payload/session/type, content/mode; text/type or file_id/type.
 	encoded := []byte(`{"payload":{"content":[`)
 	for index, item := range payload.Content {
 		if index > 0 {
 			encoded = append(encoded, ',')
 		}
-		encoded = append(encoded, `{"text":`...)
-		encoded = appendJSONString(encoded, item.Text)
-		encoded = append(encoded, `,"type":"text"}`...)
+		if item.Type == "file" {
+			encoded = append(encoded, `{"file_id":`...)
+			encoded = appendJSONString(encoded, item.FileID)
+			encoded = append(encoded, `,"type":"file"}`...)
+		} else {
+			encoded = append(encoded, `{"text":`...)
+			encoded = appendJSONString(encoded, item.Text)
+			encoded = append(encoded, `,"type":"text"}`...)
+		}
 	}
 	encoded = append(encoded, `],"mode":`...)
 	encoded = appendJSONString(encoded, payload.Mode)

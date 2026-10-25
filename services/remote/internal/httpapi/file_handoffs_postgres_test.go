@@ -53,7 +53,7 @@ func (h *fileHost) read(t *testing.T) map[string]json.RawMessage {
 	return frame
 }
 
-func connectFileHost(t *testing.T, h *fileHTTPFixture) *fileHost {
+func connectFileHost(t *testing.T, h *fileHTTPFixture, extra ...string) *fileHost {
 	t.Helper()
 	key := approvalKey(t)
 	public, jkt := approvalPublic(t, key)
@@ -82,6 +82,7 @@ func connectFileHost(t *testing.T, h *fileHTTPFixture) *fileHost {
 	_ = json.Unmarshal(challenge["payload"], &payload)
 	host.connectionID = payload.ConnectionID
 	caps := []string{"connection.heartbeat.v1", "session.catalog.v1", files.HandoffCapability}
+	caps = append(caps, extra...)
 	sort.Strings(caps)
 	proof := approvalSign(t, key, jose.ES256, "", "dsh-relay-handshake-proof+jwt", map[string]any{"iss": host.installation, "aud": auth.RelayHandshakeAudience, "challenge_id": payload.ChallengeID, "connection_id": payload.ConnectionID, "nonce": payload.Nonce, "runtime_id": fileRuntimeID, "runtime_epoch": host.epoch,
 		"hello_sha256": auth.RelayHelloDigest("host", fileRuntimeID, host.epoch, "0.2.1-rc.2", "file-host-fixture", "test", "1", strings.Join(caps, "\n")), "iat": time.Now().Unix(), "jti": "file-host-handshake-proof-0001"}, nil)

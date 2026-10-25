@@ -22,6 +22,13 @@ func TestPostgresFileMigrationRollbackCannotReviveUnboundCleanRows(t *testing.T)
 		t.Fatal("migration source unavailable")
 	}
 	directory := filepath.Join(filepath.Dir(source), "../../../../deploy/sql")
+	newest, err := os.ReadFile(filepath.Join(directory, "011_file_message_refs.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.database.DB.ExecContext(h.ctx, string(newest)); err != nil {
+		t.Fatal(err)
+	}
 	dependent, err := os.ReadFile(filepath.Join(directory, "010_file_handoffs.down.sql"))
 	if err != nil {
 		t.Fatal(err)
@@ -47,6 +54,13 @@ func TestPostgresFileMigrationRollbackCannotReviveUnboundCleanRows(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := h.database.DB.ExecContext(h.ctx, string(dependent)); err != nil {
+		t.Fatal(err)
+	}
+	newest, err = os.ReadFile(filepath.Join(directory, "011_file_message_refs.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.database.DB.ExecContext(h.ctx, string(newest)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.repository.Status(h.ctx, h.actor, file.ID); !errors.Is(err, files.ErrAccess) {

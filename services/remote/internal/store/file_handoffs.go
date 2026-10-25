@@ -124,6 +124,9 @@ func validHandoff(ctx context.Context, transaction *sql.Tx, handoff files.Handof
 	if !sameFileHost(handoff.Host, host) || handoff.PolicySHA256 != policy || handoff.File.RuntimeID != host.RuntimeID {
 		return fileAuthority{}, files.ErrAccess
 	}
+	if err := fileMessageAllowsHandoff(ctx, transaction, handoff.File.ID, false); err != nil {
+		return fileAuthority{}, err
+	}
 	if _, _, err := hostFileBinding(ctx, transaction, handoff.Host); err != nil {
 		return fileAuthority{}, err
 	}
@@ -159,6 +162,9 @@ func (repository *FileStore) IssueHandoff(ctx context.Context, host files.HostBi
 	}
 	if record.RuntimeID != host.RuntimeID {
 		return nil, files.ErrAccess
+	}
+	if err := fileMessageAllowsHandoff(ctx, transaction, id, true); err != nil {
+		return nil, err
 	}
 	if _, _, err := hostFileBinding(ctx, transaction, host); err != nil {
 		return nil, err
@@ -248,6 +254,7 @@ func (repository *FileStore) PendingHandoffFiles(ctx context.Context, host files
 	 and g.role in ('operator','owner') and (g.expires_at is null or g.expires_at>clock_timestamp())
 	 and g.scope->'actions' ? 'file.upload' and ((g.scope->'sessions') ? f.session_id::text or (g.scope->'workspaces') ? s.workspace_id::text)
 	 and exists(select 1 from org_memberships m where m.org_id=t.org_id and m.user_id=u.id)
+	 and not exists(select 1 from file_message_refs ref join commands c on c.device_id=ref.device_id and c.request_id=ref.request_id where ref.file_id=f.id and c.state<>'received')
 	 and (select count(*) from file_handoffs recent where recent.file_id=f.id and recent.created_at>clock_timestamp()-interval '1 minute')<10
 	 and not exists(select 1 from file_handoffs h where h.file_id=f.id and h.state in ('offered','downloading','staged') and h.connection_id=$3 and h.runtime_epoch=$4 and h.lease_until>clock_timestamp() and h.expires_at>clock_timestamp())
 	 order by f.created_at,f.id limit $5`, host.RuntimeID, policy, host.ConnectionID, host.RuntimeEpoch, limit)

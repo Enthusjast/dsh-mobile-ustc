@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { createHash, createPrivateKey, sign } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { once } from 'node:events'
+import { createInterface } from 'node:readline'
 import { host } from '../../host/remote-control/tests/harness.js'
 import { DshClient } from '../../host/remote-control/src/dsh-client.js'
 import { createRemoteControlPlugin } from '../../host/remote-control/src/index.js'
@@ -40,8 +40,16 @@ try {
   await plugin.apply(h.ctx, { enabled: true, runtimeId: config.runtime, workspaces, presets: ['fixture'],
     commandJournalPath: `${h.directory}/commands.sqlite`, relayUrl: config.url, applicationVersion: 'native-file-handoff-fixture' })
   process.stdout.write(JSON.stringify({ type: 'ready', session_id: created.session_id }) + '\n')
-  process.stdin.resume()
-  await once(process.stdin, 'data')
+  const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
+  for await (const line of input) {
+    if (line === 'stop') break
+    if (line !== 'inspect') throw new Error('unknown fixture command')
+    await h.ctx.agents.get(native)!.whenIdle()
+    const messages = h.ctx.agents.get(native)!.session.snapshotEvents().filter(event => event.type === 'user/message').filter(event => event.data.source.kind === 'user')
+    const files = messages.flatMap(message => message.data.content).flatMap(part => part.type === 'file' ? [{ sha256: String(part.attachment.attachmentId).slice('sha256:'.length), size_bytes: part.attachment.bytes }] : [])
+    process.stdout.write(JSON.stringify({ type: 'native.message', count: messages.length, files }) + '\n')
+  }
+  input.close()
   process.stdin.pause()
   assert.equal(h.errors.length, 0)
 } finally { if (interval) clearInterval(interval); await h.close() }

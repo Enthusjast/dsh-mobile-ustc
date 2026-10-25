@@ -14,6 +14,8 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   for (const path of [
     '../../../contracts/ws/v1/golden/message-submit.json',
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
+    '../../../contracts/ws/v1/golden/message-file-submit.json',
+    '../../../contracts/ws/v1/golden/message-file-submit.forwarded.json',
     '../../../contracts/ws/v1/golden/session-cancel.json',
     '../../../contracts/ws/v1/golden/session-cancel.forwarded.json',
     '../../../contracts/ws/v1/golden/session-archive.json',
@@ -56,6 +58,11 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   }
   const invalid = await load('../../../contracts/ws/v1/golden/invalid-message-submit.json')
   assert.equal(validate(invalid), false)
+  const files = await load('../../../contracts/ws/v1/golden/message-file-submit.forwarded.json') as Record<string, unknown>
+  assert.equal(files.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: files.type, session_id: files.session_id, payload: files.payload }))).digest('hex'))
+  for (const part of [{ type: 'file', file_id: files.request_id, text: '' }, { type: 'file', receiptId: files.request_id }, { type: 'file', path: '/private' }]) {
+    assert.equal(validate({ ...files, payload: { mode: 'queue', content: [part] } }), false)
+  }
 
   const forwarded = await load('../../../contracts/ws/v1/golden/message-submit.forwarded.json') as {
     request_id: string

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dsh-mobile-ustc.invalid/contracts/ws/v1/relay.schema.json",
   "title": "DSH Mobile Relay v1 frames",
-  "description": "Strict challenge, heartbeat, text/create/cancel/archive commands, scoped session reads, and blocking/timed question frames. Archive settlement confirms registry durability, not activity settlement. Read routing uses per-connection subscription IDs and host-generated sync IDs. Fragmented projected payloads are at most 2 MiB.",
+  "description": "Strict challenge, heartbeat, commands, scoped session reads, and blocking/timed question frames. File message parts require message.files.v1 on both peers, current Host file.handoff.v1, and atomic database authorization of every reference. Runtime validators reject duplicate file IDs. Archive settlement confirms registry durability, not activity settlement. Fragmented projected payloads are at most 2 MiB.",
   "oneOf": [
     { "$ref": "#/$defs/challenge" },
     { "$ref": "#/$defs/deviceHelloProof" },
@@ -78,6 +78,12 @@
         "workspaces": { "type": "array", "items": { "$ref": "#/$defs/uuid" }, "uniqueItems": true },
         "sessions": { "type": "array", "items": { "$ref": "#/$defs/uuid" }, "uniqueItems": true }
       }
+    },
+    "fileContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "file_id"],
+      "properties": { "type": { "const": "file" }, "file_id": { "$ref": "#/$defs/uuid" } }
     },
     "textContent": {
       "type": "object",
@@ -1543,7 +1549,7 @@
       "type": "object", "additionalProperties": false, "required": ["mode", "content"],
       "properties": {
         "mode": { "enum": ["queue", "steer"] },
-        "content": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/textContent" } }
+        "content": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "oneOf": [{ "$ref": "#/$defs/textContent" }, { "$ref": "#/$defs/fileContent" }] } }
       }
     },
     "sessionCatalogItem": {

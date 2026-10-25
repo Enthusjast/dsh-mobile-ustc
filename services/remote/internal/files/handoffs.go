@@ -13,6 +13,8 @@ type Handoffs struct {
 	policy     string
 }
 
+func (controller *Handoffs) PolicySHA256() string { return controller.policy }
+
 func NewHandoffs(repository HandoffRepository, storage BlobStore, policy string) (*Handoffs, error) {
 	if repository == nil || storage == nil {
 		return nil, ErrInvalid

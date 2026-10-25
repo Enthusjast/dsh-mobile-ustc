@@ -6,9 +6,17 @@ import (
 	"time"
 
 	"dsh-mobile-ustc/services/remote/internal/files"
+	"dsh-mobile-ustc/services/remote/internal/store"
 )
 
-func (server *Server) EnableFiles(controller *files.Handoffs) { server.fileHandoffs = controller }
+type fileMessageRecorder interface {
+	RecordRealtimeFileCommand(context.Context, store.TicketRedemption, files.HostBinding, string, string, string, string, []string, func() bool) (store.CommandStatus, error)
+}
+
+func (server *Server) EnableFiles(controller *files.Handoffs) {
+	server.fileHandoffs = controller
+	server.fileMessages, _ = server.database.(fileMessageRecorder)
+}
 
 func (server *Server) FileHostLifetime(host files.HostBinding) (<-chan struct{}, error) {
 	server.mu.Lock()
@@ -24,7 +32,36 @@ func (server *Server) FileHostLifetime(host files.HostBinding) (<-chan struct{},
 type fileRoute struct {
 	file, session string
 	until         time.Time
+	staged        bool
 }
+
+// The stage ack must enter the Host socket queue before an attached command.
+// Database staged alone can be visible just before that ack has been sent.
+func (server *Server) filesReady(host *liveConnection, session string, ids []string) bool {
+	server.mu.Lock()
+	peer := host.filePeer
+	live := server.hosts[host.runtimeID] == host && !host.closing
+	server.mu.Unlock()
+	if !live || peer == nil || peer.ctx.Err() != nil {
+		return false
+	}
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	for _, file := range ids {
+		found := false
+		for _, route := range peer.active {
+			if route.file == file && route.session == session && route.staged && route.until.After(time.Now().Add(100*time.Millisecond)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 type filePeer struct {
 	server *Server
 	live   *liveConnection
@@ -225,5 +262,11 @@ func (peer *filePeer) handle(frame wireEnvelope) {
 		peer.server.sendProtocolError(ctx, peer.live, "file.stale", &frame)
 		return
 	}
-	_ = peer.send(frame.Type+".ack", frame.RequestID, frame.SessionID, map[string]any{"handoff_id": payload.ID, "file_id": payload.FileID})
+	if peer.send(frame.Type+".ack", frame.RequestID, frame.SessionID, map[string]any{"handoff_id": payload.ID, "file_id": payload.FileID}) == nil && frame.Type == "file.staged" {
+		peer.mu.Lock()
+		route := peer.active[payload.ID]
+		route.staged = true
+		peer.active[payload.ID] = route
+		peer.mu.Unlock()
+	}
 }

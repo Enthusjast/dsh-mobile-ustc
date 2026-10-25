@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
 import { FileFrame, type FileOffer } from '../host/remote-control/src/file-protocol.js'
+import { relayPayloadDigest } from '../host/remote-control/src/relay-client.js'
 
 async function output(path: string, value: unknown) {
   const url = new URL(`../${path}`, import.meta.url), encoded = `${JSON.stringify(value, null, 2)}\n`
@@ -28,3 +29,8 @@ const frames = [
   ...['file.staged.ack', 'file.release', 'file.release.ack'].map(type => ({ ...base, session_id, type, payload: ids })),
 ]
 for (const frame of frames) { FileFrame.parse(frame); await output(`contracts/ws/v1/golden/${frame.type}.json`, frame) }
+const message = { v: 1, type: 'message.submit', request_id, runtime_id, session_id,
+  payload: { mode: 'queue' as const, content: [{ type: 'text' as const, text: '请检查附件。' }, { type: 'file' as const, file_id: offer.file_id }] } }
+await output('contracts/ws/v1/golden/message-file-submit.json', message)
+await output('contracts/ws/v1/golden/message-file-submit.forwarded.json', { ...message, runtime_epoch,
+  user_id: offer.user_id, device_id: offer.device_id, payload_sha256: relayPayloadDigest(session_id, message.payload) })

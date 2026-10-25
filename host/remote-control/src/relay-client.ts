@@ -11,7 +11,7 @@ import { questionAnswerPayload } from './questions.js'
 import { APPROVAL_INVALIDATION_CAPABILITY, SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
 import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approvals.js'
 import { CREATION_OPTIONS_CAPABILITY, creationOptionsSchema, type SessionCreationOptions } from './creation-options.js'
-import { FILE_HANDOFF_CAPABILITY } from './file-protocol.js'
+import { FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY, fileReference } from './file-protocol.js'
 import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
@@ -77,7 +77,10 @@ const submitSchema = z.strictObject({
   payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),
   payload: z.strictObject({
     mode: z.enum(['queue', 'steer']),
-    content: z.array(z.strictObject({ type: z.literal('text'), text: nonEmptyText })).min(1).max(16),
+    content: z.array(z.discriminatedUnion('type', [z.strictObject({ type: z.literal('text'), text: nonEmptyText }), fileReference])).min(1).max(16).refine(parts => {
+      const ids = parts.filter(part => part.type === 'file').map(part => part.file_id)
+      return new Set(ids).size === ids.length
+    }),
   }),
 })
 const cancelSchema = submitSchema.extend({ type: z.literal('session.cancel'), payload: z.strictObject({}) })
@@ -436,7 +439,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     } catch { /* The bounded metadata extension is unavailable; core Relay operations remain independent. */ }
     const offered: string[] = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
     if (sourceOptions) offered.push(CREATION_OPTIONS_CAPABILITY)
-    if (options.files) offered.push(FILE_HANDOFF_CAPABILITY)
+    if (options.files) offered.push(FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY)
     const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
@@ -636,6 +639,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         }
         if (sessions?.handle(value)) return
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
+        if (forwarded.type === 'message.submit' && forwarded.payload.content.some(part => part.type === 'file')
+          && (!files || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.cancel' && !ack.data.payload.capabilities.includes('session.cancel.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.archive' && !ack.data.payload.capabilities.includes('session.archive.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.create' && !ack.data.payload.capabilities.includes('session.create.v1')) throw new ProbeError('protocol.unsupported')

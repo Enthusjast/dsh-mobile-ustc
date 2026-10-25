@@ -43,6 +43,12 @@ var relayReceiptStates = map[string]struct{}{
 
 // RecordRealtimeCommand persists status and a digest; the request body remains transient.
 func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket TicketRedemption, commandType, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
+	return postgres.recordRealtimeCommand(ctx, ticket, commandType, requestID, sessionID, payloadSHA256, nil)
+}
+
+// admission runs under the same permission, command and resource locks as the
+// command insertion. Failure rolls back both the command and its file claims.
+func (postgres *Postgres) recordRealtimeCommand(ctx context.Context, ticket TicketRedemption, commandType, requestID, sessionID, payloadSHA256 string, admission func(context.Context, *sql.Tx, CommandStatus) error) (CommandStatus, error) {
 	if commandType != "message.submit" && commandType != "session.cancel" && commandType != "session.archive" && commandType != "question.answer" {
 		return CommandStatus{}, ErrGrantInvalid
 	}
@@ -99,10 +105,14 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 		return CommandStatus{}, ErrAccessDenied
 	}
 
-	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID)
+	var check func(CommandStatus) error
+	if admission != nil {
+		check = func(status CommandStatus) error { return admission(ctx, transaction, status) }
+	}
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID, check)
 }
 
-func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID string) (CommandStatus, error) {
+func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID string, admission ...func(CommandStatus) error) (CommandStatus, error) {
 	var status CommandStatus
 	var existingUserID, existingRuntimeID string
 	err := transaction.QueryRowContext(ctx, `
@@ -112,6 +122,11 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 	if err == nil {
 		if existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256 {
 			return CommandStatus{}, ErrCommandConflict
+		}
+		if len(admission) > 0 && admission[0] != nil {
+			if err := admission[0](status); err != nil {
+				return CommandStatus{}, err
+			}
 		}
 		if err := transaction.Commit(); err != nil {
 			return CommandStatus{}, ErrDatabaseUnavailable
@@ -152,6 +167,11 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 			values ($1, 'device', $2::uuid::text, $2, $3, nullif($4, '')::uuid, 'command.received', 'success', $5::jsonb)`,
 			orgID, ticket.DeviceID, ticket.RuntimeID, sessionID, string(metadata)); err != nil {
 			return CommandStatus{}, ErrDatabaseUnavailable
+		}
+	}
+	if len(admission) > 0 && admission[0] != nil {
+		if err := admission[0](status); err != nil {
+			return CommandStatus{}, err
 		}
 	}
 	if err := transaction.Commit(); err != nil {

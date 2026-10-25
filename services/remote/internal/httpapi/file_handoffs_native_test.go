@@ -24,7 +24,14 @@ func TestProtectedFileHandoffToRealNativeDSHAndRevocation(t *testing.T) {
 	if os.Getenv("REMOTE_TEST_CLUSTER_ROOT") == "" {
 		t.Skip("requires explicit isolated PostgreSQL/native DSH runner")
 	}
+	for _, message := range []bool{false, true} {
+		t.Run(map[bool]string{false: "revoke", true: "message"}[message], func(t *testing.T) { testProtectedFileHandoffNative(t, message) })
+	}
+}
+
+func testProtectedFileHandoffNative(t *testing.T, message bool) {
 	h := newFileHTTPFixture(t)
+	allowFileMessages(t, h)
 	key := approvalKey(t)
 	public, thumb := approvalPublic(t, key)
 	secret := make([]byte, 32)
@@ -163,13 +170,47 @@ func TestProtectedFileHandoffToRealNativeDSHAndRevocation(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	revokedAt := time.Now()
-	if _, err := h.database.ExecContext(ctx, `update runtime_grants set grant_version=grant_version+1`); err != nil {
-		t.Fatal(err)
-	}
-	next("native.retired")
-	if time.Since(revokedAt) > 4*time.Second {
-		t.Fatal("native receipt outlived the revocation bound")
+	if message {
+		phone := connectFilePhone(t, h, h.caller, h.token, "33333333-3333-4333-8333-333333333333", true)
+		request := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad"
+		phone.submit(t, request, prepared.File.ID)
+		for {
+			if fileMessageState(t, phone.read(t)) == "agent_queued" {
+				break
+			}
+		}
+		next("native.retired")
+		phone.submit(t, request, prepared.File.ID)
+		if fileMessageState(t, phone.read(t)) != "agent_queued" {
+			t.Fatal("native file retry lost its receipt")
+		}
+		if _, err := io.WriteString(stdin, "inspect\n"); err != nil {
+			t.Fatal(err)
+		}
+		observed := next("native.message")
+		var count int
+		var attachments []struct {
+			SHA256 string `json:"sha256"`
+			Size   int    `json:"size_bytes"`
+		}
+		_ = json.Unmarshal(observed["count"], &count)
+		_ = json.Unmarshal(observed["files"], &attachments)
+		if count != 1 || len(attachments) != 1 || attachments[0].SHA256 != sha || attachments[0].Size != len(body) {
+			t.Fatal("native message attachment or deduplication changed")
+		}
+		var refs int
+		if err := h.database.QueryRowContext(ctx, `select count(*) from file_message_refs where file_id=$1`, prepared.File.ID).Scan(&refs); err != nil || refs != 1 {
+			t.Fatal("native file command has no durable consumption claim")
+		}
+	} else {
+		revokedAt := time.Now()
+		if _, err := h.database.ExecContext(ctx, `update runtime_grants set grant_version=grant_version+1`); err != nil {
+			t.Fatal(err)
+		}
+		next("native.retired")
+		if time.Since(revokedAt) > 4*time.Second {
+			t.Fatal("native receipt outlived the revocation bound")
+		}
 	}
 	if _, err := io.WriteString(stdin, "stop\n"); err != nil {
 		t.Fatal(err)
@@ -183,5 +224,5 @@ func TestProtectedFileHandoffToRealNativeDSHAndRevocation(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("native peer did not stop")
 	}
-	t.Log("TLS Go/PostgreSQL offer, installation-signed one-use HTTP read, real npm DSH Loader receipt, stage ack and grant revocation passed; object/scanner/identity/model are local fixtures")
+	t.Log("TLS Go/PostgreSQL file offer and signed HTTP read reached real npm DSH Loader; current scenario verified revocation or file-ID message admission, consumption and retry. Object/scanner/identity/model are local fixtures.")
 }
