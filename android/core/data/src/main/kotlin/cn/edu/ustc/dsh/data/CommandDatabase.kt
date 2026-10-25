@@ -12,6 +12,13 @@ internal data class CommandRow(
     val remoteTimestamp: String?, val everHostSaved: Boolean, val everAgentQueued: Boolean, val error: String?, val workspaceId: String? = null, val createdSessionId: String? = null,
 )
 
+@Entity(tableName = "approval_decisions", indices = [Index(value = ["approvalId"], unique = true), Index(value = ["runtimeId", "sessionId", "createdAt"])])
+internal data class ApprovalDecisionRow(
+    @PrimaryKey val requestId: String, val approvalId: String, val runtimeId: String, val sessionId: String, val workspaceId: String, val epoch: String,
+    val context: ByteArray, val compact: String, val digest: String, val delivery: String, val attempts: Long, val revision: Long,
+    val createdAt: Long, val updatedAt: Long, val remote: ByteArray?, val forwarding: String?, val error: String?, val finalized: Boolean,
+)
+
 @Entity(tableName = "cached_sessions", primaryKeys = ["runtimeId", "sessionId"], indices = [Index(value = ["savedAt"]), Index(value = ["accessedAt"])])
 internal data class CachedSessionRow(val runtimeId: String, val sessionId: String, val workspaceId: String?, val epoch: String, val savedAt: Long, val accessedAt: Long, val recordCount: Int, val bytes: Long)
 
@@ -23,6 +30,18 @@ internal data class CachedRecordRow(val runtimeId: String, val sessionId: String
     @Query("SELECT * FROM database_identity WHERE slot=1") fun identity(): DatabaseIdentity?
     @Insert fun identity(value: DatabaseIdentity)
     @Query("SELECT * FROM commands WHERE requestId=:id") fun get(id: String): CommandRow?
+    @Query("SELECT * FROM approval_decisions WHERE requestId=:id") fun approvalGet(id: String): ApprovalDecisionRow?
+    @Query("SELECT * FROM approval_decisions WHERE approvalId=:id") fun approvalById(id: String): ApprovalDecisionRow?
+    @Query("SELECT * FROM approval_decisions WHERE runtimeId=:runtime AND sessionId=:session ORDER BY createdAt,requestId") fun approvals(runtime: String, session: String): List<ApprovalDecisionRow>
+    @Query("SELECT COUNT(*) FROM approval_decisions") fun approvalCount(): Int
+    @Query("SELECT COALESCE(SUM(length(context)+length(compact)),0) FROM approval_decisions") fun approvalBytes(): Long
+    @Insert fun approvalInsert(row: ApprovalDecisionRow)
+    @Update fun approvalUpdate(row: ApprovalDecisionRow): Int
+    @Query("DELETE FROM approval_decisions WHERE requestId=:id") fun approvalDelete(id: String)
+    @Query("DELETE FROM approval_decisions WHERE runtimeId=:runtime") fun revokeApprovals(runtime: String)
+    @Query("SELECT DISTINCT runtimeId FROM approval_decisions") fun approvalRuntimes(): List<String>
+    @Query("DELETE FROM approval_decisions WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND workspaceId NOT IN (:workspaces)") fun restrictApprovals(runtime: String, sessions: List<String>, workspaces: List<String>)
+    @Query("DELETE FROM approval_decisions WHERE requestId IN (SELECT requestId FROM approval_decisions WHERE finalized=1 ORDER BY createdAt,requestId LIMIT 32)") fun evictFinalApprovals()
     @Query("SELECT * FROM commands WHERE runtimeId=:runtime AND sessionId=:session ORDER BY createdAt,requestId") fun list(runtime: String, session: String): List<CommandRow>
     @Query("SELECT * FROM commands WHERE runtimeId=:runtime AND workspaceId IS NOT NULL ORDER BY createdAt,requestId") fun creations(runtime: String): List<CommandRow>
     @Query("SELECT COUNT(*) FROM commands") fun count(): Int
@@ -51,5 +70,5 @@ internal data class CachedRecordRow(val runtimeId: String, val sessionId: String
     @Query("DELETE FROM cached_sessions WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))") fun restrictCache(runtime: String, sessions: List<String>, workspaces: List<String>)
 }
 
-@Database(entities = [DatabaseIdentity::class, CommandRow::class, CachedSessionRow::class, CachedRecordRow::class], version = 3, exportSchema = true)
+@Database(entities = [DatabaseIdentity::class, CommandRow::class, ApprovalDecisionRow::class, CachedSessionRow::class, CachedRecordRow::class], version = 4, exportSchema = true)
 internal abstract class CommandDatabase : RoomDatabase() { abstract fun commands(): CommandDao }

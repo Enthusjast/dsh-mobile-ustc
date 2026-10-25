@@ -22,6 +22,7 @@ import java.util.UUID
 class CacheMigrationTest {
     @Test fun encryptedVersionOneDatabaseKeepsTheOriginalUncertainCommandAndGainsHistoryTables(): Unit = runBlocking { upgrade(1) }
     @Test fun encryptedVersionTwoKeepsHistoryAndIntentWhenCreationTargetsAreAdded(): Unit=runBlocking { upgrade(2) }
+    @Test fun encryptedVersionThreeKeepsCommandsAndHistoryWhenApprovalStorageIsAdded(): Unit=runBlocking { upgrade(3) }
     private suspend fun upgrade(version: Int) {
         val instrumentation = InstrumentationRegistry.getInstrumentation(); val context = instrumentation.targetContext
         assumeTrue("explicit owned account fixture required", InstrumentationRegistry.getArguments().getString("accountFixture") == "true")
@@ -29,6 +30,10 @@ class CacheMigrationTest {
         val owner = LocalDataOwner(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "a".repeat(64), UUID.randomUUID().toString(), UUID.randomUUID().toString())
         val command = CommandIntent.message(UUID.randomUUID().toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString(), "queue", "V1_ENCRYPTED_ORIGINAL_中文🙂")
         val historyEpoch=UUID.randomUUID().toString()
+        val oldQuestion = if (version >= 3) CommandIntent.answerQuestion(UUID.randomUUID().toString(), command.runtimeId, command.sessionId!!, historyEpoch, false,
+            QuestionAnswers(UUID.randomUUID().toString(), listOf(QuestionAnswer("plan", listOf("继续"), "V3_ORIGINAL_答复🙂"))), "c".repeat(64)) else null
+        val oldCreation = if (version >= 3) CommandIntent.createSession(UUID.randomUUID().toString(), command.runtimeId, UUID.randomUUID().toString(), "standard", historyEpoch) else null
+        val oldResult = UUID.randomUUID().toString()
         val history=SessionJson.encode(jsonObject("native_seq" to 0L.json(),"time" to 1000L.json(),"type" to "user/message".json(),"data" to jsonObject("content" to JsonArray(listOf(jsonObject("type" to "text".json(),"text" to "V2_PERSISTED_HISTORY_中文🙂".json()))))))
         val directory = File(context.noBackupFilesDir, "mobile-data/${owner.scopeHash}/${owner.fingerprint}")
         check(directory.mkdirs()); System.loadLibrary("sqlcipher")
@@ -50,6 +55,14 @@ class CacheMigrationTest {
                         db.execSQL("INSERT INTO database_identity(slot,ownerHash) VALUES(1,?)", arrayOf(owner.fingerprint))
                         db.execSQL("INSERT INTO commands(requestId,runtimeId,sessionId,intent,digest,delivery,remote,attempts,revision,createdAt,updatedAt,remoteTimestamp,everHostSaved,everAgentQueued,error) VALUES(?,?,?,?,?,'RECONCILE',NULL,1,2,1000,1001,NULL,0,0,NULL)",
                             arrayOf(command.requestId, command.runtimeId, command.sessionId, command.storageBytes(), command.digest))
+                        oldQuestion?.let { question ->
+                            db.execSQL("INSERT INTO commands(requestId,runtimeId,sessionId,intent,digest,delivery,remote,attempts,revision,createdAt,updatedAt,remoteTimestamp,everHostSaved,everAgentQueued,error) VALUES(?,?,?,?,?,'RECONCILE',NULL,1,2,1000,1001,NULL,0,0,NULL)",
+                                arrayOf(question.requestId, question.runtimeId, question.sessionId, question.storageBytes(), question.digest))
+                        }
+                        oldCreation?.let { creation ->
+                            db.execSQL("INSERT INTO commands(requestId,runtimeId,sessionId,intent,digest,delivery,remote,attempts,revision,createdAt,updatedAt,remoteTimestamp,everHostSaved,everAgentQueued,error,workspaceId,createdSessionId) VALUES(?,?,NULL,?,?,'CONFIRMED','SETTLED',1,3,1000,1001,?,1,0,NULL,?,?)",
+                                arrayOf(creation.requestId, creation.runtimeId, creation.storageBytes(), creation.digest, java.time.Instant.now().toString(), creation.workspaceId, oldResult))
+                        }
                         if(version>=2) {
                             val now=System.currentTimeMillis()
                             db.execSQL("INSERT INTO cached_sessions(runtimeId,sessionId,workspaceId,epoch,savedAt,accessedAt,recordCount,bytes) VALUES(?,?,NULL,?,?,?,1,?)",arrayOf<Any?>(command.runtimeId,command.sessionId,historyEpoch,now,now,history.size))
@@ -59,9 +72,18 @@ class CacheMigrationTest {
                     override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = error("old fixture cannot upgrade")
                 }).build()).use { it.writableDatabase }
             SqlCommandJournal.open(context, owner).use { migrated ->
-                val original = migrated.list(command.runtimeId, command.sessionId!!).single()
+                val original = migrated.list(command.runtimeId, command.sessionId!!).single { it.intent.requestId == command.requestId }
                 assertEquals(command.requestId, original.intent.requestId); assertEquals(command.text(), original.intent.text())
                 assertEquals(CommandDelivery.RECONCILE, original.delivery); assertEquals(1L, original.attempts)
+                oldQuestion?.let { question ->
+                    val restored = migrated.list(command.runtimeId, command.sessionId!!).single { it.intent.requestId == question.requestId }
+                    assertArrayEquals(question.storageBytes(), restored.intent.storageBytes()); assertEquals(1L, restored.attempts)
+                    assertEquals("c".repeat(64), restored.intent.questionDefinition)
+                }
+                oldCreation?.let { creation ->
+                    val restored = migrated.listCreations(command.runtimeId).single { it.intent.requestId == creation.requestId }
+                    assertArrayEquals(creation.storageBytes(), restored.intent.storageBytes()); assertEquals(oldResult, restored.createdSessionId)
+                }
                 if(version>=2) {
                     val restored=migrated.loadTranscript(command.runtimeId,command.sessionId!!,null)!!
                     assertEquals(historyEpoch,restored.epoch);assertEquals("V2_PERSISTED_HISTORY_中文🙂",restored.transcript.items.single().blocks.single().text)
@@ -70,7 +92,7 @@ class CacheMigrationTest {
                 val creation=CommandIntent.createSession(UUID.randomUUID().toString(),command.runtimeId,workspace,"standard",historyEpoch)
                 migrated.create(creation);migrated.beginAttempt(creation.requestId)
                 migrated.record(CommandReceipt(creation.requestId,result,creation.digest,RemoteCommandState.SETTLED,java.time.Instant.now().toString(),workspaceId=workspace))
-                assertEquals(result,migrated.listCreations(command.runtimeId).single().createdSessionId)
+                assertEquals(result,migrated.listCreations(command.runtimeId).single { it.intent.requestId == creation.requestId }.createdSessionId)
                 val epoch = UUID.randomUUID().toString()
                 migrated.saveTranscript(command.runtimeId, command.sessionId!!, null, epoch, CachedTranscript(epoch, System.currentTimeMillis(), emptyList()).transcript)
                 assertNotNull(migrated.loadTranscript(command.runtimeId, command.sessionId!!, null))

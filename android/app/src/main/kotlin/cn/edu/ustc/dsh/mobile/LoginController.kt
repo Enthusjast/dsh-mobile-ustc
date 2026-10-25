@@ -485,7 +485,9 @@ class LoginController internal constructor(private val context: Context, private
             }
             val dataOwner = checkpoint!!.let { CommandOwner(it.accountId, it.organizationId, configuration!!.fingerprint, it.userId, it.deviceId!!) }
             try {
-                persistence.retainHistory(dataOwner, items.mapNotNull { item -> item.access?.takeIf { it.protocolVersion==1L && it.expiresAt?.let { expiry -> expiry>now() }!=false }?.scope?.let { item.id to it } }.toMap(), stamp)
+                val scopes = items.mapNotNull { item -> item.access?.takeIf { it.protocolVersion==1L && it.expiresAt?.let { expiry -> expiry>now() }!=false }?.scope?.let { item.id to it } }.toMap()
+                val approvalRuntimes = items.filter { it.access?.role == "owner" }.map { it.id }.toSet()
+                persistence.retainHistory(dataOwner, scopes, stamp, approvalRuntimes)
                 current(stamp)
             } catch (error: CancellationException) { throw error }
             catch (_: CommandDataException) { current(stamp) /* Online reading remains available if local data cannot open. */ }

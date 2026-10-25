@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import cn.edu.ustc.dsh.command.*
+import cn.edu.ustc.dsh.crypto.RegisteredApprovalKey
 import cn.edu.ustc.dsh.protocol.*
 import cn.edu.ustc.dsh.session.*
 import kotlinx.coroutines.*
@@ -17,7 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SqlCommandJournal private constructor(override val owner: CommandOwner, private val database: CommandDatabase, private val password: ByteArray, private val vault: DatabaseKeyVault) : CommandJournal, TranscriptCache {
     private val closed = AtomicBoolean()
     private val lock = Any()
-    private suspend fun <T> transaction(action: (CommandDao) -> T): T = withContext(Dispatchers.IO) {
+    internal suspend fun <T> transaction(action: (CommandDao) -> T): T = withContext(Dispatchers.IO) {
         val operation = currentCoroutineContext()
         checked {
             synchronized(lock) {
@@ -34,6 +35,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         }
     }
     override suspend fun create(intent: CommandIntent, now: Long): PendingCommand = transaction { dao ->
+        if (dao.approvalGet(intent.requestId) != null) throw CommandDataException("command.request_conflict")
         if(intent.kind.question && intent.questionDefinition==null) throw CommandDataException("question.context_required")
         dao.get(intent.requestId)?.let { existing ->
             if (existing.digest != intent.digest || !existing.intent.contentEquals(intent.storageBytes())) throw CommandDataException("command.request_conflict")
@@ -70,8 +72,17 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         if (existing.attempts > 0 && existing.remote !in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)) throw CommandDataException("command.reconcile_required")
         dao.delete(id)
     }
-    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.deleteRuntimeCache(runtime) }
-    override suspend fun revokeSessionCommands(runtime: String) = transaction { dao -> dao.revokeSessionCommands(Contract.uuid(runtime)); dao.deleteRuntimeCache(runtime) }
+    fun approvalDecisions(key: RegisteredApprovalKey): ApprovalDecisionJournal = SqlApprovalDecisionJournal(this, key)
+    suspend fun retainApprovals(scopes: Map<String, RelayScope>) = transaction { dao ->
+        scopes.keys.forEach(Contract::uuid)
+        for (runtime in dao.approvalRuntimes()) {
+            val grant = scopes[runtime]
+            if (grant == null || !grant.actions.containsAll(setOf("session.read", "approval.decide"))) dao.revokeApprovals(runtime)
+            else dao.restrictApprovals(runtime, grant.sessions.toList(), grant.workspaces.toList())
+        }
+    }
+    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime) }
+    override suspend fun revokeSessionCommands(runtime: String) = transaction { dao -> dao.revokeSessionCommands(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime) }
     suspend fun retainCreations(scopes: Map<String, RelayScope>) = transaction { dao ->
         scopes.keys.forEach(Contract::uuid)
         for(runtime in dao.creationRuntimes()) {
@@ -153,6 +164,13 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
                 db.execSQL("CREATE INDEX index_commands_runtimeId_workspaceId_createdAt ON commands(runtimeId,workspaceId,createdAt)")
             }
         }
+        private val migration3To4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS approval_decisions (requestId TEXT NOT NULL, approvalId TEXT NOT NULL, runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, workspaceId TEXT NOT NULL, epoch TEXT NOT NULL, context BLOB NOT NULL, compact TEXT NOT NULL, digest TEXT NOT NULL, delivery TEXT NOT NULL, attempts INTEGER NOT NULL, revision INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, remote BLOB, forwarding TEXT, error TEXT, finalized INTEGER NOT NULL, PRIMARY KEY(requestId))")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_approval_decisions_approvalId ON approval_decisions(approvalId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_approval_decisions_runtimeId_sessionId_createdAt ON approval_decisions(runtimeId,sessionId,createdAt)")
+            }
+        }
         fun open(context: Context, owner: CommandOwner): SqlCommandJournal = checked {
             System.loadLibrary("sqlcipher")
             val directory = directory(context, owner.accountId, owner.organizationId).resolve(owner.fingerprint)
@@ -163,7 +181,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             var database: CommandDatabase? = null
             try {
                 database = Room.databaseBuilder(context.applicationContext, CommandDatabase::class.java, file.absolutePath)
-                    .addMigrations(migration1To2, migration2To3)
+                    .addMigrations(migration1To2, migration2To3, migration3To4)
                     .openHelperFactory(SupportOpenHelperFactory(password, null, true))
                     .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING).build()
                 database.openHelper.writableDatabase.execSQL("PRAGMA synchronous=FULL")
