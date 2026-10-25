@@ -9,11 +9,13 @@ android {
     buildToolsVersion = "35.0.0"
     defaultConfig { minSdk = 26; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+    sourceSets.getByName("androidTest").assets.srcDir("schemas")
 }
 kotlin { jvmToolchain(17) }
 ksp { arg("room.schemaLocation", "$projectDir/schemas") }
 dependencies {
     api(project(":core:command"))
+    api(project(":core:session"))
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     implementation(libs.sqlite)

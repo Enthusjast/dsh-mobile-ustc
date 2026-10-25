@@ -65,6 +65,7 @@ class SessionRecord private constructor(val seq: Long, val type: String, val dat
 class SessionTranscript internal constructor(
     val records: List<SessionRecord>, val cursor: Long, val openingCursor: Long, val hasMore: Boolean,
     val persistedThrough: Long, val checkpoint: String, val items: List<ConversationItem>, val taskRunning: Boolean,
+    val durableOnly: Boolean = false,
 ) {
     override fun toString() = "SessionTranscript(records=${records.size})"
 }
@@ -238,25 +239,33 @@ class SessionWindow(private val subscribeRequest: String) {
     }
 
     fun snapshot(durableOnly: Boolean = false): SessionTranscript {
-        val entries = records.values.filter { !durableOnly || it.seq <= persisted }
+        // A held settlement and its suffix cannot be restored as completed history
+        // until the matching committed end arrives, even if a checkpoint led it.
+        val entries = records.values.filter { !durableOnly || it.seq <= persisted && (held == null || it.seq < held!!.seq) }
         val live = if (durableOnly) null else active
         val items = arrayListOf<ConversationItem>()
         var liveAdded = false
         fun addLive() { live?.let { items += ConversationItem("live:${it.id}", ConversationRole.ASSISTANT, it.blocks.snapshot(), true, false) }; liveAdded = true }
         for (record in entries) {
             if (!liveAdded && live != null && record.seq > live.after) addLive()
-            if (record.seq == held?.seq || record.replacement) continue
-            val role = when (record.type) {
-                "user/message" -> ConversationRole.USER
-                "assistant/message", "assistant/attempt" -> ConversationRole.ASSISTANT
-                "tool/call", "tool/result" -> ConversationRole.TOOL
-                else -> null
-            }
-            if (role != null && record.blocks.isNotEmpty()) items += ConversationItem("event:${record.seq}", role, record.blocks, false, record.seq <= persisted,
-                record.type == "assistant/attempt" || record.data.fields["interrupted"] == JsonBoolean(true))
+            if (record.seq != held?.seq) record.conversationItem(persisted)?.let(items::add)
         }
         if (!liveAdded && live != null) addLive()
         val running = entries.lastOrNull { it.type == "turn/start" || it.type == "turn/end" }?.type == "turn/start"
-        return SessionTranscript(Collections.unmodifiableList(entries), cursor, opening, more, persisted, checkpoint, Collections.unmodifiableList(items), running)
+        return SessionTranscript(Collections.unmodifiableList(entries), if (durableOnly) entries.lastOrNull()?.seq ?: -1 else cursor,
+            if (durableOnly) minOf(opening, entries.lastOrNull()?.seq ?: -1) else opening, more, persisted, checkpoint, Collections.unmodifiableList(items), running,
+            durableOnly && (entries.isNotEmpty() || cursor == -1L && checkpoint == "persisted"))
     }
+}
+
+internal fun SessionRecord.conversationItem(persisted: Long): ConversationItem? {
+    if (replacement || blocks.isEmpty()) return null
+    val role = when (type) {
+        "user/message" -> ConversationRole.USER
+        "assistant/message", "assistant/attempt" -> ConversationRole.ASSISTANT
+        "tool/call", "tool/result" -> ConversationRole.TOOL
+        else -> return null
+    }
+    return ConversationItem("event:$seq", role, blocks, false, seq <= persisted,
+        type == "assistant/attempt" || data.fields["interrupted"] == JsonBoolean(true))
 }

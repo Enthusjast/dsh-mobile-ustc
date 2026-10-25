@@ -4,6 +4,7 @@ import cn.edu.ustc.dsh.protocol.*
 import com.fasterxml.jackson.core.*
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.io.ByteArrayOutputStream
 
 const val SESSION_PAYLOAD_BYTES = 2 * 1024 * 1024
 const val SESSION_MAX_NODES = 65_536
@@ -49,6 +50,31 @@ object SessionJson {
             if (parser.nextToken() != null) throw SessionDataException()
             root
         }
+    } catch (error: SessionDataException) { throw error }
+    catch (_: Exception) { throw SessionDataException("protocol.invalid") }
+
+    /** Local display records use the same bounded grammar, separately from signing JSON. */
+    fun encode(root: JsonObject): ByteArray = try {
+        val output = object : ByteArrayOutputStream() {
+            override fun write(value: Int) { if (size() >= SESSION_PAYLOAD_BYTES) throw SessionDataException("protocol.snapshot_too_large"); super.write(value) }
+            override fun write(bytes: ByteArray, offset: Int, length: Int) { if (size().toLong() + length > SESSION_PAYLOAD_BYTES) throw SessionDataException("protocol.snapshot_too_large"); super.write(bytes, offset, length) }
+        }
+        var nodes = 0
+        factory.createGenerator(output).use { writer ->
+            fun write(value: JsonValue, depth: Int) {
+                if (++nodes > SESSION_MAX_NODES || depth > 32) throw SessionDataException("protocol.snapshot_too_large")
+                when (value) {
+                    is JsonObject -> { writer.writeStartObject(); for ((name, item) in value.fields) { scalar(name); writer.writeFieldName(name); write(item, depth + 1) }; writer.writeEndObject() }
+                    is JsonArray -> { writer.writeStartArray(); value.values.forEach { write(it, depth + 1) }; writer.writeEndArray() }
+                    is JsonString -> { scalar(value.value); writer.writeString(value.value) }
+                    is JsonNumber -> { if (!value.value.isFinite()) throw SessionDataException(); writer.writeNumber(value.value) }
+                    is JsonBoolean -> writer.writeBoolean(value.value)
+                    JsonNull -> writer.writeNull()
+                }
+            }
+            write(root, 0)
+        }
+        output.toByteArray().also { parse(it) }
     } catch (error: SessionDataException) { throw error }
     catch (_: Exception) { throw SessionDataException("protocol.invalid") }
 

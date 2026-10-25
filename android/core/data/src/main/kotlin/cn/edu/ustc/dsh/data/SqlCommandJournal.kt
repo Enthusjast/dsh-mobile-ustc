@@ -2,8 +2,11 @@ package cn.edu.ustc.dsh.data
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import cn.edu.ustc.dsh.command.*
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.session.*
 import kotlinx.coroutines.*
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import java.io.File
@@ -11,7 +14,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Entire SQLite/WAL is SQLCipher-encrypted, under noBackupFilesDir. No plaintext fallback. */
-class SqlCommandJournal private constructor(override val owner: CommandOwner, private val database: CommandDatabase, private val password: ByteArray, private val vault: DatabaseKeyVault) : CommandJournal {
+class SqlCommandJournal private constructor(override val owner: CommandOwner, private val database: CommandDatabase, private val password: ByteArray, private val vault: DatabaseKeyVault) : CommandJournal, TranscriptCache {
     private val closed = AtomicBoolean()
     private val lock = Any()
     private suspend fun <T> transaction(action: (CommandDao) -> T): T = withContext(Dispatchers.IO) {
@@ -65,12 +68,70 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         if (existing.attempts > 0 && existing.remote !in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)) throw CommandDataException("command.reconcile_required")
         dao.delete(id)
     }
-    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)) }
+    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.deleteRuntimeCache(runtime) }
+    override suspend fun loadTranscript(runtime: String, session: String, workspace: String?): CachedTranscript? = transaction { dao ->
+        Contract.uuid(runtime); Contract.uuid(session); workspace?.let(Contract::uuid)
+        val now = System.currentTimeMillis()
+        dao.expireCache((now - CACHE_RETENTION_MILLIS).coerceAtLeast(0), now)
+        val row = dao.cachedSession(runtime, session) ?: return@transaction null
+        if (row.workspaceId != workspace) { dao.deleteCache(runtime, session); return@transaction null }
+        val records = dao.cachedRecords(runtime, session)
+        if (records.size != row.recordCount || records.sumOf { it.body.size.toLong() } != row.bytes || row.bytes > CACHE_SESSION_BYTES) throw CommandDataException("data.corrupt")
+        val parsed = records.map {
+            SessionRecord.parse(SessionJson.parse(it.body)).also { parsed -> if (parsed.seq != it.seq) throw CommandDataException("data.corrupt") }
+        }
+        dao.touchCache(runtime, session, now)
+        CachedTranscript(row.epoch, row.savedAt, parsed)
+    }
+    override suspend fun saveTranscript(runtime: String, session: String, workspace: String?, epoch: String, transcript: SessionTranscript, now: Long) {
+        Contract.uuid(runtime); Contract.uuid(session); Contract.uuid(epoch); workspace?.let(Contract::uuid)
+        if (!transcript.durableOnly || transcript.records.any { it.seq > transcript.persistedThrough } || transcript.items.any { it.live || !it.persisted } || now < 0) throw CommandDataException("data.unconfirmed_history")
+        withContext(Dispatchers.IO) {
+            val encoded = transcript.records.map { CachedRecordRow(runtime, session, it.seq, SessionJson.encode(it.raw)) }
+            var bytes = encoded.sumOf { it.body.size.toLong() }; var first = 0
+            while (bytes > CACHE_SESSION_BYTES && first < encoded.size) bytes -= encoded[first++].body.size
+            val retained = encoded.drop(first)
+            transaction { dao ->
+                dao.expireCache((now - CACHE_RETENTION_MILLIS).coerceAtLeast(0), now)
+                dao.deleteCache(runtime, session)
+                while (dao.cacheCount() >= CACHE_SESSIONS || dao.cacheBytes() + bytes > CACHE_TOTAL_BYTES) {
+                    val oldest = dao.oldestCache() ?: throw CommandDataException("data.cache_limit")
+                    dao.deleteCache(oldest.runtimeId, oldest.sessionId)
+                }
+                dao.cacheSession(CachedSessionRow(runtime, session, workspace, epoch, now, now, retained.size, bytes))
+                dao.cacheRecords(retained)
+            }
+        }
+    }
+    override suspend fun removeTranscript(runtime: String, session: String) = transaction { dao -> dao.deleteCache(Contract.uuid(runtime), Contract.uuid(session)) }
+    override suspend fun removeRuntimeTranscripts(runtime: String) = transaction { dao -> dao.deleteRuntimeCache(Contract.uuid(runtime)) }
+    override suspend fun retainTranscripts(scopes: Map<String, RelayScope>) = transaction { dao ->
+        scopes.keys.forEach(Contract::uuid)
+        val now = System.currentTimeMillis()
+        dao.expireCache((now - CACHE_RETENTION_MILLIS).coerceAtLeast(0), now)
+        for (runtime in dao.cachedRuntimes()) {
+            val granted = scopes[runtime]
+            if (granted == null || "session.read" !in granted.actions) dao.deleteRuntimeCache(runtime)
+            else dao.restrictCache(runtime, granted.sessions.toList(), granted.workspaces.toList())
+        }
+    }
     override fun close() {
         closed.set(true)
         synchronized(lock) { try { database.close() } finally { password.fill(0) } }
     }
     companion object {
+        const val CACHE_RETENTION_MILLIS = 30L * 24 * 60 * 60 * 1000
+        const val CACHE_SESSIONS = 128
+        const val CACHE_SESSION_BYTES = 8L * 1024 * 1024
+        const val CACHE_TOTAL_BYTES = 32L * 1024 * 1024
+        private val migration1To2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS cached_sessions (runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, workspaceId TEXT, epoch TEXT NOT NULL, savedAt INTEGER NOT NULL, accessedAt INTEGER NOT NULL, recordCount INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(runtimeId,sessionId))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_sessions_savedAt ON cached_sessions(savedAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_sessions_accessedAt ON cached_sessions(accessedAt)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS cached_records (runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, seq INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(runtimeId,sessionId,seq), FOREIGN KEY(runtimeId,sessionId) REFERENCES cached_sessions(runtimeId,sessionId) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            }
+        }
         fun open(context: Context, owner: CommandOwner): SqlCommandJournal = checked {
             System.loadLibrary("sqlcipher")
             val directory = directory(context, owner.accountId, owner.organizationId).resolve(owner.fingerprint)
@@ -81,6 +142,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             var database: CommandDatabase? = null
             try {
                 database = Room.databaseBuilder(context.applicationContext, CommandDatabase::class.java, file.absolutePath)
+                    .addMigrations(migration1To2)
                     .openHelperFactory(SupportOpenHelperFactory(password, null, true))
                     .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING).build()
                 database.openHelper.writableDatabase.execSQL("PRAGMA synchronous=FULL")
