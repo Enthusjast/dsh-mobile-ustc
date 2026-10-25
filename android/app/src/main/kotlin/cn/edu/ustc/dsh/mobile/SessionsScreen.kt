@@ -16,7 +16,7 @@ import cn.edu.ustc.dsh.command.*
 
 @Composable
 fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
-    onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}) {
+    onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}, onCreate: ()->Unit={}) {
     val runtime = state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }
     val opened = state.selectedSessionId
     val canCompose = opened != null && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
@@ -35,6 +35,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                 }
                 if (opened == null) {
                     item("refresh") { OutlinedButton(onRefresh, enabled = !state.loadingSessions, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("刷新会话") } }
+                    if(runtime?.access?.creationScope()!=null) item("create") { Button(onCreate,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) {Text("创建新会话")} }
                     if (state.loadingSessions) item("loading") { ProgressText("正在读取会话目录") }
                     state.sessionError?.let { error -> item("error") { Text(if (error == "access.denied") "当前授权无法读取会话目录。" else "暂时无法读取会话目录，请检查网络后刷新。", color = MaterialTheme.colorScheme.error) } }
                     if (!state.loadingSessions && state.sessionError == null && state.sessions.isEmpty()) item("empty") { Text("当前授权范围内没有会话。", color = MaterialTheme.colorScheme.onSurfaceVariant) }

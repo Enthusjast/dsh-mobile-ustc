@@ -57,6 +57,10 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val commandWrites = AtomicInteger()
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var chatMode = false
+    @Volatile var creationMode = false
+    val workspaceId="99999999-9999-4999-8999-999999999999"
+    val creationWrites=AtomicInteger()
+    val createdSessions=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     @Volatile var runtimeOffline = false
     @Volatile var dropNextCommandReply = false
     @Volatile var bindingMode = false
@@ -71,7 +75,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     @Volatile var allowSessionRead = true
     @Volatile var holdSessions = false
     private val directoryScope get() = RelayScope((if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list")) +
-        if (chatMode) listOf("message.submit", "command.status", "session.cancel") else emptyList(), emptyList(), listOf(sessionId))
+        (if (chatMode || creationMode) listOf("message.submit", "command.status", "session.cancel") else emptyList())+
+        (if(creationMode) listOf("session.create") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
     private val currentRelay = AtomicReference<WebSocket?>()
     @Volatile var relayProofReceived = false
     private var relayScope: RelayScope? = null
@@ -186,9 +191,10 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                 private val epoch = "77777777-7777-4777-8777-777777777777"
                 private val subscription = UUID.randomUUID().toString()
                 private val sync = UUID.randomUUID().toString()
+                private var currentSession=sessionId
                 private fun send(socket: WebSocket, type: String, request: String, payload: JsonObject) {
                     var frame = jsonObject("v" to 1L.json(), "type" to type.json(), "request_id" to request.json(), "runtime_id" to runtimeId.json(), "runtime_epoch" to epoch.json(),
-                        "session_id" to sessionId.json(), "subscription_id" to subscription.json(), "payload" to payload)
+                        "session_id" to currentSession.json(), "subscription_id" to subscription.json(), "payload" to payload)
                     if (type != "session.subscribed") frame = frame.with("sync_id" to sync.json())
                     require(socket.send(JsonDocument.of(frame).canonicalText()))
                 }
@@ -210,13 +216,19 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 return
                             }
                             "session.subscribe" -> {
-                                require(frame.string("runtime_id") == runtimeId && frame.string("session_id") == sessionId && sessionId in subscribedScope.sessions)
+                                currentSession=frame.string("session_id")
+                                require(frame.string("runtime_id") == runtimeId && (currentSession==sessionId && sessionId in subscribedScope.sessions || currentSession in createdSessions && workspaceId in subscribedScope.workspaces))
                                 val requestId = frame.string("request_id")
                                 if (runtimeOffline) {
-                                    webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "error".json(), "request_id" to requestId.json(), "runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "payload" to jsonObject("code" to "runtime.offline".json()))).canonicalText())
+                                    webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "error".json(), "request_id" to requestId.json(), "runtime_id" to runtimeId.json(), "session_id" to currentSession.json(), "payload" to jsonObject("code" to "runtime.offline".json()))).canonicalText())
                                     return
                                 }
                                 send(webSocket, "session.subscribed", requestId, jsonObject())
+                                if(currentSession in createdSessions) {
+                                    send(webSocket,"session.snapshot",requestId,jsonObject("cursor" to (-1L).json(),"has_more" to JsonBoolean(false),"records" to JsonArray(emptyList()),"assistant" to JsonNull))
+                                    send(webSocket,"session.checkpoint",requestId,jsonObject("state" to "persisted".json(),"through_seq" to (-1L).json()))
+                                    subscriptions.incrementAndGet(); return
+                                }
                                 send(webSocket, "session.snapshot", requestId, jsonObject("cursor" to 2L.json(), "has_more" to JsonBoolean(true), "records" to JsonArray(listOf(user(2, "电脑当前消息"))), "assistant" to jsonObject("revision" to 0L.json())))
                                 send(webSocket, "session.checkpoint", requestId, jsonObject("state" to "persisted".json(), "through_seq" to 2L.json()))
                                 subscriptions.incrementAndGet()
@@ -227,16 +239,38 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 send(webSocket, "session.page.result", frame.string("request_id"), jsonObject("records" to JsonArray(listOf(user(0, "最早的消息"), user(1, "更早的消息"))), "has_more" to JsonBoolean(false), "through_seq" to 2L.json()))
                                 return
                             }
+                            "session.create.options.get" -> {
+                                require(creationMode && "session.create" in subscribedScope.actions && workspaceId in subscribedScope.workspaces)
+                                if(runtimeOffline) webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(),"type" to "error".json(),"request_id" to frame.string("request_id").json(),"runtime_id" to runtimeId.json(),"payload" to jsonObject("code" to "runtime.offline".json()))).canonicalText())
+                                else webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(),"type" to "session.create.options.result".json(),"request_id" to frame.string("request_id").json(),"runtime_id" to runtimeId.json(),"runtime_epoch" to epoch.json(),
+                                    "payload" to jsonObject("workspaces" to JsonArray(listOf(jsonObject("workspace_id" to workspaceId.json(),"label" to "开发夹具".json()))),"presets" to JsonArray(listOf("fixture".json()))))).canonicalText())
+                                return
+                            }
+                            "session.create" -> {
+                                require(creationMode && "session.create" in subscribedScope.actions && workspaceId in subscribedScope.workspaces)
+                                val intent=cn.edu.ustc.dsh.command.CommandIntent.parse(frame)
+                                require(intent.epoch==epoch && intent.workspaceId==workspaceId && intent.payload.string("preset")=="fixture")
+                                val existing=commandStatuses[intent.requestId]
+                                val status=if(existing!=null) { require(existing.string("payload_sha256")==intent.digest); existing } else {
+                                    val result=UUID.randomUUID().toString(); createdSessions.add(result); creationWrites.incrementAndGet()
+                                    jsonObject("request_id" to intent.requestId.json(),"workspace_id" to workspaceId.json(),"session_id" to result.json(),"state" to "settled".json(),"payload_sha256" to intent.digest.json(),"updated_at" to java.time.Instant.now().toString().json()).also {commandStatuses[intent.requestId]=it}
+                                }
+                                if(dropNextCommandReply) {dropNextCommandReply=false;webSocket.close(1001,"fixture response lost");return}
+                                webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(),"type" to "command.receipt".json(),"request_id" to intent.requestId.json(),"runtime_id" to runtimeId.json(),"runtime_epoch" to epoch.json(),"session_id" to status.string("session_id").json(),
+                                    "payload" to JsonObject(status.fields.filterKeys {it in setOf("state","payload_sha256","updated_at","workspace_id")}))).canonicalText())
+                                return
+                            }
                             "message.submit", "session.cancel" -> {
-                                require(chatMode && frame.string("runtime_id") == runtimeId && frame.string("session_id") == sessionId)
+                                val target=frame.string("session_id")
+                                require((chatMode || creationMode) && frame.string("runtime_id") == runtimeId && (target==sessionId || target in createdSessions))
                                 val intent = cn.edu.ustc.dsh.command.CommandIntent.parse(frame)
                                 require(intent.kind.wire in subscribedScope.actions)
                                 commandWrites.incrementAndGet()
                                 val state = if (intent.kind == cn.edu.ustc.dsh.command.CommandKind.MESSAGE) "agent_queued" else "settled"
-                                val status = jsonObject("request_id" to intent.requestId.json(), "session_id" to sessionId.json(), "state" to state.json(), "payload_sha256" to intent.digest.json(), "updated_at" to java.time.Instant.now().toString().json())
+                                val status = jsonObject("request_id" to intent.requestId.json(), "session_id" to target.json(), "state" to state.json(), "payload_sha256" to intent.digest.json(), "updated_at" to java.time.Instant.now().toString().json())
                                 commandStatuses[intent.requestId] = status
                                 if (dropNextCommandReply) { dropNextCommandReply = false; webSocket.close(1001, "fixture response lost"); return }
-                                webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "command.receipt".json(), "request_id" to intent.requestId.json(), "runtime_id" to runtimeId.json(), "runtime_epoch" to epoch.json(), "session_id" to sessionId.json(),
+                                webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "command.receipt".json(), "request_id" to intent.requestId.json(), "runtime_id" to runtimeId.json(), "runtime_epoch" to epoch.json(), "session_id" to target.json(),
                                     "payload" to JsonObject(status.fields.filterKeys { it in setOf("state", "payload_sha256", "updated_at") }))).canonicalText())
                                 return
                             }
@@ -248,7 +282,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
                         val capabilities = payload.array("capabilities").map { (it as JsonString).value }
-                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "command.relay.v1", "session.cancel.v1") })
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "command.relay.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1") })
                         require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
                         relayProofReceived = true
                         webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
@@ -303,14 +337,16 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
-        if (path == "/v1/runtimes/$runtimeId/sessions/$sessionId/read-access") {
+        if (path.startsWith("/v1/runtimes/$runtimeId/sessions/") && path.endsWith("/read-access")) {
+            val selected=path.substringAfter("/sessions/").substringBefore('/')
+            require(selected==sessionId || selected in createdSessions)
             if (!allowSessionRead) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
             val issued = System.currentTimeMillis()
-            return resourceResponse(data(jsonObject("runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "workspace_id" to JsonNull, "grant_version" to 7L.json(),
+            return resourceResponse(data(jsonObject("runtime_id" to runtimeId.json(), "session_id" to selected.json(), "workspace_id" to (if(selected in createdSessions) workspaceId.json() else JsonNull), "grant_version" to 7L.json(),
                 "issued_at" to java.time.Instant.ofEpochMilli(issued).toString().json(), "expires_at" to java.time.Instant.ofEpochMilli(minOf(issued + 300_000, claims.integer("exp") * 1000)).toString().json())))
         }
         if (path.startsWith("/v1/commands/")) {
-            require(chatMode && request.requestUrl!!.queryParameter("device_id") == deviceId)
+            require((chatMode || creationMode) && request.requestUrl!!.queryParameter("device_id") == deviceId)
             val status = commandStatuses[path.substringAfterLast('/')]
             return if (status != null) resourceResponse(data(status)) else resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
         }
@@ -347,7 +383,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val body = JsonDocument.parse(request.body.readByteArray()).root
             require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
             relayScope = RelayScope.parse(body.obj("scope"))
-            require("session.read" in relayScope!!.actions && relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "command.status") })
+            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "command.status", "session.create") })
             relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
             relayAccessExpiresAt = claims.integer("exp") * 1000
             ticketRequests.incrementAndGet()
@@ -356,7 +392,9 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         }
         if (path == "/v1/runtimes/$runtimeId/sessions") {
             sessionRequests.incrementAndGet()
-            val result = resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("session_id" to sessionId.json(), "workspace_id" to JsonNull, "state" to "available".json(), "last_persisted_seq" to 2L.json(), "updated_at" to java.time.Instant.now().toString().json()))))))
+            val rows=listOf(jsonObject("session_id" to sessionId.json(), "workspace_id" to JsonNull, "state" to "available".json(), "last_persisted_seq" to 2L.json(), "updated_at" to java.time.Instant.now().toString().json()))+
+                createdSessions.map {id->jsonObject("session_id" to id.json(),"workspace_id" to workspaceId.json(),"state" to "available".json(),"last_persisted_seq" to (-1L).json(),"updated_at" to java.time.Instant.now().toString().json())}
+            val result = resourceResponse(data(jsonObject("items" to JsonArray(rows))))
             return if (holdSessions) result.setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS) else result
         }
         if (path == "/v1/hosts") {
@@ -366,7 +404,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         require(path == "/v1/runtimes")
         if (bindingMode && (!bindingApproved || bindingConfirmedElsewhere)) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
         return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
-            "access" to jsonObject("role" to (if (bindingMode) "owner" else if (chatMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+            "access" to jsonObject("role" to (if (bindingMode) "owner" else if (chatMode || creationMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
     }
 
     fun bindingDetails(): JsonObject = jsonObject("enrollment_id" to bindingId.json(), "request_id" to "99999999-9999-4999-8999-999999999999".json(), "organization_id" to organizationId.json(),

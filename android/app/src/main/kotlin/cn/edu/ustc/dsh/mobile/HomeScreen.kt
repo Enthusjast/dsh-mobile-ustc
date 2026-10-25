@@ -27,15 +27,18 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
     if (state.phase == HomePhase.READY && bindingState != null) {
         BackHandler { model.closeBinding() }
         HostBindingScreen(bindingState, state.subject, model::previewBinding, model::queryBinding, model::confirmBinding, model::refreshBinding, model::enterAnotherBinding, model::closeBinding, onCancel)
+    } else if(state.phase==HomePhase.READY && state.creation!=null) {
+        BackHandler { model.back() }
+        SessionCreationScreen(state,model::createSession,model::refreshCreationOptions,model::queryCreation,model::sendPendingCreation,model::openCreatedSession,model::back,onCancel)
     } else if (state.phase == HomePhase.READY && state.selectedRuntimeId != null) {
         BackHandler { model.back() }
         SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
-            model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession)
-    } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding)
+            model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, {state.selectedRuntimeId?.let(model::openCreation)})
+    } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding,model::openCreation)
 }
 
 @Composable
-fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit, onRuntime: (String) -> Unit = {}, onBinding: () -> Unit = {}) {
+fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit, onRuntime: (String) -> Unit = {}, onBinding: () -> Unit = {}, onCreate: (String)->Unit={}) {
     var name by rememberSaveable { mutableStateOf("${Build.MANUFACTURER} ${Build.MODEL}".trim()) }
     val displayName = state.deviceName ?: name
     val nameValid = displayName.trim().isNotEmpty() && displayName.trim().toByteArray(Charsets.UTF_8).size <= 160 && displayName.none { it < ' ' || it == '\u007f' }
@@ -139,6 +142,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                                 Text("运行环境 ${runtime.id.take(8)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 if (runtime.version.isNotEmpty()) Text("DSH ${runtime.version}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 OutlinedButton({ onRuntime(runtime.id) }, enabled = runtime.access?.organizationId != null && runtime.access.canList(), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看会话") }
+                                if(runtime.access?.creationScope()!=null) OutlinedButton({onCreate(runtime.id)},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text("创建新会话") }
                             }
                         }
                     }

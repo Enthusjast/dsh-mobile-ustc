@@ -107,10 +107,10 @@ internal class AccountPersistence(private val context: Context, slot: String, pr
         SqlCommandJournal.open(context, owner)
     }
     suspend fun revokeCommands(owner: CommandOwner, runtime: String, stamp: Long) = transaction(stamp) {
-        SqlCommandJournal.open(context, owner).use { journal -> runBlocking { journal.revokeRuntime(runtime) } }
+        SqlCommandJournal.open(context, owner).use { journal -> runBlocking { journal.revokeSessionCommands(runtime) } }
     }
     suspend fun retainHistory(owner: CommandOwner, scopes: Map<String, RelayScope>, stamp: Long) = transaction(stamp) {
-        SqlCommandJournal.open(context, owner).use { journal -> runBlocking { journal.retainTranscripts(scopes) } }
+        SqlCommandJournal.open(context, owner).use { journal -> runBlocking { journal.retainTranscripts(scopes); journal.retainCreations(scopes) } }
     }
 
     suspend fun clear(stamp: Long, extra: ScopeReference?) = transaction(stamp) {

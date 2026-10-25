@@ -420,6 +420,12 @@ paths:
         Negotiating `session.create.v1` allows `session.create` with the current runtime_epoch and
         payload {workspace_id, preset}, before a session UUID exists. It requires session.create
         and workspace scope; the host maps the UUID to one configured local workspace and preset.
+        The additive session.create_options.v1 extension uses host session.create.options / .ack
+        and phone session.create.options.get / .result frames for current scoped workspace UUIDs,
+        explicit public labels and allowed preset tokens. Snapshots are held only by the active
+        host connection, bounded to 128 workspaces / 128 presets and 16 MiB across live hosts.
+        Labels have at most 32 scalar characters / 128 UTF-8 bytes; no local paths or definitions
+        are returned. The service rechecks the current phone lease and workspace scope.
         Creation receipts include payload.workspace_id; a settled receipt adds the resulting
         session_id. Matching retries return stored state; changed bodies conflict. Peers may negotiate
         `question.blocking.v1` for question.snapshot frames on a scoped session subscription and

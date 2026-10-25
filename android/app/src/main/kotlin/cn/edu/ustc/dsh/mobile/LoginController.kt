@@ -38,6 +38,7 @@ data class HomeState(
     val reader: SessionReadState? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
     val outbox: CommandOutboxState? = null, val commandError: String? = null, val submitting: Boolean = false, val composerRevision: Long = 0,
+    val creation: SessionCreationState? = null,
 )
 
 internal class LoginEnvironment(
@@ -79,6 +80,10 @@ class LoginController internal constructor(private val context: Context, private
     private var readerJob: Job? = null
     private var reader: SessionReader? = null
     private var desired: Pair<String, String?>? = null
+    private var creationDesired: String? = null
+    private var creationReturnsToRuntime = false
+    private var creationFlow: SessionCreationFlow? = null
+    private var creationCollector: Job? = null
     private var commandJournal: SqlCommandJournal? = null
     private var commandCollector: Job? = null
     private var commandJob: Job? = null
@@ -458,12 +463,13 @@ class LoginController internal constructor(private val context: Context, private
                 if (access.organizationId != null && access.organizationId != configuration!!.organizationId) return@mapNotNull null
                 RuntimeRow(access.id, access.hostId, access.dshVersion, names[access.hostId] ?: "已授权的电脑", access)
             }
-            val oldAccess = mutable.value.runtimes.firstOrNull { it.id == desired?.first }?.access
+            val selectedContext = creationDesired ?: desired?.first
+            val oldAccess = mutable.value.runtimes.firstOrNull { it.id == selectedContext }?.access
             val removedRead = mutable.value.runtimes.filter { old ->
                 old.access?.scope?.actions?.contains("session.read") == true && items.firstOrNull { it.id == old.id }?.access?.scope?.actions?.contains("session.read") != true
             }.map { it.id }
             mutable.value = mutable.value.copy(runtimes = items, error = null)
-            val activeAccess = items.firstOrNull { it.id == desired?.first }?.access
+            val activeAccess = items.firstOrNull { it.id == selectedContext }?.access
             if (oldAccess != null && activeAccess != null && (oldAccess.grantVersion != activeAccess.grantVersion || activeAccess.scope?.let { oldAccess.scope?.same(it) } != true)) retireNavigation(true)
             if (removedRead.isNotEmpty()) {
                 val saved = checkpoint!!
@@ -477,12 +483,19 @@ class LoginController internal constructor(private val context: Context, private
             }
             val dataOwner = checkpoint!!.let { CommandOwner(it.accountId, it.organizationId, configuration!!.fingerprint, it.userId, it.deviceId!!) }
             try {
-                persistence.retainHistory(dataOwner, items.mapNotNull { item -> item.access?.takeIf { it.canList() }?.scope?.let { item.id to it } }.toMap(), stamp)
+                persistence.retainHistory(dataOwner, items.mapNotNull { item -> item.access?.takeIf { it.protocolVersion==1L && it.expiresAt?.let { expiry -> expiry>now() }!=false }?.scope?.let { item.id to it } }.toMap(), stamp)
                 current(stamp)
             } catch (error: CancellationException) { throw error }
             catch (_: CommandDataException) { current(stamp) /* Online reading remains available if local data cannot open. */ }
+            val pendingCreation=creationDesired
             val selection = desired
-            if (selection != null) {
+            if(pendingCreation!=null) {
+                val entry=items.firstOrNull { it.id==pendingCreation }?.access
+                if(entry?.creationScope()==null || entry.organizationId!=configuration!!.organizationId) {
+                    retireNavigation(false)
+                    mutable.value=mutable.value.copy(selectedRuntimeId=null,selectedSessionId=null,sessions=emptyList(),reader=null,creation=null)
+                } else if(foreground && creationFlow==null) openCreationInternal(pendingCreation,true)
+            } else if (selection != null) {
                 val entry = items.firstOrNull { it.id == selection.first }?.access
                 if (entry?.canList() != true || entry.organizationId != configuration!!.organizationId) {
                     retireNavigation(false)
@@ -501,9 +514,10 @@ class LoginController internal constructor(private val context: Context, private
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
         reader?.close(); reader = null
+        creationCollector?.cancel(); creationCollector=null; creationFlow?.close(); creationFlow=null
         commandJournal?.close(); commandJournal = null
-        mutable.value = mutable.value.copy(outbox = null, commandError = null, submitting = false)
-        if (!keepDesired) desired = null
+        mutable.value = mutable.value.copy(outbox = null, commandError = null, submitting = false, creation=null)
+        if (!keepDesired) { desired = null; creationDesired=null }
     }
     fun foreground(active: Boolean) {
         if (foreground == active) return
@@ -515,13 +529,69 @@ class LoginController internal constructor(private val context: Context, private
                 outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1)
         } else if (mutable.value.phase == HomePhase.READY && binding == null) {
             if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
+            else if(creationDesired!=null) openCreationInternal(creationDesired!!,true)
             else desired?.let { navigateRuntime(it.first, it.second) }
         }
     }
     private fun navigation(block: suspend CoroutineScope.() -> Unit) {
         val task = scope.launch(start = CoroutineStart.LAZY, block = block); navigationJob = task; task.start()
     }
-    fun openRuntime(id: String) = navigateRuntime(id, null)
+    fun openRuntime(id: String) { creationDesired=null; navigateRuntime(id, null) }
+    fun openCreation(id: String) = openCreationInternal(id,false)
+    private fun openCreationInternal(id: String, restoring: Boolean) {
+        if(!foreground || mutable.value.phase!=HomePhase.READY || binding!=null) return
+        val row=mutable.value.runtimes.firstOrNull { it.id==id }?.access ?: return
+        val allowed=row.creationScope() ?: return
+        if(row.organizationId!=configuration!!.organizationId) return
+        if(!restoring) creationReturnsToRuntime=mutable.value.selectedRuntimeId==id && mutable.value.selectedSessionId==null
+        creationDesired=id; desired=null
+        if(session!!.accessExpiresAt-now()<=environment.minimumValidityMillis) { renew(); return }
+        retireNavigation(true)
+        val stamp=generation; val view=navigationGeneration; val resource=api!!; val saved=checkpoint!!
+        val dataOwner=CommandOwner(saved.accountId,saved.organizationId,configuration!!.fingerprint,saved.userId,saved.deviceId!!)
+        mutable.value=mutable.value.copy(selectedRuntimeId=id,selectedSessionId=null,sessions=emptyList(),loadingSessions=false,sessionError=null,reader=null,creation=SessionCreationState())
+        navigation {
+            var database: SqlCommandJournal?=null
+            try {
+                withContext(NonCancellable) { database=persistence.commands(dataOwner,stamp) }
+                current(stamp); if(view!=navigationGeneration) return@navigation
+                val opened=resource.sessionCreator(saved.deviceId!!,id,allowed,database!!,scope)
+                commandJournal=database; database=null; creationFlow=opened
+                creationCollector=scope.launch {
+                    opened.state.collect { next ->
+                        if(generation!=stamp || navigationGeneration!=view || creationFlow!==opened || !foreground) return@collect
+                        mutable.value=mutable.value.copy(creation=next)
+                        if(next.phase==SessionCreationPhase.AUTH_REQUIRED && mutable.value.phase==HomePhase.READY) renew()
+                        else if(next.phase==SessionCreationPhase.REVOKED && mutable.value.phase==HomePhase.READY) refresh()
+                    }
+                }
+            } catch(error: CancellationException) { throw error }
+            catch(error: Exception) { if(generation==stamp && view==navigationGeneration) mutable.value=mutable.value.copy(creation=SessionCreationState(SessionCreationPhase.ERROR,error=code(error))) }
+            finally { database?.close() }
+        }
+    }
+    fun createSession(workspace: String,preset: String,epoch: String) {
+        if(!foreground || mutable.value.phase!=HomePhase.READY || mutable.value.submitting) return
+        val opened=creationFlow ?: return
+        val stamp=generation; val view=navigationGeneration
+        mutable.value=mutable.value.copy(submitting=true,commandError=null)
+        commandJob=scope.launch {
+            try { opened.create(workspace,preset,epoch); current(stamp); if(view==navigationGeneration) mutable.value=mutable.value.copy(creation=opened.state.value) }
+            catch(error: CancellationException) { throw error }
+            catch(error: Exception) { if(generation==stamp && view==navigationGeneration) mutable.value=mutable.value.copy(commandError=code(error)) }
+            finally { if(generation==stamp && view==navigationGeneration) mutable.value=mutable.value.copy(submitting=false) }
+        }
+    }
+    fun refreshCreationOptions() = creationFlow?.refreshOptions()
+    fun queryCreation() = creationFlow?.query()
+    fun sendPendingCreation(id: String) = creationFlow?.sendPending(id)
+    fun openCreatedSession(request: String) {
+        val runtime=mutable.value.selectedRuntimeId ?: return
+        val record=mutable.value.creation?.outbox?.records?.firstOrNull { it.intent.requestId==request && it.remote==RemoteCommandState.SETTLED } ?: return
+        val result=record.createdSessionId ?: return
+        if(mutable.value.runtimes.firstOrNull { it.id==runtime }?.access?.canList()!=true) return
+        retireNavigation(false); navigateRuntime(runtime,result)
+    }
     private fun navigateRuntime(id: String, resumeSession: String?) {
         if (!foreground || mutable.value.phase != HomePhase.READY || binding != null) return
         val row = mutable.value.runtimes.firstOrNull { it.id == id } ?: return
@@ -628,6 +698,14 @@ class LoginController internal constructor(private val context: Context, private
     fun refreshSessions() { mutable.value.selectedRuntimeId?.let { navigateRuntime(it, null) } }
     fun back() {
         if (binding != null) { closeBinding(); return }
+        if(creationDesired!=null || mutable.value.creation!=null) {
+            val target=creationDesired ?: mutable.value.selectedRuntimeId
+            val directory=creationReturnsToRuntime
+            retireNavigation(false)
+            mutable.value=mutable.value.copy(selectedRuntimeId=null,selectedSessionId=null,creation=null)
+            if(directory && target!=null) navigateRuntime(target,null)
+            return
+        }
         val runtime = mutable.value.selectedRuntimeId ?: return
         if (mutable.value.selectedSessionId != null) {
             retireNavigation(false); desired = runtime to null
@@ -738,6 +816,12 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun foreground(active: Boolean) = login.foreground(active)
     fun openRuntime(id: String) = login.openRuntime(id)
     fun openSession(id: String) = login.openSession(id)
+    fun openCreation(id: String) = login.openCreation(id)
+    fun createSession(workspace: String,preset: String,epoch: String) = login.createSession(workspace,preset,epoch)
+    fun refreshCreationOptions() = login.refreshCreationOptions()
+    fun queryCreation() = login.queryCreation()
+    fun sendPendingCreation(id: String) = login.sendPendingCreation(id)
+    fun openCreatedSession(id: String) = login.openCreatedSession(id)
     fun loadOlder() = login.loadOlder()
     fun retryRead() = login.retryRead()
     fun refreshSessions() = login.refreshSessions()
