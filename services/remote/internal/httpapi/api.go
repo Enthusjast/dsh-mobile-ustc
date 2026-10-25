@@ -66,11 +66,12 @@ type Repository interface {
 }
 
 type API struct {
-	database    Repository
-	identity    *auth.Authenticator
-	hostClients map[string]struct{}
-	realtime    *relay.Server
-	files       *files.Service
+	database     Repository
+	identity     *auth.Authenticator
+	hostClients  map[string]struct{}
+	realtime     *relay.Server
+	files        *files.Service
+	fileHandoffs *files.Handoffs
 }
 
 type Handler struct {
@@ -100,6 +101,7 @@ type Config struct {
 	HostClientIDs []string
 	Approvals     *relay.ApprovalConfig
 	Files         *files.Service
+	FileHandoffs  *files.Handoffs
 }
 
 type deviceRequest struct {
@@ -180,6 +182,11 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 		mux.Handle("GET /v1/files/{id}", api.protected(http.HandlerFunc(api.fileStatus)))
 		mux.Handle("POST /v1/files/{id}/upload-url", api.protected(http.HandlerFunc(api.fileUploadURL)))
 		mux.Handle("POST /v1/files/{id}/commit", api.protected(http.HandlerFunc(api.commitFile)))
+		if configs[0].FileHandoffs != nil {
+			api.fileHandoffs = configs[0].FileHandoffs
+			realtime.EnableFiles(api.fileHandoffs)
+			mux.HandleFunc("GET /v1/host-files/{id}/content", api.hostFileContent)
+		}
 	}
 	return &Handler{router: mux, realtime: realtime}
 }

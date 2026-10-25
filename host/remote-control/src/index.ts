@@ -10,6 +10,7 @@ import { startDebugServer } from './debug-server.js'
 import { startHostRelay, type HostCredentialProvider } from './relay-client.js'
 import { SignedApprovals, type SignedApprovalOptions } from './signed-approvals.js'
 import { RelayApprovals } from './relay-approvals.js'
+import { RelayFiles } from './relay-files.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
 
@@ -87,6 +88,7 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
           url: options.relayUrl, runtime, credentials,
           dshVersion: '0.2.1-rc.2', applicationVersion: options.applicationVersion!, pluginVersion: '0.0.1',
           ...(signed ? { approvals: binding => new RelayApprovals(signed!, binding) } : {}),
+          files: binding => new RelayFiles(runtime!.files, binding),
         })
       } catch (error) {
         await relay?.close()
@@ -97,7 +99,7 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
         try { await relay?.close() }
         finally {
           try { await server?.close() }
-          finally { signed?.close(); journal.close() }
+          finally { runtime?.close(); signed?.close(); journal.close() }
         }
       }
     } catch (error) {

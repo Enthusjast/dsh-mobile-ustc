@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
+	"dsh-mobile-ustc/services/remote/internal/files"
 	"dsh-mobile-ustc/services/remote/internal/store"
 	"github.com/coder/websocket"
 )
@@ -76,6 +77,7 @@ type Server struct {
 	creationOptionsBytes int
 	subscriptions        map[string]*sessionSubscription
 	approvals            *approvalRouter
+	fileHandoffs         *files.Handoffs
 }
 
 type liveConnection struct {
@@ -100,6 +102,7 @@ type liveConnection struct {
 	creationOptionsBytes int
 	subscriptions        map[string]*sessionSubscription
 	closing              bool // Protected by Server.mu; prevents admission during unregister.
+	filePeer             *filePeer
 }
 
 type outboundFrame struct {
@@ -211,6 +214,9 @@ func (server *Server) capabilities() []string {
 	capabilities := append([]string{}, supportedCapabilities...)
 	if server.approvals != nil {
 		capabilities = append(capabilities, approvalCapability, approvalInvalidationCapability)
+	}
+	if server.fileHandoffs != nil {
+		capabilities = append(capabilities, files.HandoffCapability)
 	}
 	return capabilities
 }
@@ -649,6 +655,7 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 	leaseCtx, cancel := context.WithDeadline(parent, leaseExpiresAt)
 	defer cancel()
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
+	accepted = slices.DeleteFunc(accepted, func(capability string) bool { return capability == files.HandoffCapability })
 	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "device", "connection_id": connectionID,
@@ -764,6 +771,9 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 		return
 	}
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
+	if !slices.Contains(accepted, "session.catalog.v1") {
+		accepted = slices.DeleteFunc(accepted, func(capability string) bool { return capability == files.HandoffCapability })
+	}
 	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "host", "connection_id": connectionID,
@@ -780,6 +790,11 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 }
 
 func (server *Server) runHeartbeat(parent context.Context, live *liveConnection, host *store.RuntimeConnection) {
+	if host != nil && server.fileHandoffs != nil && live.supports(files.HandoffCapability) {
+		peer := server.startFilePeer(parent, live)
+		live.filePeer = peer
+		defer peer.close()
+	}
 	connection := live.conn
 	for {
 		readCtx, cancel := context.WithTimeout(parent, connectionIdleTime)
@@ -799,6 +814,14 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			return
 		}
 		switch envelope.Type {
+		case "file.renew", "file.staged", "file.release":
+			if live.filePeer == nil || live.peer.role != "installation" {
+				server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+				continue
+			}
+			if !live.filePeer.enqueue(envelope) {
+				server.sendProtocolError(parent, live, "rate.limited", &envelope)
+			}
 		case "ping":
 			if !frameHasNoRoutingFields(envelope) {
 				server.sendProtocolError(parent, live, "protocol.invalid", nil)

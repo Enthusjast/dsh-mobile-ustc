@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "runtime_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_epoch": "99999999-9999-4999-8999-999999999999",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "type": "file.staged",
+  "payload": {
+    "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "file_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "name": "资料.txt",
+    "size_bytes": 3,
+    "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  }
+}

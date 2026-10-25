@@ -1,6 +1,6 @@
 # 文件 REST 与后台服务
 
-文件登记、隔离上传、扫描、候选写入、状态确认及后台清理现已接入正常 Go 服务入口。文件到原生 DSH 的 offer / 接收和 Android 文件入口尚未接入；`clean` 不表示 Host 收到文件、生成 receipt 或消息入队。
+文件登记、隔离上传、扫描、候选写入、状态确认及后台清理现已接入正常 Go 服务入口。启用文件服务后，扫描通过的对象可通过 [Host 交接](file-host-handoffs.md) 暂存到真实 DSH 会话；Android 文件入口和消息附件引用仍待接入。`clean` 不表示 Host 收到文件、生成 receipt 或消息入队。
 
 ## 启用与配置
 
@@ -24,7 +24,7 @@ scanner policy 读取实际部署的 clamd 配置（或内容一致的受保护�
 
 ## 当前 REST
 
-全部入口通过原有学校身份 / DPoP 中间件、手机客户端限制及活动设备检查。短操作的数据库 / 签名上下文最多三秒，且不超过已验证 token 的实际到期时间。没有客户端提供的 uploader、device、object key、lease 或本地路径选择器。
+下表的手机入口通过原有学校身份 / DPoP 中间件、手机客户端限制及活动设备检查。短操作的数据库 / 签名上下文最多三秒，且不超过已验证 token 的实际到期时间。没有客户端提供的 uploader、device、object key、lease 或本地路径选择器。Host 使用单独的 [安装密钥绑定读取入口](file-host-handoffs.md)。
 
 | 入口 | 行为 |
 | --- | --- |
@@ -57,4 +57,4 @@ scanner policy 读取实际部署的 clamd 配置（或内容一致的受保护�
 - 配置后启动实际编译的 `cmd/remote` 子进程，自动 worker完成扫描，SIGTERM 正常退出，日志无文件名 / capability / 私钥内容。
 - 后台 GC 实际删除源 / 候选对象后才释放 PostgreSQL 配额；完整 Go race、Kotlin TLS 和 npm DSH 回归保持通过。
 
-本机记录：`.local/files-api-host-final.log`、`.local/files-api-unit-final.log`、`.local/files-api-backend-final.log`。对象协议夹具在内存中用 AES-GCM 保存字节；clamd 对端是协议夹具。没有声称运行真实 KMS、实际病毒签名引擎或完成文件 APK 到 DSH 验收。主机 offer、当前 epoch 的交接授权、receipt 引用、受限导出和手机 UI 仍需继续实现。
+本节原始记录：`.local/files-api-host-final.log`、`.local/files-api-unit-final.log`、`.local/files-api-backend-final.log`。随后完成的 Host offer、当前 epoch / connection 的交接授权与真实 DSH receipt 暂存见 [交接记录](file-host-handoffs.md)。对象协议夹具在内存中用 AES-GCM 保存字节；clamd 对端是协议夹具。没有声称运行真实 KMS、实际病毒签名引擎或完成文件 APK 到 DSH 验收。消息 receipt 引用、受限导出和手机 UI 仍需继续实现。

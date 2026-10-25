@@ -56,6 +56,7 @@ func run() error {
 	apiConfig := httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig}
 	if fileRuntime != nil {
 		apiConfig.Files = fileRuntime.service
+		apiConfig.FileHandoffs = fileRuntime.handoffs
 	}
 	handler := httpapi.New(database, verifier, apiConfig)
 	server := &http.Server{

@@ -88,3 +88,5 @@ Relay 双方协商 `session.read.v1` 后，可打开按连接隔离的会话订�
 另运行 `npm run test:remote-dsh` 可启动真实 Go 服务、隔离 PostgreSQL 和同一本机 npm DSH，验证完整的登记、双端绑定、密钥证明、目录、聊天读取与撤权链路。该测试已通过；身份、模型和密钥 provider 使用本地夹具，学校 IdP、Android 和生产密钥库仍待验收。运行条件及数据边界见 [联合测试记录](../../docs/go-dsh-integration.md)。
 
 手机创建选项通过 `session.create_options.v1` 发布到当前主机连接，包含已登记工作区 UUID、公开 label 和允许的 preset token。每个快照最多 128 个工作区和 128 个 preset，label 最多 32 个 Unicode 字符／128 字节。未配置 label 时只使用工作区 UUID 的短标识；不导出本地工作区引用、路径、preset 定义或模型凭据。详情见 [创建协议](../../docs/session-create-protocol.md) 和 [Android 创建流程](../../docs/android-session-creation.md)。
+
+双方协商 `file.handoff.v1` 后，插件通过当前安装密钥和连接绑定的一次性读取证明下载 clean 对象，校验内容后暂存原生会话 receipt。receipt 由五秒续租、当前连接和原始上传设备约束，断线 / 撤权 / 会话释放后失效。手机消息附件引用仍待实现；详见 [Host 文件交接](../../docs/file-host-handoffs.md)。

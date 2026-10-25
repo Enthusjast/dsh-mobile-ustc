@@ -10,7 +10,7 @@ export const MAX_FILE_CHUNK_BYTES = 64 * 1024
 
 /** Transfer metadata describes bytes from quarantine, never a host filesystem path. */
 export const fileManifest = z.strictObject({
-  name: z.string().min(1).refine(name => Buffer.byteLength(name) <= 512 && name.trim().length > 0
+  name: z.string().min(1).max(512).regex(/^[^\\/\p{Cc}\p{Cs}]+$/u).refine(name => Buffer.byteLength(name) <= 512 && name.trim().length > 0
     && name !== '.' && name !== '..' && !/[\\/\p{Cc}\p{Cs}]/u.test(name)),
   size_bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),

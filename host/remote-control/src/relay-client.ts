@@ -11,6 +11,8 @@ import { questionAnswerPayload } from './questions.js'
 import { APPROVAL_INVALIDATION_CAPABILITY, SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
 import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approvals.js'
 import { CREATION_OPTIONS_CAPABILITY, creationOptionsSchema, type SessionCreationOptions } from './creation-options.js'
+import { FILE_HANDOFF_CAPABILITY } from './file-protocol.js'
+import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
@@ -130,6 +132,7 @@ export interface HostRelayOptions {
   applicationVersion: string
   pluginVersion: string
   approvals?: HostApprovalPeerFactory
+  files?: (binding: FileTransportBinding) => HostFilePeer
 }
 
 interface RelaySocket {
@@ -413,6 +416,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   let creationOptionsTimer: NodeJS.Timeout | undefined
   let sessions: RelaySessions | undefined
   let approvals: HostApprovalPeer | undefined
+  let files: HostFilePeer | undefined
   const abortConnection = () => {
     connection.abort()
     socket.terminate()
@@ -432,6 +436,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     } catch { /* The bounded metadata extension is unavailable; core Relay operations remain independent. */ }
     const offered: string[] = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
     if (sourceOptions) offered.push(CREATION_OPTIONS_CAPABILITY)
+    if (options.files) offered.push(FILE_HANDOFF_CAPABILITY)
     const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
@@ -459,6 +464,14 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     }
 
     if (options.approvals && (![SIGNED_APPROVAL_CAPABILITY,APPROVAL_INVALIDATION_CAPABILITY,'session.catalog.v1'].every(capability=>ack.data.payload.capabilities.includes(capability)))) throw new ProbeError('protocol.unsupported')
+    if (options.files && ack.data.payload.capabilities.includes(FILE_HANDOFF_CAPABILITY)) {
+      if (!ack.data.payload.capabilities.includes('session.catalog.v1')) throw new ProbeError('protocol.unsupported')
+      const origin = new URL(url)
+      origin.protocol = origin.protocol === 'wss:' ? 'https:' : 'http:'
+      files = options.files({ installationId: credential.installationId, connectionId: challenge.connection_id,
+        origin: origin.origin, signer: credential.signer, signal: connection.signal,
+        send: frame => sendFrame(socket, frame), fail: abortConnection })
+    }
 
     const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
     if (ack.data.payload.capabilities.includes('session.read.v1')) sessions = new RelaySessions({
@@ -590,6 +603,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     const handleFrame = async (value: unknown) => {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const frame = value as Record<string, unknown>
+        if (files && await files.handle(value)) return
         if (approvals && await approvals.handle(value)) return
         if (frame.v === 1 && frame.type === 'pong') return
         if (frame.type === 'session.catalog.ack') {
@@ -677,6 +691,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     try { await reader }
     finally { clearInterval(heartbeat) }
   } finally {
+    files?.close()
     approvals?.close()
     sessions?.close()
     if (catalogRetryTimer) clearTimeout(catalogRetryTimer)

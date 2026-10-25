@@ -250,6 +250,11 @@ export class DshClient {
 
   releaseFile(id: SessionId, receiptId: FileUploadReceiptId): boolean { return releaseNativeFile(this.ctx, id, receiptId) }
 
+  fileStaged(id: SessionId, receiptId: FileUploadReceiptId): boolean {
+    const agent = this.ctx.agents.get(id)
+    return agent !== undefined && this.ctx.fileUploads.resolve(agent, receiptId) !== undefined
+  }
+
   private isArchived(id: SessionId): boolean { return this.ctx.workspaceRegistry.archivedSessionIds.includes(id) }
 
   private requireUnarchived(id: SessionId): void {

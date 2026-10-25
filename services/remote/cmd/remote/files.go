@@ -61,8 +61,9 @@ type fileCredentials struct {
 	SessionToken    string `json:"session_token,omitempty"`
 }
 type fileRuntime struct {
-	service *files.Service
-	storage *files.S3
+	service  *files.Service
+	storage  *files.S3
+	handoffs *files.Handoffs
 }
 
 func (runtime *fileRuntime) Close() {
@@ -299,6 +300,10 @@ func loadFileRuntime(path string, database *store.Postgres) (*fileRuntime, error
 	if err != nil {
 		return nil, errFileConfiguration
 	}
+	handoffs, err := files.NewHandoffs(repository, storage, policy)
+	if err != nil {
+		return nil, errFileConfiguration
+	}
 	complete = true
-	return &fileRuntime{service: service, storage: storage}, nil
+	return &fileRuntime{service: service, storage: storage, handoffs: handoffs}, nil
 }

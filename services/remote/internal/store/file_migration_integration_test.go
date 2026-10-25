@@ -22,6 +22,13 @@ func TestPostgresFileMigrationRollbackCannotReviveUnboundCleanRows(t *testing.T)
 		t.Fatal("migration source unavailable")
 	}
 	directory := filepath.Join(filepath.Dir(source), "../../../../deploy/sql")
+	dependent, err := os.ReadFile(filepath.Join(directory, "010_file_handoffs.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.database.DB.ExecContext(h.ctx, string(dependent)); err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"009_file_transfers.down.sql", "009_file_transfers.up.sql"} {
 		body, err := os.ReadFile(filepath.Join(directory, name))
 		if err != nil {
@@ -34,6 +41,13 @@ func TestPostgresFileMigrationRollbackCannotReviveUnboundCleanRows(t *testing.T)
 		if err := h.database.DB.QueryRowContext(h.ctx, `select state from files where id=$1`, file.ID).Scan(&state); err != nil || state != "expired" {
 			t.Fatalf("rollback restored state=%s error=%v", state, err)
 		}
+	}
+	dependent, err = os.ReadFile(filepath.Join(directory, "010_file_handoffs.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.database.DB.ExecContext(h.ctx, string(dependent)); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := h.repository.Status(h.ctx, h.actor, file.ID); !errors.Is(err, files.ErrAccess) {
 		t.Fatal("migration replay converted old metadata into current authority")

@@ -1,0 +1,46 @@
+{
+  "description": "Public test-only P-256 key material; never use for deployment.",
+  "now": "2026-10-25T12:00:00.000Z",
+  "identity": {
+    "installationId": "11111111-1111-4111-8111-111111111111",
+    "runtimeId": "22222222-2222-4222-8222-222222222222",
+    "epoch": "33333333-3333-4333-8333-333333333333",
+    "connectionId": "44444444-4444-4444-8444-444444444444",
+    "handoffId": "55555555-5555-4555-8555-555555555555",
+    "fileId": "66666666-6666-4666-8666-666666666666",
+    "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "uri": "https://api.example.edu/v1/host-files/55555555-5555-4555-8555-555555555555/content"
+  },
+  "public_jwk": {
+    "kty": "EC",
+    "x": "vQXIEptc1Uq97D3s-scvgu0ZElbNWLlWqHK-PkNIonY",
+    "y": "1_U1sEReeTGRG2lst8jtWs6IoyOWuM_9Fr9YJoxxEMU",
+    "crv": "P-256"
+  },
+  "private_jwk": {
+    "kty": "EC",
+    "x": "vQXIEptc1Uq97D3s-scvgu0ZElbNWLlWqHK-PkNIonY",
+    "y": "1_U1sEReeTGRG2lst8jtWs6IoyOWuM_9Fr9YJoxxEMU",
+    "crv": "P-256",
+    "d": "mJI4QnpcujU4CEUXLaEI_KLcwWrRHB_oi6_ebSg-u-E"
+  },
+  "header": {
+    "typ": "dsh-file-read-proof+jwt",
+    "alg": "ES256"
+  },
+  "claims": {
+    "iss": "11111111-1111-4111-8111-111111111111",
+    "aud": "urn:dsh-mobile-ustc:file-read",
+    "htm": "GET",
+    "htu": "https://api.example.edu/v1/host-files/55555555-5555-4555-8555-555555555555/content",
+    "runtime_id": "22222222-2222-4222-8222-222222222222",
+    "runtime_epoch": "33333333-3333-4333-8333-333333333333",
+    "connection_id": "44444444-4444-4444-8444-444444444444",
+    "handoff_id": "55555555-5555-4555-8555-555555555555",
+    "file_id": "66666666-6666-4666-8666-666666666666",
+    "ath": "DwBzhbb51LfusnSGBa_hqYSgo7-j8BTQnip4TOnlzRo",
+    "iat": 1792929600,
+    "jti": "77777777-7777-4777-8777-777777777777"
+  },
+  "compact": "eyJ0eXAiOiJkc2gtZmlsZS1yZWFkLXByb29mK2p3dCIsImFsZyI6IkVTMjU2In0.eyJpc3MiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdWQiOiJ1cm46ZHNoLW1vYmlsZS11c3RjOmZpbGUtcmVhZCIsImh0bSI6IkdFVCIsImh0dSI6Imh0dHBzOi8vYXBpLmV4YW1wbGUuZWR1L3YxL2hvc3QtZmlsZXMvNTU1NTU1NTUtNTU1NS00NTU1LTg1NTUtNTU1NTU1NTU1NTU1L2NvbnRlbnQiLCJydW50aW1lX2lkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicnVudGltZV9lcG9jaCI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImNvbm5lY3Rpb25faWQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJoYW5kb2ZmX2lkIjoiNTU1NTU1NTUtNTU1NS00NTU1LTg1NTUtNTU1NTU1NTU1NTU1IiwiZmlsZV9pZCI6IjY2NjY2NjY2LTY2NjYtNDY2Ni04NjY2LTY2NjY2NjY2NjY2NiIsImF0aCI6IkR3QnpoYmI1MUxmdXNuU0dCYV9ocVlTZ283LWo4QlRRbmlwNFRPbmx6Um8iLCJpYXQiOjE3OTI5Mjk2MDAsImp0aSI6Ijc3Nzc3Nzc3LTc3NzctNDc3Ny04Nzc3LTc3Nzc3Nzc3Nzc3NyJ9.vaWnCf-eAEfYzC4WXEBKVzWnn9cNml-E5nv-4uLls1FOB1GzrH718f7LlmCzOLxyDElTAinGPQYTY76TTAUlkg"
+}

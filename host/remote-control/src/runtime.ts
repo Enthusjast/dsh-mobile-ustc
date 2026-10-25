@@ -4,6 +4,7 @@ import type { InteractionRouter } from './interaction-router.js'
 import { commandDigest, MemoryCommandJournal, type CommandJournal, type CommandOwner, type CommandState } from './command-journal.js'
 import { type Command, type Frame, ProbeError } from './protocol.js'
 import { SessionSync } from './session-sync.js'
+import { NativeFileRegistry } from './file-registry.js'
 
 const localCommandOwner: CommandOwner = { userId: 'local', deviceId: 'local' }
 const definiteRejections = new Set([
@@ -15,12 +16,14 @@ const definiteRejections = new Set([
 export type CommandStateObserver = (state: CommandState, result?: unknown) => void | Promise<void>
 
 export class ProbeRuntime {
+  readonly files: NativeFileRegistry
   private readonly sync: SessionSync
   private readonly commands = new Map<string, { digest: string; result: Promise<unknown> }>()
   private readonly serial = new Map<string, Promise<unknown>>()
   private closed = false
 
   constructor(readonly client: DshClient, private readonly interactions: InteractionRouter, private readonly journal: CommandJournal = new MemoryCommandJournal(client.runtimeId), readonly epoch = randomUUID()) {
+    this.files = new NativeFileRegistry(client, epoch)
     this.sync = new SessionSync(client, this.epoch, interactions, interactions.timed)
   }
 
@@ -175,5 +178,5 @@ export class ProbeRuntime {
     return this.interactions.timed.claim(sessionId, questionId, signal)
   }
 
-  close(): void { this.closed = true; this.interactions.close() }
+  close(): void { this.closed = true; this.files.close(); this.interactions.close() }
 }

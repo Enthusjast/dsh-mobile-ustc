@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "runtime_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_epoch": "99999999-9999-4999-8999-999999999999",
+  "type": "file.renewed",
+  "payload": {
+    "leases": [
+      {
+        "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "lease_until": "2026-10-25T12:00:05.000Z",
+        "expires_at": "2026-10-25T12:05:00.000Z"
+      }
+    ]
+  }
+}

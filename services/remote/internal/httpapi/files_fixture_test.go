@@ -35,12 +35,14 @@ type fileWireObject struct {
 	checksum          string
 }
 type fileObjectPeer struct {
-	mu         sync.Mutex
-	objects    map[string]fileWireObject
-	aead       cipher.AEAD
-	blockGet   bool
-	getStarted chan struct{}
-	getOnce    sync.Once
+	mu           sync.Mutex
+	objects      map[string]fileWireObject
+	aead         cipher.AEAD
+	blockGet     bool
+	blockHeaders bool
+	getStarted   chan struct{}
+	getCancelled chan struct{}
+	getOnce      sync.Once
 }
 
 func newFileObjectPeer(t *testing.T) (*fileObjectPeer, *files.S3, *httptest.Server) {
@@ -56,7 +58,7 @@ func newFileObjectPeer(t *testing.T) (*fileObjectPeer, *files.S3, *httptest.Serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer := &fileObjectPeer{objects: make(map[string]fileWireObject), aead: aead, getStarted: make(chan struct{})}
+	peer := &fileObjectPeer{objects: make(map[string]fileWireObject), aead: aead, getStarted: make(chan struct{}), getCancelled: make(chan struct{})}
 	server := httptest.NewTLSServer(http.HandlerFunc(peer.serve))
 	t.Cleanup(server.Close)
 	roots := x509.NewCertPool()
@@ -98,6 +100,7 @@ func (peer *fileObjectPeer) serve(response http.ResponseWriter, request *http.Re
 	peer.mu.Lock()
 	object, exists := peer.objects[request.URL.Path]
 	blockGet := peer.blockGet
+	blockHeaders := peer.blockHeaders
 	peer.mu.Unlock()
 	if request.Method == "DELETE" {
 		peer.mu.Lock()
@@ -148,6 +151,12 @@ func (peer *fileObjectPeer) serve(response http.ResponseWriter, request *http.Re
 		response.Header().Set("Content-Length", strconv.FormatInt(object.size, 10))
 	}
 	if request.Method == "GET" {
+		if blockHeaders {
+			peer.getOnce.Do(func() { close(peer.getStarted) })
+			<-request.Context().Done()
+			close(peer.getCancelled)
+			return
+		}
 		response.WriteHeader(200)
 		if flush, ok := response.(http.Flusher); ok {
 			flush.Flush()
@@ -155,6 +164,7 @@ func (peer *fileObjectPeer) serve(response http.ResponseWriter, request *http.Re
 		if blockGet {
 			peer.getOnce.Do(func() { close(peer.getStarted) })
 			<-request.Context().Done()
+			close(peer.getCancelled)
 			return
 		}
 		body, err := peer.aead.Open(nil, object.nonce, object.ciphertext, []byte(request.URL.Path))

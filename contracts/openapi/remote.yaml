@@ -635,8 +635,40 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { description: File service is not configured. }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/host-files/{id}/content:
+    get:
+      description: Host-only proxy read under negotiated file.handoff.v1. The five-second renewable handoff binds the live installation key, runtime epoch, connection, original uploader authority and clean scanner policy. A valid proof atomically consumes the ticket once before object I/O. Revocation, disconnect and expiry cancel pending headers and body reads. Interrupted reads need a new handoff; redirects and range/query selectors are unsupported.
+      security:
+        - HostFileTicket: []
+          HostFileProof: []
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Exact authorized clean object bytes. Host must verify size and SHA-256 before native attachment admission.
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+            Content-Length: { schema: { type: integer, minimum: 0, maximum: 200000000 } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: File service is not configured. }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
+    HostFileTicket:
+      type: http
+      scheme: DSH-File
+      description: Opaque 32-byte base64url one-use ticket received over the current authenticated Host WSS connection. Stored only as SHA-256; never sent to object storage.
+    HostFileProof:
+      type: apiKey
+      in: header
+      name: X-DSH-File-Proof
+      description: Registered installation-key ES256 JWS with typ dsh-file-read-proof+jwt, audience urn:dsh-mobile-ustc:file-read and exact iss/htm/htu/runtime_id/runtime_epoch/connection_id/handoff_id/file_id/ath/iat/jti claims. ath is base64url SHA-256 of the ticket. iat accepts at most 30 seconds skew. Embedded keys and extra claims/header fields are refused.
     DPoP:
       type: http
       scheme: DPoP

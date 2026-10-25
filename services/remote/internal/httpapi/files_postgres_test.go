@@ -154,7 +154,11 @@ func newFileHTTPFixture(t *testing.T) *fileHTTPFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"host-client"}, Files: service})
+	handoffs, err := files.NewHandoffs(repository, storage, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"host-client"}, Files: service, FileHandoffs: handoffs})
 	token := func(client, jkt string) string {
 		now := time.Now()
 		return approvalSign(t, issuer, jose.ES256, "file-issuer", "at+jwt", map[string]any{"iss": "https://id.example.edu", "sub": "file-owner", "aud": "urn:dsh-files", "client_id": client, "jti": "file-access-" + client + jkt, "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "scope": "remote.access", "cnf": map[string]any{"jkt": jkt}}, nil)

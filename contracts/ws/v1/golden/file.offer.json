@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "runtime_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_epoch": "99999999-9999-4999-8999-999999999999",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "type": "file.offer",
+  "payload": {
+    "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "file_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "user_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "device_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "key_version": 1,
+    "grant_version": 3,
+    "name": "资料.txt",
+    "size_bytes": 3,
+    "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "download_token": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+    "lease_until": "2026-10-25T12:00:05.000Z",
+    "expires_at": "2026-10-25T12:05:00.000Z"
+  }
+}
