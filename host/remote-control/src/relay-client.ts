@@ -11,7 +11,7 @@ import { questionAnswerPayload } from './questions.js'
 import { APPROVAL_INVALIDATION_CAPABILITY, SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
 import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approvals.js'
 import { CREATION_OPTIONS_CAPABILITY, creationOptionsSchema, type SessionCreationOptions } from './creation-options.js'
-import { FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY, fileReference } from './file-protocol.js'
+import { FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY, FILE_RECONCILE_CAPABILITY, fileReference } from './file-protocol.js'
 import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
@@ -84,13 +84,15 @@ const submitSchema = z.strictObject({
   }),
 })
 const cancelSchema = submitSchema.extend({ type: z.literal('session.cancel'), payload: z.strictObject({}) })
+const reconcileSchema = submitSchema.extend({ type: z.literal('message.files.reconcile'),
+  payload: submitSchema.shape.payload.refine(payload => payload.content.some(part => part.type === 'file')) })
 const archiveSchema = submitSchema.extend({ type: z.literal('session.archive'), payload: archivePayload })
 const questionSchema = submitSchema.extend({ type: z.literal('question.answer'), payload: questionAnswerPayload })
 const timedQuestionSchema = submitSchema.extend({ type: z.literal('question.timed.answer'), payload: questionAnswerPayload })
 const createSchema = submitSchema.omit({ session_id: true }).extend({
   type: z.literal('session.create'), payload: z.strictObject({ workspace_id: uuid, preset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/) }),
 })
-const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, cancelSchema, archiveSchema, createSchema, questionSchema, timedQuestionSchema])
+const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, reconcileSchema, cancelSchema, archiveSchema, createSchema, questionSchema, timedQuestionSchema])
 type ForwardedCommand = z.infer<typeof forwardedCommandSchema>
 const catalogItemSchema = z.strictObject({
   session_id: uuid,
@@ -127,6 +129,7 @@ export interface HostRelayOptions {
       creationOptions?(): SessionCreationOptions
     }
     dispatch(command: Command, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
+    reconcileFileMessage?(command: Extract<Command, { type: 'message.submit' }>, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
     follow: SessionReaderRuntime['follow']
     claimQuestion?: SessionReaderRuntime['claimQuestion']
   }
@@ -367,7 +370,7 @@ function parseForwarded(data: unknown, runtimeId: string, runtimeEpoch: string):
 function makeCommand(frame: ForwardedCommand): Command {
   return parseCommand({
     v: 0,
-    type: frame.type,
+    type: frame.type === 'message.files.reconcile' ? 'message.submit' : frame.type,
     request_id: frame.request_id,
     runtime_epoch: frame.runtime_epoch,
     ...('session_id' in frame ? { session_id: frame.session_id } : {}),
@@ -440,6 +443,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     const offered: string[] = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
     if (sourceOptions) offered.push(CREATION_OPTIONS_CAPABILITY)
     if (options.files) offered.push(FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY)
+    if (options.files && options.runtime.reconcileFileMessage) offered.push(FILE_RECONCILE_CAPABILITY)
     const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
@@ -639,6 +643,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         }
         if (sessions?.handle(value)) return
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
+        if (forwarded.type === 'message.files.reconcile' && (!files || !options.runtime.reconcileFileMessage
+          || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY) || !ack.data.payload.capabilities.includes(FILE_RECONCILE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'message.submit' && forwarded.payload.content.some(part => part.type === 'file')
           && (!files || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.cancel' && !ack.data.payload.capabilities.includes('session.cancel.v1')) throw new ProbeError('protocol.unsupported')
@@ -672,7 +678,12 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
             },
           })
         }
-        try { await options.runtime.dispatch(command, connection.signal, owner, observe) }
+        try {
+          if (forwarded.type === 'message.files.reconcile') {
+            if (command.type !== 'message.submit') throw new ProbeError('protocol.invalid')
+            await options.runtime.reconcileFileMessage!(command, connection.signal, owner, observe)
+          } else await options.runtime.dispatch(command, connection.signal, owner, observe)
+        }
         catch (error) {
           // A durably rejected/uncertain operation already has a receipt. It
           // must not tear down unrelated subscriptions on the same transport.

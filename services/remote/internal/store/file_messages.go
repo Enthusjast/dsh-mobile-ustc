@@ -23,49 +23,86 @@ func (postgres *Postgres) RecordRealtimeFileCommand(ctx context.Context, ticket 
 			return CommandStatus{}, files.ErrInvalid
 		}
 	}
-	return postgres.recordRealtimeCommand(ctx, ticket, "message.submit", requestID, sessionID, digest, func(ctx context.Context, tx *sql.Tx, status CommandStatus) error {
-		if status.State == "received" && (ready == nil || !ready()) {
-			return files.ErrStale
-		}
-		if err := bindMessageFiles(ctx, tx, ticket, host, status, policy, ids); err != nil {
+	reconcile := false
+	status, err := postgres.recordRealtimeCommand(ctx, ticket, "message.submit", requestID, sessionID, digest, func(ctx context.Context, tx *sql.Tx, status CommandStatus) error {
+		known, err := existingMessageFiles(ctx, tx, ticket, status, ids)
+		if err != nil {
 			return err
 		}
-		if status.State == "received" && !ready() {
-			return files.ErrStale
+		if status.State != "received" {
+			if !known {
+				return files.ErrAccess
+			}
+			return nil
+		}
+		// Only an already committed original can request read-only recovery.
+		// It gets no replacement download, receipt or fresh message authority.
+		fallback := func() error {
+			if !known {
+				return files.ErrStale
+			}
+			if _, _, err := hostFileBinding(ctx, tx, host); err != nil {
+				return err
+			}
+			reconcile = true
+			return nil
+		}
+		if ready == nil || !ready() {
+			return fallback()
+		}
+		if _, err := tx.ExecContext(ctx, `savepoint file_message_admission`); err != nil {
+			return files.ErrUnavailable
+		}
+		admissionErr := bindMessageFiles(ctx, tx, ticket, host, status, policy, ids)
+		if admissionErr == nil && !ready() {
+			admissionErr = files.ErrStale
+		}
+		if admissionErr != nil {
+			if !known || (!errors.Is(admissionErr, files.ErrStale) && !errors.Is(admissionErr, files.ErrAccess)) {
+				return admissionErr
+			}
+			if _, err := tx.ExecContext(ctx, `rollback to savepoint file_message_admission`); err != nil {
+				return files.ErrUnavailable
+			}
+			if err := fallback(); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `release savepoint file_message_admission`); err != nil {
+			return files.ErrUnavailable
 		}
 		return nil
 	})
+	status.ReconcileFiles = reconcile && status.State == "received"
+	return status, err
 }
 
-func bindMessageFiles(ctx context.Context, tx *sql.Tx, ticket TicketRedemption, host files.HostBinding, status CommandStatus, policy string, ids []string) error {
+func existingMessageFiles(ctx context.Context, tx *sql.Tx, ticket TicketRedemption, status CommandStatus, ids []string) (bool, error) {
 	rows, err := tx.QueryContext(ctx, `select file_id::text from file_message_refs where device_id=$1 and request_id=$2 order by file_id`, ticket.DeviceID, status.RequestID)
 	if err != nil {
-		return files.ErrUnavailable
+		return false, files.ErrUnavailable
 	}
 	previous := []string{}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return files.ErrUnavailable
+			return false, files.ErrUnavailable
 		}
 		previous = append(previous, id)
 	}
 	rowErr := rows.Err()
 	_ = rows.Close()
 	if rowErr != nil {
-		return files.ErrUnavailable
+		return false, files.ErrUnavailable
 	}
 	if len(previous) > 0 && !slices.Equal(previous, ids) {
-		return files.ErrConflict
+		return false, files.ErrConflict
 	}
-	if status.State != "received" {
-		if !slices.Equal(previous, ids) {
-			return files.ErrAccess
-		}
-		return nil
-	}
+	return slices.Equal(previous, ids), nil
+}
 
+func bindMessageFiles(ctx context.Context, tx *sql.Tx, ticket TicketRedemption, host files.HostBinding, status CommandStatus, policy string, ids []string) error {
 	for _, id := range ids {
 		record, err := loadFile(ctx, tx, id, "for update of f,t")
 		if errors.Is(err, sql.ErrNoRows) {

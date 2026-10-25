@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "type": "message.files.reconcile",
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "runtime_id": "66666666-6666-4666-8666-666666666666",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "payload": {
+    "mode": "queue",
+    "content": [
+      {
+        "type": "text",
+        "text": "请检查附件。"
+      },
+      {
+        "type": "file",
+        "file_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }
+    ]
+  },
+  "runtime_epoch": "99999999-9999-4999-8999-999999999999",
+  "user_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "device_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "payload_sha256": "39529132d6662c18f4335ed03c22e991291db197d3607e545973253bbc4bffc6"
+}

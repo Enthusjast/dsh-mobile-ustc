@@ -32,5 +32,6 @@ for (const frame of frames) { FileFrame.parse(frame); await output(`contracts/ws
 const message = { v: 1, type: 'message.submit', request_id, runtime_id, session_id,
   payload: { mode: 'queue' as const, content: [{ type: 'text' as const, text: '请检查附件。' }, { type: 'file' as const, file_id: offer.file_id }] } }
 await output('contracts/ws/v1/golden/message-file-submit.json', message)
-await output('contracts/ws/v1/golden/message-file-submit.forwarded.json', { ...message, runtime_epoch,
-  user_id: offer.user_id, device_id: offer.device_id, payload_sha256: relayPayloadDigest(session_id, message.payload) })
+const forwarded = { ...message, runtime_epoch, user_id: offer.user_id, device_id: offer.device_id, payload_sha256: relayPayloadDigest(session_id, message.payload) }
+await output('contracts/ws/v1/golden/message-file-submit.forwarded.json', forwarded)
+await output('contracts/ws/v1/golden/message-file-reconcile.forwarded.json', { ...forwarded, type: 'message.files.reconcile' })

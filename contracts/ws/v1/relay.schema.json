@@ -15,6 +15,7 @@
     { "$ref": "#/$defs/hostSessionCatalogAck" },
     { "$ref": "#/$defs/messageSubmit" },
     { "$ref": "#/$defs/messageSubmitToHost" },
+    { "$ref": "#/$defs/fileMessageReconcileToHost" },
     { "$ref": "#/$defs/sessionCancel" },
     { "$ref": "#/$defs/sessionCancelToHost" },
     { "$ref": "#/$defs/sessionArchive" },
@@ -223,6 +224,22 @@
         "user_id": { "$ref": "#/$defs/uuid" }, "device_id": { "$ref": "#/$defs/uuid" },
         "payload_sha256": { "$ref": "#/$defs/sha256" }, "payload": { "$ref": "#/$defs/submitPayload" }
       }
+    },
+    "fileMessageReconcileToHost": {
+      "type": "object", "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "user_id", "device_id", "payload_sha256", "payload"],
+      "properties": {
+        "v": { "const": 1 }, "type": { "const": "message.files.reconcile" },
+        "request_id": { "$ref": "#/$defs/uuid" }, "runtime_id": { "$ref": "#/$defs/uuid" },
+        "runtime_epoch": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" },
+        "user_id": { "$ref": "#/$defs/uuid" }, "device_id": { "$ref": "#/$defs/uuid" },
+        "payload_sha256": { "$ref": "#/$defs/sha256" },
+        "payload": { "allOf": [
+          { "$ref": "#/$defs/submitPayload" },
+          { "type": "object", "properties": { "content": { "type": "array", "contains": { "$ref": "#/$defs/fileContent" } } }, "required": ["content"] }
+        ] }
+      },
+      "description": "Host-only message.files.reconcile.v1 query for an already reserved original. Digest remains that of message.submit. It cannot admit a new native prompt. Phone clients cannot send this frame."
     },
     "sessionCancel": {
       "type": "object", "additionalProperties": false,

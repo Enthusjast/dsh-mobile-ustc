@@ -1,7 +1,9 @@
 package httpapi_test
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -13,6 +15,23 @@ import (
 	"github.com/coder/websocket"
 	jose "github.com/go-jose/go-jose/v4"
 )
+
+func stageFileMessageHost(t *testing.T, h *fileHTTPFixture, host *fileHost, offer files.FileOffer) {
+	t.Helper()
+	response, err := host.download(t, offer, host.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != 200 || readErr != nil {
+		t.Fatal("protected fixture download failed")
+	}
+	host.send(t, map[string]any{"v": 1, "type": "file.staged", "request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "runtime_id": fileRuntimeID, "runtime_epoch": host.epoch, "session_id": h.session, "payload": map[string]any{"handoff_id": offer.HandoffID, "file_id": offer.FileID, "name": offer.Name, "size_bytes": offer.SizeBytes, "sha256": offer.SHA256}})
+	if ack := host.read(t); string(ack["type"]) != `"file.staged.ack"` {
+		t.Fatal("missing stage acknowledgement")
+	}
+}
 
 type filePhone struct{ *fileHost }
 
@@ -190,5 +209,70 @@ func TestFileMessageRequiresTheDestinationHostMessageCapability(t *testing.T) {
 	var count int
 	if err := h.database.QueryRowContext(h.ctx, `select count(*) from commands`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("unsupported file command persisted")
+	}
+}
+
+func TestExpiredFileMessageUsesNegotiatedHostOnlyReconciliation(t *testing.T) {
+	for _, supported := range []bool{true, false} {
+		t.Run(map[bool]string{true: "capable", false: "legacy"}[supported], func(t *testing.T) {
+			h := newFileHTTPFixture(t)
+			allowFileMessages(t, h)
+			h.cleanForHandoff(t, []byte("expired reconciliation source"))
+			caps := []string{"command.relay.v1", files.MessageCapability}
+			if supported {
+				caps = append(caps, files.ReconcileCapability)
+			}
+			host := connectFileHost(t, h, caps...)
+			offer := host.offer(t)
+			stageFileMessageHost(t, h, host, offer)
+			phone := connectFilePhone(t, h, h.caller, h.token, "33333333-3333-4333-8333-333333333333", true)
+			request := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaf"
+			phone.submit(t, request, offer.FileID)
+			original := host.read(t)
+			if string(original["type"]) != `"message.submit"` || fileMessageState(t, phone.read(t)) != "received" {
+				t.Fatal("first file intent not recorded")
+			}
+			illegal := connectFilePhone(t, h, h.caller, h.token, "33333333-3333-4333-8333-333333333333", true)
+			illegal.send(t, map[string]any{"v": 1, "type": "message.files.reconcile", "request_id": request, "runtime_id": fileRuntimeID, "session_id": h.session, "payload": map[string]any{"mode": "queue", "content": []any{map[string]any{"type": "file", "file_id": offer.FileID}}}})
+			if fileMessageError(t, illegal.read(t)) != "protocol.unsupported" {
+				t.Fatal("phone selected Host-only reconciliation")
+			}
+			host.send(t, map[string]any{"v": 1, "type": "file.release", "request_id": "ffffffff-ffff-4fff-8fff-ffffffffffff", "runtime_id": fileRuntimeID, "runtime_epoch": host.epoch, "session_id": h.session, "payload": map[string]any{"handoff_id": offer.HandoffID, "file_id": offer.FileID}})
+			if ack := host.read(t); string(ack["type"]) != `"file.release.ack"` {
+				t.Fatal("release missing")
+			}
+			if _, err := h.database.ExecContext(h.ctx, `update files set created_at=clock_timestamp()-interval '1 day',expires_at=clock_timestamp()-interval '1 second',state='expired' where id=$1`, offer.FileID); err != nil {
+				t.Fatal(err)
+			}
+			phone.submit(t, request, offer.FileID)
+			if !supported {
+				if fileMessageError(t, phone.read(t)) != "file.staging_required" {
+					t.Fatal("legacy Host got an unsafe fallback")
+				}
+				ctx, cancel := context.WithTimeout(h.ctx, 150*time.Millisecond)
+				defer cancel()
+				if _, _, err := host.connection.Read(ctx); err == nil {
+					t.Fatal("legacy Host received a new message admission")
+				}
+				return
+			}
+			reconcile := host.read(t)
+			if string(reconcile["type"]) != `"message.files.reconcile"` || string(reconcile["payload_sha256"]) != string(original["payload_sha256"]) {
+				t.Fatal("reconciliation changed original operation or digest")
+			}
+			if fileMessageState(t, phone.read(t)) != "received" {
+				t.Fatal("reconciliation acknowledgement missing")
+			}
+			var digest string
+			_ = json.Unmarshal(original["payload_sha256"], &digest)
+			host.send(t, map[string]any{"v": 1, "type": "command.receipt", "request_id": request, "runtime_id": fileRuntimeID, "runtime_epoch": host.epoch, "session_id": h.session, "device_id": "33333333-3333-4333-8333-333333333333", "payload": map[string]any{"state": "outcome_unknown", "payload_sha256": digest}})
+			if fileMessageState(t, phone.read(t)) != "outcome_unknown" {
+				t.Fatal("unknown native evidence was not preserved")
+			}
+			var count int
+			if err := h.database.QueryRowContext(h.ctx, `select count(*) from file_message_refs`).Scan(&count); err != nil || count != 1 {
+				t.Fatal("reconciliation added another file claim")
+			}
+		})
 	}
 }

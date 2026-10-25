@@ -33,6 +33,27 @@ func TestFileMessageDigestMatchesSharedNodeGolden(t *testing.T) {
 	if err != nil || digest != frame.Digest {
 		t.Fatal("Node/Go file message digest disagrees")
 	}
+	reconcileRaw, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../contracts/ws/v1/golden/message-file-reconcile.forwarded.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reconcile struct {
+		Type      string          `json:"type"`
+		SessionID string          `json:"session_id"`
+		Digest    string          `json:"payload_sha256"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(reconcileRaw, &reconcile); err != nil {
+		t.Fatal(err)
+	}
+	var original messageSubmitPayload
+	if err := decodePayload(reconcile.Payload, &original); err != nil {
+		t.Fatal(err)
+	}
+	originalDigest, _ := messageSubmitDigest(reconcile.SessionID, original)
+	if reconcile.Type != "message.files.reconcile" || originalDigest != reconcile.Digest || originalDigest != digest {
+		t.Fatal("reconciliation changed the original message digest")
+	}
 	for _, raw := range []string{
 		`{"mode":"queue","content":[{"type":"file","file_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","text":""}]}`,
 		`{"mode":"queue","content":[{"type":"text","text":"ok","file_id":""}]}`,

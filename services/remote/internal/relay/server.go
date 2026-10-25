@@ -253,7 +253,7 @@ func (server *Server) capabilities() []string {
 	if server.fileHandoffs != nil {
 		capabilities = append(capabilities, files.HandoffCapability)
 		if server.fileMessages != nil {
-			capabilities = append(capabilities, files.MessageCapability)
+			capabilities = append(capabilities, files.MessageCapability, files.ReconcileCapability)
 		}
 	}
 	return capabilities
@@ -693,7 +693,9 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 	leaseCtx, cancel := context.WithDeadline(parent, leaseExpiresAt)
 	defer cancel()
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
-	accepted = slices.DeleteFunc(accepted, func(capability string) bool { return capability == files.HandoffCapability })
+	accepted = slices.DeleteFunc(accepted, func(capability string) bool {
+		return capability == files.HandoffCapability || capability == files.ReconcileCapability
+	})
 	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "device", "connection_id": connectionID,
@@ -816,6 +818,9 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 	}
 	if !slices.Contains(accepted, files.HandoffCapability) || !slices.Contains(accepted, "command.relay.v1") {
 		accepted = slices.DeleteFunc(accepted, func(capability string) bool { return capability == files.MessageCapability })
+	}
+	if !slices.Contains(accepted, files.MessageCapability) {
+		accepted = slices.DeleteFunc(accepted, func(capability string) bool { return capability == files.ReconcileCapability })
 	}
 	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
@@ -1222,8 +1227,16 @@ func (server *Server) forwardRecordedCommand(parent context.Context, live, host 
 		return
 	}
 	if status.State == "received" {
+		kind := envelope.Type
+		if status.ReconcileFiles {
+			if kind != "message.submit" || !host.supports(files.ReconcileCapability) {
+				server.sendProtocolError(parent, live, "file.staging_required", &envelope)
+				return
+			}
+			kind = "message.files.reconcile"
+		}
 		forward := map[string]any{
-			"v": 1, "type": envelope.Type, "request_id": envelope.RequestID,
+			"v": 1, "type": kind, "request_id": envelope.RequestID,
 			"runtime_id": live.runtimeID, "runtime_epoch": host.runtimeEpoch, "session_id": envelope.SessionID,
 			"user_id": live.peer.redemption.UserID, "device_id": live.peer.deviceID,
 			"payload_sha256": digest, "payload": payload,

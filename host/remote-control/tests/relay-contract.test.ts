@@ -16,6 +16,7 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
     '../../../contracts/ws/v1/golden/message-file-submit.json',
     '../../../contracts/ws/v1/golden/message-file-submit.forwarded.json',
+    '../../../contracts/ws/v1/golden/message-file-reconcile.forwarded.json',
     '../../../contracts/ws/v1/golden/session-cancel.json',
     '../../../contracts/ws/v1/golden/session-cancel.forwarded.json',
     '../../../contracts/ws/v1/golden/session-archive.json',
@@ -60,6 +61,10 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   assert.equal(validate(invalid), false)
   const files = await load('../../../contracts/ws/v1/golden/message-file-submit.forwarded.json') as Record<string, unknown>
   assert.equal(files.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: files.type, session_id: files.session_id, payload: files.payload }))).digest('hex'))
+  const reconcile = await load('../../../contracts/ws/v1/golden/message-file-reconcile.forwarded.json') as Record<string, unknown>
+  assert.equal(reconcile.payload_sha256, files.payload_sha256)
+  assert.equal(validate({ ...reconcile, payload: { mode: 'queue', content: [{ type: 'text', text: 'not a file intent' }] } }), false)
+  assert.equal(validate({ ...reconcile, user_id: undefined, device_id: undefined, payload_sha256: undefined }), false)
   for (const part of [{ type: 'file', file_id: files.request_id, text: '' }, { type: 'file', receiptId: files.request_id }, { type: 'file', path: '/private' }]) {
     assert.equal(validate({ ...files, payload: { mode: 'queue', content: [part] } }), false)
   }

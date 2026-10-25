@@ -63,12 +63,14 @@ type Session struct {
 }
 
 type CommandStatus struct {
-	RequestID     string    `json:"request_id"`
-	SessionID     string    `json:"session_id,omitempty"`
-	WorkspaceID   string    `json:"workspace_id,omitempty"`
-	State         string    `json:"state"`
-	PayloadSHA256 string    `json:"payload_sha256"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	// Current dispatch attempt only; this flag grants no new file admission.
+	ReconcileFiles bool      `json:"-"`
+	RequestID      string    `json:"request_id"`
+	SessionID      string    `json:"session_id,omitempty"`
+	WorkspaceID    string    `json:"workspace_id,omitempty"`
+	State          string    `json:"state"`
+	PayloadSHA256  string    `json:"payload_sha256"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type DeviceRegistration struct {

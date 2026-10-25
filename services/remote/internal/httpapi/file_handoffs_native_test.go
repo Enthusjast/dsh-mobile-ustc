@@ -24,12 +24,12 @@ func TestProtectedFileHandoffToRealNativeDSHAndRevocation(t *testing.T) {
 	if os.Getenv("REMOTE_TEST_CLUSTER_ROOT") == "" {
 		t.Skip("requires explicit isolated PostgreSQL/native DSH runner")
 	}
-	for _, message := range []bool{false, true} {
-		t.Run(map[bool]string{false: "revoke", true: "message"}[message], func(t *testing.T) { testProtectedFileHandoffNative(t, message) })
+	for _, scenario := range []string{"revoke", "message", "reconcile", "reconcile-unknown"} {
+		t.Run(scenario, func(t *testing.T) { testProtectedFileHandoffNative(t, scenario) })
 	}
 }
 
-func testProtectedFileHandoffNative(t *testing.T, message bool) {
+func testProtectedFileHandoffNative(t *testing.T, scenario string) {
 	h := newFileHTTPFixture(t)
 	allowFileMessages(t, h)
 	key := approvalKey(t)
@@ -170,7 +170,7 @@ func testProtectedFileHandoffNative(t *testing.T, message bool) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if message {
+	if scenario != "revoke" {
 		phone := connectFilePhone(t, h, h.caller, h.token, "33333333-3333-4333-8333-333333333333", true)
 		request := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad"
 		phone.submit(t, request, prepared.File.ID)
@@ -180,22 +180,56 @@ func testProtectedFileHandoffNative(t *testing.T, message bool) {
 			}
 		}
 		next("native.retired")
+		expectedState := "agent_queued"
+		if scenario == "reconcile" || scenario == "reconcile-unknown" {
+			fault := "forget-receipt\n"
+			if scenario == "reconcile-unknown" {
+				fault = "forget-command\n"
+				expectedState = "outcome_unknown"
+			}
+			if _, err := io.WriteString(stdin, fault); err != nil {
+				t.Fatal(err)
+			}
+			next("native.receipt-forgotten")
+			// Model all Relay receipts being lost while the original native
+			// message remains durable; then remove every usable source object.
+			if _, err := h.database.ExecContext(ctx, `update commands set state='received'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := h.database.ExecContext(ctx, `update files set created_at=clock_timestamp()-interval '1 day',expires_at=clock_timestamp()-interval '1 second',state='expired' where id=$1`, prepared.File.ID); err != nil {
+				t.Fatal(err)
+			}
+			h.peer.mu.Lock()
+			h.peer.objects = make(map[string]fileWireObject)
+			h.peer.mu.Unlock()
+		}
 		phone.submit(t, request, prepared.File.ID)
-		if fileMessageState(t, phone.read(t)) != "agent_queued" {
-			t.Fatal("native file retry lost its receipt")
+		for {
+			state := fileMessageState(t, phone.read(t))
+			if state == expectedState {
+				break
+			}
+			if state == "outcome_unknown" || state == "rejected" || state == "agent_queued" {
+				t.Fatalf("unexpected terminal reconciliation state=%s", state)
+			}
+		}
+		phone.submit(t, request, prepared.File.ID)
+		if fileMessageState(t, phone.read(t)) != expectedState {
+			t.Fatal("terminal native retry changed its result")
 		}
 		if _, err := io.WriteString(stdin, "inspect\n"); err != nil {
 			t.Fatal(err)
 		}
 		observed := next("native.message")
-		var count int
+		var count, promptCalls int
 		var attachments []struct {
 			SHA256 string `json:"sha256"`
 			Size   int    `json:"size_bytes"`
 		}
 		_ = json.Unmarshal(observed["count"], &count)
+		_ = json.Unmarshal(observed["prompt_calls"], &promptCalls)
 		_ = json.Unmarshal(observed["files"], &attachments)
-		if count != 1 || len(attachments) != 1 || attachments[0].SHA256 != sha || attachments[0].Size != len(body) {
+		if count != 1 || promptCalls != 1 || len(attachments) != 1 || attachments[0].SHA256 != sha || attachments[0].Size != len(body) {
 			t.Fatal("native message attachment or deduplication changed")
 		}
 		var refs int

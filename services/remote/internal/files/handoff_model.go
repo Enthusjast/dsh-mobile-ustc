@@ -8,6 +8,7 @@ import (
 
 const HandoffCapability = "file.handoff.v1"
 const MessageCapability = "message.files.v1"
+const ReconcileCapability = "message.files.reconcile.v1"
 
 type HostBinding struct {
 	InstallationID                        string

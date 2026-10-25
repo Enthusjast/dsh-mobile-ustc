@@ -90,9 +90,9 @@ func (postgres *Postgres) recordRealtimeCommand(ctx context.Context, ticket Tick
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
-	// Archived sessions remain valid archive targets so an authorized operator
-	// can restore them. Other mutations continue to require an active session.
-	if sessionState != "available" && sessionState != "running" && !(commandType == "session.archive" && sessionState == "archived") {
+	// Archived sessions remain valid archive targets. File admission hooks may
+	// reconcile an existing intent there, but must reject all fresh admission.
+	if sessionState != "available" && sessionState != "running" && !(sessionState == "archived" && (commandType == "session.archive" || commandType == "message.submit" && admission != nil)) {
 		return CommandStatus{}, ErrAccessDenied
 	}
 	var currentScope GrantScope

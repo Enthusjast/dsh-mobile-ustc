@@ -180,6 +180,94 @@ func TestPostgresFileMessageLostConnectionRollsBackTheWholeTransaction(t *testin
 	}
 }
 
+func TestPostgresFileMessageExpiredOriginalReturnsOnlyReconciliation(t *testing.T) {
+	h := newMessageFileFixture(t)
+	offer := h.stage(t, h.file)
+	request := approvalTestUUID(t)
+	if first, err := h.record(t, request, h.file.ID); err != nil || first.ReconcileFiles {
+		t.Fatalf("first admission=%v", err)
+	}
+	if err := h.repository.EndHandoff(h.ctx, h.host, offer.HandoffID); err != nil {
+		t.Fatal(err)
+	}
+	h.exec(t, `update files set created_at=clock_timestamp()-interval '1 day',expires_at=clock_timestamp()-interval '1 second',state='expired' where id=$1`, h.file.ID)
+	retry, err := h.database.RecordRealtimeFileCommand(h.ctx, h.ticket, h.host, request, h.file.SessionID, strings.Repeat("a", 64), fileTestPolicy, []string{h.file.ID}, nil)
+	if err != nil || !retry.ReconcileFiles || retry.State != "received" {
+		t.Fatalf("read-only reconciliation=%+v err=%v", retry, err)
+	}
+	public, _ := json.Marshal(retry)
+	if strings.Contains(string(public), "Reconcile") || strings.Contains(string(public), "reconcile") {
+		t.Fatal("internal dispatch mode leaked into public status")
+	}
+	if _, err := h.record(t, approvalTestUUID(t), h.file.ID); err == nil {
+		t.Fatal("expired upload admitted another command")
+	}
+	if _, err := h.record(t, request, approvalTestUUID(t)); !errors.Is(err, files.ErrConflict) {
+		t.Fatal("reconciliation changed the original manifest")
+	}
+	if h.count(t, "commands") != 1 || h.count(t, "file_message_refs") != 1 {
+		t.Fatal("reconciliation allocated another intent")
+	}
+	h.host.ConnectionID = approvalTestUUID(t)
+	if _, err := h.database.RecordRealtimeFileCommand(h.ctx, h.ticket, h.host, request, h.file.SessionID, strings.Repeat("a", 64), fileTestPolicy, []string{h.file.ID}, nil); !errors.Is(err, files.ErrAccess) {
+		t.Fatal("old Host connection obtained reconciliation")
+	}
+}
+
+func TestPostgresFileMessageReconciliationRollsBackPartialHandoffChanges(t *testing.T) {
+	h := newMessageFileFixture(t)
+	h.input.RequestID = approvalTestUUID(t)
+	other := h.scanning(t)
+	claim := h.claim(t)
+	if err := h.repository.CompleteScan(h.ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	ordered := []files.Record{h.file, other}
+	slices.SortFunc(ordered, func(a, b files.Record) int { return strings.Compare(a.ID, b.ID) })
+	first := h.stage(t, ordered[0])
+	h.stage(t, ordered[1])
+	request := approvalTestUUID(t)
+	if _, err := h.record(t, request, ordered[0].ID, ordered[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.repository.EndHandoff(h.ctx, h.host, first.HandoffID); err != nil {
+		t.Fatal(err)
+	}
+	fresh := h.stage(t, ordered[0])
+	if fresh.HandoffID == first.HandoffID {
+		t.Fatal("restaging did not rotate handoff")
+	}
+	h.exec(t, `update file_transfers set scanner_policy_sha256=$2 where file_id=$1`, ordered[1].ID, strings.Repeat("b", 64))
+	retry, err := h.record(t, request, ordered[0].ID, ordered[1].ID)
+	if err != nil || !retry.ReconcileFiles {
+		t.Fatalf("reconciliation=%v", err)
+	}
+	var retained string
+	if err := h.database.DB.QueryRowContext(h.ctx, `select handoff_id::text from file_message_refs where file_id=$1`, ordered[0].ID).Scan(&retained); err != nil || retained != first.HandoffID {
+		t.Fatal("read-only fallback retained a partial handoff update")
+	}
+}
+
+func TestPostgresFileMessageReconciliationRetainsCurrentCallerAuthorization(t *testing.T) {
+	h := newMessageFileFixture(t)
+	h.stage(t, h.file)
+	request := approvalTestUUID(t)
+	if _, err := h.record(t, request, h.file.ID); err != nil {
+		t.Fatal(err)
+	}
+	h.exec(t, `update sessions set state='archived'`)
+	if retry, err := h.record(t, request, h.file.ID); err != nil || !retry.ReconcileFiles {
+		t.Fatal("archived original could not reconcile")
+	}
+	if _, err := h.record(t, approvalTestUUID(t), h.file.ID); err == nil {
+		t.Fatal("archived session admitted a new file message")
+	}
+	h.exec(t, `update runtime_grants set grant_version=grant_version+1`)
+	if _, err := h.record(t, request, h.file.ID); !errors.Is(err, ErrAccessDenied) {
+		t.Fatal("revoked caller acquired read-only dispatch")
+	}
+}
+
 func TestPostgresFileMessageRejectsStaleAuthorityBeforeRecordingCommand(t *testing.T) {
 	for _, variant := range []string{"connection", "epoch", "policy", "expired", "device", "grant", "archive", "unstaged", "duplicate"} {
 		t.Run(variant, func(t *testing.T) {
