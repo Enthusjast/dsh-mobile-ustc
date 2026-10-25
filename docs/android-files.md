@@ -1,6 +1,6 @@
 # Android 文件协议、传输与附件命令
 
-Android 已提供系统文件选择、前台上传、受保护文件 API、匿名流式 PUT、加密上传意图和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。会话历史的附件显示、受限导出和 APK 到真实后端的文件联合验收仍待完成。
+Android 已提供系统文件选择、前台上传、受保护文件 API、匿名流式 PUT、加密上传意图和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。会话历史已显示受限附件摘要；受限导出和 APK 到真实后端的文件联合验收仍待完成。
 
 ## 系统选择器与恢复
 
@@ -48,6 +48,12 @@ Kotlin `readyForMessage` 还限制提示的本地有效期最多五秒。没有 
 
 投递未确认且原命令没有任何远端保存证据时，用户可明确重试原文件消息。状态接口失败本身不证明命令不存在（服务端可能用 access.denied 隐藏差别）；客户端还必须逐一取得当前授权下、目标相同、未绑定且暂存仍有效的文件状态，才允许短时间内以原 ID / 摘要继续。不会伪造 received，也不会在重连时自动重发。原命令已有保存 / 入队证据、文件已绑定或无法核对时，继续保持结果待确认。
 
+## 历史中的附件
+
+Host 将原生 file 块转换为现有 text 显示块，例如 `[附件：资料.txt（12 字节）]`。仅有文件的消息因而也能显示在快照、实时历史和既有加密缓存中，旧版读取方继续使用同一文本格式。它使用 DSH 准入后的显示名，不把手机原文件名当成实际存储名。
+
+只有合法的叶文件名和非负安全整数大小可以进入摘要；无效元数据显示“请在电脑端查看”。原生 attachmentId、receipt、路径、URL、额外字段和文件字节均被丢弃。摘要只用于阅读，下载仍需独立的受限导出授权。原生注入的模型上下文继续仅推进 cursor，不因其中包含文件而成为用户消息。
+
 ## 本地证据
 
 - Kotlin 模型测试使用同一 Go / Node 上传样例和文件消息摘要，覆盖字段白名单、路径 / receipt 混入、大小 / Unicode、重复引用和存储格式恢复。
@@ -60,5 +66,7 @@ Kotlin `readyForMessage` 还限制提示的本地有效期最多五秒。没有 
 2026-10-26 的上传界面与恢复改动已通过完整 Android check、Lint、debug APK / test APK 构建，以及 138 项协议 / 命令 / 网络测试。API 26 安全模拟器的原有选择器 / 聊天 / 命令回归共 20 项通过；加密上传测试进一步覆盖 WAL / 重开、v4→v5 迁移、批量回滚、范围清理和不虚构回执的原 ID 重试。记录为 `.local/android-upload-ui-full-check-second.log`、`.local/android-upload-ui-device-second.log`。
 
 新增设备组合从选择器结果处理入口注入受控 content URI，经独立进程的真实 Binder ContentProvider、生产 DocumentFileSource / SessionUploads、TLS REST 与匿名 PUT 夹具、SQLCipher 和 Relay 命令组件完成文件单独发送。测试分别等待 scanning、clean/waiting、ready 和原命令 agent_queued，确认重进页面仍只关联原上传 / 原消息，没有再次 PUT 或提交新命令。最新选择器、上传持久性、附件面板和输入框共 13 项设备测试通过，记录为 `.local/android-upload-provider-device-second.log`。系统 DocumentsUI 的人工点选和真实对象服务仍属于后续验收范围。
+
+安全历史摘要已通过 `npm run verify` 的 214 项 Host 测试。随后 `npm run test:remote-kotlin` 再次通过隔离 PostgreSQL 的完整 Go race 套件和实际 npm DSH 0.2.1-rc.2 联合测试：Kotlin 发送只有附件的消息，等待其原生历史中的准确显示名 / 大小摘要，核对绑定并重试原请求，最终仍只有一次原生 prompt 和一条文件归属。记录为 `.local/android-upload-host-summary-verify.log`、`.local/android-file-summary-kotlin-chain.log`。
 
 对象 / scanner / 身份 / 模型仍是夹具；没有使用 TokenWorks，也没有声称完成实际学校、KMS、病毒签名引擎或文件全链路实机验收。

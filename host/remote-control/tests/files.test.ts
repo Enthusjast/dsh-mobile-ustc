@@ -57,6 +57,8 @@ test('verified native file intake preserves exact bytes and admits only the rece
     await follower.return?.()
     assert.equal(projected.includes(h.cwd), false)
     assert.equal(projected.includes(uploaded.receiptId), false)
+    assert.equal(projected.includes(`[附件：${uploaded.file.name}（${uploaded.file.bytes} 字节）]`), true)
+    assert.equal(projected.includes(uploaded.file.attachmentId), false)
     assert.equal(h.ctx.fileUploads.resolve(h.ctx.agents.get(native)!, uploaded.receiptId), undefined)
     await client.prompt(native, request, 'queue', content, signal())
     assert.equal(h.ctx.agents.get(native)!.session.snapshotEvents().filter(event => event.type === 'user/message').filter(event => event.data.source.kind === 'user').length, 1)

@@ -1,4 +1,5 @@
 import type { SessionWireEvent } from '@deepseek-ai/dsh-api-session-controller/types'
+import { fileManifest } from './file-admission.js'
 
 const fields: Record<string, readonly string[]> = {
   'turn/start': ['turn'], 'turn/end': ['turn', 'reason'],
@@ -19,6 +20,15 @@ function content(value: unknown): unknown[] {
     const block = object(part)
     if (block.type === 'text') return [pick(block, ['type', 'text'])]
     if (block.type === 'reasoning') return [pick(block, ['type', 'text'])]
+    if (block.type === 'file') {
+      const attachment = object(block.attachment)
+      const name = fileManifest.shape.name.safeParse(attachment.name)
+      const bytes = attachment.bytes
+      // Render a summary using existing text blocks. Native storage identities,
+      // receipts, paths and extra attachment fields never become read authority.
+      return [{ type: 'text', text: name.success && typeof bytes === 'number' && Number.isSafeInteger(bytes) && bytes >= 0
+        ? `[附件：${name.data}（${bytes} 字节）]` : '[附件：请在电脑端查看]' }]
+    }
     return []
   })
 }

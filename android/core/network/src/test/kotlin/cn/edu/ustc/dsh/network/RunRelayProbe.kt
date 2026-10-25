@@ -143,10 +143,12 @@ object RunRelayProbe {
             withTimeout(10_000) { reader.state.first { it.phase == SessionReadPhase.READY } }
             val commands = reader.commands!!
             withTimeout(5000) { commands.state.first { it.canAttachFiles } }
-            val id = commands.submit("queue", "KOTLIN_FILE_MESSAGE", fileIds = listOf(retry.file.id))
+            val id = commands.submit("queue", "", fileIds = listOf(retry.file.id))
             withTimeout(10_000) { commands.state.first { state -> state.records.any { it.intent.requestId == id && it.everAgentQueued } } }
             val bound = api.fileStatus(retry.file.id)
             check(bound.delivery?.state == FileDeliveryState.BOUND && bound.delivery?.requestId == id)
+            val summary = "[附件：${manifest.name}（${manifest.sizeBytes} 字节）]"
+            withTimeout(10_000) { reader.state.first { state -> state.window?.items?.any { item -> item.blocks.any { it.text == summary } } == true } }
             commands.sendPending(id)
             delay(150)
             check(api.commandStatus(id, device).state == RemoteCommandState.AGENT_QUEUED)

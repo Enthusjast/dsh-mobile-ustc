@@ -1,6 +1,6 @@
 # Host 消息附件转换与恢复
 
-Host Runtime 现在可以将已确认交接的文件 ID 转为同一原生会话的临时 receipt，并随 `queue` / `steer` prompt 提交。服务端已接入 [附件授权 / 消费账本与 v1 Relay](file-message-relay.md)，双方协商 `message.files.v1` 后可使用。Android 文件消息仍待实现。
+Host Runtime 现在可以将已确认交接的文件 ID 转为同一原生会话的临时 receipt，并随 `queue` / `steer` prompt 提交。服务端已接入 [附件授权 / 消费账本与 v1 Relay](file-message-relay.md)，双方协商 `message.files.v1` 后可使用。[Android 文件上传和消息界面](android-files.md) 已接入。
 
 ## ID 与原生准入
 
@@ -24,4 +24,4 @@ Host 另提供 `reconcileFileMessage`：它先只读查询原命令日志并验�
 
 `host/remote-control/tests/file-messages.test.ts` 覆盖设备 / 用户 / 会话隔离、未确认与取消映射、多个附件中的缺项、receipt 退休、已确认重试、内容冲突、有 / 无原生证据的持久恢复、未知意图、有效 receipt 下禁止新准入、并发对账、原生队列和重新加载 DSH。接入 Relay 对账后，`npm run verify` 的 213 项测试全部通过，包含现有 Host 文件交接、DSH CLI、协议和审批回归；本机记录为 `.local/file-reconcile-relay-verify-final.log`。
 
-服务端归属绑定、逐文件授权、能力协商和对象到期后的只读结果恢复已接入，验证记录见 [Relay 文件消息](file-message-relay.md)。下一步继续 Android 上传 / 发送界面、文件展示和受限导出。
+服务端归属绑定、逐文件授权、能力协商和对象到期后的只读结果恢复已接入，验证记录见 [Relay 文件消息](file-message-relay.md)。文件历史现以合法显示名和字节数生成受限文字摘要；仅有附件的消息也可阅读。下一步继续受限导出和 APK 文件后端联合验收。

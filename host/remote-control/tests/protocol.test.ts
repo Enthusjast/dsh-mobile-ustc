@@ -69,6 +69,25 @@ test('injected and unattributed user-role input only advances the mobile cursor'
   }
 })
 
+test('file-only history keeps a safe display summary without exporting attachment authority', () => {
+  const projected = projectEvent({ type: 'user/message', seq: 7, time: 1, data: {
+    source: { kind: 'user' }, content: [{ type: 'file', receiptId: 'private-receipt', attachment: {
+      attachmentId: 'sha256:private-storage-id', name: '资料.txt', bytes: 12, path: '/private/source', url: 'https://private.example/capability',
+    } }],
+  } })
+  assert.deepEqual(projected.data, { content: [{ type: 'text', text: '[附件：资料.txt（12 字节）]' }] })
+  assert.equal(JSON.stringify(projected).includes('private'), false)
+  for (const attachment of [{ name: '/private/source', bytes: 1 }, { name: '..', bytes: 0 }, { name: 'bad\nname', bytes: 1 },
+    { name: '\ud800', bytes: 1 }, { name: 'x'.repeat(513), bytes: 1 }, { name: 'fine', bytes: -1 }, { name: 'fine', bytes: 1.5 }]) {
+    const hidden = projectEvent({ type: 'user/message', seq: 8, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'file', attachment }] } })
+    assert.deepEqual(hidden.data, { content: [{ type: 'text', text: '[附件：请在电脑端查看]' }] })
+  }
+  const injected = projectEvent({ type: 'user/message', seq: 9, time: 1, data: {
+    source: { kind: 'model-selection' }, content: [{ type: 'file', attachment: { name: 'private.txt', bytes: 1 } }],
+  } })
+  assert.equal(injected.type, 'cursor'); assert.deepEqual(injected.data, {})
+})
+
 test('answered native late questions remain human input without exporting source metadata', () => {
   const projected = projectEvent({ type: 'user/message', seq: 9, time: 2, surfaceOp: 'append', data: {
     id: 'reply', source: { kind: 'user-question-reply', callId: 'call', outcome: 'answered', credential: 'sensitive' },
