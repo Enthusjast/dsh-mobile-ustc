@@ -451,7 +451,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("restore runtime session catalog: %v", err)
 	}
-	messageScope := GrantScope{Actions: []string{"message.submit", "session.cancel", "session.read"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
+	messageScope := GrantScope{Actions: []string{"message.submit", "session.archive", "session.cancel", "session.read"}, Workspaces: []string{enrollment.Workspaces[0].ID}, Sessions: []string{}}
 	messageTicket, err := postgres.IssueRealtimeTicket(ctx, identity, deviceID, enrollment.RuntimeID, messageScope)
 	if err != nil {
 		t.Fatalf("issue message ticket: %v", err)
@@ -609,8 +609,8 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.RecordRealtimeCommand(ctx, noCancel, "question.answer", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("question answer accepted without explicit action: %v", err)
 	}
-	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "session.archive", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrGrantInvalid) {
-		t.Fatalf("unimplemented command type accepted: %v", err)
+	if _, err := postgres.RecordRealtimeCommand(ctx, noCancel, "session.archive", cancelRequestID, relaySessionID, cancelDigestHex); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("archive accepted without explicit action: %v", err)
 	}
 	if _, err := postgres.RecordRealtimeCommand(ctx, messageTicketRedemption, "session.cancel", cancelRequestID, relaySessionID, cancelDigestHex); err != nil {
 		t.Fatalf("record cancellation: %v", err)
@@ -633,6 +633,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 		t.Fatalf("request ID changed command type: %v", err)
 	}
 	testPostgresSessionCreation(t, ctx, postgres, messageTicketRedemption, commandReceipt, enrollment.Workspaces[0].ID, relaySessionID)
+	testPostgresSessionArchive(t, ctx, postgres, messageTicketRedemption, commandReceipt, relaySessionID)
 	if err := postgres.ValidateRealtimeLease(ctx, messageTicketRedemption); err != nil {
 		t.Fatalf("active message ticket lease was rejected: %v", err)
 	}
@@ -681,7 +682,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ValidateHostConnectionCredential(ctx, connectionCredential.Credential, installationThumbprint); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Fatalf("credential from an earlier key version error=%v, want ErrHostCredentialInvalid", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 38, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 43, 8); err != nil {
 		t.Fatal(err)
 	}
 	phoneHosts, err := postgres.ListHosts(ctx, phoneIdentity)
@@ -691,7 +692,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 38, 8); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 43, 8); err != nil {
 		t.Fatal(err)
 	}
 	activeDeviceID, err := postgres.ActiveDevice(ctx, identity, deviceProofThumbprint)
@@ -707,7 +708,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := postgres.RevokeDevice(ctx, identity.Issuer, identity.Subject, deviceID); err != nil {
 		t.Fatalf("idempotent device revoke: %v", err)
 	}
-	if err := assertChangeCounts(ctx, testDB, 39, 9); err != nil {
+	if err := assertChangeCounts(ctx, testDB, 44, 9); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := postgres.PendingControlEvents(ctx, 128)

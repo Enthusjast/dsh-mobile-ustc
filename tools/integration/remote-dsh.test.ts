@@ -10,7 +10,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
-import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayCreateDigest, relayQuestionDigest, relayTimedQuestionDigest } from '../../host/remote-control/src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, relayCreateDigest, relayQuestionDigest, relayTimedQuestionDigest } from '../../host/remote-control/src/relay-client.js'
 import { CompactSign } from 'jose'
 import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext, type ApprovalDecision } from '../../host/remote-control/src/approval-contract.js'
 import { canonicalObject } from '../../host/remote-control/src/canonical.js'
@@ -332,7 +332,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   })
   const beforeCreate = (await command('session.list', {})).payload.items.length
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
-  const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
+  const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.archive', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
   await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
@@ -345,7 +345,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const collector = new FrameCollector(socket, value => validate(value) || validateApproval(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['approval.signed.v1', 'command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
+    const caps = ['approval.signed.v1', 'command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -474,6 +474,51 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal((await phone('GET', `/v1/commands/${cancelId}?device_id=${device.device_id}`)).state, 'settled')
   assert.equal(query(`select count(*) from commands where request_id='${cancelId}'`), '1')
   assert.equal(query(`select count(*) from commands where request_id='${staleCancelId}'`), '0')
+
+  const archiveCommand = (archived: boolean, stopActivity = false) => ({
+    v: 1, type: 'session.archive', request_id: randomUUID(), runtime_id: enrollment.runtime_id,
+    runtime_epoch: probe.runtime_epoch, session_id: sessionId, payload: archived
+      ? { archived: true as const, stop_activity: stopActivity } : { archived: false as const, stop_activity: false as const },
+  })
+  const archiveAndWait = async (frame: ReturnType<typeof archiveCommand>, state = 'settled') => {
+    const from = mobile.frames.length
+    mobile.send(frame)
+    const receipt = await mobile.wait(item => item.type === 'command.receipt' && item.request_id === frame.request_id && item.payload.state === state, from)
+    assert.equal(receipt.payload.payload_sha256, relayArchiveDigest(sessionId, probe.runtime_epoch, frame.payload))
+    assert.equal((await phone('GET', `/v1/commands/${frame.request_id}?device_id=${device.device_id}`)).state, state)
+  }
+  const catalogState = async (state: string) => until(async () => {
+    const rows = (await phone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)).items
+    return rows.find((row: any) => row.session_id === sessionId && row.state === state)
+  }, `native catalog ${state}`)
+  const archive = archiveCommand(true)
+  await archiveAndWait(archive)
+  await catalogState('archived')
+  const archivedReadId = subscribe()
+  const archivedRead = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === archivedReadId)
+  assert.ok(JSON.stringify(archivedRead.payload.records).includes(marker), 'archive discarded native history')
+  const deniedArchivedId = randomUUID()
+  mobile.send({ ...submit, request_id: deniedArchivedId })
+  await mobile.wait(frame => frame.type === 'error' && frame.request_id === deniedArchivedId && frame.payload.code === 'access.denied')
+  await archiveAndWait(archiveCommand(false))
+  await catalogState('available')
+  await archiveAndWait(archive)
+  assert.equal((await command('session.list', {})).payload.items.find((item: any) => item.session_id === sessionId).archived, false, 'settled retry changed current desktop state')
+  const archiveActiveFrom = mobile.frames.length
+  const archiveStopMarker = `REMOTE_CANCEL_WAIT_${randomUUID()}`
+  mobile.send({ ...submit, request_id: randomUUID(), payload: { mode: 'queue', content: [{ type: 'text', text: archiveStopMarker }] } })
+  await mobile.wait(frame => frame.type === 'assistant.chunk' && JSON.stringify(frame.payload).includes('Cancelable model call is waiting'), archiveActiveFrom)
+  await archiveAndWait(archiveCommand(true), 'rejected')
+  assert.equal((await command('session.list', {})).payload.items.find((item: any) => item.session_id === sessionId).archived, false)
+  await archiveAndWait(archiveCommand(true, true))
+  const archiveStoppedTurn = await mobile.wait(frame => frame.type === 'session.event' && frame.payload.type === 'turn/end', archiveActiveFrom)
+  assert.equal(archiveStoppedTurn.payload.data.reason.kind, 'aborted')
+  await catalogState('archived')
+  await archiveAndWait(archiveCommand(false))
+  await catalogState('available')
+  mobile.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+    session_id: sessionId, subscription_id: archivedRead.subscription_id, payload: {} })
+  await mobile.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === archivedRead.subscription_id)
 
   const siblingMobile = await connectPhone(siblingPhone, siblingDevice.device_id, siblingKey)
   const questionFrom = mobile.frames.length, questionPromptId = randomUUID(), questionMarker = `M0_QUESTION_TEST_${randomUUID()}`
@@ -620,7 +665,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
 
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, cancelMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
+  for (const secret of [marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
@@ -671,6 +716,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic(`Device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic('A real Bash approved through the normal plugin was held after guard; scoped grant invalidation blocked its body before the three-second lease expired and durably reported the invalidated fact.')
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
+  t.diagnostic('Native archive/restore persisted through the Go relay: archived history remained readable, writes were denied, busy archive refused, explicit archive-and-stop aborted the held turn, and a historical settled retry did not undo a later restore.')
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
   t.diagnostic('The normal plugin negotiated signed approval: current Bash context, invalid-proof nonconsumption, phone allow/reject/cancel, one actual execution, duplicate decision reconciliation and durable native result reporting passed through the real Go service.')

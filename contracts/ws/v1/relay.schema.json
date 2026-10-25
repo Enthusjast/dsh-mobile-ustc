@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dsh-mobile-ustc.invalid/contracts/ws/v1/relay.schema.json",
   "title": "DSH Mobile Relay v1 frames",
-  "description": "Strict challenge, heartbeat, text/create/cancel commands, scoped session reads, and blocking/timed question frames. Read routing uses per-connection subscription IDs and host-generated sync IDs. Fragmented projected payloads are at most 2 MiB.",
+  "description": "Strict challenge, heartbeat, text/create/cancel/archive commands, scoped session reads, and blocking/timed question frames. Archive settlement confirms registry durability, not activity settlement. Read routing uses per-connection subscription IDs and host-generated sync IDs. Fragmented projected payloads are at most 2 MiB.",
   "oneOf": [
     { "$ref": "#/$defs/challenge" },
     { "$ref": "#/$defs/deviceHelloProof" },
@@ -17,6 +17,8 @@
     { "$ref": "#/$defs/messageSubmitToHost" },
     { "$ref": "#/$defs/sessionCancel" },
     { "$ref": "#/$defs/sessionCancelToHost" },
+    { "$ref": "#/$defs/sessionArchive" },
+    { "$ref": "#/$defs/sessionArchiveToHost" },
     { "$ref": "#/$defs/questionAnswer" },
     { "$ref": "#/$defs/questionAnswerToHost" },
     { "$ref": "#/$defs/questionSnapshot" },
@@ -235,6 +237,39 @@
         "runtime_epoch": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" },
         "user_id": { "$ref": "#/$defs/uuid" }, "device_id": { "$ref": "#/$defs/uuid" },
         "payload_sha256": { "$ref": "#/$defs/sha256" }, "payload": { "type": "object", "maxProperties": 0 }
+      }
+    },
+    "archivePayload": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["archived", "stop_activity"],
+          "properties": { "archived": { "const": true }, "stop_activity": { "type": "boolean" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["archived", "stop_activity"],
+          "properties": { "archived": { "const": false }, "stop_activity": { "const": false } }
+        }
+      ]
+    },
+    "sessionArchive": {
+      "type": "object", "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "payload"],
+      "properties": {
+        "v": { "const": 1 }, "type": { "const": "session.archive" },
+        "request_id": { "$ref": "#/$defs/uuid" }, "runtime_id": { "$ref": "#/$defs/uuid" },
+        "runtime_epoch": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" },
+        "payload": { "$ref": "#/$defs/archivePayload" }
+      }
+    },
+    "sessionArchiveToHost": {
+      "type": "object", "additionalProperties": false,
+      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "user_id", "device_id", "payload_sha256", "payload"],
+      "properties": {
+        "v": { "const": 1 }, "type": { "const": "session.archive" },
+        "request_id": { "$ref": "#/$defs/uuid" }, "runtime_id": { "$ref": "#/$defs/uuid" },
+        "runtime_epoch": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" },
+        "user_id": { "$ref": "#/$defs/uuid" }, "device_id": { "$ref": "#/$defs/uuid" },
+        "payload_sha256": { "$ref": "#/$defs/sha256" }, "payload": { "$ref": "#/$defs/archivePayload" }
       }
     },
     "creationOptions": {

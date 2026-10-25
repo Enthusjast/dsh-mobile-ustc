@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { readFileSync } from 'node:fs'
-import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, startHostRelay } from '../src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, startHostRelay } from '../src/relay-client.js'
 import { mobileSessionId, type SessionCatalogChange } from '../src/dsh-client.js'
 
 const ws = createRequire(import.meta.url)('ws') as { WebSocketServer: new (options: object) => any }
@@ -104,14 +104,15 @@ test('Relay host client proves the installation key and routes only digest-match
             && claims.iss === installationId && claims.aud === 'urn:dsh-mobile-ustc:realtime'
             && claims.challenge_id === challengeId && claims.connection_id === connectionId
             && claims.nonce === nonce && claims.runtime_id === runtimeId && claims.runtime_epoch === runtimeEpoch
-            && claims.hello_sha256 === 'AD-ziN2o1S2R_pQVRbx77zT0m7nbTasOj9q3evX07NY'
+            && frame.payload.capabilities.includes('session.archive.v1')
+            && claims.hello_sha256 === hostHelloDigest(['host', runtimeId, runtimeEpoch, '0.2.1-rc.2', '1.2.3', '0.0.1', '1', [...frame.payload.capabilities].sort().join('\n')])
             && verify('sha256', Buffer.from(signingInput), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
           if (!valid) return reject(new Error('host hello proof did not match the challenge'))
           helloClaims = claims
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: connectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: runtimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolve()
@@ -154,7 +155,7 @@ test('Relay host client proves the installation key and routes only digest-match
       routed.push({ command, owner })
       await observe?.('host_accepted')
       await observe?.('dispatching')
-      await observe?.((command as { type: string }).type === 'session.cancel' ? 'settled' : 'agent_queued')
+      await observe?.((command as { type: string }).type !== 'message.submit' ? 'settled' : 'agent_queued')
     },
   }
   const relay = startHostRelay({
@@ -193,9 +194,15 @@ test('Relay host client proves the installation key and routes only digest-match
     await waitFor(() => routed.length === 2)
     assert.deepEqual(routed[1]?.command, { v: 0, type: 'session.cancel', request_id: cancelId, runtime_epoch: runtimeEpoch, session_id: sessionId, payload: {} })
 
+    const archiveId = 'bbbbbbbb-2222-4222-8222-222222222222'
+    const archivePayload = { archived: true as const, stop_activity: false }
+    relaySocket.send(JSON.stringify({ ...forwarded, type: 'session.archive', request_id: archiveId, payload: archivePayload, payload_sha256: relayArchiveDigest(sessionId, runtimeEpoch, archivePayload) }))
+    await waitFor(() => routed.length === 3)
+    assert.deepEqual(routed[2]?.command, { v: 0, type: 'session.archive', request_id: archiveId, runtime_epoch: runtimeEpoch, session_id: sessionId, payload: archivePayload })
+
     relaySocket.send(JSON.stringify({ ...forwarded, payload_sha256: createHash('sha256').update('tampered').digest('hex') }))
     await waitFor(() => relaySocket.readyState !== 1)
-    assert.equal(routed.length, 2)
+    assert.equal(routed.length, 3)
   } finally {
     await relay.close()
   }

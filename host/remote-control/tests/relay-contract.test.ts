@@ -16,6 +16,12 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
     '../../../contracts/ws/v1/golden/session-cancel.json',
     '../../../contracts/ws/v1/golden/session-cancel.forwarded.json',
+    '../../../contracts/ws/v1/golden/session-archive.json',
+    '../../../contracts/ws/v1/golden/session-archive.forwarded.json',
+    '../../../contracts/ws/v1/golden/session-archive-stop.json',
+    '../../../contracts/ws/v1/golden/session-archive-stop.forwarded.json',
+    '../../../contracts/ws/v1/golden/session-restore.json',
+    '../../../contracts/ws/v1/golden/session-restore.forwarded.json',
     '../../../contracts/ws/v1/golden/question-answer.json',
     '../../../contracts/ws/v1/golden/question-answer.forwarded.json',
     '../../../contracts/ws/v1/golden/question-snapshot.json',
@@ -66,6 +72,13 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   const { runtime_epoch: _epoch, ...missingEpoch } = deviceCancel
   assert.equal(validate(missingEpoch), false)
   assert.equal(validate({ ...deviceCancel, payload: { all: true } }), false)
+  for (const name of ['session-archive', 'session-archive-stop', 'session-restore']) {
+    const archive = await load(`../../../contracts/ws/v1/golden/${name}.forwarded.json`) as Record<string, unknown>
+    assert.equal(archive.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: archive.type, runtime_epoch: archive.runtime_epoch, session_id: archive.session_id, payload: archive.payload }))).digest('hex'))
+    assert.equal(validate({ ...archive, payload: { archived: false, stop_activity: true } }), false)
+    assert.equal(validate({ ...archive, payload: { archived: true } }), false)
+    assert.equal(validate({ ...archive, runtime_epoch: undefined }), false)
+  }
   const question = await load('../../../contracts/ws/v1/golden/question-answer.forwarded.json') as Record<string, unknown>
   assert.equal(question.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: question.type, runtime_epoch: question.runtime_epoch, session_id: question.session_id, payload: question.payload }))).digest('hex'))
   assert.equal(validate({ ...question, payload: { question_id: question.request_id, decision: 'allow_once' } }), false)

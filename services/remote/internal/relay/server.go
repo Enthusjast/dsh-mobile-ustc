@@ -42,7 +42,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", creationOptionsCapability, "session.read.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.archive.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", creationOptionsCapability, "session.read.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -103,8 +103,9 @@ type liveConnection struct {
 }
 
 type outboundFrame struct {
-	body   []byte
-	result chan error
+	body        []byte
+	result      chan error
+	beforeWrite func() error
 }
 
 type peer struct {
@@ -221,7 +222,13 @@ func (live *liveConnection) writeLoop() {
 			return
 		case frame := <-live.sendQueue:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := live.conn.Write(ctx, websocket.MessageText, frame.body)
+			var err error
+			if frame.beforeWrite != nil {
+				err = frame.beforeWrite()
+			}
+			if err == nil {
+				err = live.conn.Write(ctx, websocket.MessageText, frame.body)
+			}
 			cancel()
 			frame.result <- err
 			if err != nil {
@@ -238,6 +245,25 @@ func (live *liveConnection) stop() {
 }
 
 func (live *liveConnection) sendJSON(ctx context.Context, value any) error {
+	return live.sendJSONBeforeWrite(ctx, value, nil)
+}
+
+// Publish a handshake's route while hello.ok already owns the next writer slot.
+// The peer can use the route as soon as it sees hello.ok; concurrent pushes
+// still queue behind that frame, including while an old host is being fenced.
+func (live *liveConnection) sendHello(ctx context.Context, value any, bind func() bool) error {
+	return live.sendJSONBeforeWrite(ctx, value, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !bind() {
+			return net.ErrClosed
+		}
+		return nil
+	})
+}
+
+func (live *liveConnection) sendJSONBeforeWrite(ctx context.Context, value any, beforeWrite func() error) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -245,7 +271,7 @@ func (live *liveConnection) sendJSON(ctx context.Context, value any) error {
 	if len(data) > maxFrameBytes {
 		return errors.New("relay: outgoing frame exceeds limit")
 	}
-	frame := outboundFrame{body: data, result: make(chan error, 1)}
+	frame := outboundFrame{body: data, result: make(chan error, 1), beforeWrite: beforeWrite}
 	select {
 	case <-live.done:
 		return net.ErrClosed
@@ -623,7 +649,7 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 	leaseCtx, cancel := context.WithDeadline(parent, leaseExpiresAt)
 	defer cancel()
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
-	if writeJSON(leaseCtx, connection, map[string]any{
+	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "device", "connection_id": connectionID,
 			"device_id": redemption.DeviceID, "runtime_id": redemption.RuntimeID,
@@ -632,11 +658,7 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 			"server_time": time.Now().UTC(), "heartbeat_seconds": heartbeatSeconds,
 			"max_frame_bytes": maxFrameBytes, "lease_expires_at": leaseExpiresAt,
 		},
-	}) != nil {
-		return
-	}
-	if !server.bindDevice(live, redemption, connectionID, accepted) {
-		closePolicy(connection, "server draining")
+	}, func() bool { return server.bindDevice(live, redemption, connectionID, accepted) }) != nil {
 		return
 	}
 	server.runHeartbeat(leaseCtx, live, nil)
@@ -742,7 +764,7 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 		return
 	}
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
-	if writeJSON(leaseCtx, connection, map[string]any{
+	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
 			"role": "host", "connection_id": connectionID,
 			"installation_id": registered.InstallationID, "runtime_id": registered.RuntimeID,
@@ -751,11 +773,7 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 			"server_time": time.Now().UTC(), "heartbeat_seconds": heartbeatSeconds,
 			"max_frame_bytes": maxFrameBytes, "lease_expires_at": peer.installation.ExpiresAt,
 		},
-	}) != nil {
-		return
-	}
-	if !server.bindHost(live, registered, accepted) {
-		closePolicy(connection, "server draining")
+	}, func() bool { return server.bindHost(live, registered, accepted) }) != nil {
 		return
 	}
 	server.runHeartbeat(leaseCtx, live, &registered)
@@ -817,7 +835,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			}) != nil {
 				return
 			}
-		case "message.submit", "session.cancel", "session.create", "session.create.options.get", "question.answer", "question.timed.answer":
+		case "message.submit", "session.cancel", "session.archive", "session.create", "session.create.options.get", "question.answer", "question.timed.answer":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				closePolicy(connection, "operation denied")
@@ -1021,6 +1039,9 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 	if envelope.Type == "session.cancel" {
 		capability = "session.cancel.v1"
 	}
+	if envelope.Type == "session.archive" {
+		capability = "session.archive.v1"
+	}
 	if envelope.Type == "question.answer" {
 		capability = "question.blocking.v1"
 	}
@@ -1035,6 +1056,7 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		!uuidPattern.MatchString(envelope.SessionID) ||
 		(envelope.Type == "message.submit" && envelope.RuntimeEpoch != "") ||
 		(envelope.Type == "session.cancel" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
+		(envelope.Type == "session.archive" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
 		(envelope.Type == "question.answer" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
 		(envelope.Type == "question.timed.answer" && !uuidPattern.MatchString(envelope.RuntimeEpoch)) ||
 		envelope.DeviceID != "" || envelope.UserID != "" || envelope.PayloadSHA256 != "" || envelope.SubscriptionID != "" || envelope.SyncID != "" {
@@ -1051,6 +1073,14 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		}
 		payload = submit
 		digest, _ = messageSubmitDigest(envelope.SessionID, submit)
+	} else if envelope.Type == "session.archive" {
+		var archive sessionArchivePayload
+		if decodePayload(envelope.Payload, &archive) != nil || archive.Archived == nil || archive.StopActivity == nil || (!*archive.Archived && *archive.StopActivity) {
+			server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+			return
+		}
+		payload = archive
+		digest = sessionArchiveDigest(envelope.SessionID, envelope.RuntimeEpoch, archive)
 	} else if envelope.Type == "question.answer" || envelope.Type == "question.timed.answer" {
 		var answer questionAnswerPayload
 		if decodePayload(envelope.Payload, &answer) != nil || !validQuestionAnswer(answer) {
@@ -1290,6 +1320,18 @@ func sessionCancelDigest(sessionID, runtimeEpoch string) string {
 	// Identifiers are validated UUIDs. Bind cancel retries to their original
 	// runtime so a delayed command cannot stop work after a process restart.
 	encoded := `{"payload":{},"runtime_epoch":"` + runtimeEpoch + `","session_id":"` + sessionID + `","type":"session.cancel"}`
+	digest := sha256.Sum256([]byte(encoded))
+	return hex.EncodeToString(digest[:])
+}
+
+type sessionArchivePayload struct {
+	Archived     *bool `json:"archived"`
+	StopActivity *bool `json:"stop_activity"`
+}
+
+func sessionArchiveDigest(sessionID, runtimeEpoch string, payload sessionArchivePayload) string {
+	// Both required booleans and the UUIDs have been validated before hashing.
+	encoded := `{"payload":{"archived":` + strconv.FormatBool(*payload.Archived) + `,"stop_activity":` + strconv.FormatBool(*payload.StopActivity) + `},"runtime_epoch":"` + runtimeEpoch + `","session_id":"` + sessionID + `","type":"session.archive"}`
 	digest := sha256.Sum256([]byte(encoded))
 	return hex.EncodeToString(digest[:])
 }

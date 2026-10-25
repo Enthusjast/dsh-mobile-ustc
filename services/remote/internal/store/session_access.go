@@ -14,12 +14,16 @@ func (postgres *Postgres) AuthorizeRealtimeQuestion(ctx context.Context, ticket 
 	if !slices.Contains(ticket.Scope.Actions, "question.answer") {
 		return ErrAccessDenied
 	}
-	return postgres.AuthorizeRealtimeSessionRead(ctx, ticket, sessionID)
+	return postgres.authorizeRealtimeSessionRead(ctx, ticket, sessionID, false)
 }
 
 // AuthorizeRealtimeSessionRead is called at admission and before every content
 // frame. Directory visibility alone never grants access to session bodies.
 func (postgres *Postgres) AuthorizeRealtimeSessionRead(ctx context.Context, ticket TicketRedemption, sessionID string) error {
+	return postgres.authorizeRealtimeSessionRead(ctx, ticket, sessionID, true)
+}
+
+func (postgres *Postgres) authorizeRealtimeSessionRead(ctx context.Context, ticket TicketRedemption, sessionID string, includeArchived bool) error {
 	if !grantUUIDPattern.MatchString(sessionID) || !slices.Contains(ticket.Scope.Actions, "session.read") {
 		return ErrAccessDenied
 	}
@@ -50,7 +54,7 @@ func (postgres *Postgres) AuthorizeRealtimeSessionRead(ctx context.Context, tick
 	if json.Unmarshal(scopeJSON, &scope) != nil {
 		return ErrDatabaseUnavailable
 	}
-	if state == "unavailable" || !grantScopeSubset(ticket.Scope, scope) ||
+	if state == "unavailable" || state == "archived" && !includeArchived || !grantScopeSubset(ticket.Scope, scope) ||
 		!scopeIncludesSession(ticket.Scope, sessionID, workspaceID) || !scopeIncludesSession(scope, sessionID, workspaceID) {
 		return ErrAccessDenied
 	}

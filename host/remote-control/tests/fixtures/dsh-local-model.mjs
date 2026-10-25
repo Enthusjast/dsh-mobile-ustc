@@ -7,7 +7,7 @@ class LocalModel extends LlmAdapter {
     super()
     this.approvalToolIssued = false
     this.questionToolIssued = false
-    this.cancelWaitIssued = false
+    this.cancelWaitIssued = new Set()
     this.timedQuestionsIssued = new Set()
     this.signedApprovalsIssued = new Set()
   }
@@ -46,8 +46,10 @@ class LocalModel extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
-    if (!this.cancelWaitIssued && userText.includes('REMOTE_CANCEL_WAIT')) {
-      this.cancelWaitIssued = true
+    const cancelWait = (userText.match(/REMOTE_CANCEL_WAIT_[0-9a-f-]{36}/g) ?? (userText.includes('REMOTE_CANCEL_WAIT') ? ['REMOTE_CANCEL_WAIT'] : []))
+      .find(marker => !this.cancelWaitIssued.has(marker))
+    if (cancelWait) {
+      this.cancelWaitIssued.add(cancelWait)
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: 'Cancelable model call is waiting' }
       await delay(30_000, undefined, { signal: options.signal })

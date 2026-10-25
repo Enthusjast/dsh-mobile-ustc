@@ -43,7 +43,7 @@ var relayReceiptStates = map[string]struct{}{
 
 // RecordRealtimeCommand persists status and a digest; the request body remains transient.
 func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket TicketRedemption, commandType, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
-	if commandType != "message.submit" && commandType != "session.cancel" && commandType != "question.answer" {
+	if commandType != "message.submit" && commandType != "session.cancel" && commandType != "session.archive" && commandType != "question.answer" {
 		return CommandStatus{}, ErrGrantInvalid
 	}
 	if !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) ||
@@ -84,7 +84,9 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
-	if sessionState != "available" && sessionState != "running" {
+	// Archived sessions remain valid archive targets so an authorized operator
+	// can restore them. Other mutations continue to require an active session.
+	if sessionState != "available" && sessionState != "running" && !(commandType == "session.archive" && sessionState == "archived") {
 		return CommandStatus{}, ErrAccessDenied
 	}
 	var currentScope GrantScope
