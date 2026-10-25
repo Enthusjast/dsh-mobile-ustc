@@ -4,6 +4,9 @@ import cn.edu.ustc.dsh.auth.*
 import cn.edu.ustc.dsh.crypto.*
 import cn.edu.ustc.dsh.protocol.*
 import cn.edu.ustc.dsh.command.*
+import cn.edu.ustc.dsh.session.QuestionKind
+import cn.edu.ustc.dsh.session.QuestionPhase
+import cn.edu.ustc.dsh.session.ClaimPhase
 import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.JWSHeader
 import com.nimbusds.jose.crypto.ECDSASigner
@@ -202,7 +205,7 @@ object RunRelayProbe {
             check(journal.listCreations(runtime).single().attempts==1L)
         }
         val result=api.sessions(runtime).obj("data").array("items").map {SessionDirectoryEntry.parse(it as JsonObject)}.single {it.id==created}
-        val createdScope=runtimeAccess.scope!!.session(result.id,result.workspaceId,setOf("session.read","message.submit","command.status"))
+        val createdScope=runtimeAccess.scope!!.session(result.id,result.workspaceId,setOf("session.read","message.submit","question.answer","command.status"))
         api.chatReader(fixture.string("device_id"),runtime,result.id,createdScope,journal,owner).use {reader->
             withTimeout(10_000) {reader.state.first {it.phase==SessionReadPhase.READY}}
             val writer=reader.commands!!
@@ -210,6 +213,42 @@ object RunRelayProbe {
             withTimeout(15_000) {writer.state.first {it.records.any {row->row.intent.requestId==request && row.everAgentQueued}}}
             val completed=withTimeout(15_000) {reader.state.first {it.window?.items?.any {item->item.role==cn.edu.ustc.dsh.session.ConversationRole.ASSISTANT && item.persisted && item.blocks.any {block->block.text=="DSH local integration fixture response"}}==true}}
             check(completed.window!!.items.count {item->item.blocks.any {block->block.text=="KOTLIN_CREATED_SESSION_CONTINUE"}}==1)
+            writer.submit("queue","M0_QUESTION_TEST_KOTLIN")
+            val pending=withTimeout(10_000) {reader.state.first {it.questions.items.any {item->item.batch.kind==QuestionKind.BLOCKING}}}.questions.items.single {it.batch.kind==QuestionKind.BLOCKING}
+            val answer=reader.answerQuestion(pending.handle,QuestionAnswers(pending.batch.id,listOf(QuestionAnswer("m0-choice",listOf("Local answer"),"KOTLIN_BLOCKING_REPLY"))))
+            val answered=withTimeout(10_000) {writer.state.first {it.records.any {row->row.intent.requestId==answer && row.remote==RemoteCommandState.SETTLED}}}.records.single {it.intent.requestId==answer}
+            check(!answered.everAgentQueued && answered.intent.questionDefinition==pending.batch.definition)
+            withTimeout(10_000) {reader.state.first {it.questions.items.none {item->item.batch.id==pending.batch.id} && it.window?.taskRunning==false}}
+        }
+        var timedSession: String?=null
+        api.sessionCreator(fixture.string("device_id"),runtime,creationScope,journal,owner).use {flow->
+            val options=withTimeout(10_000) {flow.state.first {it.phase==SessionCreationPhase.READY}}.options!!
+            check("remote-timed" in options.presets)
+            val request=flow.create(workspace,"remote-timed",options.epoch)
+            timedSession=withTimeout(10_000) {flow.state.first {it.outbox.records.any {row->row.intent.requestId==request && row.createdSessionId!=null}}}.outbox.records.single {it.intent.requestId==request}.createdSessionId
+        }
+        val timedScope=runtimeAccess.scope!!.session(timedSession!!,workspace,setOf("session.read","message.submit","question.answer","command.status"))
+        api.chatReader(fixture.string("device_id"),runtime,timedSession!!,timedScope,journal,owner).use {reader->
+            withTimeout(10_000) {reader.state.first {it.phase==SessionReadPhase.READY}}
+            val writer=reader.commands!!
+            writer.submit("queue","REMOTE_TIMED_FOREGROUND_KOTLIN")
+            val first=withTimeout(10_000) {reader.state.first {it.questions.items.any {item->item.batch.kind==QuestionKind.TIMED && item.batch.phase==QuestionPhase.OPEN}}}.questions.items.first {it.batch.kind==QuestionKind.TIMED && it.batch.phase==QuestionPhase.OPEN}
+            reader.claimQuestion(first.handle)
+            val claimed=withTimeout(5000) {reader.state.first {it.questions.items.any {item->item.batch.id==first.batch.id && item.claim?.phase==ClaimPhase.ACTIVE}}}.questions.items.single {it.batch.id==first.batch.id}
+            check(claimed.remainingMillis!=null && claimed.remainingMillis!!<=10_000)
+            val foreground=reader.answerQuestion(claimed.handle,QuestionAnswers(claimed.batch.id,listOf(QuestionAnswer("timed-choice",listOf("Reply"),"KOTLIN_TIMED_FOREGROUND_REPLY"))))
+            val consumed=withTimeout(10_000) {writer.state.first {it.records.any {row->row.intent.requestId==foreground && row.remote==RemoteCommandState.SETTLED}}}.records.single {it.intent.requestId==foreground}
+            check(!consumed.everAgentQueued)
+            withTimeout(10_000) {reader.state.first {it.questions.items.none {item->item.batch.id==first.batch.id} && it.window?.taskRunning==false}}
+            writer.submit("queue","REMOTE_TIMED_RELEASE_KOTLIN")
+            val second=withTimeout(10_000) {reader.state.first {it.questions.items.any {item->item.batch.kind==QuestionKind.TIMED && item.batch.phase==QuestionPhase.OPEN}}}.questions.items.first {it.batch.kind==QuestionKind.TIMED && it.batch.phase==QuestionPhase.OPEN}
+            reader.claimQuestion(second.handle)
+            withTimeout(5000) {reader.state.first {it.questions.items.any {item->item.batch.id==second.batch.id && item.claim?.phase==ClaimPhase.ACTIVE}}}
+            reader.releaseQuestion(second.handle)
+            val continued=withTimeout(10_000) {reader.state.first {it.questions.items.any {item->item.batch.id==second.batch.id && item.batch.phase==QuestionPhase.CONTINUED}}}.questions.items.single {it.batch.id==second.batch.id}
+            val late=reader.answerQuestion(continued.handle,QuestionAnswers(continued.batch.id,listOf(QuestionAnswer("timed-choice",listOf("Reply"),"KOTLIN_TIMED_LATE_REPLY"))))
+            withTimeout(10_000) {writer.state.first {it.records.any {row->row.intent.requestId==late && row.everAgentQueued}}}
+            withTimeout(10_000) {reader.state.first {it.window?.items?.any {item->item.blocks.any {block->block.text.contains("KOTLIN_TIMED_LATE_REPLY")}}==true}}
         }
     }
 }

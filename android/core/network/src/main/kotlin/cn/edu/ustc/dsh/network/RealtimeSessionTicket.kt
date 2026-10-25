@@ -28,8 +28,8 @@ class RealtimeSessionTicket internal constructor(
                 val now = System.currentTimeMillis()
                 val challenge = DeviceChallenge.parse(link.receive(), now, expiresAt)
                 val capabilities = mutableListOf("connection.heartbeat.v1")
-                if ("session.read" in scope.actions) capabilities += "session.read.v1"
-                if (scope.actions.any { it in setOf("message.submit", "session.cancel", "session.create") }) capabilities += "command.relay.v1"
+                if ("session.read" in scope.actions) capabilities += listOf("session.read.v1","question.blocking.v1","question.timed.v1")
+                if (scope.actions.any { it in setOf("message.submit", "session.cancel", "session.create", "question.answer") }) capabilities += "command.relay.v1"
                 if ("session.cancel" in scope.actions) capabilities += "session.cancel.v1"
                 if ("session.create" in scope.actions) capabilities += listOf("session.create.v1", "session.create_options.v1")
                 val hello = DeviceHello(deviceId, capabilities)

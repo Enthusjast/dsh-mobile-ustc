@@ -237,7 +237,7 @@ class RelayNetworkTest {
         "role" to "device".json(), "connection_id" to connection.json(), "device_id" to device.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(),
         "protocols" to JsonArray(listOf(1L.json())), "capabilities" to JsonArray(listOf("connection.heartbeat.v1".json(), "session.read.v1".json())),
         "server_time" to time(0), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(), "lease_expires_at" to time(299_000)))
-    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL, expectedCapabilities: List<String> = listOf("connection.heartbeat.v1", "session.read.v1"), onContent: ((WebSocket, JsonObject) -> Unit)? = null): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL, expectedCapabilities: List<String> = listOf("connection.heartbeat.v1", "session.read.v1","question.blocking.v1","question.timed.v1"), onContent: ((WebSocket, JsonObject) -> Unit)? = null): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
         override fun onOpen(socket: WebSocket, response: Response) { socket.send(JsonDocument.of(challenge).canonicalText()) }
         override fun onMessage(socket: WebSocket, text: String) {
             try {
@@ -271,6 +271,7 @@ class RelayNetworkTest {
         lateinit var request: String
         var onPage: (JsonObject) -> Unit = {}
         var onCommand: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected command") }
+        var onClaim: (WebSocket,JsonObject)->Unit={_,_->error("unexpected claim")}
         var offline = false
         fun receive(socket: WebSocket, frame: JsonObject) {
             this.socket = socket
@@ -290,7 +291,8 @@ class RelayNetworkTest {
                     assertEquals(subscription, frame.string("subscription_id")); assertEquals(epoch, frame.string("runtime_epoch"))
                     onPage(frame)
                 }
-                "message.submit", "session.cancel" -> onCommand(socket, frame)
+                "message.submit", "session.cancel","question.answer","question.timed.answer" -> onCommand(socket, frame)
+                "question.claim","question.release"->onClaim(socket,frame)
                 else -> error("unexpected client frame")
             }
         }
@@ -308,8 +310,8 @@ class RelayNetworkTest {
     }
     private suspend fun SessionReader.await(test: (SessionReadState) -> Boolean) = withTimeout(5000) { state.first(test) }.also { peerFailure.get()?.let { throw AssertionError(it) } }
 
-    private inner class CommandPeer {
-        val granted = RelayScope(listOf("session.read", "message.submit", "command.status", "session.cancel"), emptyList(), listOf(sessionId))
+    private inner class CommandPeer(questions: Boolean=false) {
+        val granted = RelayScope(listOf("session.read", "message.submit", "command.status", "session.cancel")+if(questions) listOf("question.answer") else emptyList(), emptyList(), listOf(sessionId))
         val journal = MemoryCommandJournal(CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device))
         val feed = ReadPeer(listOf(user(0, "opening")), 0)
         val statuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
@@ -322,7 +324,7 @@ class RelayNetworkTest {
         var readLeaseMillis = 299_000L
         val accessReads = java.util.concurrent.atomic.AtomicInteger()
         init {
-            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "command.relay.v1", "session.cancel.v1")
+            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.cancel.v1")
             server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when {
                     request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
@@ -352,6 +354,97 @@ class RelayNetworkTest {
             }
         }
         fun reader(owner: CoroutineScope, transcripts: TranscriptCache? = null) = api().chatReader(device, runtime, sessionId, granted, journal, owner, transcripts = transcripts)
+    }
+    private fun questionPayload(timed: Boolean=false,phase: String="open",revision: Long=1,detail: String="Review this plan") : JsonObject {
+        var item=jsonObject("question_id" to "99999999-9999-4999-8999-999999999999".json(),"expires_at" to (if(timed) JsonNull else time(60_000)),"questions" to JsonArray(listOf(jsonObject("id" to "plan".json(),"question" to "Continue?".json(),"detail" to detail.json(),"options" to JsonArray(listOf(jsonObject("label" to "Continue".json()),jsonObject("label" to "Cancel".json()))),"intent" to jsonObject("kind" to "plan-review".json(),"approve" to "Continue".json())))))
+        if(timed) item=item.with("state" to phase.json())
+        return jsonObject("revision" to revision.json(),"items" to JsonArray(listOf(item)))
+    }
+    @Test fun aCurrentBlockingPlanAcceptsOneCompleteAnswerAndUsesAuthoritativeSettlement(): Unit=runBlocking {
+        val fixture=CommandPeer(true);fixture.advertisedState=RemoteCommandState.SETTLED
+        fixture.reader(this).use {reader->
+            reader.await {it.phase==SessionReadPhase.READY};fixture.feed.send("question.snapshot",questionPayload())
+            val view=reader.await {it.questions.items.isNotEmpty()}.questions.items.single()
+            assertTrue(reader.state.value.questions.canAnswer)
+            assertThrows(QuestionStateException::class.java) {runBlocking {reader.answerQuestion(view.handle,QuestionAnswers(view.batch.id,listOf(QuestionAnswer("plan",listOf("bad")))))}}
+            val answers=QuestionAnswers(view.batch.id,listOf(QuestionAnswer("plan",listOf("Continue"),"中文答复")))
+            val id=reader.answerQuestion(view.handle,answers)
+            withTimeout(5000) {reader.commands!!.state.first {it.records.any {row->row.intent.requestId==id && row.remote==RemoteCommandState.SETTLED}}}
+            assertFalse(fixture.journal.list(runtime,sessionId).single().everAgentQueued)
+            assertThrows(CommandDataException::class.java) {runBlocking {reader.answerQuestion(view.handle,answers)}}
+            fixture.feed.send("question.snapshot",jsonObject("revision" to 2L.json(),"items" to JsonArray(emptyList())))
+            reader.await {it.questions.blockingLoaded && it.questions.items.isEmpty()}
+            assertEquals(0L,reader.state.value.window!!.cursor);assertEquals(1,fixture.writes.size)
+        }
+    }
+    @Test fun readPermissionCanDisplayQuestionsButCannotClaimOrAnswer(): Unit=runBlocking {
+        val fixture=CommandPeer()
+        fixture.reader(this).use {reader->
+            reader.await {it.phase==SessionReadPhase.READY};fixture.feed.send("question.timed.snapshot",questionPayload(true))
+            val view=reader.await {it.questions.items.isNotEmpty()}.questions.items.single()
+            assertFalse(reader.state.value.questions.canAnswer)
+            assertThrows(RemoteRequestException::class.java) {runBlocking {reader.claimQuestion(view.handle)}}
+            assertThrows(RemoteRequestException::class.java) {runBlocking {reader.answerQuestion(view.handle,QuestionAnswers(view.batch.id,listOf(QuestionAnswer("plan",emptyList()))))}}
+            assertTrue(fixture.journal.list(runtime,sessionId).isEmpty());assertTrue(fixture.writes.isEmpty())
+        }
+    }
+    @Test fun timedClaimReleaseAndLateAnswerUseTheCurrentSubscriptionWithoutRepeatingTheCallback(): Unit=runBlocking {
+        val fixture=CommandPeer(true);var claim: String?=null
+        fixture.feed.onClaim={_,frame->when(frame.string("type")) {
+            "question.claim"->{claim=frame.string("request_id");Thread.sleep(150);fixture.feed.send("question.claimed",jsonObject("question_id" to frame.obj("payload").string("question_id").json(),"remaining_ms" to 1500L.json(),"expires_at" to time(1500)),requestId=claim!!)}
+            "question.release"->{assertEquals(claim,frame.obj("payload").string("claim_id"));fixture.feed.send("question.released",jsonObject("claim_id" to claim!!.json()),requestId=frame.string("request_id"));fixture.feed.send("question.timed.snapshot",questionPayload(true,"continued",2))}
+        }}
+        fixture.reader(this).use {reader->
+            reader.await {it.phase==SessionReadPhase.READY};fixture.feed.send("question.timed.snapshot",questionPayload(true))
+            val view=reader.await {it.questions.items.isNotEmpty()}.questions.items.single()
+            assertNull(view.remainingMillis);reader.claimQuestion(view.handle)
+            val active=reader.await {it.questions.items.single().claim?.phase==ClaimPhase.ACTIVE}.questions.items.single()
+            assertTrue(active.remainingMillis!!<1500)
+            reader.releaseQuestion(view.handle)
+            val continued=reader.await {it.questions.items.single().batch.phase==QuestionPhase.CONTINUED}.questions.items.single()
+            reader.answerQuestion(continued.handle,QuestionAnswers(continued.batch.id,listOf(QuestionAnswer("plan",emptyList(),"late answer"))))
+            withTimeout(5000) {reader.commands!!.state.first {it.records.singleOrNull()?.everAgentQueued==true}}
+            assertEquals("question.timed.answer",fixture.writes.single().string("type"))
+        }
+    }
+    @Test fun disconnectAndRevocationNeverRetainAnAnswerableQuestionInTheCachedTranscript(): Unit=runBlocking {
+        val fixture=CommandPeer(true)
+        fixture.reader(this).use {reader->
+            reader.await {it.phase==SessionReadPhase.READY};fixture.feed.send("question.snapshot",questionPayload())
+            val old=reader.await {it.questions.items.isNotEmpty()}.questions.items.single()
+            fixture.feed.control("server.draining",jsonObject("reason" to "server_draining".json()))
+            val closed=reader.await {it.phase==SessionReadPhase.BACKOFF}
+            assertTrue(closed.questions.items.isEmpty())
+            assertThrows(QuestionStateException::class.java) {runBlocking {reader.answerQuestion(old.handle,QuestionAnswers(old.batch.id,listOf(QuestionAnswer("plan",listOf("Continue")))))}}
+        }
+    }
+    @Test fun aStoredAnswerCannotBeTransferredToChangedQuestionContentOnReconnect(): Unit=runBlocking {
+        val fixture=CommandPeer(true);fixture.advertisedState=RemoteCommandState.RECEIVED
+        fixture.reader(this).use {reader->
+            reader.await {it.phase==SessionReadPhase.READY};fixture.feed.send("question.snapshot",questionPayload())
+            val original=reader.await {it.questions.items.isNotEmpty()}.questions.items.single()
+            val id=reader.answerQuestion(original.handle,QuestionAnswers(original.batch.id,listOf(QuestionAnswer("plan",listOf("Continue")))))
+            withTimeout(5000) {reader.commands!!.state.first {it.records.singleOrNull()?.remote==RemoteCommandState.RECEIVED}}
+            fixture.feed.control("server.draining",jsonObject("reason" to "server_draining".json()))
+            reader.await {it.phase==SessionReadPhase.BACKOFF};reader.await {it.phase==SessionReadPhase.READY}
+            fixture.feed.send("question.snapshot",questionPayload(detail="A changed plan"))
+            reader.await {it.questions.items.firstOrNull()?.batch?.definition?.let {hash->hash!=original.batch.definition}==true}
+            reader.commands!!.sendPending(id)
+            withTimeout(5000) {reader.commands.state.first {it.error=="question.stale"}}
+            assertEquals(1,fixture.writes.size);assertEquals(1L,fixture.journal.list(runtime,sessionId).single().attempts)
+        }
+    }
+    @Test fun strongerStatusProofIsSavedEvenWhenItMakesExplicitRetryIneligible(): Unit=runBlocking {
+        val fixture=CommandPeer();fixture.advertisedState=RemoteCommandState.RECEIVED
+        fixture.reader(this).use {reader->
+            reader.await {it.phase==SessionReadPhase.READY};val commands=reader.commands!!
+            val id=commands.submit("queue","one original")
+            withTimeout(5000) {commands.state.first {it.records.singleOrNull()?.remote==RemoteCommandState.RECEIVED}}
+            fixture.statuses.compute(id) {_,value->value!!.with("state" to "settled".json(),"updated_at" to time(0))}
+            commands.sendPending(id)
+            withTimeout(5000) {commands.state.first {it.error=="command.reconcile_required" && it.records.singleOrNull()?.remote==RemoteCommandState.SETTLED}}
+            assertEquals(1,fixture.writes.size);assertEquals(1L,fixture.journal.list(runtime,sessionId).single().attempts)
+        }
     }
     private inner class CreationPeer {
         val workspace="88888888-8888-4888-8888-888888888888"

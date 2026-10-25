@@ -276,8 +276,8 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     suspend fun sessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
-        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "command.status") } ||
-            scope.actions.any { it in setOf("message.submit", "session.cancel") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
+        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "question.answer", "command.status") } ||
+            scope.actions.any { it in setOf("message.submit", "session.cancel", "question.answer") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     internal suspend fun creationTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {

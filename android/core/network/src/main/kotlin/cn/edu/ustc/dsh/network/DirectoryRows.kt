@@ -34,6 +34,7 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
                 if (grant.role in setOf("operator", "owner")) {
                     if ("message.submit" in grant.scope.actions) actions += "message.submit"
                     if ("session.cancel" in grant.scope.actions) actions += "session.cancel"
+                    if ("question.answer" in grant.scope.actions) actions += "question.answer"
                 }
             }
             grant.scope.session(id, workspaceId, actions)

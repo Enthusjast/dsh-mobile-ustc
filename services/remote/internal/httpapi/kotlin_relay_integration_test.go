@@ -65,7 +65,7 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 		{`insert into runtimes(id,installation_id,profile_ref,protocol_version) values($1,$2,'kotlin-fixture',1)`, []any{runtimeID, installationID}},
 		{`insert into workspaces(id,runtime_id,workspace_ref) values($1,$2,'opaque-fixture-workspace')`, []any{workspaceID, runtimeID}},
 		{`insert into sessions(id,runtime_id,workspace_id,dsh_session_id) values($1,$2,$3,'opaque-fixture-native')`, []any{sessionID, runtimeID, workspaceID}},
-		{`insert into runtime_grants(runtime_id,user_id,role,scope,granted_by) values($1,$2,'operator',$3::jsonb,$2)`, []any{runtimeID, userID, `{"actions":["host.list","session.list","session.read","message.submit","session.cancel","session.create","command.status"],"workspaces":["` + workspaceID + `"],"sessions":["` + sessionID + `"]}`}},
+		{`insert into runtime_grants(runtime_id,user_id,role,scope,granted_by) values($1,$2,'operator',$3::jsonb,$2)`, []any{runtimeID, userID, `{"actions":["host.list","session.list","session.read","message.submit","session.cancel","session.create","question.answer","command.status"],"workspaces":["` + workspaceID + `"],"sessions":["` + sessionID + `"]}`}},
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement.query, statement.args...); err != nil {

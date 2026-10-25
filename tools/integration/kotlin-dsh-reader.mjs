@@ -28,14 +28,18 @@ await writeFile(wrapper, [
   'export const {name,inject,apply}=plugin', '',
 ].join('\n'), { mode: 0o600 })
 const patch = join(root, 'host.patch.yml')
+const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
+const questionPlugin = "          - id: tool-ask-user\n            name: '@deepseek-ai/dsh-tool-ask-user'"
+assert.ok(standardPreset.includes(questionPlugin), 'Pinned DSH preset question tool changed')
+const timedPreset = standardPreset.replace('- id: preset-standard', '- id: preset-remote-timed').replace('        id: standard', '        id: remote-timed').replace(questionPlugin, questionPlugin+'\n            config:\n              mode: timed\n              timeout: 1')
 await writeFile(patch, [
   '- insert:', '    - id: local-model', `      name: ${JSON.stringify(resolve('host/remote-control/tests/fixtures/dsh-local-model.mjs'))}`,
   '    - id: remote-control', `      name: ${JSON.stringify(wrapper)}`, '      config:', '        enabled: true',
   `        runtimeId: ${fixture.runtime_id}`, `        socketPath: ${JSON.stringify(socketPath)}`, `        relayUrl: ${JSON.stringify(fixture.deployment.remote_origin)}`,
   '        applicationVersion: kotlin-content-fixture', `        commandJournalPath: ${JSON.stringify(join(root, 'commands.sqlite'))}`,
   '        workspaces:', '          - id: probe', `            remoteId: ${fixture.workspace_id}`, `            cwd: ${JSON.stringify(workspace)}`,
-  '        presets: [standard]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
-].join('\n'), { mode: 0o600 })
+  '        presets: [standard, remote-timed]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
+].join('\n')+'\n'+timedPreset, { mode: 0o600 })
 
 let stopping = false, subscription, java
 const dsh = spawn(process.execPath, [join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js'), '--profile', 'kotlin-content', '--from-default-profile', 'web', '--patch', patch, '--host', '127.0.0.1', '--port', '0', '--no-open'], {

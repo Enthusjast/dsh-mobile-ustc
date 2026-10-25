@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 enum class SessionReadPhase { CONNECTING, SYNCING, READY, BACKOFF, OFFLINE, AUTH_REQUIRED, REVOKED, ERROR, CLOSED }
-data class SessionReadState(val phase: SessionReadPhase, val window: SessionTranscript? = null, val error: String? = null, val loadingOlder: Boolean = false, val pageError: String? = null, val runtimeEpoch: String? = null, val cacheError: String? = null)
+data class SessionReadState(val phase: SessionReadPhase, val window: SessionTranscript? = null, val error: String? = null, val loadingOlder: Boolean = false, val pageError: String? = null, val runtimeEpoch: String? = null, val cacheError: String? = null, val questions: SessionQuestionState=SessionQuestionState())
 internal class SessionReaderOptions(val heartbeatMillis: Long = 20_000, val openingMillis: Long = 15_000, val pageMillis: Long = 15_000,
     val backoffMillis: (Int) -> Long = { retry -> val cap = minOf(60_000L, 1000L shl retry.coerceAtMost(6)); cap / 2 + SecureRandom().nextInt((cap / 2 + 1).toInt()) })
 
@@ -34,6 +34,8 @@ class SessionReader internal constructor(
     private val mutable = MutableStateFlow(SessionReadState(SessionReadPhase.CONNECTING))
     val state: StateFlow<SessionReadState> = mutable.asStateFlow()
     private val connection = AtomicReference<SessionRelayConnection?>()
+    private class QuestionEndpoint(val connection: SessionRelayConnection,val route: SessionRoute,val questions: SessionQuestions,val lock: Mutex,val lifetime: Job)
+    private val questionEndpoint=AtomicReference<QuestionEndpoint?>()
     private val closed = AtomicBoolean()
     private val pages = Channel<Unit>(1)
     private val retries = Channel<Unit>(Channel.CONFLATED)
@@ -56,9 +58,9 @@ class SessionReader internal constructor(
         listOf(deviceId, runtimeId, sessionId).forEach(Contract::uuid)
         workspaceId?.let(Contract::uuid)
         if (transcripts != null && (transcripts.owner.deviceId != deviceId || journal != null && transcripts.owner.fingerprint != journal.owner.fingerprint)) throw ProtocolException()
-        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "command.status") } || journal == null && readScope.actions != setOf("session.read")) throw ProtocolException()
+        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "question.answer", "command.status") } || journal == null && readScope.actions != setOf("session.read")) throw ProtocolException()
         commands = journal?.let { SessionCommands(api, it, runtimeId, sessionId, readScope, scope) }
-        scope.coroutineContext[Job]!!.invokeOnCompletion { commands?.close(); cacheWrites.cancel(); connection.getAndSet(null)?.close(); cache.set(null); mutable.value = SessionReadState(SessionReadPhase.CLOSED) }
+        scope.coroutineContext[Job]!!.invokeOnCompletion { close() }
         scope.launch {
             while (isActive) {
                 delay(1000)
@@ -92,6 +94,49 @@ class SessionReader internal constructor(
         }
     }
     fun retry() { if (mutable.value.phase in setOf(SessionReadPhase.BACKOFF, SessionReadPhase.ERROR, SessionReadPhase.OFFLINE)) retries.trySend(Unit) }
+    fun refreshQuestions() { if(mutable.value.phase in setOf(SessionReadPhase.READY,SessionReadPhase.BACKOFF,SessionReadPhase.ERROR,SessionReadPhase.OFFLINE)) retries.trySend(Unit) }
+    @Synchronized private fun publishState(state: SessionReadState) {if(!closed.get() && scope.isActive) mutable.value=state}
+    @Synchronized private fun installQuestionEndpoint(target: QuestionEndpoint) {
+        if(!closed.get() && scope.isActive && questionEndpoint.get()?.connection!==target.connection) questionEndpoint.set(target)
+    }
+    @Synchronized private fun publishQuestions(questions: SessionQuestions,canAnswer: Boolean) {
+        if(!closed.get() && scope.isActive && mutable.value.phase==SessionReadPhase.READY) mutable.update {it.copy(questions=questions.state(canAnswer))}
+    }
+    private fun answerAuthority(connected: SessionRelayConnection)=commands!=null && "question.answer" in readScope.actions && "command.status" in readScope.actions && "command.relay.v1" in connected.identity.capabilities
+    private fun requireQuestionEndpoint(handle: QuestionHandle): QuestionEndpoint {
+        val target=questionEndpoint.get() ?: throw QuestionStateException("question.stale")
+        if(mutable.value.phase!=SessionReadPhase.READY || !target.lifetime.isActive || target.connection!==connection.get() || target.route.runtimeId!=handle.runtimeId || target.route.sessionId!=handle.sessionId || target.route.epoch!=handle.epoch || target.route.subscriptionId!=handle.subscriptionId) throw QuestionStateException("question.stale")
+        if(!answerAuthority(target.connection)) throw RemoteRequestException("access.denied")
+        return target
+    }
+    suspend fun answerQuestion(handle: QuestionHandle,answers: QuestionAnswers): String {
+        val target=requireQuestionEndpoint(handle)
+        return target.lock.withLock {
+            if(questionEndpoint.get()!==target || !target.lifetime.isActive) throw QuestionStateException("question.stale")
+            target.questions.validate(handle,answers)
+            commands!!.answerQuestion(answers,handle.kind==QuestionKind.TIMED,handle.epoch,handle.definition)
+        }
+    }
+    suspend fun claimQuestion(handle: QuestionHandle) {
+        val target=requireQuestionEndpoint(handle)
+        target.lock.withLock {
+            if(questionEndpoint.get()!==target || !target.lifetime.isActive || "question.timed.v1" !in target.connection.identity.capabilities) throw QuestionStateException("question.stale")
+            val id=target.questions.beginClaim(handle,UUID.randomUUID().toString()) ?: return@withLock
+            publishQuestions(target.questions,true)
+            try {target.connection.send(routed("question.claim",id,target.route,jsonObject("question_id" to handle.questionId.json())).with("sync_id" to handle.syncId.json()))}
+            catch(error: Exception) {target.connection.close();throw error}
+        }
+    }
+    suspend fun releaseQuestion(handle: QuestionHandle) {
+        val target=questionEndpoint.get() ?: return
+        target.lock.withLock {
+            if(questionEndpoint.get()!==target || !target.lifetime.isActive) return@withLock
+            val id=UUID.randomUUID().toString();val claim=target.questions.beginRelease(handle,id) ?: return@withLock
+            publishQuestions(target.questions,answerAuthority(target.connection))
+            try {target.connection.send(routed("question.release",id,target.route,jsonObject("claim_id" to claim.json())).with("sync_id" to handle.syncId.json()))}
+            catch(error: Exception) {target.connection.close();throw error}
+        }
+    }
     private fun cacheValid(): Boolean = System.currentTimeMillis() in cacheSince.get() until cacheUntil.get() && System.nanoTime() < cacheDeadline.get()
     private fun cached(): SessionTranscript? = cache.get().takeIf { cacheValid() }
     private fun cachedState(phase: SessionReadPhase, error: String? = null) = SessionReadState(phase, cached(), error, cacheError = cacheProblem.get())
@@ -160,7 +205,7 @@ class SessionReader internal constructor(
             catch (_: RetryRead) { failures = 0; resyncs = 0 }
             catch (error: Stop) {
                 if (error.phase in setOf(SessionReadPhase.REVOKED, SessionReadPhase.AUTH_REQUIRED)) {
-                    cache.set(null); mutable.update { it.copy(window = null, runtimeEpoch = null) }; commands?.close()
+                    cache.set(null); questionEndpoint.set(null);mutable.update { it.copy(window = null, runtimeEpoch = null,questions=SessionQuestionState()) }; commands?.close()
                     if (error.phase == SessionReadPhase.REVOKED) invalidateCache(true)
                 }
                 mutable.value = cachedState(error.phase, error.reason)
@@ -173,7 +218,7 @@ class SessionReader internal constructor(
                 val phase = if (error.code in setOf("access.denied", "access.revoked", "device.invalid", "auth.identity_mismatch", "access.organization_missing")) SessionReadPhase.REVOKED
                     else if (error.code in setOf("auth.expired", "auth.proof_invalid")) SessionReadPhase.AUTH_REQUIRED else null
                 if (phase != null) {
-                    cache.set(null); mutable.update { it.copy(window = null, runtimeEpoch = null) }; commands?.close()
+                    cache.set(null); questionEndpoint.set(null);mutable.update { it.copy(window = null, runtimeEpoch = null,questions=SessionQuestionState()) }; commands?.close()
                     if (phase == SessionReadPhase.REVOKED) invalidateCache(true)
                     mutable.value = SessionReadState(phase, error = error.code); return
                 }
@@ -203,8 +248,12 @@ class SessionReader internal constructor(
         connected.send(jsonObject("v" to 1L.json(), "type" to "session.subscribe".json(), "request_id" to request.json(), "runtime_id" to runtimeId.json(), "session_id" to sessionId.json(),
             "payload" to jsonObject("max_messages" to maxMessages.toLong().json())))
         val lock = Mutex()
+        val lifetime=currentCoroutineContext()[Job]!!
         var route: SessionRoute? = null
         var fragments: SessionFragments? = null
+        var questions: SessionQuestions?=null
+        var questionSync: String?=null
+        var lastQuestionTick=0L
         val window = SessionWindow(request)
         var dirty = false
         var offline = false
@@ -217,7 +266,17 @@ class SessionReader internal constructor(
         suspend fun publish() {
             if (offline || !window.ready || !scope.isActive) return
             val snapshot = window.snapshot()
-            if (!commandAttached) { commands?.ready(connected, route!!.epoch); commandAttached = true }
+            if (!commandAttached) {
+                commands?.ready(connected, route!!.epoch)
+                commands?.bindQuestions {record->lock.withLock {
+                    if(offline || !window.ready || !lifetime.isActive || record.intent.epoch!=route!!.epoch) throw QuestionStateException("question.stale")
+                    val definition=record.intent.questionDefinition ?: throw QuestionStateException("question.context_required")
+                    val payload=QuestionAnswers.parse(record.intent.payload)
+                    questions!!.validateStored(payload.questionId,if(record.intent.kind==CommandKind.TIMED_QUESTION) QuestionKind.TIMED else QuestionKind.BLOCKING,definition,payload)
+                }}
+                commandAttached = true
+            }
+            installQuestionEndpoint(QuestionEndpoint(connected,route!!,questions!!,lock,lifetime))
             if (allowOfflineCache) lease(connected, leaseDeadline, cacheUntil)
             val durable = window.snapshot(durableOnly = true)
             if (durable.durableOnly) {
@@ -227,7 +286,7 @@ class SessionReader internal constructor(
                     cacheWrites.trySend(CacheWrite(cacheGeneration.get(), route!!.epoch, durable, System.currentTimeMillis())); savedKey = key
                 }
             }
-            mutable.value = SessionReadState(SessionReadPhase.READY, snapshot, loadingOlder = window.paging, pageError = mutable.value.pageError, runtimeEpoch = route!!.epoch, cacheError = cacheProblem.get())
+            publishState(SessionReadState(SessionReadPhase.READY, snapshot, loadingOlder = window.paging, pageError = mutable.value.pageError, runtimeEpoch = route!!.epoch, cacheError = cacheProblem.get(),questions=questions!!.state(answerAuthority(connected))))
             dirty = false
         }
         val heartbeat = launch {
@@ -237,7 +296,12 @@ class SessionReader internal constructor(
                 connected.send(jsonObject("v" to 1L.json(), "type" to "ping".json(), "payload" to jsonObject()))
             }
         }
-        val publisher = launch { while (isActive) { delay(100); lock.withLock { if (dirty) publish() } } }
+        val publisher = launch { while (isActive) { delay(100); lock.withLock {
+            if(dirty) publish()
+            else if(!offline && window.ready && System.nanoTime()-lastQuestionTick>=250_000_000 && questions?.state(false)?.items?.isNotEmpty()==true) {
+                lastQuestionTick=System.nanoTime();publishQuestions(questions!!,answerAuthority(connected))
+            }
+        } } }
         val retryer = launch { retries.receive(); throw RetryRead() }
         val authority = launch {
             while (isActive && transcripts != null && allowOfflineCache) {
@@ -288,6 +352,7 @@ class SessionReader internal constructor(
         try {
             while (isActive) {
                 val timeout = lock.withLock {
+                    if(questions?.timedOut()==true) throw SessionDataException()
                     if (System.nanoTime() >= pageDeadline) {
                         pageId?.let(window::pageFailed); pageId = null; pageDeadline = Long.MAX_VALUE
                         mutable.update { it.copy(loadingOlder = false, pageError = "network.page_timeout") }
@@ -321,15 +386,21 @@ class SessionReader internal constructor(
                         if (frame.string("request_id") != request || frame.string("runtime_id") != runtimeId || frame.string("session_id") != sessionId || route != null) throw SessionDataException()
                         frame.obj("payload").exactKeys()
                         val accepted = SessionRoute(runtimeId, Contract.uuid(frame.string("runtime_epoch")), sessionId, Contract.uuid(frame.string("subscription_id")))
-                        if (cacheEpoch != null && cacheEpoch != accepted.epoch) { cache.set(null); mutable.update { it.copy(window = null) }; invalidateCache(false) }
+                        if (cacheEpoch != null && cacheEpoch != accepted.epoch) { cache.set(null);questionEndpoint.set(null); mutable.update { it.copy(window = null,questions=SessionQuestionState()) }; invalidateCache(false) }
                         cacheEpoch = accepted.epoch; route = accepted; fragments = SessionFragments(accepted)
+                        questions=SessionQuestions(accepted,request)
                         offline = false; openingDeadline = System.nanoTime() + options.openingMillis * 1_000_000
+                    }
+                    "question.claimed","question.claim.closed","question.released"->lock.withLock {
+                        if("question.timed.v1" !in connected.identity.capabilities || !window.ready || offline) throw SessionDataException()
+                        questions!!.claimFrame(frame)
+                        publishQuestions(questions!!,answerAuthority(connected))
                     }
                     "access.revoked" -> { relayEnvelope(frame, type, "v", "type", "payload"); frame.obj("payload").exactKeys("code"); throw Stop(SessionReadPhase.REVOKED, "access.revoked") }
                     "runtime.changed" -> {
                         relayEnvelope(frame, type, "v", "type", "payload"); frame.obj("payload").exactKeys("runtime_id")
                         if (frame.obj("payload").string("runtime_id") != runtimeId) throw ProtocolException()
-                        cache.set(null); mutable.update { it.copy(window = null) }; invalidateCache(false); throw SessionDataException()
+                        cache.set(null);questionEndpoint.set(null); mutable.update { it.copy(window = null,questions=SessionQuestionState()) }; invalidateCache(false); throw SessionDataException()
                     }
                     "server.draining" -> {
                         relayEnvelope(frame, type, "v", "type", "payload"); frame.obj("payload").exactKeys("reason")
@@ -345,6 +416,11 @@ class SessionReader internal constructor(
                         val code = payload.string("code")
                         if (code in setOf("access.denied", "access.revoked", "device.invalid")) throw Stop(SessionReadPhase.REVOKED, code)
                         if (code in setOf("auth.expired", "auth.proof_invalid")) throw Stop(SessionReadPhase.AUTH_REQUIRED, code)
+                        val questionRequest=(frame.fields["request_id"] as? JsonString)?.value
+                        if(questionRequest!=null) {
+                            try { if(questions?.claimError(questionRequest,code)==true) {publishQuestions(questions!!,answerAuthority(connected));return@withLock} }
+                            catch(_: QuestionStateException) {throw SessionDataException()}
+                        }
                         if (frame.fields["request_id"] == pageId?.json() && pageId != null) {
                             window.pageFailed(pageId!!); pageId = null; pageDeadline = Long.MAX_VALUE
                             mutable.update { it.copy(loadingOlder = false, pageError = if (code in errors) code else "protocol.invalid") }
@@ -359,7 +435,7 @@ class SessionReader internal constructor(
                                     // The phone remains online even when its host is
                                     // absent. Keep heartbeat/control delivery so a
                                     // revoked cached view can be cleared promptly.
-                                    offline = true; dirty = false; commands?.disconnected()
+                                    offline = true; dirty = false; commands?.disconnected();questionEndpoint.set(null)
                                     pageId?.let(window::pageFailed); pageId = null; pageDeadline = Long.MAX_VALUE
                                     mutable.value = cachedState(SessionReadPhase.OFFLINE, code)
                                 }
@@ -370,8 +446,18 @@ class SessionReader internal constructor(
                     }
                     else -> lock.withLock {
                         val assembled = (fragments ?: throw SessionDataException()).accept(frame) ?: return@withLock
+                        if(assembled.type in setOf("question.snapshot","question.timed.snapshot")) {
+                            val capability=if(assembled.type=="question.snapshot") "question.blocking.v1" else "question.timed.v1"
+                            if(capability !in connected.identity.capabilities || !window.ready || offline) throw SessionDataException()
+                            if(window.acceptsSync(assembled.syncId) && questions!!.accept(assembled)) publishQuestions(questions!!,answerAuthority(connected))
+                            return@withLock
+                        }
                         try {
                             if (window.accept(assembled)) {
+                                if(assembled.type=="session.snapshot" && questionSync!=window.syncId) {
+                                    if(questions!!.hasClaims) throw SessionDataException()
+                                    questions!!.attach(window.syncId!!);questionSync=window.syncId
+                                }
                                 if (assembled.type in setOf("session.page.result", "session.snapshot")) { pageId = null; pageDeadline = Long.MAX_VALUE }
                                 dirty = true
                                 if (assembled.type != "assistant.chunk") publish()
@@ -384,13 +470,14 @@ class SessionReader internal constructor(
                     }
                 }
             }
-        } finally { receiver.cancel(); incoming.cancel(); heartbeat.cancel(); publisher.cancel(); pager.cancel(); retryer.cancel(); authority.cancel(); fragments?.clear() }
+        } finally { questionEndpoint.set(null);receiver.cancel(); incoming.cancel(); heartbeat.cancel(); publisher.cancel(); pager.cancel(); retryer.cancel(); authority.cancel(); fragments?.clear() }
     }
     private fun routed(kind: String, request: String, route: SessionRoute, payload: JsonObject) = jsonObject("v" to 1L.json(), "type" to kind.json(), "request_id" to request.json(),
         "runtime_id" to route.runtimeId.json(), "runtime_epoch" to route.epoch.json(), "session_id" to route.sessionId.json(), "subscription_id" to route.subscriptionId.json(), "payload" to payload)
-    override fun close() {
+    @Synchronized override fun close() {
         if (closed.compareAndSet(false, true)) {
             commands?.close()
+            questionEndpoint.set(null)
             scope.cancel(); connection.getAndSet(null)?.close(); pages.cancel(); retries.cancel(); cacheWrites.cancel(); cache.set(null); mutable.value = SessionReadState(SessionReadPhase.CLOSED)
         }
     }

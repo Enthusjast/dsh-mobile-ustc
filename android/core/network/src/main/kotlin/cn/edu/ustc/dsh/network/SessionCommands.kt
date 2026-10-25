@@ -26,6 +26,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
     private val recordsLock=Mutex()
     val state: StateFlow<CommandOutboxState> = mutable.asStateFlow()
     private val endpoint = AtomicReference<Endpoint?>()
+    private val questionValidator=AtomicReference<(suspend (PendingCommand)->Unit)?>(null)
     private val generation = AtomicLong()
     private val sendQueue = Channel<Send>(8)
     private val refreshQueue = Channel<Unit>(Channel.CONFLATED)
@@ -44,8 +45,10 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         update { it.copy(connected = canSend(connection)) }; refreshQueue.trySend(Unit)
     }
     internal fun authorizeStatusReads() { statusAuthorized.set(true); query() }
+    internal fun bindQuestions(validate: suspend (PendingCommand)->Unit) { questionValidator.set(validate) }
     internal fun disconnected() {
         generation.incrementAndGet(); endpoint.set(null)
+        questionValidator.set(null)
         while (sendQueue.tryReceive().isSuccess) { /* Retire old-generation queued intent. */ }
         update { it.copy(connected = false, sending = false) }
     }
@@ -53,7 +56,10 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         (if (session == null) "session.create" in scopeGrant.actions && "session.create.v1" in connection.identity.capabilities else "message.submit" in scopeGrant.actions) && "command.status" in scopeGrant.actions
     private suspend fun loadRecords() = if (session == null) journal.listCreations(runtime).filter { it.intent.workspaceId in scopeGrant.workspaces } else journal.list(runtime, session)
     private suspend fun localRecords() = recordsLock.withLock { loadRecords().also { rows -> update { it.copy(records=rows) } } }
-    private suspend fun saveOriginal(intent: CommandIntent) = recordsLock.withLock { journal.create(intent); val rows=loadRecords(); update { it.copy(records=rows) } }
+    private suspend fun saveOriginal(intent: CommandIntent) = recordsLock.withLock {
+        if(intent.kind.question && loadRecords().any {it.intent.kind==intent.kind && it.intent.payload.string("question_id")==intent.payload.string("question_id") && it.intent.questionDefinition==intent.questionDefinition && it.remote!=RemoteCommandState.REJECTED}) throw CommandDataException("question.reconcile_required")
+        journal.create(intent);val rows=loadRecords();update {it.copy(records=rows)}
+    }
     suspend fun submit(mode: String, text: String, sendNow: Boolean = true): String {
         if (session == null || !scope.isActive || "message.submit" !in scopeGrant.actions || "command.status" !in scopeGrant.actions) throw RemoteRequestException("access.denied")
         val intent = CommandIntent.message(UUID.randomUUID().toString(), runtime, session, mode, text)
@@ -77,6 +83,15 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         val intent = CommandIntent.createSession(UUID.randomUUID().toString(), runtime, workspace, preset, expectedEpoch)
         saveOriginal(intent); query(); enqueue(intent.requestId, target)
         return intent.requestId
+    }
+    internal suspend fun answerQuestion(answers: QuestionAnswers,timed: Boolean,expectedEpoch: String,definition: String): String {
+        val target=endpoint.get() ?: throw RelayException("runtime.offline")
+        val capability=if(timed) "question.timed.v1" else "question.blocking.v1"
+        if(!scope.isActive || session==null || "question.answer" !in scopeGrant.actions || "command.status" !in scopeGrant.actions ||
+            "command.relay.v1" !in target.connection.identity.capabilities || capability !in target.connection.identity.capabilities) throw RemoteRequestException("access.denied")
+        if(target.epoch!=expectedEpoch) throw CommandDataException("runtime.changed")
+        val intent=CommandIntent.answerQuestion(UUID.randomUUID().toString(),runtime,session,expectedEpoch,timed,answers,definition)
+        saveOriginal(intent);query();enqueue(intent.requestId,target);return intent.requestId
     }
     fun sendPending(id: String) {
         Contract.uuid(id)
@@ -107,21 +122,24 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
             var attempted = false
             try {
                 val known = loadRecords().firstOrNull { it.intent.requestId == event.id } ?: throw CommandDataException("command.not_found")
-                if (known.intent.kind.wire !in scopeGrant.actions || known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
+                if (known.intent.kind.action !in scopeGrant.actions || known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 if (known.attempts > 0) {
                     val proof = api.commandStatus(event.id, journal.owner.deviceId)
                     if (endpoint.get() !== target) throw RelayException("relay.disconnected")
+                    journal.record(proof)
                     journal.rearm(event.id, proof)
                 }
+                if(known.intent.kind.question) (questionValidator.get() ?: throw CommandDataException("question.stale"))(known)
                 val record = journal.beginAttempt(event.id); attempted = true
                 if (record.intent.runtimeId != runtime || record.intent.sessionId != session || record.intent.epoch != null && record.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 currentCoroutineContext().ensureActive()
                 if (endpoint.get() !== target) throw RelayException("relay.disconnected")
+                if(record.intent.kind.question) (questionValidator.get() ?: throw CommandDataException("question.stale"))(record)
                 update { it.copy(sending = true, error = null) }
                 target.connection.send(record.intent.frame()); query()
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
-                val code = if (error is CommandDataException) error.code else "command.delivery_unconfirmed"
+                val code = if (error is CommandDataException) error.code else if(error is cn.edu.ustc.dsh.session.QuestionStateException) error.code else "command.delivery_unconfirmed"
                 if (attempted) runCatching { journal.uncertain(event.id, code) }
                 update { it.copy(error = code) }
             } finally { update { it.copy(sending = false) }; query() }
