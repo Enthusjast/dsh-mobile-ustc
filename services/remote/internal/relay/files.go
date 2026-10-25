@@ -35,6 +35,29 @@ type fileRoute struct {
 	staged        bool
 }
 
+func (server *Server) FileDeliveryHint(runtime, session, id string) *files.Delivery {
+	waiting := &files.Delivery{State: "waiting"}
+	server.mu.Lock()
+	host := server.hosts[runtime]
+	var peer *filePeer
+	if host != nil && !host.closing && host.supports(files.MessageCapability) {
+		peer = host.filePeer
+	}
+	server.mu.Unlock()
+	if peer == nil || peer.ctx.Err() != nil {
+		return waiting
+	}
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	for _, route := range peer.active {
+		if route.file == id && route.session == session && route.staged && route.until.After(time.Now().Add(100*time.Millisecond)) {
+			until := route.until
+			return &files.Delivery{State: "ready", ExpiresAt: &until}
+		}
+	}
+	return waiting
+}
+
 // The stage ack must enter the Host socket queue before an attached command.
 // Database staged alone can be visible just before that ack has been sent.
 func (server *Server) filesReady(host *liveConnection, session string, ids []string) bool {

@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class CommandOutboxState(val records: List<PendingCommand> = emptyList(), val connected: Boolean = false, val sending: Boolean = false, val error: String? = null, val canArchive: Boolean = false)
+data class CommandOutboxState(val records: List<PendingCommand> = emptyList(), val connected: Boolean = false, val sending: Boolean = false, val error: String? = null, val canArchive: Boolean = false, val canAttachFiles: Boolean = false)
 
 /** Shares the reader's authenticated socket; never writes automatically after a reconnect. */
 class SessionCommands internal constructor(private val api: RemoteApi, private val journal: CommandJournal, private val runtime: String, private val session: String?,
@@ -42,7 +42,8 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
     internal fun ready(connection: SessionRelayConnection, epoch: String) {
         if (!scope.isActive) return
         endpoint.set(Endpoint(generation.incrementAndGet(), connection, epoch))
-        update { it.copy(connected = canSend(connection), canArchive = supports(CommandKind.ARCHIVE, connection)) }; refreshQueue.trySend(Unit)
+        update { it.copy(connected = canSend(connection), canArchive = supports(CommandKind.ARCHIVE, connection),
+            canAttachFiles = supports(CommandKind.MESSAGE, connection) && FILE_MESSAGE_CAPABILITY in connection.identity.capabilities) }; refreshQueue.trySend(Unit)
     }
     internal fun authorizeStatusReads() { statusAuthorized.set(true); query() }
     internal fun bindQuestions(validate: suspend (PendingCommand)->Unit) { questionValidator.set(validate) }
@@ -50,7 +51,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         generation.incrementAndGet(); endpoint.set(null)
         questionValidator.set(null)
         while (sendQueue.tryReceive().isSuccess) { /* Retire old-generation queued intent. */ }
-        update { it.copy(connected = false, sending = false, canArchive = false) }
+        update { it.copy(connected = false, sending = false, canArchive = false, canAttachFiles = false) }
     }
     private fun supports(kind: CommandKind, connection: SessionRelayConnection): Boolean {
         val capability = when (kind) {
@@ -72,9 +73,9 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         if(intent.kind.question && loadRecords().any {it.intent.kind==intent.kind && it.intent.payload.string("question_id")==intent.payload.string("question_id") && it.intent.questionDefinition==intent.questionDefinition && it.remote!=RemoteCommandState.REJECTED}) throw CommandDataException("question.reconcile_required")
         journal.create(intent);val rows=loadRecords();update {it.copy(records=rows)}
     }
-    suspend fun submit(mode: String, text: String, sendNow: Boolean = true): String {
+    suspend fun submit(mode: String, text: String, sendNow: Boolean = true, fileIds: List<String> = emptyList()): String {
         if (session == null || !scope.isActive || "message.submit" !in scopeGrant.actions || "command.status" !in scopeGrant.actions) throw RemoteRequestException("access.denied")
-        val intent = CommandIntent.message(UUID.randomUUID().toString(), runtime, session, mode, text)
+        val intent = CommandIntent.message(UUID.randomUUID().toString(), runtime, session, mode, text, fileIds)
         saveOriginal(intent); refreshQueue.trySend(Unit)
         if (sendNow) sendPending(intent.requestId)
         return intent.requestId
@@ -144,6 +145,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
             try {
                 val known = loadRecords().firstOrNull { it.intent.requestId == event.id } ?: throw CommandDataException("command.not_found")
                 if (!supports(known.intent.kind, target.connection)) throw CommandDataException("access.denied")
+                if (known.intent.fileIds().isNotEmpty() && FILE_MESSAGE_CAPABILITY !in target.connection.identity.capabilities) throw CommandDataException("file.unsupported")
                 if (known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 if (known.attempts > 0) {
                     val proof = api.commandStatus(event.id, journal.owner.deviceId)

@@ -24,7 +24,11 @@ func TestProtectedFileHandoffToRealNativeDSHAndRevocation(t *testing.T) {
 	if os.Getenv("REMOTE_TEST_CLUSTER_ROOT") == "" {
 		t.Skip("requires explicit isolated PostgreSQL/native DSH runner")
 	}
-	for _, scenario := range []string{"revoke", "message", "reconcile", "reconcile-unknown"} {
+	scenarios := []string{"revoke", "message", "reconcile", "reconcile-unknown"}
+	if os.Getenv("REMOTE_TEST_KOTLIN_CLASSPATH") != "" {
+		scenarios = append(scenarios, "kotlin")
+	}
+	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) { testProtectedFileHandoffNative(t, scenario) })
 	}
 }
@@ -145,105 +149,109 @@ func testProtectedFileHandoffNative(t *testing.T, scenario string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	body := bytes.Repeat([]byte("real-native protected handoff\x00\xff"), 4000)
-	prepared := h.cleanForHandoff(t, body)
-	uploaded := next("native.upload")
-	var size int
-	var sha string
-	_ = json.Unmarshal(uploaded["size_bytes"], &size)
-	_ = json.Unmarshal(uploaded["sha256"], &sha)
-	expected := sha256.Sum256(body)
-	if size != len(body) || sha != hex.EncodeToString(expected[:]) {
-		t.Fatal("native receipt contains another object")
-	}
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		var count int
-		err := h.database.QueryRowContext(ctx, `select count(*) from file_handoffs where file_id=$1 and state='staged'`, prepared.File.ID).Scan(&count)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if count == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("native stage acknowledgement did not reach PostgreSQL")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if scenario != "revoke" {
-		phone := connectFilePhone(t, h, h.caller, h.token, "33333333-3333-4333-8333-333333333333", true)
-		request := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad"
-		phone.submit(t, request, prepared.File.ID)
-		for {
-			if fileMessageState(t, phone.read(t)) == "agent_queued" {
-				break
-			}
-		}
-		next("native.retired")
-		expectedState := "agent_queued"
-		if scenario == "reconcile" || scenario == "reconcile-unknown" {
-			fault := "forget-receipt\n"
-			if scenario == "reconcile-unknown" {
-				fault = "forget-command\n"
-				expectedState = "outcome_unknown"
-			}
-			if _, err := io.WriteString(stdin, fault); err != nil {
-				t.Fatal(err)
-			}
-			next("native.receipt-forgotten")
-			// Model all Relay receipts being lost while the original native
-			// message remains durable; then remove every usable source object.
-			if _, err := h.database.ExecContext(ctx, `update commands set state='received'`); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := h.database.ExecContext(ctx, `update files set created_at=clock_timestamp()-interval '1 day',expires_at=clock_timestamp()-interval '1 second',state='expired' where id=$1`, prepared.File.ID); err != nil {
-				t.Fatal(err)
-			}
-			h.peer.mu.Lock()
-			h.peer.objects = make(map[string]fileWireObject)
-			h.peer.mu.Unlock()
-		}
-		phone.submit(t, request, prepared.File.ID)
-		for {
-			state := fileMessageState(t, phone.read(t))
-			if state == expectedState {
-				break
-			}
-			if state == "outcome_unknown" || state == "rejected" || state == "agent_queued" {
-				t.Fatalf("unexpected terminal reconciliation state=%s", state)
-			}
-		}
-		phone.submit(t, request, prepared.File.ID)
-		if fileMessageState(t, phone.read(t)) != expectedState {
-			t.Fatal("terminal native retry changed its result")
-		}
-		if _, err := io.WriteString(stdin, "inspect\n"); err != nil {
-			t.Fatal(err)
-		}
-		observed := next("native.message")
-		var count, promptCalls int
-		var attachments []struct {
-			SHA256 string `json:"sha256"`
-			Size   int    `json:"size_bytes"`
-		}
-		_ = json.Unmarshal(observed["count"], &count)
-		_ = json.Unmarshal(observed["prompt_calls"], &promptCalls)
-		_ = json.Unmarshal(observed["files"], &attachments)
-		if count != 1 || promptCalls != 1 || len(attachments) != 1 || attachments[0].SHA256 != sha || attachments[0].Size != len(body) {
-			t.Fatal("native message attachment or deduplication changed")
-		}
-		var refs int
-		if err := h.database.QueryRowContext(ctx, `select count(*) from file_message_refs where file_id=$1`, prepared.File.ID).Scan(&refs); err != nil || refs != 1 {
-			t.Fatal("native file command has no durable consumption claim")
-		}
+	if scenario == "kotlin" {
+		kotlinFileTransfer(t, ctx, h, body, stdin, next)
 	} else {
-		revokedAt := time.Now()
-		if _, err := h.database.ExecContext(ctx, `update runtime_grants set grant_version=grant_version+1`); err != nil {
-			t.Fatal(err)
+		prepared := h.cleanForHandoff(t, body)
+		uploaded := next("native.upload")
+		var size int
+		var sha string
+		_ = json.Unmarshal(uploaded["size_bytes"], &size)
+		_ = json.Unmarshal(uploaded["sha256"], &sha)
+		expected := sha256.Sum256(body)
+		if size != len(body) || sha != hex.EncodeToString(expected[:]) {
+			t.Fatal("native receipt contains another object")
 		}
-		next("native.retired")
-		if time.Since(revokedAt) > 4*time.Second {
-			t.Fatal("native receipt outlived the revocation bound")
+		deadline = time.Now().Add(5 * time.Second)
+		for {
+			var count int
+			err := h.database.QueryRowContext(ctx, `select count(*) from file_handoffs where file_id=$1 and state='staged'`, prepared.File.ID).Scan(&count)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("native stage acknowledgement did not reach PostgreSQL")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if scenario != "revoke" {
+			phone := connectFilePhone(t, h, h.caller, h.token, "33333333-3333-4333-8333-333333333333", true)
+			request := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad"
+			phone.submit(t, request, prepared.File.ID)
+			for {
+				if fileMessageState(t, phone.read(t)) == "agent_queued" {
+					break
+				}
+			}
+			next("native.retired")
+			expectedState := "agent_queued"
+			if scenario == "reconcile" || scenario == "reconcile-unknown" {
+				fault := "forget-receipt\n"
+				if scenario == "reconcile-unknown" {
+					fault = "forget-command\n"
+					expectedState = "outcome_unknown"
+				}
+				if _, err := io.WriteString(stdin, fault); err != nil {
+					t.Fatal(err)
+				}
+				next("native.receipt-forgotten")
+				// Model all Relay receipts being lost while the original native
+				// message remains durable; then remove every usable source object.
+				if _, err := h.database.ExecContext(ctx, `update commands set state='received'`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := h.database.ExecContext(ctx, `update files set created_at=clock_timestamp()-interval '1 day',expires_at=clock_timestamp()-interval '1 second',state='expired' where id=$1`, prepared.File.ID); err != nil {
+					t.Fatal(err)
+				}
+				h.peer.mu.Lock()
+				h.peer.objects = make(map[string]fileWireObject)
+				h.peer.mu.Unlock()
+			}
+			phone.submit(t, request, prepared.File.ID)
+			for {
+				state := fileMessageState(t, phone.read(t))
+				if state == expectedState {
+					break
+				}
+				if state == "outcome_unknown" || state == "rejected" || state == "agent_queued" {
+					t.Fatalf("unexpected terminal reconciliation state=%s", state)
+				}
+			}
+			phone.submit(t, request, prepared.File.ID)
+			if fileMessageState(t, phone.read(t)) != expectedState {
+				t.Fatal("terminal native retry changed its result")
+			}
+			if _, err := io.WriteString(stdin, "inspect\n"); err != nil {
+				t.Fatal(err)
+			}
+			observed := next("native.message")
+			var count, promptCalls int
+			var attachments []struct {
+				SHA256 string `json:"sha256"`
+				Size   int    `json:"size_bytes"`
+			}
+			_ = json.Unmarshal(observed["count"], &count)
+			_ = json.Unmarshal(observed["prompt_calls"], &promptCalls)
+			_ = json.Unmarshal(observed["files"], &attachments)
+			if count != 1 || promptCalls != 1 || len(attachments) != 1 || attachments[0].SHA256 != sha || attachments[0].Size != len(body) {
+				t.Fatal("native message attachment or deduplication changed")
+			}
+			var refs int
+			if err := h.database.QueryRowContext(ctx, `select count(*) from file_message_refs where file_id=$1`, prepared.File.ID).Scan(&refs); err != nil || refs != 1 {
+				t.Fatal("native file command has no durable consumption claim")
+			}
+		} else {
+			revokedAt := time.Now()
+			if _, err := h.database.ExecContext(ctx, `update runtime_grants set grant_version=grant_version+1`); err != nil {
+				t.Fatal(err)
+			}
+			next("native.retired")
+			if time.Since(revokedAt) > 4*time.Second {
+				t.Fatal("native receipt outlived the revocation bound")
+			}
 		}
 	}
 	if _, err := io.WriteString(stdin, "stop\n"); err != nil {

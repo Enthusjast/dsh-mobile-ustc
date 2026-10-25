@@ -33,5 +33,11 @@ test('file HTTP OpenAPI accepts public goldens and rejects authority/path smuggl
   const settled = await load('clean')
   assert.equal(status(settled), true, ajv.errorsText(status.errors))
   assert.equal(status({ ...settled, data: { file: { ...settled.data.file, receipt_id: registration.request_id } } }), false)
+  for (const delivery of [{ state: 'waiting' }, { state: 'ready', expires_at: settled.data.file.expires_at }, { state: 'bound', request_id: registration.request_id, command_state: 'received' }]) {
+    assert.equal(status({ ...settled, data: { file: { ...settled.data.file, delivery } } }), true, ajv.errorsText(status.errors))
+  }
+  for (const delivery of [{ state: 'ready' }, { state: 'bound', request_id: registration.request_id, command_state: 'invented' }, { state: 'waiting', receipt_id: 'private' }]) {
+    assert.equal(status({ ...settled, data: { file: { ...settled.data.file, delivery } } }), false)
+  }
   for (const path of ['/v1/runtimes/{id}/sessions/{session_id}/files', '/v1/files/{id}', '/v1/files/{id}/upload-url', '/v1/files/{id}/commit']) assert.ok(api.paths[path])
 })

@@ -16,6 +16,28 @@ type fileRegistrationRequest struct {
 	SHA256    string `json:"sha256"`
 }
 
+func (api *API) fileDelivery(ctx context.Context, status *files.Status) error {
+	if api.fileHandoffs == nil {
+		return nil
+	}
+	bound, err := api.fileHandoffs.MessageReference(ctx, status.ID)
+	if err != nil {
+		return err
+	}
+	if bound != nil {
+		status.Delivery = bound
+		return nil
+	}
+	if status.State == "clean" {
+		status.Delivery = api.realtime.FileDeliveryHint(status.RuntimeID, status.SessionID, status.ID)
+		if status.Delivery.ExpiresAt != nil && status.Delivery.ExpiresAt.After(status.ExpiresAt) {
+			until := status.ExpiresAt
+			status.Delivery.ExpiresAt = &until
+		}
+	}
+	return nil
+}
+
 func fileOperation(response http.ResponseWriter, request *http.Request) (context.Context, context.CancelFunc, files.Actor, bool) {
 	principal, ok := auth.PrincipalFromContext(request.Context())
 	device, _ := request.Context().Value(deviceContextKey{}).(string)
@@ -44,6 +66,9 @@ func (api *API) registerFile(response http.ResponseWriter, request *http.Request
 	}
 	defer cancel()
 	prepared, err := api.files.Register(ctx, actor, files.UploadRegistration{RequestID: input.RequestID, RuntimeID: runtime, SessionID: session, Name: input.Name, SizeBytes: *input.SizeBytes, SHA256: input.SHA256})
+	if err == nil {
+		err = api.fileDelivery(ctx, &prepared.File)
+	}
 	if err != nil {
 		api.writeStoreError(response, err)
 		return
@@ -63,6 +88,9 @@ func (api *API) fileStatus(response http.ResponseWriter, request *http.Request) 
 	}
 	defer cancel()
 	status, err := api.files.Status(ctx, actor, id)
+	if err == nil {
+		err = api.fileDelivery(ctx, &status)
+	}
 	if err != nil {
 		api.writeStoreError(response, err)
 		return
@@ -82,6 +110,9 @@ func (api *API) fileUploadURL(response http.ResponseWriter, request *http.Reques
 	}
 	defer cancel()
 	prepared, err := api.files.Upload(ctx, actor, id)
+	if err == nil {
+		err = api.fileDelivery(ctx, &prepared.File)
+	}
 	if err != nil {
 		api.writeStoreError(response, err)
 		return
@@ -101,6 +132,9 @@ func (api *API) commitFile(response http.ResponseWriter, request *http.Request) 
 	}
 	defer cancel()
 	status, err := api.files.Commit(ctx, actor, id)
+	if err == nil {
+		err = api.fileDelivery(ctx, &status)
+	}
 	if err != nil {
 		api.writeStoreError(response, err)
 		return

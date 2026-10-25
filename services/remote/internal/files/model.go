@@ -86,6 +86,7 @@ type Record struct {
 }
 
 type Status struct {
+	Delivery        *Delivery `json:"delivery,omitempty"`
 	ID              string    `json:"file_id"`
 	RuntimeID       string    `json:"runtime_id"`
 	SessionID       string    `json:"session_id"`
@@ -98,6 +99,14 @@ type Status struct {
 	UploadExpiresAt time.Time `json:"upload_expires_at"`
 	ExpiresAt       time.Time `json:"expires_at"`
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+// Advisory presentation state. Every message still requires atomic admission.
+type Delivery struct {
+	State        string     `json:"state"`
+	RequestID    string     `json:"request_id,omitempty"`
+	CommandState string     `json:"command_state,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
 
 func (record Record) Status() Status {

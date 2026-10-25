@@ -1,0 +1,195 @@
+package cn.edu.ustc.dsh.network
+
+import cn.edu.ustc.dsh.auth.*
+import cn.edu.ustc.dsh.crypto.*
+import cn.edu.ustc.dsh.protocol.*
+import com.nimbusds.jose.*
+import com.nimbusds.jose.crypto.ECDSASigner
+import com.nimbusds.jose.crypto.ECDSAVerifier
+import com.nimbusds.jose.jwk.Curve
+import com.nimbusds.jose.jwk.gen.ECKeyGenerator
+import kotlinx.coroutines.*
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.*
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
+import org.junit.After
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.security.MessageDigest
+import java.time.Instant
+import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+class FileUploadsTest {
+    private val service = MockWebServer()
+    private val objects = MockWebServer()
+    private val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
+    private val tls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+    private val trusted = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+    private val http: LoginHttp
+    private val issuer = ECKeyGenerator(Curve.P_256).keyID("fixture-issuer").generate()
+    private val key = ECKeyGenerator(Curve.P_256).generate()
+    private val signer = object : DeviceProofSigner {
+        override val publicKey = PublicProofKey(JsonDocument.parse(key.toPublicJWK().toJSONString()).root)
+        override fun signJose(signingInput: ByteArray): ByteArray = ECDSASigner(key).sign(JWSHeader(JWSAlgorithm.ES256), signingInput).decode()
+    }
+    private val runtime = "66666666-6666-4666-8666-666666666666"
+    private val session = "22222222-2222-4222-8222-222222222222"
+    private val request = "11111111-1111-4111-8111-111111111111"
+    private val file = "33333333-3333-4333-8333-333333333333"
+    private val bytes = "abc".toByteArray()
+    private val manifest = FileManifest("PRIVATE_资料.txt", bytes.size.toLong(), digest(bytes))
+    private val origin get() = service.url("/").toString().trimEnd('/')
+    init {
+        service.useHttps(tls.sslSocketFactory(), false); objects.useHttps(tls.sslSocketFactory(), false)
+        service.start(); objects.start()
+        http = LoginHttp.forTests(OkHttpClient.Builder().sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager).build())
+    }
+    @After fun cleanup() { service.shutdown(); objects.shutdown() }
+    private fun digest(value: ByteArray) = MessageDigest.getInstance("SHA-256").digest(value).joinToString("") { "%02x".format(it.toInt() and 255) }
+    private fun api(): RemoteApi {
+        val config = LoginConfiguration.parse(JsonDocument.of(jsonObject("issuer" to "$origin/issuer".json(), "client_id" to "mobile".json(), "redirect_uri" to LoginConfiguration.REDIRECT_URI.json(),
+            "resource" to "urn:dsh-remote".json(), "audience" to "urn:dsh-remote".json(), "remote_origin" to origin.json(), "organization_id" to request.json(),
+            "scopes" to JsonArray(listOf("openid".json(), "remote.access".json())), "endpoint_origins" to JsonArray(listOf(origin.json())), "signing_algorithms" to JsonArray(listOf("ES256".json())))).canonicalBytes())
+        val discovery = OidcDiscovery.parse(JsonDocument.of(jsonObject("issuer" to config.issuer.json(), "authorization_endpoint" to "$origin/authorize".json(), "token_endpoint" to "$origin/token".json(),
+            "jwks_uri" to "$origin/jwks".json(), "response_types_supported" to JsonArray(listOf("code".json())), "id_token_signing_alg_values_supported" to JsonArray(listOf("ES256".json())))).canonicalBytes(), config)
+        val now = System.currentTimeMillis()
+        val login = PendingLogin(discovery, signer.publicKey.thumbprint, now)
+        val exchange = login.acceptCallback(LoginConfiguration.REDIRECT_URI + "?state=${login.state}&code=fixture", now)
+        val base = jsonObject("iss" to config.issuer.json(), "sub" to "fixture-user".json(), "iat" to (now / 1000).json(), "exp" to (now / 1000 + 300).json())
+        fun jwt(claims: JsonObject, type: String) = JWSObject(JWSHeader.Builder(JWSAlgorithm.ES256).keyID(issuer.keyID).type(JOSEObjectType(type)).build(), Payload(JsonDocument.of(claims).canonicalText())).apply { sign(ECDSASigner(issuer)) }.serialize()
+        val token = jsonObject("access_token" to jwt(base.with("aud" to config.audience.json(), "client_id" to config.clientId.json(), "jti" to "fixture-access".json(), "scope" to "remote.access".json(), "cnf" to jsonObject("jkt" to signer.publicKey.thumbprint.json())), "at+jwt").json(),
+            "id_token" to jwt(base.with("aud" to config.clientId.json(), "nonce" to login.nonce.json()), "JWT").json(), "token_type" to "DPoP".json(), "expires_in" to 300L.json())
+        val keys = IssuerKeys.parse(JsonDocument.of(jsonObject("keys" to JsonArray(listOf(JsonDocument.parse(issuer.toPublicJWK().toJSONString()).root)))).canonicalBytes())
+        return http.resource(config, TokenVerifier.authorizationCodeResponse(JsonDocument.of(token).canonicalBytes(), exchange, keys, now), signer)
+    }
+    private fun time(offset: Long) = Instant.ofEpochMilli(System.currentTimeMillis() + offset).toString().json()
+    private fun status(state: String = "uploading", expected: FileManifest = manifest) = jsonObject("file_id" to file.json(), "runtime_id" to runtime.json(), "session_id" to session.json(), "direction" to "to_host".json(),
+        "name" to expected.name.json(), "size_bytes" to expected.sizeBytes.json(), "sha256" to expected.sha256.json(), "state" to state.json(), "created_at" to time(-1000), "upload_expires_at" to time(120_000), "expires_at" to time(3_600_000))
+    private fun headers() = jsonObject("Content-Type" to "application/octet-stream".json(), "Content-Length" to manifest.sizeBytes.toString().json(), "Cache-Control" to "no-store".json(),
+        "X-Amz-Checksum-Sha256" to Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(bytes)).json(), "X-Amz-Server-Side-Encryption" to "aws:kms".json(), "X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id" to "fixture-kms".json())
+    private fun capability() = jsonObject("url" to objects.url("/quarantine?X-Amz-Signature=PRIVATE_CAPABILITY").toString().json(), "method" to "PUT".json(), "headers" to headers(), "expires_at" to time(60_000))
+    private fun prepared(capability: JsonObject = capability(), value: JsonObject = status()) = jsonObject("file" to value, "upload" to capability)
+    private fun reply(data: JsonObject, code: Int = 200) = MockResponse().setResponseCode(code).setHeader("Content-Type", "application/json").setBody(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to data)).canonicalText())
+    private fun proof(request: RecordedRequest): JsonObject {
+        val signed = JWSObject.parse(request.getHeader("DPoP")); assertTrue(signed.verify(ECDSAVerifier(key)))
+        return JsonDocument.parse(signed.payload.toBytes()).root
+    }
+    @Test fun authenticatedRegistrationStreamsAnAnonymousVerifiedPutThenCommitsAndQueries(): Unit = runBlocking {
+        val api = api()
+        service.enqueue(MockResponse().setResponseCode(401).setHeader("Content-Type", "application/json").setHeader("DPoP-Nonce", "registration-nonce")
+            .setHeader("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\"").setBody("{\"ok\":false,\"error\":{\"code\":\"auth.proof_invalid\"}}"))
+        service.enqueue(reply(prepared(), 201).setHeader("DPoP-Nonce", "service-next-nonce"))
+        val handle = api.registerFile(runtime, session, request, manifest)
+        val first = service.takeRequest(); val retried = service.takeRequest()
+        assertEquals("POST", retried.method); assertEquals("/v1/runtimes/$runtime/sessions/$session/files", retried.path)
+        assertEquals("registration-nonce", proof(retried).string("nonce")); assertNotEquals(proof(first).string("jti"), proof(retried).string("jti"))
+        assertTrue(retried.getHeader("Authorization")!!.startsWith("DPoP "))
+        val body = JsonDocument.parse(retried.body.readByteArray()).root
+        assertEquals(request, body.string("request_id")); assertTrue(FileManifest.parse(JsonObject(body.fields.filterKeys { it != "request_id" })).same(manifest))
+        assertTrue(handle.canUpload); assertFalse(handle.toString().contains("PRIVATE")); assertFalse(handle.file.toString().contains("PRIVATE"))
+        objects.enqueue(MockResponse().setResponseCode(200).setHeader("DPoP-Nonce", "evil-object-nonce").setHeader("Set-Cookie", "private=secret"))
+        val progress = arrayListOf<Long>()
+        api.uploadFile(handle, { ByteArrayInputStream(bytes) }, progress::add)
+        val put = objects.takeRequest()
+        assertEquals("PUT", put.method); assertNull(put.getHeader("Authorization")); assertNull(put.getHeader("DPoP")); assertNull(put.getHeader("Cookie"))
+        assertEquals(bytes.size.toString(), put.getHeader("Content-Length")); assertEquals("no-store", put.getHeader("Cache-Control"))
+        assertEquals("aws:kms", put.getHeader("X-Amz-Server-Side-Encryption")); assertArrayEquals(bytes, put.body.readByteArray()); assertEquals(manifest.sizeBytes, progress.last())
+        service.enqueue(reply(jsonObject("file" to status("scanning")), 202))
+        assertEquals(FileTransferState.SCANNING, api.commitFile(file).state)
+        val commit = service.takeRequest(); assertEquals("/v1/files/$file/commit", commit.path); assertEquals("service-next-nonce", proof(commit).string("nonce"))
+        service.enqueue(reply(jsonObject("file" to status("clean"))))
+        assertEquals(FileTransferState.CLEAN, api.fileStatus(file).state); assertEquals("/v1/files/$file", service.takeRequest().path)
+    }
+    @Test fun malformedCapabilitiesAndCrossSessionManifestsFailBeforeSendingBytes(): Unit = runBlocking {
+        val api = api()
+        val base = capability()
+        val invalid = listOf(base.with("url" to "http://localhost/private".json()), base.with("url" to "https://user:secret@localhost/private".json()),
+            base.with("url" to objects.url("/private#fragment").toString().json()), base.with("method" to "GET".json()), base.with("expires_at" to time(2_000_000)),
+            base.with("headers" to headers().with("Authorization" to "secret".json())), base.with("headers" to headers().with("Cookie" to "secret".json())),
+            base.with("headers" to headers().with("DPoP" to "secret".json())), base.with("headers" to headers().with("content-type" to "application/octet-stream".json())),
+            base.with("headers" to headers().with("Content-Length" to "7".json())), base.with("headers" to headers().with("X-Amz-Checksum-Sha256" to "invalid".json())))
+        for (bad in invalid) {
+            service.enqueue(reply(prepared(bad), 201))
+            try { api.registerFile(runtime, session, request, manifest); fail("unsafe capability accepted") } catch (_: ProtocolException) { }
+            service.takeRequest()
+        }
+        service.enqueue(reply(prepared(value = status().with("session_id" to runtime.json())), 201))
+        try { api.registerFile(runtime, session, request, manifest); fail("cross-session response accepted") } catch (_: ProtocolException) { }
+        service.takeRequest(); assertEquals(0, objects.requestCount)
+    }
+    @Test fun redirectsDoNotCarryTheBodyOrAnyCredentialsToAnotherRequest(): Unit = runBlocking {
+        val api = api(); service.enqueue(reply(prepared(), 201)); val handle = api.registerFile(runtime, session, request, manifest); service.takeRequest()
+        objects.enqueue(MockResponse().setResponseCode(307).setHeader("Location", objects.url("/redirect-target")))
+        try { api.uploadFile(handle, { ByteArrayInputStream(bytes) }); fail("redirect accepted") } catch (error: RemoteRequestException) { assertEquals("file.upload_rejected", error.code) }
+        objects.takeRequest(); assertEquals(1, objects.requestCount)
+    }
+    @Test fun changedSourcesAndForeignApiHandlesCannotCompleteAnUpload(): Unit = runBlocking {
+        val api = api(); service.enqueue(reply(prepared(), 201)); val handle = api.registerFile(runtime, session, request, manifest); service.takeRequest()
+        var opened = false
+        try { api().uploadFile(handle, { opened = true; ByteArrayInputStream(bytes) }); fail("foreign handle accepted") } catch (error: RemoteRequestException) { assertEquals("auth.identity_mismatch", error.code) }
+        assertFalse(opened); assertEquals(0, objects.requestCount)
+        objects.enqueue(MockResponse().setResponseCode(200))
+        try { api.uploadFile(handle, { ByteArrayInputStream("xyz".toByteArray()) }); fail("changed source accepted") } catch (error: RemoteRequestException) { assertEquals("file.integrity_mismatch", error.code) }
+        assertEquals(1, service.requestCount)
+    }
+    @Test fun cancellationClosesTheOpenedContentSource(): Unit = runBlocking {
+        val api = api(); service.enqueue(reply(prepared(), 201)); val handle = api.registerFile(runtime, session, request, manifest); service.takeRequest()
+        val entered = CountDownLatch(1); val released = CountDownLatch(1); val closed = AtomicBoolean()
+        val source = object : InputStream() {
+            override fun read(): Int = error("bulk reads required")
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int { entered.countDown(); released.await(5, TimeUnit.SECONDS); return -1 }
+            override fun close() { closed.set(true); released.countDown() }
+        }
+        objects.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val transfer = launch { api.uploadFile(handle, { source }) }
+        assertTrue(withContext(Dispatchers.IO) { entered.await(3, TimeUnit.SECONDS) })
+        transfer.cancelAndJoin(); assertTrue(closed.get())
+    }
+    @Test fun emptyFilesHaveAnExactZeroLengthBodyAndExpiredCapabilitiesNeverOpenTheSource(): Unit = runBlocking {
+        val api = api()
+        val empty = FileManifest("empty.txt", 0, digest(byteArrayOf()))
+        val cap = capability().with("headers" to jsonObject("Content-Type" to "application/octet-stream".json(), "Content-Length" to "0".json()))
+        service.enqueue(reply(prepared(cap, status(expected = empty)), 201))
+        val handle = api.registerFile(runtime, session, request, empty); service.takeRequest()
+        objects.enqueue(MockResponse().setResponseCode(200))
+        api.uploadFile(handle, { ByteArrayInputStream(byteArrayOf()) })
+        assertEquals(0, objects.takeRequest().bodySize)
+        service.enqueue(reply(prepared(capability().with("expires_at" to time(-1))), 201))
+        val expired = api.registerFile(runtime, session, request, manifest); service.takeRequest()
+        var opened = false
+        try { api.uploadFile(expired, { opened = true; ByteArrayInputStream(bytes) }); fail("expired upload accepted") } catch (error: RemoteRequestException) { assertEquals("file.upload_expired", error.code) }
+        assertFalse(opened); assertEquals(1, objects.requestCount)
+    }
+    @Test fun objectTlsIdentityIsVerifiedBeforeReadingContent(): Unit = runBlocking {
+        val api = api()
+        val bad = capability().with("url" to objects.url("/quarantine").newBuilder().host("127.0.0.1").build().toString().json())
+        service.enqueue(reply(prepared(bad), 201))
+        val handle = api.registerFile(runtime, session, request, manifest); service.takeRequest()
+        var opened = false
+        try { api.uploadFile(handle, { opened = true; ByteArrayInputStream(bytes) }); fail("wrong TLS identity accepted") } catch (error: RemoteRequestException) { assertEquals("file.upload_failed", error.code) }
+        assertFalse(opened)
+    }
+    @Test fun capabilityExpiryClosesAStalledProviderWithoutWaitingForItsReadToFinish(): Unit = runBlocking {
+        val api = api()
+        service.enqueue(reply(prepared(capability().with("expires_at" to time(2000))), 201))
+        val handle = api.registerFile(runtime, session, request, manifest); service.takeRequest()
+        val released = CountDownLatch(1); val closed = AtomicBoolean()
+        val source = object : InputStream() {
+            override fun read(): Int = error("bulk reads required")
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int { released.await(5, TimeUnit.SECONDS); return -1 }
+            override fun close() { closed.set(true); released.countDown() }
+        }
+        objects.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        try {
+            withTimeout(4000) { api.uploadFile(handle, { source }) }
+            fail("stalled provider outlived the capability")
+        } catch (error: RemoteRequestException) { assertEquals("file.upload_expired", error.code) }
+        assertTrue(closed.get())
+    }
+}

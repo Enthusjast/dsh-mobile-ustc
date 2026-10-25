@@ -10,6 +10,22 @@ import (
 	"dsh-mobile-ustc/services/remote/internal/files"
 )
 
+// Called only after the file status operation has authorized the original device.
+func (repository *FileStore) FileMessageReference(ctx context.Context, id string) (*files.Delivery, error) {
+	if !grantUUIDPattern.MatchString(id) {
+		return nil, files.ErrInvalid
+	}
+	delivery := &files.Delivery{State: "bound"}
+	err := repository.database.DB.QueryRowContext(ctx, `select r.request_id::text,c.state from file_message_refs r join commands c on c.device_id=r.device_id and c.request_id=r.request_id where r.file_id=$1`, id).Scan(&delivery.RequestID, &delivery.CommandState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, files.ErrUnavailable
+	}
+	return delivery, nil
+}
+
 // File references are reserved in the command transaction, before any Relay
 // forwarding. A terminal original only reconciles its existing references.
 func (postgres *Postgres) RecordRealtimeFileCommand(ctx context.Context, ticket TicketRedemption, host files.HostBinding, requestID, sessionID, digest, policy string, fileIDs []string, ready func() bool) (CommandStatus, error) {

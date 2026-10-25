@@ -710,6 +710,7 @@ components:
       additionalProperties: false
       required: [file_id, runtime_id, session_id, direction, name, size_bytes, sha256, state, upload_expires_at, expires_at, created_at]
       properties:
+        delivery: { $ref: '#/components/schemas/FileDeliveryHint' }
         file_id: { type: string, format: uuid }
         runtime_id: { type: string, format: uuid }
         session_id: { type: string, format: uuid }
@@ -722,6 +723,27 @@ components:
         upload_expires_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
+    FileDeliveryHint:
+      description: Advisory current Host readiness or the original command reference; never an admission capability. Ready expires within the current handoff lease. Every send is separately authorized.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state]
+          properties:
+            state: { const: waiting }
+        - type: object
+          additionalProperties: false
+          required: [state, expires_at]
+          properties:
+            state: { const: ready }
+            expires_at: { type: string, format: date-time }
+        - type: object
+          additionalProperties: false
+          required: [state, request_id, command_state]
+          properties:
+            state: { const: bound }
+            request_id: { type: string, format: uuid }
+            command_state: { enum: [received, host_accepted, dispatching, agent_queued, observed, settled, rejected, outcome_unknown] }
     FileUploadCapability:
       type: object
       additionalProperties: false

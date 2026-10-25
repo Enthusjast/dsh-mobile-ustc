@@ -276,3 +276,57 @@ func TestExpiredFileMessageUsesNegotiatedHostOnlyReconciliation(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnedFileStatusSeparatesScanReadinessAndMessageOwnership(t *testing.T) {
+	h := newFileHTTPFixture(t)
+	allowFileMessages(t, h)
+	prepared := h.cleanForHandoff(t, []byte("readiness metadata"))
+	if status := h.status(t, prepared.File.ID); status.Delivery == nil || status.Delivery.State != "waiting" {
+		t.Fatal("clean object was mislabeled as ready")
+	}
+	host := connectFileHost(t, h, "command.relay.v1", files.MessageCapability)
+	offer := host.offer(t)
+	if status := h.status(t, offer.FileID); status.Delivery == nil || status.Delivery.State != "waiting" {
+		t.Fatal("offer alone made the attachment ready")
+	}
+	stageFileMessageHost(t, h, host, offer)
+	status := h.status(t, offer.FileID)
+	if status.Delivery == nil || status.Delivery.State != "ready" || status.Delivery.ExpiresAt == nil || !status.Delivery.ExpiresAt.After(time.Now()) || status.Delivery.ExpiresAt.After(time.Now().Add(5*time.Second)) {
+		t.Fatal("current stage readiness missing")
+	}
+	if code, _ := h.second.call(h.secondToken, "GET", "/v1/files/"+offer.FileID, nil); code != 403 {
+		t.Fatal("another device read delivery hints")
+	}
+	phone := connectFilePhone(t, h, h.caller, h.token, "33333333-3333-4333-8333-333333333333", true)
+	request := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaba"
+	phone.submit(t, request, offer.FileID)
+	forwarded := host.read(t)
+	if string(forwarded["type"]) != `"message.submit"` || fileMessageState(t, phone.read(t)) != "received" {
+		t.Fatal("message was not reserved")
+	}
+	status = h.status(t, offer.FileID)
+	if status.Delivery == nil || status.Delivery.State != "bound" || status.Delivery.RequestID != request || status.Delivery.CommandState != "received" || status.Delivery.ExpiresAt != nil {
+		t.Fatal("file ownership hint missing")
+	}
+	second := h.cleanForHandoff(t, []byte("disconnect readiness"))
+	secondOffer := host.offer(t)
+	if secondOffer.FileID != second.File.ID {
+		t.Fatal("unexpected second offer")
+	}
+	stageFileMessageHost(t, h, host, secondOffer)
+	if h.status(t, second.File.ID).Delivery.State != "ready" {
+		t.Fatal("second file was never ready")
+	}
+	_ = host.connection.CloseNow()
+	deadline := time.Now().Add(time.Second)
+	for {
+		status := h.status(t, second.File.ID)
+		if status.Delivery != nil && status.Delivery.State == "waiting" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closed Host retained file readiness")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

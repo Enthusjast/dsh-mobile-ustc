@@ -13,6 +13,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.io.InputStream
 import java.net.URI
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -26,6 +27,8 @@ class RemoteRequestException(val code: String = "network.unavailable") : Illegal
 
 /** No redirects, implicit retries, cookies, logging interceptor or disk response cache. */
 class LoginHttp private constructor(private val client: OkHttpClient) {
+    internal suspend fun upload(prepared: PreparedFileUpload, source: () -> InputStream, current: () -> Unit, progress: (Long) -> Unit) =
+        uploadFileBytes(client, prepared, source, current, progress)
     companion object {
         fun create(): LoginHttp = LoginHttp(secure(OkHttpClient.Builder()).build())
         internal fun forTests(client: OkHttpClient): LoginHttp = LoginHttp(secure(client.newBuilder()).build())
@@ -123,7 +126,8 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
             val code = runCatching { JsonDocument.parse(reply.bytes).root.obj("error").string("code") }.getOrNull()
             // Only protocol codes reach presentation; untrusted error bodies/messages do not.
             throw RemoteRequestException(if (code in setOf("auth.expired", "auth.proof_invalid", "access.denied", "access.revoked", "device.invalid", "device.registration_conflict", "internal",
-                    "approval.conflict", "approval.expired", "approval.assurance_required", "rate.limited")) code!! else "network.request_failed")
+                    "approval.conflict", "approval.expired", "approval.assurance_required", "rate.limited", "protocol.invalid", "file.request_conflict", "file.quota_exceeded",
+                    "file.state_changed", "file.scanner_unavailable", "file.unavailable", "file.staging_required", "file.already_bound")) code!! else "network.request_failed")
         }
         return reply
     }
@@ -173,6 +177,7 @@ class TokenEndpoint internal constructor(private val http: LoginHttp, private va
 }
 
 class RemoteApi internal constructor(private val http: LoginHttp, private val config: LoginConfiguration, private val session: LoginSession, private val signer: DeviceProofSigner) {
+    private val fileOwner = Any()
     private var nonce: String? = null
     private var mappedUserId: String? = null
     private val mutex = Mutex()
@@ -232,6 +237,44 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         val root = JsonDocument.parse(read("/v1/commands/$id?device_id=$deviceId")).root; root.exactKeys("ok", "data")
         if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
         CommandReceipt.status(root.obj("data")).also { if (it.requestId != id) throw RemoteRequestException("network.invalid_response") }
+    }
+    suspend fun registerFile(runtimeId: String, sessionId: String, requestId: String, manifest: FileManifest): PreparedFileUpload = mutex.withLock {
+        Contract.uuid(runtimeId); Contract.uuid(sessionId); Contract.uuid(requestId)
+        preparedFile(request("POST", "/v1/runtimes/$runtimeId/sessions/$sessionId/files", manifest.json().with("request_id" to requestId.json())), runtimeId, sessionId, manifest)
+    }
+    suspend fun fileStatus(id: String): RemoteFileStatus = mutex.withLock {
+        val file = fileStatusResponse(read("/v1/files/${Contract.uuid(id)}"))
+        if (file.id != id) throw ProtocolException()
+        file
+    }
+    suspend fun fileUploadURL(expected: RemoteFileStatus): PreparedFileUpload = mutex.withLock {
+        preparedFile(request("POST", "/v1/files/${expected.id}/upload-url", jsonObject()), expected.runtimeId, expected.sessionId, expected.manifest).also {
+            if (it.file.id != expected.id) throw ProtocolException()
+        }
+    }
+    suspend fun commitFile(id: String): RemoteFileStatus = mutex.withLock {
+        val file = fileStatusResponse(request("POST", "/v1/files/${Contract.uuid(id)}/commit", jsonObject()))
+        if (file.id != id) throw ProtocolException()
+        file
+    }
+    suspend fun uploadFile(prepared: PreparedFileUpload, source: () -> InputStream, progress: (Long) -> Unit = {}) {
+        if (prepared.owner !== fileOwner) throw RemoteRequestException("auth.identity_mismatch")
+        http.upload(prepared, source, { session.accessTokenForRequest(System.currentTimeMillis()) }, progress)
+    }
+    private fun fileStatusResponse(bytes: ByteArray): RemoteFileStatus {
+        val root = JsonDocument.parse(bytes).root; root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+        val data = root.obj("data"); data.exactKeys("file")
+        return RemoteFileStatus.parse(data.obj("file"))
+    }
+    private fun preparedFile(bytes: ByteArray, runtime: String, target: String, manifest: FileManifest): PreparedFileUpload {
+        val root = JsonDocument.parse(bytes).root; root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+        val data = root.obj("data")
+        data.exactKeys(*(if ("upload" in data.fields) arrayOf("file", "upload") else arrayOf("file")))
+        val file = RemoteFileStatus.parse(data.obj("file"))
+        if (file.runtimeId != runtime || file.sessionId != target || !file.manifest.same(manifest)) throw ProtocolException()
+        return PreparedFileUpload(file, if ("upload" in data.fields) FileUploadCapability.parse(data.obj("upload"), file) else null, fileOwner)
     }
     /** Current session membership and read permission, including when its host is offline. */
     internal suspend fun cachedReadUntil(runtime: String, sessionId: String, workspace: String?, grantVersion: Long): Long = mutex.withLock {

@@ -22,6 +22,7 @@ import java.io.File
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.util.UUID
+import java.security.MessageDigest
 
 /** Test-only fresh fixture input from the private cluster; no production login/configuration entrypoint. */
 object RunRelayProbe {
@@ -55,10 +56,20 @@ object RunRelayProbe {
             phase = "tls-configuration"
             val certificate = CertificateFactory.getInstance("X.509").generateCertificate(fixture.string("ca_pem").byteInputStream()) as X509Certificate
             val trust = HandshakeCertificates.Builder().addTrustedCertificate(certificate).build()
-            val client = OkHttpClient.Builder().sslSocketFactory(trust.sslSocketFactory(), trust.trustManager).build()
+            val fileTrust = fixture.fields["object_ca_pem"]?.let {
+                val objectCertificate = CertificateFactory.getInstance("X.509").generateCertificate(fixture.string("object_ca_pem").byteInputStream()) as X509Certificate
+                HandshakeCertificates.Builder().addTrustedCertificate(certificate).addTrustedCertificate(objectCertificate).build()
+            } ?: trust
+            val client = OkHttpClient.Builder().sslSocketFactory(fileTrust.sslSocketFactory(), fileTrust.trustManager).build()
             ownedClient = client
             val http = LoginHttp.forTests(client)
             val api = http.resource(config, session, signer)
+            if (fixture.fields["mode"] == "files".json()) {
+                phase = "file-transfer"
+                files(api, fixture, root, config, this)
+                println("Kotlin authenticated upload / anonymous TLS PUT / scanner / Host readiness / file-ID message passed")
+                return@runBlocking
+            }
             if (fixture.fields["mode"] == "binding".json()) {
                 phase = "host-binding"
                 binding(api, fixture, this)
@@ -98,6 +109,49 @@ object RunRelayProbe {
             throw IllegalStateException("Kotlin Relay probe failed at $phase")
         }
         finally { ownedClient?.let { it.connectionPool.evictAll(); it.dispatcher.executorService.shutdownNow() } }
+    }
+
+    private suspend fun files(api: RemoteApi, fixture: JsonObject, root: File, config: LoginConfiguration, owner: CoroutineScope) {
+        val source = File(fixture.string("source_file")).canonicalFile
+        require(source.toPath().startsWith(root.toPath()) && source.length() <= MAX_FILE_BYTES)
+        val hash = MessageDigest.getInstance("SHA-256")
+        var size = 0L
+        source.inputStream().use { stream ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) { val count = stream.read(buffer); if (count < 0) break; size += count; require(size <= MAX_FILE_BYTES); hash.update(buffer, 0, count) }
+        }
+        val manifest = FileManifest("Kotlin_资料.bin", size, hash.digest().joinToString("") { "%02x".format(it.toInt() and 255) })
+        val account = api.me()
+        val runtime = fixture.string("runtime_id"); val session = fixture.string("session_id"); val device = fixture.string("device_id")
+        val request = UUID.randomUUID().toString()
+        val prepared = api.registerFile(runtime, session, request, manifest)
+        val retry = api.registerFile(runtime, session, request, manifest)
+        check(prepared.file.id == retry.file.id && retry.canUpload)
+        api.uploadFile(retry, source::inputStream)
+        check(api.commitFile(retry.file.id).state in setOf(FileTransferState.SCANNING, FileTransferState.CLEAN))
+        withTimeout(15_000) {
+            while (true) {
+                val current = api.fileStatus(retry.file.id)
+                check(current.state !in setOf(FileTransferState.REJECTED, FileTransferState.EXPIRED))
+                if (current.readyForMessage()) break
+                delay(100)
+            }
+        }
+        val journal = MemoryCommandJournal(CommandOwner(UUID.randomUUID().toString(), config.organizationId, config.fingerprint, account.userId, device))
+        val grant = RelayScope(listOf("session.read", "message.submit", "command.status"), listOf(fixture.string("workspace_id")), emptyList())
+        api.chatReader(device, runtime, session, grant, journal, owner, workspaceId = fixture.string("workspace_id")).use { reader ->
+            withTimeout(10_000) { reader.state.first { it.phase == SessionReadPhase.READY } }
+            val commands = reader.commands!!
+            withTimeout(5000) { commands.state.first { it.canAttachFiles } }
+            val id = commands.submit("queue", "KOTLIN_FILE_MESSAGE", fileIds = listOf(retry.file.id))
+            withTimeout(10_000) { commands.state.first { state -> state.records.any { it.intent.requestId == id && it.everAgentQueued } } }
+            val bound = api.fileStatus(retry.file.id)
+            check(bound.delivery?.state == FileDeliveryState.BOUND && bound.delivery?.requestId == id)
+            commands.sendPending(id)
+            delay(150)
+            check(api.commandStatus(id, device).state == RemoteCommandState.AGENT_QUEUED)
+            println(JsonDocument.of(jsonObject("file_id" to retry.file.id.json(), "request_id" to id.json(), "size_bytes" to size.json(), "sha256" to manifest.sha256.json())).canonicalText())
+        }
     }
 
     private suspend fun binding(api: RemoteApi, fixture: JsonObject, owner: CoroutineScope) {

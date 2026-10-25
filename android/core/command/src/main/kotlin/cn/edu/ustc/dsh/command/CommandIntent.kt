@@ -33,12 +33,14 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
         return frame
     }
     fun storageBytes(): ByteArray = JsonDocument.of(if(questionDefinition==null) frame() else frame().with("local_context_sha256" to questionDefinition.json())).canonicalBytes()
-    fun text(): String? = if (kind == CommandKind.MESSAGE) payload.array("content").joinToString("\n") { (it as JsonObject).string("text") } else null
+    fun text(): String? = if (kind == CommandKind.MESSAGE) payload.array("content").map { it as JsonObject }.filter { it.string("type") == "text" }.joinToString("\n") { it.string("text") } else null
+    fun fileIds(): List<String> = if (kind == CommandKind.MESSAGE) payload.array("content").map { it as JsonObject }.filter { it.string("type") == "file" }.map { it.string("file_id") } else emptyList()
     override fun toString() = "CommandIntent(${kind.wire})"
     companion object {
-        fun message(request: String, runtime: String, session: String, mode: String, text: String): CommandIntent =
+        fun message(request: String, runtime: String, session: String, mode: String, text: String, fileIds: List<String> = emptyList()): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "message.submit".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(),
-                "payload" to jsonObject("mode" to mode.json(), "content" to JsonArray(listOf(jsonObject("type" to "text".json(), "text" to text.json()))))))
+                "payload" to jsonObject("mode" to mode.json(), "content" to JsonArray((if (text.isBlank()) emptyList() else listOf(jsonObject("type" to "text".json(), "text" to text.json()))) +
+                    fileIds.map { jsonObject("type" to "file".json(), "file_id" to it.json()) }))))
         fun cancel(request: String, runtime: String, session: String, epoch: String): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "session.cancel".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(), "runtime_epoch" to epoch.json(), "payload" to jsonObject()))
         fun archive(request: String, runtime: String, session: String, epoch: String, archived: Boolean, stopActivity: Boolean): CommandIntent =
@@ -79,8 +81,15 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
                 if (payload.string("mode") !in setOf("queue", "steer")) throw ProtocolException()
                 val blocks = payload.array("content")
                 if (blocks.size !in 1..16) throw ProtocolException()
+                val files = hashSetOf<String>()
                 for (item in blocks) {
-                    val block = item as? JsonObject ?: throw ProtocolException(); block.exactKeys("type", "text")
+                    val block = item as? JsonObject ?: throw ProtocolException()
+                    if (block.string("type") == "file") {
+                        block.exactKeys("type", "file_id")
+                        if (!files.add(Contract.uuid(block.string("file_id")))) throw ProtocolException()
+                        continue
+                    }
+                    block.exactKeys("type", "text")
                     val text = block.string("text")
                     if (block.string("type") != "text" || text.isBlank() || text.codePointCount(0, text.length) > 32_768 ||
                         text.any { Character.isISOControl(it) && it !in "\n\r\t" }) throw ProtocolException()

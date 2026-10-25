@@ -59,6 +59,7 @@ func (ReadPermit) GoString() string             { return "files.ReadPermit" }
 func (ReadPermit) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
 
 type HandoffRepository interface {
+	FileMessageReference(context.Context, string) (*Delivery, error)
 	PendingHandoffFiles(context.Context, HostBinding, string, int) ([]string, error)
 	IssueHandoff(context.Context, HostBinding, string, string) (*FileOffer, error)
 	RenewHandoff(context.Context, HostBinding, string, string) (Handoff, error)

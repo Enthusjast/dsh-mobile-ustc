@@ -14,6 +14,9 @@ type Handoffs struct {
 }
 
 func (controller *Handoffs) PolicySHA256() string { return controller.policy }
+func (controller *Handoffs) MessageReference(ctx context.Context, id string) (*Delivery, error) {
+	return controller.repository.FileMessageReference(ctx, id)
+}
 
 func NewHandoffs(repository HandoffRepository, storage BlobStore, policy string) (*Handoffs, error) {
 	if repository == nil || storage == nil {

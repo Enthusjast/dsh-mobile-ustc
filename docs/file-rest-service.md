@@ -2,6 +2,8 @@
 
 文件登记、隔离上传、扫描、候选写入、状态确认及后台清理现已接入正常 Go 服务入口。启用文件服务后，扫描通过的对象可通过 [Host 交接](file-host-handoffs.md) 暂存到真实 DSH 会话，再经 [消息附件授权](file-message-relay.md) 引用文件 ID。Android 文件入口和显示仍待接入。`clean` 不表示 Host 收到文件、生成 receipt 或消息入队。
 
+文件公共状态另提供可选 delivery 提示，区分 clean 后的 waiting、当前短租约下的 ready，以及已归属原命令的 bound。该提示不授予任何新权限；发送时仍执行完整事务检查。[Android 共享客户端](android-files.md) 已解析该状态并完成匿名 PUT / 文件消息联调，文件选择和进程恢复 UI 尚待实现。
+
 ## 启用与配置
 
 设置 `REMOTE_FILES_CONFIG_FILE` 指向受保护 JSON 文件；未设置时不创建文件服务、不启动文件 worker，也不注册文件路由。样例位于 `deploy/files/`：

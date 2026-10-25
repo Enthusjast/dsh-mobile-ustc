@@ -1,6 +1,6 @@
 # Relay 消息附件授权与消费
 
-公网 v1 Relay 现在支持经双方协商的文件 ID 消息。实际本地组合已走通受保护上传 / 扫描、Host 暂存、文件引用、原生 DSH 入队与重复提交。Android 文件 API、选择 / 上传界面、文件消息显示和受限导出尚待实现；学校身份、对象服务和扫描引擎仍使用夹具。
+公网 v1 Relay 现在支持经双方协商的文件 ID 消息。实际本地组合已走通受保护上传 / 扫描、Host 暂存、文件引用、原生 DSH 入队与重复提交。[Android 文件 API 与命令](android-files.md) 已由实际 Kotlin 客户端完成联调；选择 / 上传界面、进程恢复、文件消息显示和受限导出尚待实现。学校身份、对象服务和扫描引擎仍使用夹具。
 
 ## 协商与消息结构
 
@@ -42,6 +42,6 @@ Host 对账先验证本地原命令 owner 和摘要，再读取原生队列 / �
 - 正常 Host 插件和真实 npm DSH 0.2.1-rc.2 Loader 收到经 Go 上传 / 扫描 / 交接的字节，实际文件出现在原生用户消息中；重复提交只有一条用户消息，并有一个持久文件归属记录。另一个场景继续验证 grant 撤销后的 receipt 回收。
 - 在同一真实 TLS / PostgreSQL / DSH 组合中，故障注入恢复 Host 准入前保存的加密 dispatching 记录、模拟 Relay 回执全部丢失，并使文件到期、移除所有源对象。重试仍从原生证据恢复 agent_queued，prompt 调用总数保持 1；删除本地命令证据时返回 outcome_unknown，用户消息和 prompt 调用数均不增加。
 - PostgreSQL 用例验证未绑定意图不能请求对账、清单 / 摘要不可更改、当前连接 / grant 仍需有效，以及多附件回退不保留部分 handoff 更新。WSS 用例验证手机发送 Host 专用帧会被拒绝，旧 Host 不会收到新的准入请求。
-- 既有 Kotlin TLS Relay 客户端与正常 npm DSH CLI 组合执行回归。Kotlin 客户端本轮仍只发送文本，没有声称完成 Android 文件链路。
+- Kotlin TLS Relay 客户端与正常 npm DSH CLI 组合执行回归。另已接入 [Kotlin 实际上传与附件消息组合](android-files.md)，但文件 APK 界面和实机链路仍待验证。
 
 原始文件消息记录为 `.local/file-message-relay-verify-final.log` 和 `.local/file-message-relay-backend-final.log`；新增对账记录为 `.local/file-reconcile-relay-verify-final.log`、`.local/file-reconcile-chain-second.log` 和 `.local/file-reconcile-relay-backend-final.log`。S3 / clamd 协议对端、身份和模型均是本地夹具，未执行 TokenWorks、真实 KMS / 病毒签名库或文件 APK 实机验收。

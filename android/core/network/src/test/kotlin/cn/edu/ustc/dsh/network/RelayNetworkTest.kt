@@ -312,7 +312,7 @@ class RelayNetworkTest {
     }
     private suspend fun SessionReader.await(test: (SessionReadState) -> Boolean) = withTimeout(5000) { state.first(test) }.also { peerFailure.get()?.let { throw AssertionError(it) } }
 
-    private inner class CommandPeer(questions: Boolean=false, archive: Boolean=false, archiveOnly: Boolean=false) {
+    private inner class CommandPeer(questions: Boolean=false, archive: Boolean=false, archiveOnly: Boolean=false, advertiseFiles: Boolean=true) {
         val granted = RelayScope(listOf("session.read", "command.status") + (if (archiveOnly) emptyList() else listOf("message.submit", "session.cancel")) +
             (if (archive) listOf("session.archive") else emptyList()) + (if(questions) listOf("question.answer") else emptyList()), emptyList(), listOf(sessionId))
         val journal = MemoryCommandJournal(CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device))
@@ -328,13 +328,14 @@ class RelayNetworkTest {
         val accessReads = java.util.concurrent.atomic.AtomicInteger()
         init {
             val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1") +
+                (if ("message.submit" in granted.actions) listOf(FILE_MESSAGE_CAPABILITY) else emptyList()) +
                 (if (archiveOnly) emptyList() else listOf("session.cancel.v1")) + (if (archive) listOf("session.archive.v1") else emptyList())
             server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when {
                     request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
                         "user_id" to journal.owner.userId.json(), "memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json())))))
                     request.path == "/v1/realtime/tickets" -> if (denyTickets) json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403) else ticketResponse().setBody(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))).canonicalText())
-                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.map(String::json)), "lease_expires_at" to time(leaseMillis))), expectedCapabilities = capabilities, onContent = feed::receive)
+                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.filter { advertiseFiles || it != FILE_MESSAGE_CAPABILITY }.map(String::json)), "lease_expires_at" to time(leaseMillis))), expectedCapabilities = capabilities, onContent = feed::receive)
                     request.path == "/v1/runtimes/$runtime/sessions/$sessionId/read-access" -> {
                         accessReads.incrementAndGet()
                         if (accessUnavailable) json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "internal".json()))).setResponseCode(503)
@@ -973,6 +974,28 @@ class RelayNetworkTest {
             assertEquals(id, fixture.writes.single().string("request_id")); assertEquals(CommandDelivery.CONFIRMED, delivered.delivery)
             assertEquals("steer", delivered.intent.payload.string("mode"))
             assertEquals(1, fixture.writes.size)
+        }
+    }
+    @Test fun negotiatedFileIdsAreSavedBeforeWritingAndAnOlderPeerNeverGetsThem(): Unit = runBlocking {
+        val fixture = CommandPeer()
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!
+            withTimeout(5000) { commands.state.first { it.canAttachFiles } }
+            val file = UUID.randomUUID().toString()
+            val id = commands.submit("queue", "", fileIds = listOf(file))
+            val saved = withTimeout(5000) { commands.state.first { state -> state.records.any { it.intent.requestId == id && it.everAgentQueued } } }.records.single()
+            assertEquals(listOf(file), saved.intent.fileIds()); assertEquals("", saved.intent.text())
+            assertEquals(file, fixture.writes.single().obj("payload").array("content").let { (it.single() as JsonObject).string("file_id") })
+        }
+        val older = CommandPeer(advertiseFiles = false)
+        older.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!
+            assertFalse(commands.state.value.canAttachFiles)
+            val id = commands.submit("queue", "original", fileIds = listOf(UUID.randomUUID().toString()))
+            withTimeout(5000) { commands.state.first { it.error == "file.unsupported" } }
+            assertTrue(older.writes.isEmpty()); assertEquals(0, older.journal.list(runtime, sessionId).single { it.intent.requestId == id }.attempts)
         }
     }
     @Test fun aReceiptHintCannotAdvanceBeyondThisDevicesAuthoritativePersistenceFacts(): Unit = runBlocking {
