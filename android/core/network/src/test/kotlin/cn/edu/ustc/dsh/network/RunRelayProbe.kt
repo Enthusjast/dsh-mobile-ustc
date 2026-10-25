@@ -172,7 +172,7 @@ object RunRelayProbe {
         val account = api.me()
         val config = LoginConfiguration.parse(JsonDocument.of(fixture.obj("deployment")).canonicalBytes())
         val journal = MemoryCommandJournal(CommandOwner(UUID.randomUUID().toString(), config.organizationId, config.fingerprint, account.userId, fixture.string("device_id")))
-        val commandScope = runtimeAccess.scope!!.session(session, entry.workspaceId, setOf("session.read", "message.submit", "command.status", "session.cancel"))
+        val commandScope = runtimeAccess.scope!!.session(session, entry.workspaceId, setOf("session.read", "message.submit", "command.status", "session.archive", "session.cancel"))
         api.chatReader(fixture.string("device_id"), runtime, session, commandScope, journal, owner).use { chat ->
             withTimeout(10_000) { chat.state.first { it.phase == SessionReadPhase.READY } }
             val writer = chat.commands!!
@@ -189,6 +189,17 @@ object RunRelayProbe {
             val cancellation = writer.cancel(waiting.runtimeEpoch!!)
             withTimeout(10_000) { writer.state.first { it.records.any { command -> command.intent.requestId == cancellation && command.remote == RemoteCommandState.SETTLED } } }
             withTimeout(10_000) { chat.state.first { it.window?.let { window -> !window.taskRunning && window.items.any { item -> item.interrupted } } == true } }
+            suspend fun archive(archived: Boolean) {
+                val request = writer.archive(archived, false, chat.state.value.runtimeEpoch!!)
+                val record = withTimeout(10_000) { writer.state.first { it.records.any { row -> row.intent.requestId == request && row.remote == RemoteCommandState.SETTLED } } }.records.single { it.intent.requestId == request }
+                check(record.everHostSaved && !record.everAgentQueued && record.attempts == 1L)
+                withTimeout(10_000) {
+                    while (api.sessions(runtime).obj("data").array("items").map { SessionDirectoryEntry.parse(it as JsonObject) }.single { it.id == session }.state.let { if (archived) it != "archived" else it !in setOf("available", "running") }) delay(100)
+                }
+            }
+            archive(true)
+            check(chat.state.value.window!!.cursor >= nativeCursor)
+            archive(false)
         }
         val workspace=entry.workspaceId ?: error("registered creation workspace required")
         val creationScope=RelayScope(listOf("session.create","command.status"),listOf(workspace),emptyList())

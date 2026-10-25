@@ -19,10 +19,11 @@ import cn.edu.ustc.dsh.protocol.*
 fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
     onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}, onCreate: ()->Unit={},
     onAnswer: (QuestionHandle,QuestionAnswers)->Unit={_,_->},onClaim: (QuestionHandle)->Unit={},onRelease: (QuestionHandle)->Unit={},onRefreshQuestions: ()->Unit={},
-    onApproval: (String) -> Unit = {}, onApprovalQuery: () -> Unit = {}) {
+    onApproval: (String) -> Unit = {}, onApprovalQuery: () -> Unit = {}, onArchive: (String, Boolean, Boolean) -> Unit = { _, _, _ -> }) {
     val runtime = state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }
     val opened = state.selectedSessionId
-    val canCompose = opened != null && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
+    val archived = state.sessions.firstOrNull { it.id == opened }?.state == "archived"
+    val canCompose = opened != null && !archived && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
     Scaffold(bottomBar = {
         if (canCompose) SessionComposer(state, onSubmit)
     }) { insets ->
@@ -80,7 +81,14 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         }
                     }
                     val transcript = read.window
-                    state.approvals?.takeIf { runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true }?.let { approvals ->
+                    if (archived || runtime?.access?.scope?.actions?.contains("session.archive") == true) item("archive-session") {
+                        key(opened) {
+                        SessionArchiveActions(archived, read.runtimeEpoch, read.phase == SessionReadPhase.READY && state.outbox?.canArchive == true && !state.submitting,
+                            runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("session.archive", "command.status")) == true,
+                            onArchive, onRefresh)
+                        }
+                    }
+                    state.approvals?.takeIf { !archived && runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true }?.let { approvals ->
                         approvals.error?.let { code -> item("approval-error") { Text(approvalErrorText(code), color = MaterialTheme.colorScheme.error) } }
                         val pending = approvals.view.items.filter { it.canReview || it.handle != null || it.remainingMillis > 0 && it.status.state in setOf(ApprovalRemoteState.PENDING, ApprovalRemoteState.DECISION_RECEIVED) }
                         items(pending, key = { "approval:${it.status.id}" }) { view ->
@@ -102,7 +110,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                             } }
                         }
                     }
-                    if(read.phase==SessionReadPhase.READY) {
+                    if(read.phase==SessionReadPhase.READY && !archived) {
                         items(read.questions.items,key={"question:${it.handle.kind}:${it.batch.id}"}) {question->
                             QuestionCard(question,read.questions.canAnswer,state.submitting,state.outbox?.records ?: emptyList(),onAnswer,onClaim,onRelease,onRefreshQuestions,onQueryCommands)
                         }
@@ -120,15 +128,21 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                             OutlinedCard(Modifier.fillMaxWidth()) {
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                     Text(commandLabel(record), style = MaterialTheme.typography.titleSmall)
+                                    if (record.intent.kind == CommandKind.ARCHIVE) {
+                                        val archiveIntent = (record.intent.payload["archived"] as JsonBoolean).value
+                                        Text(if (archiveIntent) "归档会话" else "恢复会话")
+                                        if ((record.intent.payload["stop_activity"] as JsonBoolean).value) Text("已选择同时请求停止活动；实际结束状态以会话内容为准。", style = MaterialTheme.typography.bodySmall)
+                                    }
                                     if (!record.everAgentQueued) record.intent.text()?.let { ReadingText(it, 512) }
                                     if(record.intent.kind.question) SubmittedQuestionAnswer(record.intent)
                                     val questionCurrent=!record.intent.kind.question || read.questions.items.any {it.batch.id==record.intent.payload.string("question_id") && it.batch.definition==record.intent.questionDefinition && it.handle.epoch==record.intent.epoch && it.answerable}
+                                    val actionAllowed = (!archived || record.intent.kind == CommandKind.ARCHIVE) && (record.intent.epoch == null || record.intent.epoch == read.runtimeEpoch)
                                     if (record.delivery == CommandDelivery.PENDING && record.attempts == 0L && questionCurrent) {
-                                        OutlinedButton({ onSendPending(record.intent.requestId) }, enabled = outbox.connected, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("发送这条待发消息") }
+                                        OutlinedButton({ onSendPending(record.intent.requestId) }, enabled = outbox.connected && actionAllowed, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (record.intent.kind == CommandKind.MESSAGE) "发送这条待发消息" else "发送这条待发命令") }
                                     }
                                     if (record.remote == RemoteCommandState.RECEIVED && !record.everHostSaved && record.attempts > 0 && questionCurrent) {
                                         var retry by remember { mutableStateOf(false) }
-                                        OutlinedButton({ retry = true }, enabled = outbox.connected, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新转交同一请求") }
+                                        OutlinedButton({ retry = true }, enabled = outbox.connected && actionAllowed, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新转交同一请求") }
                                         if (retry) AlertDialog(onDismissRequest = { retry = false }, title = { Text("重新转交这条原请求？") },
                                             text = { Text("会先核对状态并保留原请求编号。主机若已接收，将返回原状态，不会创建一条新消息。") },
                                             confirmButton = { TextButton({ retry = false; onSendPending(record.intent.requestId) }) { Text("核对并重试") } },
@@ -140,7 +154,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         }
                     }
                     val cancelEpoch = read.runtimeEpoch
-                    if (read.phase == SessionReadPhase.READY && transcript?.taskRunning == true && cancelEpoch != null && runtime?.access?.scope?.actions?.containsAll(setOf("session.cancel", "command.status")) == true) item("cancel-task") {
+                    if (!archived && read.phase == SessionReadPhase.READY && transcript?.taskRunning == true && cancelEpoch != null && runtime?.access?.scope?.actions?.containsAll(setOf("session.cancel", "command.status")) == true) item("cancel-task") {
                         var confirm by remember(cancelEpoch) { mutableStateOf(false) }
                         OutlinedButton({ confirm = true }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("中断当前任务") }
                         if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("中断电脑上的当前任务？") },
@@ -229,9 +243,9 @@ private fun commandLabel(record: PendingCommand): String = when {
     record.delivery == CommandDelivery.PENDING -> "手机待发送"
     record.remote == RemoteCommandState.RECEIVED -> "中继已接收，尚未确认主机保存"
     record.remote == RemoteCommandState.HOST_ACCEPTED -> "主机已保存"
-    record.remote == RemoteCommandState.DISPATCHING -> "主机已保存，正在交给 Agent"
+    record.remote == RemoteCommandState.DISPATCHING -> if (record.intent.kind == CommandKind.ARCHIVE) "主机已保存，正在更改归档状态" else "主机已保存，正在交给 Agent"
     record.remote in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED) -> if(record.intent.kind==CommandKind.TIMED_QUESTION) "后续答复已入队" else "Agent 已入队"
-    record.remote == RemoteCommandState.SETTLED -> if (record.intent.kind == CommandKind.CANCEL) "中断请求已确认" else if(record.intent.kind.question) "答复已确认" else "命令已完成"
+    record.remote == RemoteCommandState.SETTLED -> if (record.intent.kind == CommandKind.ARCHIVE) (if ((record.intent.payload["archived"] as JsonBoolean).value) "归档操作已确认" else "恢复操作已确认") else if (record.intent.kind == CommandKind.CANCEL) "中断请求已确认" else if(record.intent.kind.question) "答复已确认" else "命令已完成"
     record.remote == RemoteCommandState.REJECTED -> "主机拒绝了此命令"
     else -> "结果待确认"
 }
@@ -242,7 +256,10 @@ private fun commandErrorText(code: String) = when (code) {
     "command.busy" -> "待处理的发送操作较多，请稍后核对发送状态。"
     "command.too_large", "command.invalid" -> "消息过长或格式不支持，请调整后重试。"
     "command.reconcile_required", "command.delivery_unconfirmed", "command.status_unavailable" -> "尚未核对发送结果，请查询原请求状态；不会自动重复发送。"
-    "runtime.changed" -> "电脑运行环境已重新启动，原中断请求不会用于新的任务。"
+    "runtime.changed" -> "电脑运行环境已重新启动，原操作请求不会用于新的任务。"
+    "session.active" -> "会话仍有活动。请等待结束，或重新确认归档并请求停止。"
+    "session.archived" -> "会话已归档，请刷新会话状态并恢复后继续。"
+    "access.denied" -> "当前连接不支持或未获授权执行此操作，请刷新会话状态。"
     "question.stale","question.resync_required","question.ended","interaction.stale" -> "提问状态已更新，请刷新并核对电脑上的当前问题。原答复不会自动重发。"
     "question.invalid_answer" -> "请按当前问题的选项和要求填写完整答复。"
     "question.reconcile_required" -> "这个问题已有答复请求，请先核对原请求的结果。"

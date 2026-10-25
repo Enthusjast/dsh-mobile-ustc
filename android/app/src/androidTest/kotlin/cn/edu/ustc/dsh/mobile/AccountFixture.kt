@@ -59,6 +59,9 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val commandWrites = AtomicInteger()
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var chatMode = false
+    @Volatile var archiveMode = false
+    @Volatile var archived = false
+    val archiveWrites = AtomicInteger()
     @Volatile var creationMode = false
     @Volatile var questionMode=false
     @Volatile var approvalMode = false
@@ -119,6 +122,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     private val directoryScope get() = RelayScope((if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list")) +
         (if (chatMode || creationMode || questionMode) listOf("message.submit", "command.status", "session.cancel") else emptyList())+
         (if(questionMode) listOf("question.answer") else emptyList())+
+        (if(archiveMode) listOf("session.archive") else emptyList())+
         (if(approvalMode) listOf("approval.decide", "grant.manage") else emptyList())+
         (if(creationMode) listOf("session.create") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
     private val currentRelay = AtomicReference<WebSocket?>()
@@ -383,12 +387,17 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(),"type" to "command.receipt".json(),"request_id" to intent.requestId.json(),"runtime_id" to runtimeId.json(),"runtime_epoch" to epoch.json(),"session_id" to sessionId.json(),"payload" to JsonObject(status.fields.filterKeys {it in setOf("state","payload_sha256","updated_at")}))).canonicalText())
                                 return
                             }
-                            "message.submit", "session.cancel" -> {
+                            "message.submit", "session.cancel", "session.archive" -> {
                                 val target=frame.string("session_id")
                                 require((chatMode || creationMode) && frame.string("runtime_id") == runtimeId && (target==sessionId || target in createdSessions))
                                 val intent = cn.edu.ustc.dsh.command.CommandIntent.parse(frame)
                                 require(intent.kind.wire in subscribedScope.actions)
                                 commandWrites.incrementAndGet()
+                                if (intent.kind == cn.edu.ustc.dsh.command.CommandKind.ARCHIVE) {
+                                    require(archiveMode && target == sessionId && intent.epoch == epoch)
+                                    archived = (intent.payload["archived"] as JsonBoolean).value
+                                    archiveWrites.incrementAndGet()
+                                }
                                 val state = if (intent.kind == cn.edu.ustc.dsh.command.CommandKind.MESSAGE) "agent_queued" else "settled"
                                 val status = jsonObject("request_id" to intent.requestId.json(), "session_id" to target.json(), "state" to state.json(), "payload_sha256" to intent.digest.json(), "updated_at" to java.time.Instant.now().toString().json())
                                 commandStatuses[intent.requestId] = status
@@ -405,7 +414,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
                         val capabilities = payload.array("capabilities").map { (it as JsonString).value }
-                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.archive.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
                         require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
                         relayProofReceived = true
                         if ("approval.signed.v1" in capabilities) approvalEndpoint.set(ApprovalEndpoint(connectionId, subscribedScope))
@@ -533,7 +542,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val body = JsonDocument.parse(request.body.readByteArray()).root
             require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
             relayScope = RelayScope.parse(body.obj("scope"))
-            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.cancel", "question.answer","command.status", "session.create", "approval.decide") })
+            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer","command.status", "session.create", "approval.decide") })
             if ("approval.decide" in relayScope!!.actions) require(approvalMode && approvalRole == "owner")
             relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
             relayAccessExpiresAt = claims.integer("exp") * 1000
@@ -543,7 +552,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         }
         if (path == "/v1/runtimes/$runtimeId/sessions") {
             sessionRequests.incrementAndGet()
-            val rows=listOf(jsonObject("session_id" to sessionId.json(), "workspace_id" to JsonNull, "state" to "available".json(), "last_persisted_seq" to 2L.json(), "updated_at" to java.time.Instant.now().toString().json()))+
+            val rows=listOf(jsonObject("session_id" to sessionId.json(), "workspace_id" to JsonNull, "state" to (if (archived) "archived" else "available").json(), "last_persisted_seq" to 2L.json(), "updated_at" to java.time.Instant.now().toString().json()))+
                 createdSessions.map {id->jsonObject("session_id" to id.json(),"workspace_id" to workspaceId.json(),"state" to "available".json(),"last_persisted_seq" to (-1L).json(),"updated_at" to java.time.Instant.now().toString().json())}
             val result = resourceResponse(data(jsonObject("items" to JsonArray(rows))))
             return if (holdSessions) result.setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS) else result

@@ -29,13 +29,16 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
     fun viewScope(grant: RuntimeDirectoryEntry, includeApprovals: Boolean = false): RelayScope? = try {
         if (!grant.canList() || grant.scope == null || "session.read" !in grant.scope.actions) null else {
             val actions = mutableSetOf("session.read")
-            if (includeApprovals && grant.role == "owner" && "approval.decide" in grant.scope.actions) actions += "approval.decide"
+            if (state != "archived" && includeApprovals && grant.role == "owner" && "approval.decide" in grant.scope.actions) actions += "approval.decide"
             if ("command.status" in grant.scope.actions) {
                 actions += "command.status"
                 if (grant.role in setOf("operator", "owner")) {
-                    if ("message.submit" in grant.scope.actions) actions += "message.submit"
-                    if ("session.cancel" in grant.scope.actions) actions += "session.cancel"
-                    if ("question.answer" in grant.scope.actions) actions += "question.answer"
+                    if (state != "unavailable" && "session.archive" in grant.scope.actions) actions += "session.archive"
+                    if (state != "archived") {
+                        if ("message.submit" in grant.scope.actions) actions += "message.submit"
+                        if ("session.cancel" in grant.scope.actions) actions += "session.cancel"
+                        if ("question.answer" in grant.scope.actions) actions += "question.answer"
+                    }
                 }
             }
             grant.scope.session(id, workspaceId, actions)

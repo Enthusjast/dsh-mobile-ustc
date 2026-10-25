@@ -719,6 +719,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     fun submitMessage(mode: String, text: String, sendNow: Boolean = true) {
         if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.submitting) return
+        if (mutable.value.sessions.firstOrNull { it.id == mutable.value.selectedSessionId }?.state == "archived") return
         val opened = reader ?: return
         if (opened.state.value.phase in setOf(SessionReadPhase.AUTH_REQUIRED, SessionReadPhase.REVOKED, SessionReadPhase.CLOSED)) return
         val commands = opened.commands ?: return
@@ -894,9 +895,47 @@ class LoginController internal constructor(private val context: Context, private
             if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = "command.cancel_unconfirmed")
         } }
     }
+    fun archiveSession(expectedEpoch: String, archived: Boolean, stopActivity: Boolean) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.submitting) return
+        val opened = reader ?: return
+        val commands = opened.commands ?: return
+        val runtimeId = mutable.value.selectedRuntimeId ?: return
+        val sessionId = mutable.value.selectedSessionId ?: return
+        if (opened.state.value.phase != SessionReadPhase.READY || opened.state.value.runtimeEpoch != expectedEpoch) return
+        val stamp = generation; val view = navigationGeneration
+        val resource = api ?: return
+        mutable.value = mutable.value.copy(submitting = true, commandError = null)
+        commandJob = scope.launch {
+            try {
+                val id = commands.archive(archived, stopActivity, expectedEpoch)
+                val result = withTimeoutOrNull(15_000) { commands.state.first { outbox -> outbox.records.any { row -> row.intent.requestId == id &&
+                    row.remote in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED, RemoteCommandState.OUTCOME_UNKNOWN) } } }
+                current(stamp); if (view != navigationGeneration) return@launch
+                if (result?.records?.firstOrNull { it.intent.requestId == id }?.remote == RemoteCommandState.SETTLED) {
+                    // Receipts prove the historical command. Only a fresh Host
+                    // catalog determines current state; desktop actions can race.
+                    var pollsRemaining = 20
+                    do {
+                        val response = resource.sessions(runtimeId)
+                        current(stamp); if (view != navigationGeneration) return@launch
+                        if (response["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
+                        val rows = response.obj("data").array("items").map { SessionDirectoryEntry.parse(it as? JsonObject ?: throw RemoteRequestException("network.invalid_response")) }
+                        if (rows.map { it.id }.toSet().size != rows.size) throw RemoteRequestException("network.invalid_response")
+                        mutable.value = mutable.value.copy(sessions = rows)
+                        if (rows.firstOrNull { it.id == sessionId }?.state.let { if (archived) it == "archived" else it in setOf("available", "running") } || --pollsRemaining <= 0) break
+                        delay(250)
+                    } while (true)
+                    if (mutable.value.sessions.any { it.id == sessionId }) openSession(sessionId)
+                    else navigateRuntime(runtimeId, null)
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = code(error)) }
+            finally { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(submitting = false) }
+        }
+    }
     fun loadOlder() = reader?.loadOlder()
     fun retryRead() = reader?.retry()
-    fun refreshSessions() { mutable.value.selectedRuntimeId?.let { navigateRuntime(it, null) } }
+    fun refreshSessions() { mutable.value.selectedRuntimeId?.let { navigateRuntime(it, mutable.value.selectedSessionId) } }
     fun back() {
         if (binding != null) { closeBinding(); return }
         if(creationDesired!=null || mutable.value.creation!=null) {
@@ -1046,6 +1085,7 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun discardUnsentApproval(id: String) = login.discardUnsentApproval(id)
     fun reauthenticateApproval() = login.reauthenticateApproval()
     fun cancelSession(epoch: String) = login.cancelSession(epoch)
+    fun archiveSession(epoch: String, archived: Boolean, stopActivity: Boolean) = login.archiveSession(epoch, archived, stopActivity)
     fun openBinding() = login.openBinding()
     fun previewBinding(id: String, code: String) = login.previewBinding(id, code)
     fun confirmBinding() = login.confirmBinding()

@@ -159,11 +159,23 @@ class DeviceCompositionTest {
                 until("native $mode turn completed") { controller!!.state.value.reader?.window?.let { window -> !window.taskRunning && window.items.any { it.blocks.any { block -> block.text == marker } } } == true }
                 main { controller!!.closeApprovalReview() }
             }
+            main { controller!!.archiveSession(controller!!.state.value.reader!!.runtimeEpoch!!, true, false) }
+            until("native archived catalog and receipt") { controller!!.state.value.let { state -> !state.submitting && state.reader?.phase == SessionReadPhase.READY && state.outbox?.canArchive == true && state.sessions.singleOrNull { it.id == session }?.state == "archived" && state.outbox.records.any { it.intent.kind == CommandKind.ARCHIVE && it.remote == RemoteCommandState.SETTLED } } }
+            assertTrue(controller!!.state.value.outbox!!.records.filter { it.intent.kind == CommandKind.ARCHIVE }.none { it.everAgentQueued })
+            main { controller!!.archiveSession(controller!!.state.value.reader!!.runtimeEpoch!!, false, false) }
+            until("native restored catalog and receipt") { controller!!.state.value.let { state -> !state.submitting && state.reader?.phase == SessionReadPhase.READY && state.outbox?.canArchive == true && state.sessions.singleOrNull { it.id == session }?.state in setOf("available", "running") && state.outbox.records.count { it.intent.kind == CommandKind.ARCHIVE && it.remote == RemoteCommandState.SETTLED } == 2 } }
+            val archiveOriginals = controller!!.state.value.outbox!!.records.filter { it.intent.kind == CommandKind.ARCHIVE }
             main { controller!!.close(); controller = LoginController(context, http, environment); controller!!.foreground(true) }
             attach(scenario)
             until("accepted identity restored") { controller!!.state.value.let { it.phase == HomePhase.READY && !it.refreshing } }
             open(runtime, session)
             until("encrypted original decisions restored") { controller!!.state.value.approvals?.records?.size == 2 }
+            until("encrypted archive originals restored") { controller!!.state.value.outbox?.records?.count { it.intent.kind == CommandKind.ARCHIVE } == 2 }
+            for (original in archiveOriginals) {
+                val row = controller!!.state.value.outbox!!.records.single { it.intent.requestId == original.intent.requestId }
+                assertEquals(original.intent.digest, row.intent.digest); assertEquals(1L, row.attempts)
+                assertEquals(RemoteCommandState.SETTLED, row.remote); assertFalse(row.everAgentQueued)
+            }
             val restored = controller!!.state.value.approvals!!.records
             for (original in originals) {
                 val row = restored.single { it.intent.requestId == original.intent.requestId }
@@ -174,7 +186,8 @@ class DeviceCompositionTest {
             val reopened = checkpoint(slot, config)
             assertEquals(accepted.deviceId, reopened.deviceId); assertEquals(accepted.approvalKeyJkt, reopened.approvalKeyJkt); assertEquals(accepted.session.proofKeyThumbprint, reopened.session.proofKeyThumbprint)
             val result = JsonDocument.of(jsonObject("v" to 1L.json(), "state" to "passed".json(), "run_id" to run.json(), "device_id" to accepted.deviceId!!.json(),
-                "proof_key_jkt" to accepted.session.proofKeyThumbprint.json(), "approval_key_jkt" to accepted.approvalKeyJkt!!.json(), "reopened" to JsonBoolean(true)))
+                "proof_key_jkt" to accepted.session.proofKeyThumbprint.json(), "approval_key_jkt" to accepted.approvalKeyJkt!!.json(), "reopened" to JsonBoolean(true),
+                "archive_requests" to JsonArray(archiveOriginals.map { it.intent.requestId.json() }), "session_id" to session.json()))
             File(directory, "result.json").writeBytes(result.canonicalBytes())
         } finally {
             main { binding?.cancel(); biometric?.cancel(); controller?.cancel() }

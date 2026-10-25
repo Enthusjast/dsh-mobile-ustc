@@ -292,7 +292,7 @@ class RelayNetworkTest {
                     assertEquals(subscription, frame.string("subscription_id")); assertEquals(epoch, frame.string("runtime_epoch"))
                     onPage(frame)
                 }
-                "message.submit", "session.cancel","question.answer","question.timed.answer" -> onCommand(socket, frame)
+                "message.submit", "session.cancel", "session.archive", "question.answer","question.timed.answer" -> onCommand(socket, frame)
                 "question.claim","question.release"->onClaim(socket,frame)
                 "approval.subscribe", "approval.status.get", "approval.details.get" -> onApproval(socket, frame)
                 else -> error("unexpected client frame")
@@ -312,8 +312,9 @@ class RelayNetworkTest {
     }
     private suspend fun SessionReader.await(test: (SessionReadState) -> Boolean) = withTimeout(5000) { state.first(test) }.also { peerFailure.get()?.let { throw AssertionError(it) } }
 
-    private inner class CommandPeer(questions: Boolean=false) {
-        val granted = RelayScope(listOf("session.read", "message.submit", "command.status", "session.cancel")+if(questions) listOf("question.answer") else emptyList(), emptyList(), listOf(sessionId))
+    private inner class CommandPeer(questions: Boolean=false, archive: Boolean=false, archiveOnly: Boolean=false) {
+        val granted = RelayScope(listOf("session.read", "command.status") + (if (archiveOnly) emptyList() else listOf("message.submit", "session.cancel")) +
+            (if (archive) listOf("session.archive") else emptyList()) + (if(questions) listOf("question.answer") else emptyList()), emptyList(), listOf(sessionId))
         val journal = MemoryCommandJournal(CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device))
         val feed = ReadPeer(listOf(user(0, "opening")), 0)
         val statuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
@@ -326,7 +327,8 @@ class RelayNetworkTest {
         var readLeaseMillis = 299_000L
         val accessReads = java.util.concurrent.atomic.AtomicInteger()
         init {
-            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", "session.cancel.v1")
+            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1") +
+                (if (archiveOnly) emptyList() else listOf("session.cancel.v1")) + (if (archive) listOf("session.archive.v1") else emptyList())
             server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when {
                     request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
@@ -991,6 +993,49 @@ class RelayNetworkTest {
             assertTrue(fixture.writes.isEmpty())
             assertThrows(CommandDataException::class.java) { runBlocking { commands.cancel("88888888-8888-4888-8888-888888888888") } }
             assertTrue(fixture.writes.isEmpty())
+        }
+    }
+    @Test fun archiveOnlyScopePersistsOriginalBeforeWritingAndReconcilesWithoutReplay(): Unit = runBlocking {
+        val fixture = CommandPeer(archive = true, archiveOnly = true)
+        fixture.advertisedState = RemoteCommandState.SETTLED
+        var id = ""
+        fixture.reader(this).use { reader ->
+            val ready = reader.await { it.phase == SessionReadPhase.READY }
+            val commands = reader.commands!!
+            withTimeout(5000) { commands.state.first { it.connected && it.canArchive } }
+            assertThrows(CommandDataException::class.java) { runBlocking { commands.archive(false, false, runtime) } }
+            assertThrows(ProtocolException::class.java) { runBlocking { commands.archive(false, true, ready.runtimeEpoch!!) } }
+            assertTrue(fixture.writes.isEmpty())
+            id = commands.archive(false, false, ready.runtimeEpoch!!)
+            val saved = withTimeout(5000) { commands.state.first { it.records.singleOrNull()?.remote == RemoteCommandState.SETTLED } }.records.single()
+            assertEquals(CommandKind.ARCHIVE, saved.intent.kind); assertFalse(saved.everAgentQueued)
+            assertEquals(JsonBoolean(false), saved.intent.payload["archived"])
+            assertEquals(1L, saved.attempts)
+        }
+        fixture.reader(this).use { reopened ->
+            reopened.await { it.phase == SessionReadPhase.READY }
+            val rows = withTimeout(5000) { reopened.commands!!.state.first { it.records.singleOrNull()?.intent?.requestId == id } }.records
+            assertEquals(RemoteCommandState.SETTLED, rows.single().remote)
+            delay(150)
+            assertEquals(1, fixture.writes.size)
+        }
+    }
+    @Test fun unsupportedArchiveAndFailedArchiveDurabilityNeverReachTheSocket(): Unit = runBlocking {
+        val unsupported = CommandPeer()
+        unsupported.reader(this).use { reader ->
+            val ready = reader.await { it.phase == SessionReadPhase.READY }
+            assertFalse(reader.commands!!.state.value.canArchive)
+            assertThrows(RemoteRequestException::class.java) { runBlocking { reader.commands!!.archive(true, false, ready.runtimeEpoch!!) } }
+            assertTrue(unsupported.writes.isEmpty())
+        }
+        val fixture = CommandPeer(archive = true)
+        fixture.journal.failBegin = true
+        fixture.reader(this).use { reader ->
+            val ready = reader.await { it.phase == SessionReadPhase.READY }
+            reader.commands!!.archive(true, true, ready.runtimeEpoch!!)
+            withTimeout(5000) { reader.commands!!.state.first { it.error == "data.unavailable" } }
+            assertTrue(fixture.writes.isEmpty())
+            assertEquals(0L, fixture.journal.list(runtime, sessionId).single().attempts)
         }
     }
     @Test fun explicitRetryRequeriesReceivedAndReusesTheExactOriginalRequest(): Unit = runBlocking {

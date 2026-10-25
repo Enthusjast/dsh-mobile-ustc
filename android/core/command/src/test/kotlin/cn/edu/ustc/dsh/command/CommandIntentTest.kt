@@ -14,13 +14,34 @@ class CommandIntentTest {
     private fun receipt(intent: CommandIntent, state: RemoteCommandState, time: String = "2026-10-25T00:00:00.000000001Z") = CommandReceipt(request, session, intent.digest, state, time)
     @Test fun messageAndEpochBoundCancellationMatchTheSharedGoNodeDigests() {
         val root = File(System.getProperty("contracts.root"), "ws/v1/golden")
-        for (kind in listOf("message-submit", "session-cancel")) {
+        for (kind in listOf("message-submit", "session-cancel", "session-archive", "session-archive-stop", "session-restore")) {
             val frame = JsonDocument.parse(File(root, "$kind.json").readBytes()).root
             val forwarded = JsonDocument.parse(File(root, "$kind.forwarded.json").readBytes()).root
             assertEquals(forwarded.string("payload_sha256"), CommandIntent.parse(frame).digest)
         }
         assertNotEquals(CommandIntent.cancel(request, runtime, session, epoch).digest,
             CommandIntent.cancel(request, runtime, session, "77777777-7777-4777-8777-777777777777").digest)
+    }
+    @Test fun archiveBindsBothChoicesAndEpochAndRetainsTheImmutableOriginal() {
+        val original = CommandIntent.archive(request, runtime, session, epoch, true, false)
+        assertEquals(CommandKind.ARCHIVE, original.kind)
+        assertEquals(original.digest, CommandIntent.stored(original.storageBytes()).digest)
+        assertNotEquals(original.digest, CommandIntent.archive(request, runtime, session, epoch, true, true).digest)
+        assertNotEquals(original.digest, CommandIntent.archive(request, runtime, session, epoch, false, false).digest)
+        assertNotEquals(original.digest, CommandIntent.archive(request, runtime, session, runtime, true, false).digest)
+        assertThrows(ProtocolException::class.java) { CommandIntent.archive(request, runtime, session, epoch, false, true) }
+        assertThrows(ProtocolException::class.java) { CommandIntent.parse(original.frame().with("payload" to jsonObject("archived" to JsonBoolean(true)))) }
+    }
+    @Test fun settledArchiveMeansRegistryDurabilityAndCannotBecomeAnAgentQueueFact() {
+        val intent = CommandIntent.archive(request, runtime, session, epoch, true, true)
+        val started = CommandEvolution.begin(CommandEvolution.created(intent, 1), 2)
+        for (state in listOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED)) {
+            assertThrows(CommandDataException::class.java) { CommandEvolution.receipt(started, receipt(intent, state)) }
+        }
+        val settled = CommandEvolution.receipt(started, receipt(intent, RemoteCommandState.SETTLED))
+        assertTrue(settled.everHostSaved); assertFalse(settled.everAgentQueued)
+        val unknown = CommandEvolution.receipt(started, receipt(intent, RemoteCommandState.OUTCOME_UNKNOWN))
+        assertThrows(CommandDataException::class.java) { CommandEvolution.rearm(unknown, receipt(intent, RemoteCommandState.RECEIVED, "2026-10-25T00:00:01Z")) }
     }
     @Test fun originalWhitespaceAndUnicodeSurviveWhileWireLimitsAndUnsafeInputFailClosed() {
         val text = "  中文🙂\n\tcontinue\r\n"

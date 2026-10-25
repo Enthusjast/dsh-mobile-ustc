@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class CommandOutboxState(val records: List<PendingCommand> = emptyList(), val connected: Boolean = false, val sending: Boolean = false, val error: String? = null)
+data class CommandOutboxState(val records: List<PendingCommand> = emptyList(), val connected: Boolean = false, val sending: Boolean = false, val error: String? = null, val canArchive: Boolean = false)
 
 /** Shares the reader's authenticated socket; never writes automatically after a reconnect. */
 class SessionCommands internal constructor(private val api: RemoteApi, private val journal: CommandJournal, private val runtime: String, private val session: String?,
@@ -42,7 +42,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
     internal fun ready(connection: SessionRelayConnection, epoch: String) {
         if (!scope.isActive) return
         endpoint.set(Endpoint(generation.incrementAndGet(), connection, epoch))
-        update { it.copy(connected = canSend(connection)) }; refreshQueue.trySend(Unit)
+        update { it.copy(connected = canSend(connection), canArchive = supports(CommandKind.ARCHIVE, connection)) }; refreshQueue.trySend(Unit)
     }
     internal fun authorizeStatusReads() { statusAuthorized.set(true); query() }
     internal fun bindQuestions(validate: suspend (PendingCommand)->Unit) { questionValidator.set(validate) }
@@ -50,10 +50,22 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         generation.incrementAndGet(); endpoint.set(null)
         questionValidator.set(null)
         while (sendQueue.tryReceive().isSuccess) { /* Retire old-generation queued intent. */ }
-        update { it.copy(connected = false, sending = false) }
+        update { it.copy(connected = false, sending = false, canArchive = false) }
     }
-    private fun canSend(connection: SessionRelayConnection) = "command.relay.v1" in connection.identity.capabilities &&
-        (if (session == null) "session.create" in scopeGrant.actions && "session.create.v1" in connection.identity.capabilities else "message.submit" in scopeGrant.actions) && "command.status" in scopeGrant.actions
+    private fun supports(kind: CommandKind, connection: SessionRelayConnection): Boolean {
+        val capability = when (kind) {
+            CommandKind.MESSAGE -> "command.relay.v1"
+            CommandKind.CANCEL -> "session.cancel.v1"
+            CommandKind.ARCHIVE -> "session.archive.v1"
+            CommandKind.CREATE -> "session.create.v1"
+            CommandKind.QUESTION -> "question.blocking.v1"
+            CommandKind.TIMED_QUESTION -> "question.timed.v1"
+        }
+        return kind.action in scopeGrant.actions && "command.status" in scopeGrant.actions &&
+            "command.relay.v1" in connection.identity.capabilities && capability in connection.identity.capabilities
+    }
+    private fun canSend(connection: SessionRelayConnection) = if (session == null) supports(CommandKind.CREATE, connection)
+        else listOf(CommandKind.MESSAGE, CommandKind.CANCEL, CommandKind.ARCHIVE, CommandKind.QUESTION, CommandKind.TIMED_QUESTION).any { supports(it, connection) }
     private suspend fun loadRecords() = if (session == null) journal.listCreations(runtime).filter { it.intent.workspaceId in scopeGrant.workspaces } else journal.list(runtime, session)
     private suspend fun localRecords() = recordsLock.withLock { loadRecords().also { rows -> update { it.copy(records=rows) } } }
     private suspend fun saveOriginal(intent: CommandIntent) = recordsLock.withLock {
@@ -74,6 +86,15 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         if ("session.cancel" !in scopeGrant.actions || "session.cancel.v1" !in target.connection.identity.capabilities || "command.relay.v1" !in target.connection.identity.capabilities) throw RemoteRequestException("access.denied")
         val intent = CommandIntent.cancel(UUID.randomUUID().toString(), runtime, session, target.epoch)
         saveOriginal(intent); refreshQueue.trySend(Unit); enqueue(intent.requestId, target)
+        return intent.requestId
+    }
+    suspend fun archive(archived: Boolean, stopActivity: Boolean, expectedEpoch: String): String {
+        if (session == null || !scope.isActive) throw RemoteRequestException("access.denied")
+        val target = endpoint.get() ?: throw RelayException("runtime.offline")
+        if (target.epoch != Contract.uuid(expectedEpoch)) throw CommandDataException("runtime.changed")
+        if (!supports(CommandKind.ARCHIVE, target.connection)) throw RemoteRequestException("access.denied")
+        val intent = CommandIntent.archive(UUID.randomUUID().toString(), runtime, session, target.epoch, archived, stopActivity)
+        saveOriginal(intent); query(); enqueue(intent.requestId, target)
         return intent.requestId
     }
     internal suspend fun createSession(workspace: String, preset: String, expectedEpoch: String): String {
@@ -122,7 +143,8 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
             var attempted = false
             try {
                 val known = loadRecords().firstOrNull { it.intent.requestId == event.id } ?: throw CommandDataException("command.not_found")
-                if (known.intent.kind.action !in scopeGrant.actions || known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
+                if (!supports(known.intent.kind, target.connection)) throw CommandDataException("access.denied")
+                if (known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 if (known.attempts > 0) {
                     val proof = api.commandStatus(event.id, journal.owner.deviceId)
                     if (endpoint.get() !== target) throw RelayException("relay.disconnected")

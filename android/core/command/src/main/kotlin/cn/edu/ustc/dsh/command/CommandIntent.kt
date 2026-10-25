@@ -9,7 +9,7 @@ class CommandDataException(val code: String) : IllegalStateException(code)
 typealias CommandOwner = LocalDataOwner
 
 enum class CommandKind(val wire: String) {
-    MESSAGE("message.submit"), CANCEL("session.cancel"), CREATE("session.create"), QUESTION("question.answer"), TIMED_QUESTION("question.timed.answer");
+    MESSAGE("message.submit"), CANCEL("session.cancel"), ARCHIVE("session.archive"), CREATE("session.create"), QUESTION("question.answer"), TIMED_QUESTION("question.timed.answer");
     val action get()=if(this==TIMED_QUESTION) "question.answer" else wire
     val question get()=this==QUESTION || this==TIMED_QUESTION
 }
@@ -41,6 +41,9 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
                 "payload" to jsonObject("mode" to mode.json(), "content" to JsonArray(listOf(jsonObject("type" to "text".json(), "text" to text.json()))))))
         fun cancel(request: String, runtime: String, session: String, epoch: String): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "session.cancel".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(), "runtime_epoch" to epoch.json(), "payload" to jsonObject()))
+        fun archive(request: String, runtime: String, session: String, epoch: String, archived: Boolean, stopActivity: Boolean): CommandIntent =
+            parse(jsonObject("v" to 1L.json(), "type" to "session.archive".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(), "runtime_epoch" to epoch.json(),
+                "payload" to jsonObject("archived" to JsonBoolean(archived), "stop_activity" to JsonBoolean(stopActivity))))
         fun createSession(request: String, runtime: String, workspace: String, preset: String, epoch: String): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "session.create".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "runtime_epoch" to epoch.json(),
                 "payload" to jsonObject("workspace_id" to workspace.json(), "preset" to preset.json())))
@@ -66,6 +69,11 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
             else if (kind == CommandKind.CREATE) {
                 payload.exactKeys("workspace_id", "preset"); Contract.uuid(payload.string("workspace_id"))
                 if (!Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}").matches(payload.string("preset"))) throw ProtocolException()
+            } else if (kind == CommandKind.ARCHIVE) {
+                payload.exactKeys("archived", "stop_activity")
+                val archived = (payload["archived"] as? JsonBoolean)?.value ?: throw ProtocolException()
+                val stop = (payload["stop_activity"] as? JsonBoolean)?.value ?: throw ProtocolException()
+                if (!archived && stop) throw ProtocolException()
             } else if (kind == CommandKind.CANCEL) payload.exactKeys() else {
                 payload.exactKeys("mode", "content")
                 if (payload.string("mode") !in setOf("queue", "steer")) throw ProtocolException()
@@ -148,7 +156,7 @@ object CommandEvolution {
             receipt.epoch != null && record.intent.epoch != null && receipt.epoch != record.intent.epoch) throw CommandDataException("command.request_conflict")
         if (record.createdSessionId != null && receipt.sessionId != null && receipt.sessionId != record.createdSessionId) throw CommandDataException("command.request_conflict")
         if (record.attempts == 0L) throw CommandDataException("command.unsent_receipt")
-        if(record.intent.kind in setOf(CommandKind.QUESTION,CommandKind.CANCEL) && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED,RemoteCommandState.OBSERVED)) throw CommandDataException("command.state_conflict")
+        if(record.intent.kind in setOf(CommandKind.QUESTION,CommandKind.CANCEL,CommandKind.ARCHIVE) && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED,RemoteCommandState.OBSERVED)) throw CommandDataException("command.state_conflict")
         val previous = record.remoteTimestamp?.let { OffsetDateTime.parse(it).toInstant() }
         if (previous != null && receipt.instant < previous) return record
         if (previous == receipt.instant && record.remote == receipt.state) return record

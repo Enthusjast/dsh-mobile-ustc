@@ -38,7 +38,7 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
         BackHandler { model.back() }
         SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
             model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, {state.selectedRuntimeId?.let(model::openCreation)},model::answerQuestion,model::claimQuestion,model::releaseQuestion,model::refreshQuestions,
-            model::reviewApproval, model::queryApprovals)
+            model::reviewApproval, model::queryApprovals, model::archiveSession)
     } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding,model::openCreation)
 }
 

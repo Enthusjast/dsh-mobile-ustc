@@ -65,8 +65,13 @@ try {
   phase='native-effects'
   assert.equal(await readFile(join(workspace,'approval-allow.txt'),'utf8'),'authorized')
   await assert.rejects(access(join(workspace,'approval-reject.txt')))
+  const completed=JSON.parse(await readFile(result,'utf8'))
+  assert.equal(completed.session_id,created.payload.session_id)
+  assert.equal(new Set(completed.archive_requests).size,2)
+  const catalog=await local('POST','/m0/command',{v:0,type:'session.list',request_id:randomUUID(),runtime_epoch:probe.runtime_epoch,payload:{}})
+  assert.equal(catalog.payload.items.find(item=>item.session_id===completed.session_id).archived,false,'phone restore did not reach the native registry')
   process.stdout.write(output)
-  console.log('Android APK / real Go TLS / npm DSH: one allowed Bash append and no rejected invocation file passed')
+  console.log('Android APK / real Go TLS / npm DSH: one allowed Bash append, no rejected invocation file, native archive/restore and encrypted original recovery passed')
 } catch(error){throw new Error('Android/Go/DSH composition failed at '+phase,{cause:error})}
 finally {
   stopping=true;if(device&&device.exitCode===null&&device.signalCode===null)device.kill('SIGTERM')

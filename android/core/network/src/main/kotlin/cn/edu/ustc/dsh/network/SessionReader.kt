@@ -60,7 +60,7 @@ class SessionReader internal constructor(
         listOf(deviceId, runtimeId, sessionId).forEach(Contract::uuid)
         workspaceId?.let(Contract::uuid)
         if (transcripts != null && (transcripts.owner.deviceId != deviceId || journal != null && transcripts.owner.fingerprint != journal.owner.fingerprint)) throw ProtocolException()
-        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.cancel", "question.answer", "command.status", "approval.decide") } || journal == null && readScope.actions != setOf("session.read") ||
+        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide") } || journal == null && readScope.actions != setOf("session.read") ||
             (approvalAccount != null) != ("approval.decide" in readScope.actions) || approvalAccount != null && approvalAccount.journal.owner.fingerprint != journal?.owner?.fingerprint) throw ProtocolException()
         commands = journal?.let { SessionCommands(api, it, runtimeId, sessionId, readScope, scope) }
         scope.coroutineContext[Job]!!.invokeOnCompletion { close() }

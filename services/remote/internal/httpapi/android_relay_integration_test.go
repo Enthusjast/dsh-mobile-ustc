@@ -65,7 +65,7 @@ func TestAndroidAppAgainstPostgresRelayAndNativeDSH(t *testing.T) {
 		{`insert into runtimes(id,installation_id,profile_ref,protocol_version) values($1,$2,'android-fixture',1)`, []any{runtimeID, installationID}},
 		{`insert into workspaces(id,runtime_id,workspace_ref) values($1,$2,'android-fixture-workspace')`, []any{workspaceID, runtimeID}},
 		{`insert into runtime_grants(runtime_id,user_id,role,scope,granted_by) values($1,$2,'owner',$3::jsonb,$2)`, []any{runtimeID, userID,
-			`{"actions":["host.list","session.list","session.read","message.submit","command.status","approval.decide","grant.manage"],"workspaces":["` + workspaceID + `"],"sessions":[]}`}},
+			`{"actions":["host.list","session.list","session.read","message.submit","session.archive","command.status","approval.decide","grant.manage"],"workspaces":["` + workspaceID + `"],"sessions":[]}`}},
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement.query, statement.args...); err != nil {
@@ -151,11 +151,13 @@ func TestAndroidAppAgainstPostgresRelayAndNativeDSH(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result struct {
-		State       string `json:"state"`
-		DeviceID    string `json:"device_id"`
-		ProofJKT    string `json:"proof_key_jkt"`
-		ApprovalJKT string `json:"approval_key_jkt"`
-		Reopened    bool   `json:"reopened"`
+		State           string   `json:"state"`
+		DeviceID        string   `json:"device_id"`
+		ProofJKT        string   `json:"proof_key_jkt"`
+		ApprovalJKT     string   `json:"approval_key_jkt"`
+		Reopened        bool     `json:"reopened"`
+		ArchiveRequests []string `json:"archive_requests"`
+		SessionID       string   `json:"session_id"`
 	}
 	if json.Unmarshal(resultBytes, &result) != nil || result.State != "passed" || !result.Reopened {
 		t.Fatal("missing native composition result")
@@ -173,6 +175,14 @@ func TestAndroidAppAgainstPostgresRelayAndNativeDSH(t *testing.T) {
 	}
 	if err := db.QueryRowContext(ctx, `select count(*) from approvals where runtime_id=$1 and decided_device_id=$2 and ((decision='allow_once' and host_state='settled' and execution_outcome='succeeded') or (decision='reject' and host_state='denied'))`, runtimeID, result.DeviceID).Scan(&count); err != nil || count != 2 {
 		t.Fatal("native approval decisions/results are incomplete")
+	}
+	if len(result.ArchiveRequests) != 2 || result.ArchiveRequests[0] == result.ArchiveRequests[1] {
+		t.Fatal("missing independent native archive/restore originals")
+	}
+	for _, id := range result.ArchiveRequests {
+		if err := db.QueryRowContext(ctx, `select count(*) from commands where device_id=$1 and request_id=$2 and runtime_id=$3 and session_id=$4 and state='settled'`, result.DeviceID, id, runtimeID, result.SessionID).Scan(&count); err != nil || count != 1 {
+			t.Fatal("native archive/restore receipt is incomplete")
+		}
 	}
 	oidc.mu.Lock()
 	exchanges := oidc.exchanges

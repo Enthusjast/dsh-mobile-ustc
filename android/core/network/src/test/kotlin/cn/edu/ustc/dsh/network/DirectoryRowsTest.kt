@@ -46,4 +46,14 @@ class DirectoryRowsTest {
             assertEquals(setOf("session.read"), session().viewScope(grant, includeApprovals = true)!!.actions)
         }
     }
+    @Test fun archivedScopeRetainsHistoryStatusAndExplicitRestoreButDropsExecutionActions() {
+        val actions = listOf("session.list", "session.read", "message.submit", "session.cancel", "session.archive", "question.answer", "command.status", "approval.decide")
+        val owner = RuntimeDirectoryEntry.parse(row().with("access" to access(actions).with("role" to "owner".json())))
+        assertEquals(setOf("session.read", "command.status", "session.archive"), session(state = "archived").viewScope(owner, includeApprovals = true)!!.actions)
+        assertNotNull(session(state = "archived").readScope(owner))
+        assertTrue("session.archive" in session().viewScope(owner)!!.actions)
+        val viewer = RuntimeDirectoryEntry.parse(row().with("access" to access(actions)))
+        assertEquals(setOf("session.read", "command.status"), session(state = "archived").viewScope(viewer)!!.actions)
+        assertFalse("session.archive" in session(state = "unavailable").viewScope(owner)!!.actions)
+    }
 }

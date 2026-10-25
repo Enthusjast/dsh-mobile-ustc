@@ -16,9 +16,17 @@ Host 本地协议和移动协议接受 `session.archive`，payload 必须包含 
 
 Host 目录将原生归档集合投影为 `archived`；监听 Workspace Domain 的持久变化，桌面归档或恢复也会发布目录增量。会话仍能解析以读取历史或恢复。远程消息和模型选择拒绝归档目标。
 
-Go 允许获授权的 `archived` 目标执行归档 / 恢复，读取历史和查询原命令状态；拒绝对其提交消息、中断、答复及前台问题 claim。不可用目标拒绝归档 / 恢复。服务端仅存命令元数据和摘要，归档状态通过原生目录同步更新，不由收到的归档命令乐观修改。
+Go 允许获授权的 `archived` 目标执行归档 / 恢复，读取历史和查询原命令状态；拒绝对其提交消息、中断、答复及前台问题 claim。不可用目标拒绝归档 / 恢复。服务端仅存命令元数据和摘要，归档状态通过原生目录同步更新，不由收到的归档命令乐观修改。创建结果捕获时已归档的会话仍可确认创建；创建回执不会覆盖其后目录中的状态。
 
 Session Controller 安装的原生 `ArchivedSessionGate` 还会拒绝归档会话及其 subagent 后代的下一次模型步骤；fork 的执行不受父会话归档影响。该门控不终止已经执行的外部副作用。
+
+## Android
+
+会话阅读页提供归档 / 恢复确认，归档默认不请求停止。停止选项必须显式勾选，未提交选择不进入 SavedInstanceState；页面重建或切换会话、epoch 时不恢复选择，连接或权限不可用时关闭确认。归档回执显示“归档操作已确认”，不宣称任务已结束。
+
+发送前将 epoch、两个布尔选项、request ID 和摘要保存到现有 SQLCipher 命令日志；同一 ID 不能变成相反操作。连接恢复或控制器重建只查询原状态，不自动重发。只含 `session.read`、`command.status` 和 `session.archive` 的连接可恢复归档会话；新连接逐命令检查所需能力。
+
+归档页保留历史和本机发送记录，隐藏消息输入和执行交互。确认后重新读取主机目录并重建相应范围的连接，恢复后才能继续发送。历史回执不会乐观覆盖目录中的当前状态。目录变化传播期间重读有次数上限；刷新失败时保留原命令供对账。
 
 ## 验证记录
 
@@ -35,4 +43,12 @@ Session Controller 安装的原生 `ArchivedSessionGate` 还会拒绝归档会�
 
 回归同时修复握手路由发布时序：`hello.ok` 进入有序 writer 后、写出前才发布路由，保证对端收到成功时可立即使用，并使并发业务帧排在 hello 之后。重复连接测试检查 Host 和手机两种路由及能力已可用。
 
-模型和身份使用确定性本地夹具。Android 接入正在开发；未验证真实学校身份、完整发行组合、物理设备、进程强杀或断电。
+Android 完整 check / lint、应用和测试 APK 构建通过；174 项共享 JVM 测试通过，零失败 / 跳过。共享 Kotlin 客户端经真实 TLS Go / PostgreSQL / npm DSH 完成归档与恢复。新增 golden、状态演进、归档专用 scope、拒绝未知能力、发送前持久化失败和重建后不重发均有测试。
+
+专用 API 26 AVD 的 14 项定向应用用例覆盖归档确认与停止选择、界面重建 / epoch 变化、历史页禁用输入、SQLCipher 原命令恢复，以及既有聊天、创建和断线恢复。归档控制器 2 项等待新连接就绪后复测通过；其余 12 项沿用同轮通过结果。完整应用回归的前次 96 项记录另见应用验收文档。
+
+`npm run test:remote-android -- emulator-5580` 的完整 APK → TLS Go → PostgreSQL → 正常 npm DSH 组合在 2026-10-25 通过，Go 包含 race 检测，耗时约 131 秒。应用完成原生归档、原生恢复，并在控制器重建后恢复两个独立原请求、摘要、settled 状态和单次发送次数。Go 检查两个当前设备的持久回执；Host 独立检查原生集合已经恢复，允许的 Bash 文件只写入一次且拒绝文件未产生。设备登记和两次工具审批仍使用三次真实平台生物识别签名。学校身份及模型使用本地夹具，归档权限在夹具中显式授予。
+
+本次本机证据：`.local/archive-final-host.log`、`.local/archive-go-dsh-kotlin-final.log`、`.local/archive-android-build.log`、`.local/archive-android-final-check.log`、`.local/android-sources/archive-native-first.log`、`.local/android-sources/archive-native-retest.log`、`.local/android-sources/archive-device-composition-final.log`。
+
+未验证真实学校身份、完整发行组合、物理设备、进程强杀或断电。
