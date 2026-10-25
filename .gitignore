@@ -12,3 +12,5 @@ android/**/build/
 android/local.properties
 /.idea/
 /android/.idea/
+__pycache__/
+*.py[cod]

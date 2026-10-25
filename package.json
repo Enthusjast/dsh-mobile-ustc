@@ -13,6 +13,7 @@
     "verify": "npm run contracts:check && npm run check && npm run build && npm test",
     "test:remote-dsh": "python3 tools/integration/run_remote_dsh.py",
     "test:remote-kotlin": "python3 tools/integration/run_remote_dsh.py --kotlin-relay",
+    "test:remote-android": "python3 tools/integration/run_remote_dsh.py --android-relay",
     "test:android": "cd android && ./gradlew check",
     "test:android:core": "cd android && ./gradlew -PjvmOnly=true check"
   },
