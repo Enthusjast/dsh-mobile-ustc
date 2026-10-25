@@ -97,7 +97,7 @@ export class RelayFiles {
       this.settle(request)
       if (pending.type !== 'file.release') for (const id of pending.ids) { const transfer = this.transfers.get(id); if (transfer) this.end(id, transfer) }
     }
-    for (const [id, transfer] of this.transfers) if (!this.valid(transfer)) this.end(id, transfer)
+    for (const [id, transfer] of this.transfers) if (!this.valid(transfer) || (transfer.stage === 'staged' && !this.registry.available(transfer.offer.file_id))) this.end(id, transfer)
     if (this.transfers.size && !this.renewal && Date.now() - this.lastRenewal >= 1000) {
       this.lastRenewal = Date.now()
       void this.send('file.renew', undefined, { handoff_ids: [...this.transfers.keys()] }).catch(() => this.binding.fail())

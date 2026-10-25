@@ -5,12 +5,14 @@ import { commandDigest, MemoryCommandJournal, type CommandJournal, type CommandO
 import { type Command, type Frame, ProbeError } from './protocol.js'
 import { SessionSync } from './session-sync.js'
 import { NativeFileRegistry } from './file-registry.js'
+import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload'
 
 const localCommandOwner: CommandOwner = { userId: 'local', deviceId: 'local' }
 const definiteRejections = new Set([
   'access.denied', 'model.not_available', 'protocol.invalid', 'runtime.changed', 'runtime.offline', 'session.not_found',
   'interaction.stale', 'interaction.invalid_answer',
   'session.active', 'session.archived',
+  'file.staging_required',
 ])
 
 export type CommandStateObserver = (state: CommandState, result?: unknown) => void | Promise<void>
@@ -38,7 +40,7 @@ export class ProbeRuntime {
     const report = async (state: CommandState, result?: unknown) => {
       try { await observe?.(state, result) } catch { /* Receipts are best effort; the durable local journal remains authoritative. */ }
     }
-    const run = async () => {
+    const run = async (recoveringDispatch = false) => {
       this.check(command)
       switch (command.type) {
         case 'session.list': return this.client.list(signal)
@@ -76,11 +78,25 @@ export class ProbeRuntime {
         }
         case 'message.submit': {
           const id = await this.client.resolve(command.session_id, signal)
-          const content = 'text' in command.payload ? command.payload.text : command.payload.content
+          const wire = 'text' in command.payload ? command.payload.text : command.payload.content
+          const files = new Set<string>()
+          const content = typeof wire === 'string' ? wire : wire.map(part => {
+            if (part.type === 'text') return part
+            files.add(part.file_id)
+            try { return this.files.resolve(part.file_id, command.session_id, owner) }
+            catch (error) {
+              if (!recoveringDispatch || !(error instanceof ProbeError) || error.code !== 'file.staging_required') throw error
+              // The native controller deduplicates a known request before it
+              // resolves receipts. An unregistered placeholder can reconcile
+              // a persisted original; it cannot admit a new file message.
+              return { type: 'file' as const, receiptId: randomUUID() as FileUploadReceiptId }
+            }
+          })
           const nativeRequestId = owner.deviceId === 'local'
             ? command.request_id
             : `${owner.deviceId}:${command.request_id}`
-          return this.client.prompt(id, nativeRequestId, command.payload.mode, content, signal)
+          try { return await this.client.prompt(id, nativeRequestId, command.payload.mode, content, signal) }
+          finally { for (const file of files) this.files.drop(file) }
         }
         case 'session.subscribe': throw new ProbeError('protocol.streaming_required')
       }
@@ -124,7 +140,7 @@ export class ProbeRuntime {
           this.journal.start(command.request_id, owner)
           await report('dispatching')
           try {
-            const value = await run()
+            const value = await run(recoveringDispatch)
             const lateAnswer = command.type === 'question.timed.answer' && value !== null && typeof value === 'object' && 'delivery' in value && value.delivery === 'late_message'
             const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create' || lateAnswer
             if (checkpointRequired && value !== null && typeof value === 'object'

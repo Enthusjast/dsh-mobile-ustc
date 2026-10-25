@@ -12,6 +12,11 @@ const command = <T extends string, P extends z.ZodType>(type: T, payload: P) =>
 const sessionCommand = <T extends string, P extends z.ZodType>(type: T, payload: P) =>
   z.strictObject({ ...session, type: z.literal(type), payload })
 const textContent = z.strictObject({ type: z.literal('text'), text: z.string().min(1).max(32_768).regex(/\S/) })
+const fileContent = z.strictObject({ type: z.literal('file'), file_id: uuid })
+const messageContent = z.array(z.discriminatedUnion('type', [textContent, fileContent])).min(1).max(16).refine(items => {
+  const files = items.filter(item => item.type === 'file').map(item => item.file_id)
+  return new Set(files).size === files.length
+})
 export const archivePayload = z.discriminatedUnion('archived', [
   z.strictObject({ archived: z.literal(true), stop_activity: z.boolean() }),
   z.strictObject({ archived: z.literal(false), stop_activity: z.literal(false) }),
@@ -27,7 +32,7 @@ export const Command = z.discriminatedUnion('type', [
   ])),
   sessionCommand('message.submit', z.union([
     z.strictObject({ mode: z.enum(['queue', 'steer']), text: z.string().min(1).max(32_768).regex(/\S/) }),
-    z.strictObject({ mode: z.enum(['queue', 'steer']), content: z.array(textContent).min(1).max(16) }),
+    z.strictObject({ mode: z.enum(['queue', 'steer']), content: messageContent }),
   ])),
   sessionCommand('session.cancel', empty),
   sessionCommand('session.archive', archivePayload),

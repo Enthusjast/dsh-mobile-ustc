@@ -213,24 +213,47 @@
                   "maxItems": 16,
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "properties": {
-                      "type": {
-                        "type": "string",
-                        "const": "text"
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "const": "text"
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 32768,
+                            "pattern": "\\S"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "text"
+                        ],
+                        "additionalProperties": false
                       },
-                      "text": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 32768,
-                        "pattern": "\\S"
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "const": "file"
+                          },
+                          "file_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "file_id"
+                        ],
+                        "additionalProperties": false
                       }
-                    },
-                    "required": [
-                      "type",
-                      "text"
-                    ],
-                    "additionalProperties": false
+                    ]
                   }
                 }
               },

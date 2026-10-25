@@ -1,0 +1,14 @@
+{
+  "v": 0,
+  "type": "message.submit",
+  "request_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_epoch": "44444444-4444-4444-8444-444444444444",
+  "session_id": "55555555-5555-4555-8555-555555555555",
+  "payload": {
+    "mode": "queue",
+    "content": [
+      { "type": "text", "text": "Inspect the authorized attachment." },
+      { "type": "file", "file_id": "77777777-7777-4777-8777-777777777777" }
+    ]
+  }
+}

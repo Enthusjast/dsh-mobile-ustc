@@ -24,6 +24,11 @@ export class NativeFileRegistry {
   }
   confirm(fileId: string): void { const staged = this.entries.get(fileId); if (staged) staged.confirmed = true }
 
+  available(fileId: string): boolean {
+    const staged = this.entries.get(fileId)
+    return staged !== undefined && staged.confirmed && !staged.signal.aborted && staged.valid() && this.client.fileStaged(staged.native, staged.upload.receiptId)
+  }
+
   resolve(fileId: string, session: string, owner: { userId: string; deviceId: string }): DshPromptPart {
     const staged = this.entries.get(fileId)
     if (staged && (staged.signal.aborted || !staged.valid() || !this.client.fileStaged(staged.native, staged.upload.receiptId))) this.drop(fileId)
