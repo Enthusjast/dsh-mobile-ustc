@@ -4,6 +4,9 @@ import android.app.KeyguardManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import cn.edu.ustc.dsh.network.SessionReadPhase
+import cn.edu.ustc.dsh.data.SqlCommandJournal
+import cn.edu.ustc.dsh.protocol.LocalDataOwner
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
@@ -43,6 +46,37 @@ class AccountSessionTest {
     private fun openRead() {
         openDirectory(); main { controller!!.openSession(fixture!!.sessionId) }
         until("confirmed session snapshot") { controller!!.state.value.reader?.let { it.phase == SessionReadPhase.READY && it.window?.persistedThrough == 2L } == true }
+    }
+    private fun cachedHistory() = fixture!!.let { test ->
+        val saved = test.checkpoint()!!
+        val owner = LocalDataOwner(saved.accountId, saved.organizationId, saved.session.deploymentFingerprint, saved.userId, saved.deviceId!!)
+        SqlCommandJournal.open(instrumentation.targetContext, owner).use { database -> runBlocking { database.loadTranscript(test.runtimeId, test.sessionId, null) } }
+    }
+
+    @Test fun confirmedHistorySurvivesControllerRecreationAndHostOfflineAfterFreshAuthorization() {
+        val test = fixture!!; openRead()
+        until("history transaction committed") { cachedHistory()?.transcript?.items?.size == 1 }
+        main { controller!!.close(); controller = null }
+        test.runtimeOffline = true
+        val tickets = test.ticketRequests.get()
+        main { controller = LoginController(instrumentation.targetContext, test.http, test.environment()); controller!!.foreground(true) }
+        until("revalidated account and directory") { controller!!.state.value.let { it.phase == HomePhase.READY && !it.refreshing && it.runtimes.size == 1 } }
+        openDirectory(); main { controller!!.openSession(test.sessionId) }
+        until("host offline with encrypted history") { controller!!.state.value.reader?.let { it.phase == SessionReadPhase.OFFLINE && it.window != null } == true }
+        val restored = controller!!.state.value.reader!!.window!!
+        assertEquals("电脑当前消息", restored.items.single().blocks.single().text)
+        assertFalse(restored.taskRunning); assertFalse(restored.items.any { it.live }); assertTrue(test.ticketRequests.get() > tickets)
+        test.revokeSession()
+        until("offline host view revoked through the live control connection") { controller!!.state.value.let { !it.refreshing && it.selectedSessionId == null && it.runtimes.single().access?.grantVersion == 8L } }
+        assertNull(cachedHistory())
+    }
+
+    @Test fun authoritativeReadRemovalErasesPersistedHistoryAndRetiresItsWriter() {
+        val owner = controller!!; val test = fixture!!; openRead()
+        until("history before revoke") { cachedHistory() != null }
+        test.allowSessionRead = false; main { owner.refresh() }
+        until("scope removal applied") { owner.state.value.let { !it.refreshing && it.selectedSessionId == null && it.runtimes.single().access?.grantVersion == 8L } }
+        assertNull(cachedHistory()); assertNull(owner.state.value.reader); assertNotNull(test.checkpoint())
     }
 
     @Test fun platformKeyReadPagesAndReopensWithAFreshSubscriptionAcrossForegroundChanges() {

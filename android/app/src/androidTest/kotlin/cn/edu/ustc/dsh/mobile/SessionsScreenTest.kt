@@ -57,4 +57,13 @@ class SessionsScreenTest {
         rule.onNodeWithText("返回电脑列表").performScrollTo().performClick()
         rule.runOnIdle { assertEquals(1, back) }
     }
+    @Test fun offlineHistoryIsLabeledAsCachedAndNeverClaimsTheCurrentTaskIsRunning() {
+        val history = CachedTranscript(id, 1000, transcript().records).transcript
+        rule.setContent { DshTheme { SessionsScreen(initial().copy(reader = SessionReadState(SessionReadPhase.OFFLINE, history)), {}, {}, {}, {}, {}, {}) } }
+        rule.onNodeWithText("显示本机已确认保存的历史缓存。当前任务状态需重新连接确认。").performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText("合成回复").performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText("电脑上的任务仍在进行。").assertDoesNotExist()
+        rule.onNodeWithText("需要电脑上线后才能读取内容。").assertDoesNotExist()
+        rule.onNodeWithText("会话还没有消息。").assertDoesNotExist()
+    }
 }

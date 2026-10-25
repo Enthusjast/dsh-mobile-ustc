@@ -463,6 +463,8 @@ class LoginController internal constructor(private val context: Context, private
                 old.access?.scope?.actions?.contains("session.read") == true && items.firstOrNull { it.id == old.id }?.access?.scope?.actions?.contains("session.read") != true
             }.map { it.id }
             mutable.value = mutable.value.copy(runtimes = items, error = null)
+            val activeAccess = items.firstOrNull { it.id == desired?.first }?.access
+            if (oldAccess != null && activeAccess != null && (oldAccess.grantVersion != activeAccess.grantVersion || activeAccess.scope?.let { oldAccess.scope?.same(it) } != true)) retireNavigation(true)
             if (removedRead.isNotEmpty()) {
                 val saved = checkpoint!!
                 val owner = CommandOwner(saved.accountId, saved.organizationId, configuration!!.fingerprint, saved.userId, saved.deviceId!!)
@@ -473,6 +475,12 @@ class LoginController internal constructor(private val context: Context, private
                 for (runtime in removedRead) persistence.revokeCommands(owner, runtime, stamp)
                 current(stamp)
             }
+            val dataOwner = checkpoint!!.let { CommandOwner(it.accountId, it.organizationId, configuration!!.fingerprint, it.userId, it.deviceId!!) }
+            try {
+                persistence.retainHistory(dataOwner, items.mapNotNull { item -> item.access?.takeIf { it.canList() }?.scope?.let { item.id to it } }.toMap(), stamp)
+                current(stamp)
+            } catch (error: CancellationException) { throw error }
+            catch (_: CommandDataException) { current(stamp) /* Online reading remains available if local data cannot open. */ }
             val selection = desired
             if (selection != null) {
                 val entry = items.firstOrNull { it.id == selection.first }?.access
@@ -564,7 +572,7 @@ class LoginController internal constructor(private val context: Context, private
                     mutable.value = mutable.value.copy(commandError = if (error is CommandDataException) error.code else "data.unavailable")
                 }
                 current(stamp); if (view != navigationGeneration) return@navigation
-                val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope)
+                val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId)
                     else resource.reader(saved.deviceId!!, runtimeId, id, runtime.scope!!.readSession(id, selected.workspaceId), scope)
                 commandJournal = database; database = null; reader = opened
                 opened.commands?.let { commands -> commandCollector = scope.launch {

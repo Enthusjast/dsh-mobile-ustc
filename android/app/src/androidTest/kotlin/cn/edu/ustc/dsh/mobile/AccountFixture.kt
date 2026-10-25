@@ -303,6 +303,12 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (path == "/v1/runtimes/$runtimeId/sessions/$sessionId/read-access") {
+            if (!allowSessionRead) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+            val issued = System.currentTimeMillis()
+            return resourceResponse(data(jsonObject("runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "workspace_id" to JsonNull, "grant_version" to 7L.json(),
+                "issued_at" to java.time.Instant.ofEpochMilli(issued).toString().json(), "expires_at" to java.time.Instant.ofEpochMilli(minOf(issued + 300_000, claims.integer("exp") * 1000)).toString().json())))
+        }
         if (path.startsWith("/v1/commands/")) {
             require(chatMode && request.requestUrl!!.queryParameter("device_id") == deviceId)
             val status = commandStatuses[path.substringAfterLast('/')]

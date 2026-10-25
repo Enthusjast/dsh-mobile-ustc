@@ -65,7 +65,8 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                                     SessionReadPhase.CLOSED -> "已暂停实时读取"
                                 }
                                 Text(label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                                if (read.window != null && read.phase != SessionReadPhase.READY) Text("显示上次确认保存的记录。", style = MaterialTheme.typography.bodySmall)
+                                if (read.window != null && read.phase != SessionReadPhase.READY) Text("显示本机已确认保存的历史缓存。当前任务状态需重新连接确认。", style = MaterialTheme.typography.bodySmall)
+                                if (read.cacheError != null) Text("本机历史缓存暂时无法读取或更新，在线阅读仍可继续。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                                 if (read.phase == SessionReadPhase.OFFLINE && read.window == null) Text("需要电脑上线后才能读取内容。")
                                 if (read.error in setOf("protocol.snapshot_too_large", "client.history_limit")) Text("内容超过本机阅读窗口，请在电脑查看完整内容。")
                                 if (read.phase in setOf(SessionReadPhase.ERROR, SessionReadPhase.OFFLINE, SessionReadPhase.BACKOFF)) {
@@ -121,7 +122,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         if (transcript.checkpoint != "persisted") item("persistence") { Text("保存状态暂不可用，部分内容尚未确认保存。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         if (transcript.items.isEmpty() && read.phase == SessionReadPhase.READY) item("empty-session") { Text("会话还没有消息。") }
                         items(transcript.items, key = { it.id }) { entry -> ConversationBubble(entry) }
-                        if (transcript.taskRunning) item("running") { Text("电脑上的任务仍在进行。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        if (transcript.taskRunning && read.phase == SessionReadPhase.READY) item("running") { Text("电脑上的任务仍在进行。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
                 }
             }

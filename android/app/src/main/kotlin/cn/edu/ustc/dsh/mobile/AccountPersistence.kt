@@ -7,6 +7,7 @@ import cn.edu.ustc.dsh.data.SqlCommandJournal
 import cn.edu.ustc.dsh.command.CommandOwner
 import cn.edu.ustc.dsh.keystore.*
 import cn.edu.ustc.dsh.protocol.Contract
+import cn.edu.ustc.dsh.protocol.RelayScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -107,6 +108,9 @@ internal class AccountPersistence(private val context: Context, slot: String, pr
     }
     suspend fun revokeCommands(owner: CommandOwner, runtime: String, stamp: Long) = transaction(stamp) {
         SqlCommandJournal.open(context, owner).use { journal -> runBlocking { journal.revokeRuntime(runtime) } }
+    }
+    suspend fun retainHistory(owner: CommandOwner, scopes: Map<String, RelayScope>, stamp: Long) = transaction(stamp) {
+        SqlCommandJournal.open(context, owner).use { journal -> runBlocking { journal.retainTranscripts(scopes) } }
     }
 
     suspend fun clear(stamp: Long, extra: ScopeReference?) = transaction(stamp) {
