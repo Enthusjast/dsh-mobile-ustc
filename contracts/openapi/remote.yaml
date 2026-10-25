@@ -302,6 +302,33 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes/{id}/sessions/{session_id}/read-access:
+    get:
+      description: Revalidates this exact session's current read scope and workspace independently of host presence. The response bounds a local cached-history view; it is not a credential or a subscription. Requires an active registered phone's DPoP key and rejects query selectors.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Current per-session read authority, bounded by five minutes, the access token and the grant expiry.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data: { $ref: '#/components/schemas/SessionReadAccess' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/runtimes/{id}/grants/{user_id}:
     put:
       parameters:
@@ -948,6 +975,17 @@ components:
         state: { enum: [available, running, archived, unavailable] }
         last_persisted_seq: { type: integer, minimum: -1 }
         updated_at: { type: string, format: date-time }
+    SessionReadAccess:
+      type: object
+      additionalProperties: false
+      required: [runtime_id, session_id, workspace_id, grant_version, issued_at, expires_at]
+      properties:
+        runtime_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        workspace_id: { type: [string, 'null'], format: uuid }
+        grant_version: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
     CommandStatusResponse:
       type: object
       additionalProperties: false

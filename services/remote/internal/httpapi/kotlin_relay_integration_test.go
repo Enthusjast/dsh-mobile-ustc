@@ -106,7 +106,7 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	fixture := map[string]any{
 		"deployment": map[string]any{"issuer": issuer, "client_id": "mobile", "redirect_uri": "cn.edu.ustc.dsh.mobile:/oauth2redirect", "resource": "urn:dsh-kotlin-relay", "audience": "urn:dsh-kotlin-relay",
 			"remote_origin": server.URL, "organization_id": orgID, "scopes": []string{"openid", "remote.access"}, "endpoint_origins": []string{issuer}, "signing_algorithms": []string{"ES256"}},
-		"proof_jwk": json.RawMessage(private), "access_token": access, "issuer_jwks": jwks, "device_id": deviceID, "runtime_id": runtimeID, "session_id": sessionID, "subject": "kotlin-fixture",
+		"proof_jwk": json.RawMessage(private), "access_token": access, "issuer_jwks": jwks, "device_id": deviceID, "runtime_id": runtimeID, "session_id": sessionID, "workspace_id": workspaceID, "subject": "kotlin-fixture",
 		"access_expires_at": now.Add(5 * time.Minute).UnixMilli(), "ca_pem": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})),
 	}
 	directory, err := os.MkdirTemp(cluster, "kotlin-relay-")

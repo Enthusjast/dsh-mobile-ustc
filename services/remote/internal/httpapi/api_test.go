@@ -29,6 +29,15 @@ type fakeRepository struct {
 	activeDeviceErr         error
 	activeDeviceCall        int
 	commandCalls            int
+	cacheAccess             store.SessionReadAccess
+	cacheAccessErr          error
+	cacheAccessCalls        int
+	cacheIdentity           store.UserIdentity
+	cacheDevice             string
+	cacheJKT                string
+	cacheRuntime            string
+	cacheSession            string
+	cacheCredentialUntil    time.Time
 	ticketCalls             int
 	enrollmentCalls         int
 	enrollmentResult        store.EnrollmentCreated
@@ -193,6 +202,19 @@ func (fake *fakeRepository) ListRuntimes(context.Context, store.UserIdentity) ([
 func (fake *fakeRepository) ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error) {
 	return []store.Session{}, nil
 }
+func (fake *fakeRepository) SessionCacheReadAccess(_ context.Context, identity store.UserIdentity, device, jkt, runtime, session string, until time.Time) (store.SessionReadAccess, error) {
+	fake.cacheAccessCalls++
+	fake.cacheIdentity = identity
+	fake.cacheDevice = device
+	fake.cacheJKT = jkt
+	fake.cacheRuntime = runtime
+	fake.cacheSession = session
+	fake.cacheCredentialUntil = until
+	if fake.cacheAccess.RuntimeID == "" && fake.cacheAccessErr == nil {
+		return store.SessionReadAccess{}, store.ErrAccessDenied
+	}
+	return fake.cacheAccess, fake.cacheAccessErr
+}
 func (fake *fakeRepository) CommandStatus(context.Context, store.UserIdentity, string, string) (store.CommandStatus, error) {
 	fake.commandCalls++
 	return store.CommandStatus{}, errors.New("not implemented")
@@ -237,14 +259,14 @@ func TestProtectedRoutesRejectAnonymousRequestsBeforeDatabaseAccess(t *testing.T
 	}
 	repo := &fakeRepository{}
 	handler := New(repo, identity)
-	for _, target := range []string{"/v1/me", "/v1/devices/current", "/v1/hosts", "/v1/runtimes", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions"} {
+	for _, target := range []string{"/v1/me", "/v1/devices/current", "/v1/hosts", "/v1/runtimes", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions/55555555-5555-4555-8555-555555555555/read-access"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("anonymous GET %s status = %d, want 401", target, response.Code)
 		}
 	}
-	if repo.listCalls != 0 || repo.accountCalls != 0 || repo.currentDeviceCalls != 0 {
+	if repo.listCalls != 0 || repo.accountCalls != 0 || repo.currentDeviceCalls != 0 || repo.cacheAccessCalls != 0 {
 		t.Fatal("unauthenticated route accessed the repository")
 	}
 }

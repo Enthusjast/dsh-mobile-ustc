@@ -60,6 +60,7 @@ type Repository interface {
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
+	SessionCacheReadAccess(context.Context, store.UserIdentity, string, string, string, string, time.Time) (store.SessionReadAccess, error)
 	CommandStatus(context.Context, store.UserIdentity, string, string) (store.CommandStatus, error)
 }
 
@@ -155,6 +156,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.Handle("GET /v1/hosts", api.protected(http.HandlerFunc(api.listHosts)))
 	mux.Handle("GET /v1/runtimes", api.protected(http.HandlerFunc(api.listRuntimes)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions", api.protected(http.HandlerFunc(api.listSessions)))
+	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}/read-access", api.protected(http.HandlerFunc(api.sessionReadAccess)))
 	mux.Handle("PUT /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.putRuntimeGrant)))
 	mux.Handle("DELETE /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.revokeRuntimeGrant)))
 	mux.Handle("POST /v1/realtime/tickets", api.protected(http.HandlerFunc(api.issueRealtimeTicket)))
@@ -515,6 +517,23 @@ func (api *API) commandStatus(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeData(response, http.StatusOK, status)
+}
+
+func (api *API) sessionReadAccess(response http.ResponseWriter, request *http.Request) {
+	runtimeID, sessionID := request.PathValue("id"), request.PathValue("session_id")
+	if !uuidPattern.MatchString(runtimeID) || !uuidPattern.MatchString(sessionID) || request.URL.RawQuery != "" {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
+	access, err := api.database.SessionCacheReadAccess(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject},
+		deviceID, principal.ProofKeyJKT, runtimeID, sessionID, principal.ExpiresAt)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, access)
 }
 
 func (api *API) putRuntimeGrant(response http.ResponseWriter, request *http.Request) {

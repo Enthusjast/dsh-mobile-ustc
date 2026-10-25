@@ -279,6 +279,47 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 			t.Fatal("preview did not bind verified identity and private request body")
 		}
 	})
+	t.Run("cache read access binds the current phone and exact resource", func(t *testing.T) {
+		const runtime = "55555555-5555-4555-8555-555555555555"
+		const session = "66666666-6666-4666-8666-666666666666"
+		uri := "https://api.example.edu/v1/runtimes/" + runtime + "/sessions/" + session + "/read-access"
+		nonce := ""
+		sequence := 0
+		send := func(token, path string) *httptest.ResponseRecorder {
+			sequence++
+			result := sendDPoPRequest(t, hostAPI, token, proofKey, proofJWK, http.MethodGet, path, fmt.Sprintf("cache-proof-%04d", sequence), nonce)
+			nonce = result.Header().Get("DPoP-Nonce")
+			if result.Code == http.StatusUnauthorized {
+				sequence++
+				result = sendDPoPRequest(t, hostAPI, token, proofKey, proofJWK, http.MethodGet, path, fmt.Sprintf("cache-proof-%04d", sequence), nonce)
+				nonce = result.Header().Get("DPoP-Nonce")
+			}
+			return result
+		}
+		repo.activeDeviceErr = nil
+		repo.cacheAccess = store.SessionReadAccess{RuntimeID: runtime, SessionID: session, GrantVersion: 7, IssuedAt: now, ExpiresAt: now.Add(time.Minute)}
+		allowed := send(access, uri)
+		if allowed.Code != http.StatusOK || repo.cacheAccessCalls != 1 || repo.cacheIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.cacheDevice != deviceID || repo.cacheJKT != proofJKT || repo.cacheRuntime != runtime || repo.cacheSession != session || !repo.cacheCredentialUntil.Equal(now.Add(5*time.Minute)) || allowed.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("cache admission lost verified identity/resource bounds: status=%d", allowed.Code)
+		}
+		if denied := send(access, uri+"?device_id=untrusted"); denied.Code != http.StatusBadRequest || repo.cacheAccessCalls != 1 {
+			t.Fatal("caller selector reached cache admission")
+		}
+		repo.activeDeviceErr = store.ErrDeviceNotFound
+		if denied := send(access, uri); denied.Code != http.StatusForbidden || repo.cacheAccessCalls != 1 {
+			t.Fatal("unregistered device reached cached body authority")
+		}
+		repo.activeDeviceErr = nil
+		if denied := send(hostAccess, uri); denied.Code != http.StatusForbidden || repo.cacheAccessCalls != 1 {
+			t.Fatal("host OAuth client reached phone cache authority")
+		}
+		repo.cacheAccessErr = store.ErrDatabaseUnavailable
+		if failed := send(access, uri); failed.Code != http.StatusServiceUnavailable || strings.Contains(failed.Body.String(), "grant_version") {
+			t.Fatal("failed cache admission disclosed an authority result")
+		}
+		repo.cacheAccessErr = nil
+	})
+
 }
 
 func sendDPoPRequest(t *testing.T, handler http.Handler, access string, proofKey *ecdsa.PrivateKey, proofJWK map[string]any, method, uri, jti, nonce string, body ...any) *httptest.ResponseRecorder {
