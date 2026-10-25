@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Context } from '@deepseek-ai/cordis'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionFollowFrame, SessionPageRequest } from '@deepseek-ai/dsh-api-session-controller/types'
@@ -8,11 +8,16 @@ import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload'
 import { WorkspaceActiveSessionError, workspaceDomainSpec, workspaceDomainState } from '@deepseek-ai/dsh-workspace'
 import { ProbeError } from './protocol.js'
 import { configuredCreationOptions } from './creation-options.js'
-import { admitNativeFile, releaseNativeFile, type FileManifest } from './file-admission.js'
+import { admitNativeFile, fileManifest, releaseNativeFile, type FileManifest } from './file-admission.js'
+import { PinnedExportSource } from './file-export-source.js'
+import { sessionAttachmentSource } from './session-file-export.js'
+import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
+import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 
 export type DshPromptPart = Extract<PromptContentPart, { type: 'text' | 'file' }>
 
-export interface Workspace { id: string; cwd: string; remoteId?: string; label?: string }
+export interface WorkspaceExportRoot { id: string; directory: string }
+export interface Workspace { id: string; cwd: string; remoteId?: string; label?: string; exportRoots?: WorkspaceExportRoot[] }
 
 export interface SessionCatalogItem {
   session_id: string
@@ -41,7 +46,14 @@ export class DshClient {
     readonly runtimeId: string,
     private readonly workspaces: readonly Workspace[],
     private readonly presets: readonly string[],
-  ) {}
+  ) {
+    for (const workspace of workspaces) {
+      const roots = workspace.exportRoots ?? []
+      if (roots.length > 8 || new Set(roots.map(root => root.id)).size !== roots.length || roots.some(root =>
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(root.id) || typeof root.directory !== 'string' ||
+        root.directory !== '.' && (root.directory.split('/').length > 16 || root.directory.split('/').some(part => !fileManifest.shape.name.safeParse(part).success)))) throw new ProbeError('file.export_invalid')
+    }
+  }
 
   private get controller(): SessionController { return this.ctx.sessionController }
   creationOptions() { return configuredCreationOptions(this.workspaces, this.presets) }
@@ -167,6 +179,58 @@ export class DshClient {
     const nativeId = this.ids.get(id)
     if (nativeId === undefined) throw new ProbeError('session.not_found')
     return SessionId(nativeId)
+  }
+
+  private async exportWorkspace(id: string, signal: AbortSignal): Promise<{ native: SessionId; workspace: Workspace }> {
+    const native = await this.resolve(id, signal)
+    const inspection = await this.controller.inspect(native, signal)
+    const matches = this.workspaces.filter(workspace => workspace.cwd === inspection.meta.cwd)
+    if (matches.length !== 1 || inspection.meta.parentSession !== undefined || inspection.meta.origin === 'subagent') throw new ProbeError('access.denied')
+    return { native, workspace: matches[0]! }
+  }
+
+  /** Host-selected artifact under an explicitly configured root; never decode this from a phone path. */
+  async workspaceExportSource(id: string, rootId: string, parts: readonly string[], signal: AbortSignal, current: () => void): Promise<PinnedExportSource> {
+    signal.throwIfAborted(); current()
+    const { workspace } = await this.exportWorkspace(id, signal)
+    const roots = workspace.exportRoots?.filter(root => root.id === rootId) ?? []
+    if (roots.length !== 1) throw new ProbeError('access.denied')
+    const directory = roots[0]!.directory
+    const prefix = directory === '.' ? [] : directory.split('/')
+    const cwd = workspace.cwd
+    const filesystem = this.ctx.fs
+    if (!filesystem) throw new ProbeError('file.export_unsupported')
+    const provider = Reflect.get(filesystem, symbols.original) ?? filesystem
+    // These pinned native backends share unrestricted read semantics. An
+    // unknown execution world or read-policy wrapper needs its own adapter;
+    // opening a coincidentally matching Host path would bypass that provider.
+    const backend = Object.getPrototypeOf(provider)?.constructor
+    if (backend !== LocalFileSystem && backend !== SandboxedFileSystem) throw new ProbeError('file.export_unsupported')
+    const guard = () => {
+      current()
+      const active = this.ctx.fs
+      if (!active || (Reflect.get(active, symbols.original) ?? active) !== provider) throw new ProbeError('access.denied')
+      const matches = this.workspaces.filter(item => item.cwd === cwd)
+      const allowed = matches.length === 1 ? matches[0]!.exportRoots?.filter(root => root.id === rootId && root.directory === directory) : []
+      if (allowed?.length !== 1) throw new ProbeError('access.denied')
+    }
+    return PinnedExportSource.open({ root: cwd, parts: [...prefix, ...parts] }, signal, guard)
+  }
+
+  /** File/image selection is a log position in this scoped Session, never a caller-supplied native reference. */
+  async attachmentExportSource(id: string, seq: number, index: number, signal: AbortSignal, current: () => void): Promise<PinnedExportSource> {
+    if (!Number.isSafeInteger(seq) || seq < 0 || seq >= Number.MAX_SAFE_INTEGER || !Number.isSafeInteger(index) || index < 0 || index > 4095) throw new ProbeError('file.export_invalid')
+    signal.throwIfAborted(); current()
+    const { native, workspace } = await this.exportWorkspace(id, signal)
+    const checkpoint = this.ctx.sessions.get(native) === undefined ? await this.readColdCursor(native, signal) : await this.checkpoint(native)
+    if (checkpoint.state !== 'persisted' || checkpoint.through_seq < seq) throw new ProbeError('session.persistence_unavailable')
+    const page = await this.page(native, { throughSeq: checkpoint.through_seq, beforeSeq: seq + 1, maxMessages: 1 }, signal)
+    const event = page.records.find(record => record.event.seq === seq)?.event
+    if (event === undefined) throw new ProbeError('file.export_unavailable')
+    const cwd = workspace.cwd
+    const guard = () => { current(); if (this.workspaces.filter(item => item.cwd === cwd).length !== 1) throw new ProbeError('access.denied') }
+    signal.throwIfAborted(); guard()
+    return sessionAttachmentSource(this.ctx, event, index, signal, guard)
   }
 
   async create(workspace: string, preset: string) {

@@ -11,6 +11,11 @@ const fields: Record<string, readonly string[]> = {
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
+export function isHumanInput(value: unknown): boolean {
+  const source = object(value)
+  return source.kind === 'user' || (source.kind === 'user-question-reply' && source.outcome === 'answered'
+    && typeof source.callId === 'string' && source.callId.length > 0)
+}
 function pick(value: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]))
 }
@@ -36,9 +41,7 @@ function content(value: unknown): unknown[] {
 /** Explicit display projection. Unknown/configuration events advance the cursor without exporting data. */
 export function projectEvent(event: SessionWireEvent) {
   const data = object(event.data)
-  const source = object(data.source)
-  const humanInput = source.kind === 'user' || (source.kind === 'user-question-reply' && source.outcome === 'answered'
-    && typeof source.callId === 'string' && source.callId.length > 0)
+  const humanInput = isHumanInput(data.source)
   let projected: Record<string, unknown> = {}
   if (fields[event.type]) projected = pick(data, fields[event.type]!)
   // Native user-role messages also carry producer-injected context. Only the

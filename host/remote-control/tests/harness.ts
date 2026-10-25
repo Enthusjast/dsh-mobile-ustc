@@ -48,7 +48,7 @@ export class TestModel extends LlmAdapter {
   }
 }
 
-export async function host(options: { probe?: boolean; timeoutMs?: number; directory?: string; retainDirectory?: boolean; runtimeId?: string } = {}) {
+export async function host(options: { probe?: boolean; timeoutMs?: number; directory?: string; retainDirectory?: boolean; runtimeId?: string; filesystem?: 'local' | 'sandbox' } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'dsh-mobile-'))
   const cleanupDirectory = options.retainDirectory !== true
   const cwd = join(directory, 'workspace')
@@ -76,7 +76,10 @@ export async function host(options: { probe?: boolean; timeoutMs?: number; direc
     { id: 'access', name: '@deepseek-ai/dsh-api-remote-access' },
     { id: 'questions', name: '@deepseek-ai/dsh-user-questions' },
     { id: 'defaults', name: '@deepseek-ai/dsh-agent-default-model', config: { provider: 'fixture', model: 'fixture' } },
-    { id: 'fs', name: '@deepseek-ai/dsh-fs-local' },
+    ...(options.filesystem === 'sandbox' ? [
+      { id: 'sandbox-policy', name: '@deepseek-ai/dsh-sandbox-policy', config: { mode: 'read-only', workspaceRoot: cwd } },
+      { id: 'fs', name: '@deepseek-ai/dsh-fs-sandbox' },
+    ] : [{ id: 'fs', name: '@deepseek-ai/dsh-fs-local' }]),
     { id: 'working-directory', name: '@deepseek-ai/dsh-working-directory' },
     { id: 'attachments', name: '@deepseek-ai/dsh-attachment-local', config: { dshHome: directory } },
     { id: 'credentials', name: '@deepseek-ai/dsh-credentials-local', config: { path: join(directory, 'credentials.yaml') } },

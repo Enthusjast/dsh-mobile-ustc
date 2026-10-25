@@ -15,7 +15,7 @@ export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSig
 export type { SignedApprovalOptions } from './signed-approvals.js'
 
 export const name = 'ustc-remote-control'
-export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections', 'workspaceRegistry', 'fileUploads']
+export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections', 'workspaceRegistry', 'fileUploads', 'attachments', 'fs']
 
 export interface Config {
   enabled?: boolean
@@ -33,7 +33,9 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean().default(false),
   runtimeId: z.string().default(''),
   socketPath: z.string().default(''),
-  workspaces: z.array(z.object({ id: z.string().required(), cwd: z.string().required(), remoteId: z.string(), label: z.string() })).default([]),
+  workspaces: z.array(z.object({ id: z.string().required(), cwd: z.string().required(), remoteId: z.string(), label: z.string(),
+    exportRoots: z.array(z.object({ id: z.string().required(), directory: z.string().required() })).default([]),
+  })).default([]),
   presets: z.array(String).default([]),
   highRiskTools: z.array(String).default(['bash', 'pwsh', 'run_code']),
   interactionTimeoutMs: z.number().min(100).max(600_000).default(180_000),
@@ -99,11 +101,12 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
         try { await relay?.close() }
         finally {
           try { await server?.close() }
-          finally { runtime?.close(); signed?.close(); journal.close() }
+          finally { runtime?.close(); await runtime?.exports.close(); signed?.close(); journal.close() }
         }
       }
     } catch (error) {
       runtime?.close()
+      await runtime?.exports.close()
       signed?.close()
       journal.close()
       throw error

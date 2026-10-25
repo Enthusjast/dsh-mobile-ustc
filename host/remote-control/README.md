@@ -89,6 +89,8 @@ Relay 双方协商 `session.read.v1` 后，可打开按连接隔离的会话订�
 
 手机创建选项通过 `session.create_options.v1` 发布到当前主机连接，包含已登记工作区 UUID、公开 label 和允许的 preset token。每个快照最多 128 个工作区和 128 个 preset，label 最多 32 个 Unicode 字符／128 字节。未配置 label 时只使用工作区 UUID 的短标识；不导出本地工作区引用、路径、preset 定义或模型凭据。详情见 [创建协议](../../docs/session-create-protocol.md) 和 [Android 创建流程](../../docs/android-session-creation.md)。
 
-双方协商 `file.handoff.v1` 后，插件通过当前安装密钥和连接绑定的一次性读取证明下载 clean 对象，校验内容后暂存原生会话 receipt。receipt 由五秒续租、当前连接和原始上传设备约束，断线 / 撤权 / 会话释放后失效。进一步协商 `message.files.v1` 后，可引用服务端已原子授权的文件 ID 入队；Android 文件入口仍待实现。详见 [Host 文件交接](../../docs/file-host-handoffs.md) 和 [消息附件](../../docs/file-message-relay.md)。
+双方协商 `file.handoff.v1` 后，插件通过当前安装密钥和连接绑定的一次性读取证明下载 clean 对象，校验内容后暂存原生会话 receipt。receipt 由五秒续租、当前连接和原始上传设备约束，断线 / 撤权 / 会话释放后失效。进一步协商 `message.files.v1` 后，可引用服务端已原子授权的文件 ID 入队；[Android 上传与附件界面](../../docs/android-files.md) 已接入。详见 [Host 文件交接](../../docs/file-host-handoffs.md) 和 [消息附件](../../docs/file-message-relay.md)。
 
 Host 另协商 `message.files.reconcile.v1`，使已登记原命令在对象到期或暂存失效后仍可核对已有结果。服务端专用对账帧只查询原生请求记录和持久化检查点，不走普通消息提交；缺少本地证据时保留未知结果。该能力不提供新的下载、receipt 或消息准入权限。
+
+受限导出的 [Host 来源层](../../docs/file-export-sources.md) 已提供会话持久附件 / 图片、显式 exportRoots 下的工作区交付物、不透明来源 ID 和运行时清理。Linux 读取固定文件描述符并核对版本 / 摘要；未知执行世界和缺少安全文件适配的平台拒绝读取。目前未宣告导出 Relay 能力，服务端扫描 / 下载与 Android 保存链路仍需接入。
