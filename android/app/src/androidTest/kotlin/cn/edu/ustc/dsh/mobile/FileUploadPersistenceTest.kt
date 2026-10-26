@@ -83,11 +83,12 @@ class FileUploadPersistenceTest {
         val journal = open()
         val message = CommandIntent.message(UUID.randomUUID().toString(), runtime, session, "queue", "existing v4 command")
         journal.create(message)
-        // Test-only schema fixture: v4 is exactly v5 without file_uploads. No
+        // Test-only schema fixture: remove the newer file tables to emulate v4. No
         // password or key leaves the existing encrypted Room connection.
         val field = SqlCommandJournal::class.java.getDeclaredField("database").apply { isAccessible = true }
         val database = field.get(journal) as RoomDatabase
         database.openHelper.writableDatabase.execSQL("DROP TABLE file_uploads")
+        database.openHelper.writableDatabase.execSQL("DROP TABLE file_exports")
         database.openHelper.writableDatabase.execSQL("PRAGMA user_version=4")
         journal.close()
         val migrated = open()

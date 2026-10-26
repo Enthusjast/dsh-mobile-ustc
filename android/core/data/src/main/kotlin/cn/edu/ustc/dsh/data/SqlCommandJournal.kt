@@ -15,7 +15,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Entire SQLite/WAL is SQLCipher-encrypted, under noBackupFilesDir. No plaintext fallback. */
-class SqlCommandJournal private constructor(override val owner: CommandOwner, private val database: CommandDatabase, private val password: ByteArray, private val vault: DatabaseKeyVault) : CommandJournal, TranscriptCache, FileUploadJournal {
+class SqlCommandJournal private constructor(override val owner: CommandOwner, private val database: CommandDatabase, private val password: ByteArray, private val vault: DatabaseKeyVault) : CommandJournal, TranscriptCache, FileUploadJournal, FileExportJournal {
     private val closed = AtomicBoolean()
     private val lock = Any()
     internal suspend fun <T> transaction(action: (CommandDao) -> T): T = withContext(Dispatchers.IO) {
@@ -105,6 +105,30 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             else dao.restrictUploads(runtime, grant.sessions.toList(), grant.workspaces.toList())
         }
     }
+    override suspend fun createExport(intent: FileExportIntent, now: Long): StoredFileExport = transaction { dao ->
+        dao.export(intent.requestId)?.let { old ->
+            if (old.digest != intent.digest || !old.intent.contentEquals(intent.bytes())) throw CommandDataException("file.request_conflict")
+            return@transaction old.decodeExport()
+        }
+        if (dao.exportCount() >= 64) throw CommandDataException("file.local_limit")
+        FileExportRow(intent.requestId, intent.runtimeId, intent.sessionId, intent.workspaceId, intent.origin.wire, intent.bytes(), intent.digest, null, null, now, now).also(dao::insertExport).decodeExport()
+    }
+    override suspend fun exports(runtime: String, session: String): List<StoredFileExport> = transaction { it.exports(Contract.uuid(runtime), Contract.uuid(session)).map(FileExportRow::decodeExport) }
+    override suspend fun registeredExport(id: String, file: RemoteExportStatus, now: Long): StoredFileExport = transaction { dao ->
+        val old = dao.export(Contract.uuid(id)) ?: throw CommandDataException("file.export_not_found")
+        val previous = old.decodeExport()
+        if (!previous.intent.matches(file) || old.fileId?.let { it != file.id } == true || previous.manifest?.let { !it.same(file.manifest) } == true ||
+            dao.exportByFile(file.id)?.requestId?.let { it != id } == true) throw CommandDataException("file.request_conflict")
+        old.copy(fileId = file.id, manifest = JsonDocument.of(file.manifest.json()).canonicalBytes(), updatedAt = maxOf(now, old.updatedAt)).also { check(dao.updateExport(it) == 1) }.decodeExport()
+    }
+    override suspend fun removeExport(id: String) = transaction { it.deleteExport(Contract.uuid(id)) }
+    suspend fun retainExports(scopes: Map<String, RelayScope>) = transaction { dao ->
+        for (runtime in dao.exportRuntimes()) {
+            val grant = scopes[runtime]
+            if (grant == null || !grant.actions.containsAll(setOf("file.download", "session.read"))) dao.revokeExports(runtime)
+            else dao.restrictExports(runtime, grant.sessions.toList(), grant.workspaces.toList())
+        }
+    }
     suspend fun retainApprovals(scopes: Map<String, RelayScope>) = transaction { dao ->
         scopes.keys.forEach(Contract::uuid)
         for (runtime in dao.approvalRuntimes()) {
@@ -113,8 +137,8 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             else dao.restrictApprovals(runtime, grant.sessions.toList(), grant.workspaces.toList())
         }
     }
-    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime); dao.revokeUploads(runtime) }
-    override suspend fun revokeSessionCommands(runtime: String) = transaction { dao -> dao.revokeSessionCommands(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime); dao.revokeUploads(runtime) }
+    override suspend fun revokeRuntime(runtime: String) = transaction { dao -> dao.revokeRuntime(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime); dao.revokeUploads(runtime); dao.revokeExports(runtime) }
+    override suspend fun revokeSessionCommands(runtime: String) = transaction { dao -> dao.revokeSessionCommands(Contract.uuid(runtime)); dao.revokeApprovals(runtime); dao.deleteRuntimeCache(runtime); dao.revokeUploads(runtime); dao.revokeExports(runtime) }
     suspend fun retainCreations(scopes: Map<String, RelayScope>) = transaction { dao ->
         scopes.keys.forEach(Contract::uuid)
         for(runtime in dao.creationRuntimes()) {
@@ -174,6 +198,13 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         synchronized(lock) { try { database.close() } finally { password.fill(0) } }
     }
     companion object {
+        private val migration5To6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS file_exports (requestId TEXT NOT NULL, runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, workspaceId TEXT, origin TEXT NOT NULL, intent BLOB NOT NULL, digest TEXT NOT NULL, fileId TEXT, manifest BLOB, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(requestId))")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_file_exports_fileId ON file_exports(fileId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_file_exports_runtimeId_sessionId_createdAt ON file_exports(runtimeId,sessionId,createdAt)")
+            }
+        }
         private val migration4To5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE TABLE IF NOT EXISTS file_uploads (requestId TEXT NOT NULL, runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, workspaceId TEXT, intent BLOB NOT NULL, digest TEXT NOT NULL, fileId TEXT, messageId TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(requestId))")
@@ -220,7 +251,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             var database: CommandDatabase? = null
             try {
                 database = Room.databaseBuilder(context.applicationContext, CommandDatabase::class.java, file.absolutePath)
-                    .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5)
+                    .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5, migration5To6)
                     .openHelperFactory(SupportOpenHelperFactory(password, null, true))
                     .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING).build()
                 database.openHelper.writableDatabase.execSQL("PRAGMA synchronous=FULL")
@@ -261,4 +292,10 @@ private fun CommandRow.decode(): PendingCommand {
     createdSessionId?.let(Contract::uuid)
     if ((parsed.kind == CommandKind.CREATE && remote == RemoteCommandState.SETTLED.name) != (createdSessionId != null)) throw CommandDataException("data.corrupt")
     return PendingCommand(parsed, CommandDelivery.valueOf(delivery), remote?.let(RemoteCommandState::valueOf), attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, createdSessionId)
+}
+
+private fun FileExportRow.decodeExport(): StoredFileExport {
+    val parsed = FileExportIntent.parse(intent)
+    if (parsed.requestId != requestId || parsed.runtimeId != runtimeId || parsed.sessionId != sessionId || parsed.workspaceId != workspaceId || parsed.origin.wire != origin || parsed.digest != digest) throw CommandDataException("data.corrupt")
+    return StoredFileExport(parsed, fileId, manifest?.let { ExportManifest.parse(JsonDocument.parse(it).root) }, createdAt, updatedAt)
 }

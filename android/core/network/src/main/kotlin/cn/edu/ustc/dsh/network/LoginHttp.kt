@@ -14,6 +14,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.URI
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -29,6 +30,8 @@ class RemoteRequestException(val code: String = "network.unavailable") : Illegal
 class LoginHttp private constructor(private val client: OkHttpClient) {
     internal suspend fun upload(prepared: PreparedFileUpload, source: () -> InputStream, current: () -> Unit, progress: (Long) -> Unit) =
         uploadFileBytes(client, prepared, source, current, progress)
+    internal suspend fun download(request: Request, file: RemoteExportStatus, destination: () -> OutputStream, current: () -> Unit, progress: (Long) -> Unit): HttpReply? =
+        downloadFileBytes(client, request, file, destination, current, progress)
     companion object {
         fun create(): LoginHttp = LoginHttp(secure(OkHttpClient.Builder()).build())
         internal fun forTests(client: OkHttpClient): LoginHttp = LoginHttp(secure(client.newBuilder()).build())
@@ -215,13 +218,14 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         return SessionCreationFlow(this,deviceId,runtimeId,scope,journal,owner)
     }
     fun chatReader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, journal: CommandJournal, owner: CoroutineScope,
-        transcripts: cn.edu.ustc.dsh.session.TranscriptCache? = null, workspaceId: String? = null, approvalAccount: SessionApprovalAccount? = null): SessionReader {
+        transcripts: cn.edu.ustc.dsh.session.TranscriptCache? = null, workspaceId: String? = null, approvalAccount: SessionApprovalAccount? = null, exportJournal: FileExportJournal? = null): SessionReader {
         if (journal.owner.deviceId != deviceId || journal.owner.organizationId != config.organizationId || journal.owner.deploymentHash != config.fingerprint ||
             mappedUserId != null && mappedUserId != journal.owner.userId) throw RemoteRequestException("auth.identity_mismatch")
         if (transcripts != null && transcripts.owner.fingerprint != journal.owner.fingerprint) throw RemoteRequestException("auth.identity_mismatch")
         if (approvalAccount != null && approvalAccount.journal.owner.fingerprint != journal.owner.fingerprint) throw RemoteRequestException("auth.identity_mismatch")
+        if (exportJournal != null && exportJournal.owner.fingerprint != journal.owner.fingerprint) throw RemoteRequestException("auth.identity_mismatch")
         if (transcripts != null) scope.session(sessionId, workspaceId, setOf("session.read"))
-        return SessionReader(this, deviceId, runtimeId, sessionId, scope, owner, journal = journal, transcripts = transcripts, workspaceId = workspaceId, approvalAccount = approvalAccount)
+        return SessionReader(this, deviceId, runtimeId, sessionId, scope, owner, journal = journal, transcripts = transcripts, workspaceId = workspaceId, approvalAccount = approvalAccount, exportJournal = exportJournal)
     }
     internal suspend fun submitApproval(connection: String, intent: ApprovalDecisionIntent, owner: LocalDataOwner, current: () -> Unit): ApprovalAdmission = mutex.withLock {
         Contract.uuid(connection)
@@ -251,6 +255,44 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         val file = fileStatusResponse(read("/v1/files/${Contract.uuid(id)}"))
         if (file.id != id) throw ProtocolException()
         file
+    }
+    suspend fun exportStatus(id: String): RemoteExportStatus = mutex.withLock {
+        exportResponse(read("/v1/files/${Contract.uuid(id)}")).also { if (it.id != id) throw ProtocolException() }
+    }
+    suspend fun exportRequestStatus(id: String): RemoteExportStatus = mutex.withLock {
+        exportResponse(read("/v1/file-exports/${Contract.uuid(id)}"))
+    }
+    /** The sink must remain private until this method returns successfully. */
+    suspend fun downloadExport(expected: RemoteExportStatus, destination: () -> OutputStream, current: () -> Unit = {}, progress: (Long) -> Unit = {}) {
+        val fresh = exportStatus(expected.id)
+        if (fresh.runtimeId != expected.runtimeId || fresh.sessionId != expected.sessionId || !fresh.manifest.same(expected.manifest)) throw RemoteRequestException("file.integrity_mismatch")
+        if (!fresh.downloadable()) throw RemoteRequestException("file.state_changed")
+        val url = (config.remoteOrigin + "/v1/files/${fresh.id}/content").toHttpUrl()
+        var challengeNonce: String? = null
+        repeat(2) { attempt ->
+            val request = mutex.withLock {
+                currentCoroutineContext().ensureActive(); current()
+                val access = session.accessTokenForRequest(System.currentTimeMillis())
+                val proof = DeviceProofs.dpop(signer, "GET", url.toString(), System.currentTimeMillis(), challengeNonce ?: nonce, access)
+                nonce = null
+                Request.Builder().url(url).header("Authorization", "DPoP $access").header("DPoP", proof.compact)
+                    .header("Accept", "application/octet-stream").header("Accept-Encoding", "identity").header("Cache-Control", "no-store").build()
+            }
+            val reply = http.download(request, fresh, destination, { session.accessTokenForRequest(System.currentTimeMillis()); current() }, progress) ?: return
+            challengeNonce = reply.nonce()
+            mutex.withLock { if (challengeNonce != null) nonce = challengeNonce }
+            val challenge = reply.status == 401 && reply.headers.values("WWW-Authenticate").any { it == "DPoP error=\"use_dpop_nonce\"" }
+            if (attempt == 0 && challenge && challengeNonce != null) return@repeat
+            http.checked(reply)
+            throw RemoteRequestException("network.invalid_response")
+        }
+        throw RemoteRequestException("auth.proof_invalid")
+    }
+    private fun exportResponse(bytes: ByteArray): RemoteExportStatus {
+        val root = JsonDocument.parse(bytes).root; root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+        val data = root.obj("data"); data.exactKeys("file")
+        return RemoteExportStatus.parse(data.obj("file"))
     }
     suspend fun fileUploadURL(expected: RemoteFileStatus): PreparedFileUpload = mutex.withLock {
         preparedFile(request("POST", "/v1/files/${expected.id}/upload-url", jsonObject()), expected.runtimeId, expected.sessionId, expected.manifest).also {
@@ -341,7 +383,7 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     suspend fun sessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
-        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide") } ||
+        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide", "file.download") } ||
             scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel", "question.answer") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
         issueSessionTicket(runtimeId, deviceId, scope)
     }

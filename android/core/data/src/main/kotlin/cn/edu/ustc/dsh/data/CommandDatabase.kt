@@ -30,7 +30,21 @@ internal data class CachedRecordRow(val runtimeId: String, val sessionId: String
 internal data class FileUploadRow(@PrimaryKey val requestId: String, val runtimeId: String, val sessionId: String, val workspaceId: String?, val intent: ByteArray,
     val digest: String, val fileId: String?, val messageId: String?, val createdAt: Long, val updatedAt: Long)
 
+@Entity(tableName = "file_exports", indices = [Index(value = ["fileId"], unique = true), Index(value = ["runtimeId", "sessionId", "createdAt"])])
+internal data class FileExportRow(@PrimaryKey val requestId: String, val runtimeId: String, val sessionId: String, val workspaceId: String?, val origin: String,
+    val intent: ByteArray, val digest: String, val fileId: String?, val manifest: ByteArray?, val createdAt: Long, val updatedAt: Long)
+
 @Dao internal interface CommandDao {
+    @Query("SELECT * FROM file_exports WHERE requestId=:id") fun export(id: String): FileExportRow?
+    @Query("SELECT * FROM file_exports WHERE fileId=:id") fun exportByFile(id: String): FileExportRow?
+    @Query("SELECT * FROM file_exports WHERE runtimeId=:runtime AND sessionId=:session ORDER BY createdAt,requestId") fun exports(runtime: String, session: String): List<FileExportRow>
+    @Query("SELECT COUNT(*) FROM file_exports") fun exportCount(): Int
+    @Query("SELECT DISTINCT runtimeId FROM file_exports") fun exportRuntimes(): List<String>
+    @Query("DELETE FROM file_exports WHERE runtimeId=:runtime") fun revokeExports(runtime: String)
+    @Query("DELETE FROM file_exports WHERE runtimeId=:runtime AND ((origin='workspace_artifact' AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))) OR (origin='session_attachment' AND sessionId NOT IN (:sessions) AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))))") fun restrictExports(runtime: String, sessions: List<String>, workspaces: List<String>)
+    @Query("DELETE FROM file_exports WHERE requestId=:id") fun deleteExport(id: String)
+    @Insert fun insertExport(row: FileExportRow)
+    @Update fun updateExport(row: FileExportRow): Int
     @Query("SELECT * FROM file_uploads WHERE requestId=:id") fun upload(id: String): FileUploadRow?
     @Query("SELECT * FROM file_uploads WHERE fileId=:id") fun uploadByFile(id: String): FileUploadRow?
     @Query("SELECT * FROM file_uploads WHERE runtimeId=:runtime AND sessionId=:session ORDER BY createdAt,requestId") fun uploads(runtime: String, session: String): List<FileUploadRow>
@@ -84,5 +98,5 @@ internal data class FileUploadRow(@PrimaryKey val requestId: String, val runtime
     @Query("DELETE FROM cached_sessions WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))") fun restrictCache(runtime: String, sessions: List<String>, workspaces: List<String>)
 }
 
-@Database(entities = [DatabaseIdentity::class, CommandRow::class, ApprovalDecisionRow::class, CachedSessionRow::class, CachedRecordRow::class, FileUploadRow::class], version = 5, exportSchema = true)
+@Database(entities = [DatabaseIdentity::class, CommandRow::class, ApprovalDecisionRow::class, CachedSessionRow::class, CachedRecordRow::class, FileUploadRow::class, FileExportRow::class], version = 6, exportSchema = true)
 internal abstract class CommandDatabase : RoomDatabase() { abstract fun commands(): CommandDao }

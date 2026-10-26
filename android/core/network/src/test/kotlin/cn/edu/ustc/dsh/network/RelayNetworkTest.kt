@@ -273,6 +273,7 @@ class RelayNetworkTest {
         var onCommand: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected command") }
         var onClaim: (WebSocket,JsonObject)->Unit={_,_->error("unexpected claim")}
         var onApproval: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected approval") }
+        var onExport: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected export") }
         var offline = false
         fun receive(socket: WebSocket, frame: JsonObject) {
             this.socket = socket
@@ -295,6 +296,7 @@ class RelayNetworkTest {
                 "message.submit", "session.cancel", "session.archive", "question.answer","question.timed.answer" -> onCommand(socket, frame)
                 "question.claim","question.release"->onClaim(socket,frame)
                 "approval.subscribe", "approval.status.get", "approval.details.get" -> onApproval(socket, frame)
+                "file.exports.list", "file.export.request", "file.export.cancel" -> onExport(socket, frame)
                 else -> error("unexpected client frame")
             }
         }
@@ -369,6 +371,106 @@ class RelayNetworkTest {
             }
         }
         fun reader(owner: CoroutineScope, transcripts: TranscriptCache? = null) = api().chatReader(device, runtime, sessionId, granted, journal, owner, transcripts = transcripts)
+    }
+
+    private inner class ExportPeer(private val advertise: Boolean = true) {
+        val granted = RelayScope(listOf("session.read", "file.download"), emptyList(), listOf(sessionId))
+        val commands = MemoryCommandJournal(CommandOwner(UUID.randomUUID().toString(), config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device))
+        val journal = MemoryFileExportJournal(commands.owner)
+        val feed = ReadPeer(listOf(user(0, "opening")), 0)
+        val selections = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val restores = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val source = UUID.randomUUID().toString()
+        val file = UUID.randomUUID().toString()
+        var loseAdmission = false
+        var dishonestManifest = false
+        val epoch = commands.owner.userId
+        fun metadata() = jsonObject("file_id" to file.json(), "runtime_id" to runtime.json(), "session_id" to sessionId.json(), "direction" to "from_host".json(),
+            "name" to "PRIVATE_export.txt".json(), "size_bytes" to 3L.json(), "sha256" to "a".repeat(64).json(), "state" to "scanning".json(),
+            "created_at" to time(-1000), "upload_expires_at" to time(120_000), "expires_at" to time(3_600_000))
+        init {
+            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", FILE_EXPORT_CAPABILITY)
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
+                        "user_id" to commands.owner.userId.json(), "memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json())))))
+                    request.path == "/v1/realtime/tickets" -> bindingReply(jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))
+                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.filter { advertise || it != FILE_EXPORT_CAPABILITY }.map(String::json)))), expectedCapabilities = capabilities, onContent = feed::receive)
+                    request.path!!.startsWith("/v1/file-exports/") || request.path == "/v1/files/$file" -> {
+                        assertEquals("GET", request.method); restores += request.path!!
+                        if (dishonestManifest) bindingReply(jsonObject("file" to metadata().with("sha256" to "b".repeat(64).json()))) else bindingReply(jsonObject("file" to metadata()))
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            feed.onExport = { socket, frame ->
+                frame.exactKeys("v", "type", "request_id", "runtime_id", "runtime_epoch", "session_id", "payload")
+                assertEquals(epoch, frame.string("runtime_epoch"))
+                val payload = when (frame.string("type")) {
+                    "file.exports.list" -> jsonObject("items" to JsonArray(listOf(jsonObject("source_id" to source.json(), "kind" to "file".json(), "origin" to "session_attachment".json(),
+                        "name" to "PRIVATE_export.txt".json(), "size_bytes" to 3L.json(), "expires_at" to time(120_000)))), "directory_id" to JsonNull, "cursor" to JsonNull)
+                    "file.export.request" -> {
+                        val id = frame.string("request_id")
+                        assertEquals(source, frame.obj("payload").string("source_id")); assertEquals(id, runBlocking { journal.exports(runtime, sessionId) }.single().intent.requestId)
+                        selections += id
+                        if (loseAdmission) null else jsonObject("file" to metadata())
+                    }
+                    else -> null
+                }
+                payload?.let { socket.send(JsonDocument.of(frame.with("type" to (if (frame.string("type") == "file.exports.list") "file.exports.result" else "file.export.accepted").json(), "payload" to it)).canonicalText()) }
+            }
+        }
+        fun reader(owner: CoroutineScope) = api().chatReader(device, runtime, sessionId, granted, commands, owner, exportJournal = journal)
+    }
+    @Test fun exportsShareTheSessionReceiverAndPersistBeforeDispatchThenRecoverWithoutReadmission(): Unit = runBlocking {
+        val fixture = ExportPeer()
+        lateinit var oldSource: ExportSource
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }; val exports = reader.exports!!
+            withTimeout(3000) { exports.state.first { it.connected } }
+            exports.browse()
+            oldSource = withTimeout(3000) { exports.state.first { it.page != null } }.page!!.items.single()
+            exports.request(oldSource)
+            withTimeout(5000) { exports.state.first { !it.preparing && it.rows.singleOrNull()?.stored?.fileId == fixture.file } }
+            assertEquals(1, fixture.selections.size)
+            fixture.feed.start(); fixture.feed.chunk()
+            withTimeout(3000) { reader.state.first { it.window?.items?.any { item -> item.blocks.any { it.text?.contains("streamed text") == true } } == true } }
+        }
+        fixture.reader(this).use { reopened ->
+            reopened.await { it.phase == SessionReadPhase.READY }; val exports = reopened.exports!!
+            withTimeout(3000) { exports.state.first { it.connected && it.rows.singleOrNull()?.stored?.fileId == fixture.file } }
+            exports.request(oldSource)
+            delay(150); assertEquals(1, fixture.selections.size); assertNull(exports.state.value.page)
+            fixture.dishonestManifest = true; exports.query()
+            withTimeout(3000) { exports.state.first { it.rows.singleOrNull()?.error == "file.request_conflict" } }
+            assertEquals("a".repeat(64), fixture.journal.exports(runtime, sessionId).single().manifest!!.sha256)
+        }
+    }
+    @Test fun lostExportAdmissionReopensByOriginalRequestAndStorageFailureNeverDispatches(): Unit = runBlocking {
+        val fixture = ExportPeer(); fixture.loseAdmission = true
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }; val exports = reader.exports!!
+            withTimeout(3000) { exports.state.first { it.connected } }; exports.browse()
+            val source = withTimeout(3000) { exports.state.first { it.page != null } }.page!!.items.single()
+            fixture.journal.failCreate = true; exports.request(source)
+            withTimeout(3000) { exports.state.first { !it.preparing && it.error == "data.unavailable" } }
+            assertTrue(fixture.selections.isEmpty())
+            fixture.journal.failCreate = false; exports.request(source)
+            withTimeout(3000) { while (fixture.selections.isEmpty()) delay(10) }
+        }
+        val original = fixture.journal.exports(runtime, sessionId).single().intent.requestId
+        fixture.reader(this).use { reopened ->
+            reopened.await { it.phase == SessionReadPhase.READY }
+            withTimeout(5000) { reopened.exports!!.state.first { it.rows.singleOrNull()?.stored?.fileId == fixture.file } }
+            assertTrue(fixture.restores.contains("/v1/file-exports/$original")); assertEquals(listOf(original), fixture.selections)
+        }
+    }
+    @Test fun unnegotiatedExportCapabilityCannotStartBrowsing(): Unit = runBlocking {
+        val fixture = ExportPeer(advertise = false)
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }; val exports = reader.exports!!; exports.browse(); delay(150)
+            assertFalse(exports.state.value.connected); assertNull(exports.state.value.page); assertTrue(fixture.selections.isEmpty())
+        }
     }
     private inner class ApprovalPeer(large: Boolean = false, workspaceScope: Boolean = false) {
         val owner = CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device)

@@ -31,6 +31,7 @@ class RealtimeSessionTicket internal constructor(
                 if ("session.read" in scope.actions) capabilities += listOf("session.read.v1","question.blocking.v1","question.timed.v1")
                 if (scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel", "session.create", "question.answer") }) capabilities += "command.relay.v1"
                 if ("message.submit" in scope.actions) capabilities += FILE_MESSAGE_CAPABILITY
+                if ("file.download" in scope.actions) capabilities += FILE_EXPORT_CAPABILITY
                 if ("session.archive" in scope.actions) capabilities += "session.archive.v1"
                 if ("session.cancel" in scope.actions) capabilities += "session.cancel.v1"
                 if ("session.create" in scope.actions) capabilities += listOf("session.create.v1", "session.create_options.v1")

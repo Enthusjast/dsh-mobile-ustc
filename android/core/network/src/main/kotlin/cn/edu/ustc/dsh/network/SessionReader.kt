@@ -28,11 +28,12 @@ class SessionReader internal constructor(
     private val api: RemoteApi, private val deviceId: String, private val runtimeId: String, private val sessionId: String,
     private val readScope: RelayScope, owner: CoroutineScope, private val options: SessionReaderOptions = SessionReaderOptions(), private val journal: CommandJournal? = null,
     private val transcripts: TranscriptCache? = null, private val workspaceId: String? = null,
-    approvalAccount: SessionApprovalAccount? = null,
+    approvalAccount: SessionApprovalAccount? = null, exportJournal: FileExportJournal? = null,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob(owner.coroutineContext[Job]) + Dispatchers.Default)
     val commands: SessionCommands?
     val approvals: SessionApprovalClient? = approvalAccount?.let { SessionApprovalClient(api, it, runtimeId, sessionId, scope) }
+    val exports: SessionExports? = exportJournal?.let { SessionExports(api, it, runtimeId, sessionId, workspaceId, readScope, scope) }
     private val mutable = MutableStateFlow(SessionReadState(SessionReadPhase.CONNECTING))
     val state: StateFlow<SessionReadState> = mutable.asStateFlow()
     private val connection = AtomicReference<SessionRelayConnection?>()
@@ -60,8 +61,9 @@ class SessionReader internal constructor(
         listOf(deviceId, runtimeId, sessionId).forEach(Contract::uuid)
         workspaceId?.let(Contract::uuid)
         if (transcripts != null && (transcripts.owner.deviceId != deviceId || journal != null && transcripts.owner.fingerprint != journal.owner.fingerprint)) throw ProtocolException()
-        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide") } || journal == null && readScope.actions != setOf("session.read") ||
+        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide", "file.download") } || journal == null && readScope.actions != setOf("session.read") ||
             (approvalAccount != null) != ("approval.decide" in readScope.actions) || approvalAccount != null && approvalAccount.journal.owner.fingerprint != journal?.owner?.fingerprint) throw ProtocolException()
+        if ((exportJournal != null) != ("file.download" in readScope.actions) || exportJournal != null && exportJournal.owner.fingerprint != journal?.owner?.fingerprint) throw ProtocolException()
         commands = journal?.let { SessionCommands(api, it, runtimeId, sessionId, readScope, scope) }
         scope.coroutineContext[Job]!!.invokeOnCompletion { close() }
         scope.launch {
@@ -204,7 +206,7 @@ class SessionReader internal constructor(
                     } catch (error: CancellationException) { throw error }
                     catch (_: Exception) { cacheProblem.set("data.cache_unavailable") }
                 }
-                try { consume(connected, deadline, until, cacheUntil != null) } finally { approvals?.disconnected(); commands?.disconnected(); connection.compareAndSet(connected, null); connected.close() }
+                try { consume(connected, deadline, until, cacheUntil != null) } finally { exports?.disconnected(); approvals?.disconnected(); commands?.disconnected(); connection.compareAndSet(connected, null); connected.close() }
             } catch (error: CancellationException) { throw error }
             catch (_: RetryRead) { failures = 0; resyncs = 0 }
             catch (error: Stop) {
@@ -241,7 +243,7 @@ class SessionReader internal constructor(
                 } else { mutable.value = cachedState(SessionReadPhase.BACKOFF, error.code); pause(options.backoffMillis(failures++)) }
             } catch (_: Exception) {
                 mutable.value = cachedState(SessionReadPhase.ERROR, "network.unavailable"); pause(null)
-            } finally { approvals?.disconnected(); connection.getAndSet(null)?.close(); while (pages.tryReceive().isSuccess) { /* Retire old-generation page intents. */ } }
+            } finally { exports?.disconnected(); approvals?.disconnected(); connection.getAndSet(null)?.close(); while (pages.tryReceive().isSuccess) { /* Retire old-generation page intents. */ } }
         }
     }
 
@@ -282,6 +284,7 @@ class SessionReader internal constructor(
             }
             installQuestionEndpoint(QuestionEndpoint(connected,route!!,questions!!,lock,lifetime))
             approvals?.contentReady(route!!, window.syncId!!)
+            exports?.ready(connected, route!!.epoch)
             if (allowOfflineCache) lease(connected, leaseDeadline, cacheUntil)
             val durable = window.snapshot(durableOnly = true)
             if (durable.durableOnly) {
@@ -376,6 +379,10 @@ class SessionReader internal constructor(
                 } ?: continue
                 val type = frame.string("type")
                 when (type) {
+                    "file.exports.result", "file.export.accepted", "file.export.error" -> {
+                        if (FILE_EXPORT_CAPABILITY !in connected.identity.capabilities || exports == null) throw ProtocolException()
+                        exports.accept(frame)
+                    }
                     "approval.snapshot", "approval.reference", "approval.details", "approval.fragment", "approval.error" -> {
                         if (SIGNED_APPROVAL_CAPABILITY !in connected.identity.capabilities || approvals == null) throw ProtocolException()
                         try { approvals.accept(frame) } catch (_: ApprovalStateException) { throw SessionDataException("protocol.resync_required") }
@@ -424,6 +431,7 @@ class SessionReader internal constructor(
                         val payload = frame.obj("payload"); payload.exactKeys("code")
                         val code = payload.string("code")
                         if (code !in setOf("access.revoked", "device.invalid", "auth.expired", "auth.proof_invalid")) {
+                            if (exports?.error(frame, code) == true) return@withLock
                             try { if (approvals?.error(frame, code) == true) return@withLock }
                             catch (_: ApprovalStateException) { throw SessionDataException("protocol.resync_required") }
                         }
@@ -449,7 +457,7 @@ class SessionReader internal constructor(
                                     // absent. Keep heartbeat/control delivery so a
                                     // revoked cached view can be cleared promptly.
                                     offline = true; dirty = false; commands?.disconnected();questionEndpoint.set(null)
-                                    approvals?.contentOffline()
+                                    approvals?.contentOffline(); exports?.disconnected()
                                     pageId?.let(window::pageFailed); pageId = null; pageDeadline = Long.MAX_VALUE
                                     mutable.value = cachedState(SessionReadPhase.OFFLINE, code)
                                 }
@@ -492,6 +500,7 @@ class SessionReader internal constructor(
         if (closed.compareAndSet(false, true)) {
             commands?.close()
             approvals?.close()
+            exports?.close()
             questionEndpoint.set(null)
             scope.cancel(); connection.getAndSet(null)?.close(); pages.cancel(); retries.cancel(); cacheWrites.cancel(); cache.set(null); mutable.value = SessionReadState(SessionReadPhase.CLOSED)
         }

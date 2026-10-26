@@ -262,4 +262,48 @@ class FileUploadsTest {
         }
         failure.get()?.let { throw AssertionError("workflow fixture failed", it) }
     }
+    private fun exportStatus() = status("clean").with("direction" to "from_host".json())
+    private fun binary(value: ByteArray = bytes) = MockResponse().setHeader("Content-Type", "application/octet-stream").setHeader("Content-Encoding", "identity")
+        .setHeader("X-DSH-Content-SHA256", manifest.sha256).setBody(okio.Buffer().write(value))
+    @Test fun exportDownloadUsesCurrentMetadataAndFreshDpopNonceBeforeOpeningPrivateStaging(): Unit = runBlocking {
+        val api = api(); val file = RemoteExportStatus.parse(exportStatus())
+        service.enqueue(reply(jsonObject("file" to exportStatus())))
+        service.enqueue(MockResponse().setResponseCode(401).setHeader("Content-Type", "application/json").setHeader("DPoP-Nonce", "export-download-nonce")
+            .setHeader("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\"").setBody("{\"ok\":false,\"error\":{\"code\":\"auth.proof_invalid\"}}"))
+        service.enqueue(binary())
+        val out = java.io.ByteArrayOutputStream(); var opened = 0
+        api.downloadExport(file, { opened++; out })
+        assertEquals(1, opened); assertArrayEquals(bytes, out.toByteArray())
+        val traffic = List(3) { service.takeRequest() }
+        assertEquals(listOf("/v1/files/${file.id}", "/v1/files/${file.id}/content", "/v1/files/${file.id}/content"), traffic.map { it.path })
+        assertTrue(traffic.all { it.method == "GET" && it.getHeader("Authorization")!!.startsWith("DPoP ") })
+        assertEquals("export-download-nonce", proof(traffic.last()).string("nonce"))
+        assertEquals("identity", traffic.last().getHeader("Accept-Encoding")); assertNull(traffic.last().getHeader("Range"))
+        assertNotEquals(proof(traffic[1]).string("jti"), proof(traffic[2]).string("jti"))
+    }
+    @Test fun exportDownloadRejectsChangedIdentityCorruptBytesAndRedirects(): Unit = runBlocking {
+        val api = api(); val file = RemoteExportStatus.parse(exportStatus())
+        val badResponses = listOf(binary("xyz".toByteArray()), binary("ab".toByteArray()), binary().setHeader("X-DSH-Content-SHA256", "b".repeat(64)),
+            binary().setHeader("Content-Encoding", "gzip"), binary().setResponseCode(206), MockResponse().setResponseCode(302).setHeader("Location", objects.url("/private")))
+        for (response in badResponses) {
+            service.enqueue(reply(jsonObject("file" to exportStatus()))); service.enqueue(response)
+            try { api.downloadExport(file, { java.io.ByteArrayOutputStream() }); fail("invalid download accepted") } catch (_: RemoteRequestException) { }
+        }
+        var opened = false
+        service.enqueue(reply(jsonObject("file" to exportStatus().with("session_id" to runtime.json()))))
+        try { api.downloadExport(file, { opened = true; java.io.ByteArrayOutputStream() }); fail("changed target accepted") } catch (_: RemoteRequestException) { }
+        assertFalse(opened); assertEquals(0, objects.requestCount)
+    }
+    @Test fun exportCancellationClosesPrivateStagingAndDoesNotBlockOrdinaryApiReads(): Unit = runBlocking {
+        val api = api(); val file = RemoteExportStatus.parse(exportStatus())
+        service.enqueue(reply(jsonObject("file" to exportStatus()))); service.enqueue(binary().throttleBody(1, 1, TimeUnit.SECONDS))
+        val out = object : java.io.ByteArrayOutputStream() { val closed = AtomicBoolean(); override fun close() { closed.set(true) } }
+        val started = CompletableDeferred<Unit>()
+        val task = launch { api.downloadExport(file, { started.complete(Unit); out }) }
+        withTimeout(3000) { started.await() }
+        service.enqueue(reply(jsonObject("file" to exportStatus())))
+        withTimeout(1500) { assertEquals(file.id, api.exportStatus(file.id).id) }
+        task.cancelAndJoin(); assertTrue(out.closed.get())
+    }
+
 }
