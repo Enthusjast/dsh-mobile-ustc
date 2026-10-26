@@ -65,6 +65,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val appUpdateQueries = AtomicInteger()
     val appUpdateDownloads = AtomicInteger()
     val appUpdateDownloadFailure = AtomicReference<String?>()
+    val appUpdateFlowFailure = AtomicReference<String?>()
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var pushMode = false
     @Volatile var pushCleanupUnavailable = false
@@ -238,7 +239,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         http = LoginHttp::class.java.getDeclaredConstructor(OkHttpClient::class.java).apply { isAccessible = true }.newInstance(transport)
     }
     fun environment(minimumValidity: Long = 0, approvalPromptMillis: Long = MAX_DECISION_AGE_MS, pushProvider: ((NotificationCenter) -> DevicePushProvider)? = null,
-        appUpdateConfiguration: (() -> ByteArray)? = null) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity, approvalPromptMillis = approvalPromptMillis, pushProvider = pushProvider, appUpdateConfiguration = appUpdateConfiguration)
+        appUpdateConfiguration: (() -> ByteArray)? = null) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity, approvalPromptMillis = approvalPromptMillis, pushProvider = pushProvider, appUpdateConfiguration = appUpdateConfiguration,
+            appUpdateDiagnosticFailure = { appUpdateFlowFailure.set(it.stackTraceToString()) })
     private fun discovery() = jsonObject("issuer" to issuer.json(), "authorization_endpoint" to "$origin/authorize".json(),
         "token_endpoint" to "$origin/token".json(), "jwks_uri" to "$origin/jwks".json(),
         "response_types_supported" to JsonArray(listOf("code".json())), "id_token_signing_alg_values_supported" to JsonArray(listOf("ES256".json())))

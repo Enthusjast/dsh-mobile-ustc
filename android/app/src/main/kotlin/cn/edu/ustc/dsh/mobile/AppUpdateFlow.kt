@@ -48,6 +48,7 @@ internal class AppUpdateFlow(
     private val access: AppUpdateAccess, parent: CoroutineScope, private val current: () -> Unit,
     private val authorityFailure: (String) -> Unit = {}, dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val monotonicNanos: () -> Long = System::nanoTime,
+    private val diagnosticFailure: ((Exception) -> Unit)? = null,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob(parent.coroutineContext[Job]) + dispatcher)
     private val id = UUID.randomUUID().toString()
@@ -92,6 +93,7 @@ internal class AppUpdateFlow(
                 throw error
             }
             catch (error: Exception) {
+                diagnosticFailure?.let { runCatching { it(error) } }
                 val stale = error is StaleAction
                 if (!stale) {
                     armed = null; dropCandidate()

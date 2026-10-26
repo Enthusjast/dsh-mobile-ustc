@@ -31,7 +31,7 @@ class AccountAppUpdateTest {
     private fun await(test: () -> Boolean) {
         val end = android.os.SystemClock.elapsedRealtime() + 60_000
         while (android.os.SystemClock.elapsedRealtime() < end) { if (test()) return; Thread.sleep(25) }
-        throw AssertionError("update fixture timed out: ${controller?.state?.value?.phase}; ${controller?.state?.value?.appUpdates}; fixture=${fixture?.failure?.get()}; download=${fixture?.appUpdateDownloadFailure?.get()}")
+        throw AssertionError("update fixture timed out: ${controller?.state?.value?.phase}; ${controller?.state?.value?.appUpdates}; fixture=${fixture?.failure?.get()}; download=${fixture?.appUpdateDownloadFailure?.get()}; flow=${fixture?.appUpdateFlowFailure?.get()}")
     }
     @Before fun setup() {
         val args = InstrumentationRegistry.getArguments()
@@ -120,10 +120,20 @@ class AccountAppUpdateTest {
         assertNull(controller!!.state.value.appUpdates); assertFalse(controller!!.state.value.appUpdateSettings)
     }
     @Test fun aTamperedArchiveCannotReachSessionPreparationEvenWithMatchingMetadataHash(): Unit = runBlocking {
-        candidate("tampered"); available(); main { controller!!.downloadAppUpdate() }
-        await { controller!!.state.value.appUpdates?.let { !it.busy && it.error == "update.apk_invalid" } == true }
-        assertNull(backend.read(fixture!!.slot)); assertEquals(sessions, context.packageManager.packageInstaller.mySessions.map { it.sessionId }.toSet())
-        assertTrue(File(context.cacheDir, "apk-updates").listFiles().isNullOrEmpty())
+        val repeats = InstrumentationRegistry.getArguments().getString("apkTamperRepeat")?.toInt() ?: 1
+        require(repeats in 1..20)
+        candidate("tampered"); available()
+        repeat(repeats) { attempt ->
+            if (attempt != 0) {
+                main { controller!!.checkAppUpdates() }
+                await { controller!!.state.value.appUpdates?.let { !it.busy && it.phase == AppUpdatePhase.AVAILABLE } == true }
+            }
+            main { controller!!.downloadAppUpdate() }
+            await { controller!!.state.value.appUpdates?.let { !it.busy && it.error != null } == true }
+            assertEquals("tampered attempt ${attempt + 1}; ${fixture!!.appUpdateFlowFailure.get()}", "update.apk_invalid", controller!!.state.value.appUpdates!!.error)
+            assertNull(backend.read(fixture!!.slot)); assertEquals(sessions, context.packageManager.packageInstaller.mySessions.map { it.sessionId }.toSet())
+            assertTrue(File(context.cacheDir, "apk-updates").listFiles().isNullOrEmpty())
+        }
     }
     @Test fun aConfirmationEventCannotSurviveABackgroundRoundTripAndOnlyTheOriginalSessionRemains(): Unit = runBlocking {
         prepared(); val server = fixture!!; val before = backend.read(server.slot)!!.record

@@ -28,7 +28,7 @@ internal suspend fun downloadAppBytes(client: OkHttpClient, candidate: PrivateAp
         continuation.invokeOnCancellation { call.cancel(); runCatching { active.getAndSet(null)?.close() }; candidate.close() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (continuation.isActive) continuation.resumeWithException(RemoteRequestException("update.download_failed"))
+                if (continuation.isActive) continuation.resumeWithException(RemoteRequestException("update.download_failed").also { it.initCause(e) })
             }
             override fun onResponse(call: Call, response: Response) {
                 active.set(response)
@@ -63,7 +63,7 @@ internal suspend fun downloadAppBytes(client: OkHttpClient, candidate: PrivateAp
                 } catch (error: Exception) {
                     if (continuation.isActive) continuation.resumeWithException(when (error) {
                         is CancellationException, is RemoteRequestException -> error
-                        else -> RemoteRequestException("update.download_failed")
+                        else -> RemoteRequestException("update.download_failed").also { it.initCause(error) }
                     })
                 } finally { active.set(null) }
             }

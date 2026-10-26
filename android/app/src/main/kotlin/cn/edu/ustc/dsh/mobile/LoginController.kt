@@ -67,6 +67,7 @@ internal class LoginEnvironment(
     val approvalPromptMillis: Long = MAX_DECISION_AGE_MS,
     val pushProvider: ((NotificationCenter) -> DevicePushProvider)? = null,
     val appUpdateConfiguration: (() -> ByteArray)? = null,
+    val appUpdateDiagnosticFailure: ((Exception) -> Unit)? = null,
 ) { init { require(approvalPromptMillis in 1..MAX_DECISION_AGE_MS) } }
 
 @Singleton
@@ -1178,7 +1179,7 @@ class LoginController internal constructor(private val context: Context, private
                 if (generation == stamp && navigationGeneration == view && mutable.value.phase == HomePhase.READY) {
                     if (code in setOf("auth.expired", "auth.proof_invalid", "auth.reauthentication_required")) renew() else refresh()
                 }
-            })
+            }, diagnosticFailure = environment.appUpdateDiagnosticFailure)
         appUpdateFlow = opened
         mutable.value = mutable.value.copy(appUpdates = opened.state.value)
         appUpdateCollector = scope.launch {
