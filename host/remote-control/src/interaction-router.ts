@@ -8,16 +8,18 @@ import { mobileSessionId } from './dsh-client.js'
 import { ProbeError } from './protocol.js'
 import { questionItem, type BlockingQuestion, type QuestionSnapshot, type QuestionSource } from './questions.js'
 import { TimedQuestions } from './timed-questions.js'
+import type { LocalQuestionReference, QuestionReferenceSource } from './question-reference-protocol.js'
 
 type Answer = { decision: 'allow_once' | 'reject' } | AskUserQuestionAnswer
 interface Pending {
+  nativeSessionId: string
   view: { interaction_id: string; session_id: string; kind: 'approval' | 'question'; expires_at: string; detail: unknown }
   finish(answer?: Answer): void
   question?: BlockingQuestion
 }
 
 /** M0 local human answerer, without mobile identity or production signing claims. */
-export class InteractionRouter implements QuestionSource {
+export class InteractionRouter implements QuestionSource, QuestionReferenceSource {
   readonly timed: TimedQuestions
   private readonly pending = new Map<string, Pending>()
   private readonly executions = new Map<string, ToolExecution>()
@@ -26,6 +28,7 @@ export class InteractionRouter implements QuestionSource {
   private revision = 0
   private questionBytes = 0
   private readonly questionListeners = new Map<string, Set<() => void>>()
+  private readonly referenceListeners = new Set<() => void>()
 
   constructor(
     private readonly ctx: Context,
@@ -115,6 +118,7 @@ export class InteractionRouter implements QuestionSource {
         if (question) this.changed(sessionId)
       }
       this.pending.set(id, {
+        nativeSessionId: agent.id,
         view: { interaction_id: id, session_id: sessionId, kind, expires_at: expiresAt, detail },
         finish, ...(question ? { question } : {}),
       })
@@ -155,6 +159,22 @@ export class InteractionRouter implements QuestionSource {
   private changed(sessionId: string): void {
     this.revision++
     for (const listener of this.questionListeners.get(sessionId) ?? []) listener()
+    for (const listener of this.referenceListeners) listener()
+  }
+
+  references(): LocalQuestionReference[] {
+    const ordinary: LocalQuestionReference[] = [...this.pending.values()].filter(item => item.question && Date.parse(item.view.expires_at) > Date.now()).map(item => ({
+      nativeSessionId: item.nativeSessionId,
+      reference: { question_id: item.view.interaction_id, session_id: item.view.session_id, kind: 'question' as const,
+        state: 'pending' as const, expires_at: item.view.expires_at },
+    }))
+    return ordinary.concat(this.timed.references())
+  }
+
+  watchReferences(changed: () => void): () => void {
+    this.referenceListeners.add(changed)
+    const stopTimed = this.timed.watchReferences(changed)
+    return () => { this.referenceListeners.delete(changed); stopTimed() }
   }
 
   answerQuestion(sessionId: string, id: string, answer: AskUserQuestionAnswer) {
@@ -197,5 +217,6 @@ export class InteractionRouter implements QuestionSource {
     this.approved.clear()
     this.executions.clear()
     this.questionListeners.clear()
+    this.referenceListeners.clear()
   }
 }

@@ -99,8 +99,10 @@ test('a real timed question tool continues once and its late reply becomes one n
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
     }
     await h.client.prompt(h.agent.id, randomUUID(), 'queue', 'Ask the timed fixture question', lifetime.signal)
-    const opened = await until(() => h.interactions.timed.snapshot(h.sessionId).items.find(item => item.state === 'open'))
-    const continued = await until(() => h.interactions.timed.snapshot(h.sessionId).items.find(item => item.state === 'continued'))
+    // Background metadata observation must not subscribe, claim or extend the native wait.
+    const opened = await until(() => h.interactions.references().map(item => item.reference).find(item => item.state === 'pending'))
+    assert.equal(opened.expires_at, null)
+    const continued = await until(() => h.interactions.references().map(item => item.reference).find(item => item.state === 'continued'))
     assert.equal(continued.question_id, opened.question_id, 'native timeout changed the question identity')
     await held.started
     const before = h.agent.session.snapshotEvents().filter(event => event.type === 'tool/result' && event.data.message.toolCallId === callId)
@@ -108,7 +110,7 @@ test('a real timed question tool continues once and its late reply becomes one n
     assert.ok(JSON.stringify(before).includes('"pending":true') || JSON.stringify(before).includes('\\"pending\\":true'))
     h.interactions.close()
     reloaded = new InteractionRouter(h.ctx, h.runtimeId, candidate => candidate === h.agent, [], 2000)
-    const restored = reloaded.timed.snapshot(h.sessionId).items[0]!
+    const restored = reloaded.references()[0]!.reference
     assert.equal(restored.state, 'continued')
     assert.notEqual(restored.question_id, continued.question_id, 'reload reused an old callback identity')
     const answer = { answers: [{ id: 'plan', selected: ['Continue'], custom: 'late fixture reply' }] }

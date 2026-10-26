@@ -13,6 +13,7 @@ import { createServer, request } from 'node:http'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { PersistentCommandJournal } from '../src/command-journal.js'
 import { hostHelloDigest, relayPayloadDigest } from '../src/relay-client.js'
+import { questionReferencesFrame } from '../src/question-reference-protocol.js'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 
 const WebSocketServer = createRequire(import.meta.url)('ws').WebSocketServer as new (options: object) => any
@@ -123,6 +124,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
   let relayFailure: Error | undefined
   const relayReceipts: any[] = []
   const relaySessionFrames: any[] = []
+  const relayQuestionReferences: ReturnType<typeof questionReferencesFrame.parse>[] = []
   let relayCatalog: any[] = []
   let relayCreationOptions: any
   const relayCatalogSnapshots = new Map<string, any[]>()
@@ -152,7 +154,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           const proof = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'))
           const signingInput = Buffer.from(`${headerPart}.${payloadPart}`)
           relayRuntimeEpoch = proof.runtime_epoch
-          const expectedCapabilities=['command.relay.v1', 'connection.heartbeat.v1', 'file.handoff.v1', 'message.files.reconcile.v1', 'message.files.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1']
+          const expectedCapabilities=['command.relay.v1', 'connection.heartbeat.v1', 'file.handoff.v1', 'message.files.reconcile.v1', 'message.files.v1', 'question.blocking.v1', 'question.references.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1']
           if(exportSupported)expectedCapabilities.push('file.export.v1')
           expectedCapabilities.sort()
           assert.deepEqual([...frame.payload.capabilities].sort(),expectedCapabilities)
@@ -170,10 +172,14 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.references.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
           } }))
           resolveRelayConnected()
+        } else if(frame.type === 'question.references') {
+          const metadata = questionReferencesFrame.parse(frame)
+          relayQuestionReferences.push(metadata)
+          socket.send(JSON.stringify({ ...metadata, type: 'question.references.ack', payload: { sequence: metadata.payload.sequence, item_count: metadata.payload.items.length } }))
         } else if(frame.type === 'session.create.options') {
           assert.equal(relayValidator(frame),true,JSON.stringify(relayValidator.errors))
           assert.equal(frame.runtime_epoch,relayRuntimeEpoch)
@@ -457,6 +463,12 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     const question = await waitForInteraction(command)
     assert.equal(question.kind, 'question')
     assert.equal(question.detail.questions[0].id, 'm0-choice')
+    const referenceDeadline=Date.now()+5000
+    while(!relayQuestionReferences.some(frame=>frame.payload.items.some(item=>item.question_id===question.interaction_id)) && Date.now()<referenceDeadline) await new Promise(resolve=>setTimeout(resolve,10))
+    const reference=relayQuestionReferences.find(frame=>frame.payload.items.some(item=>item.question_id===question.interaction_id))
+    assert.ok(reference,'ordinary question was not published independently of the closed WSS subscription')
+    assert.equal(reference.payload.items.find(item=>item.question_id===question.interaction_id)!.session_id,sessionId)
+    assert.ok(!JSON.stringify(reference).includes(question.detail.questions[0].question))
     await command('interaction.answer', { interaction_id: question.interaction_id, answer: {
       answers: [{ id: 'm0-choice', selected: ['Local answer'] }],
     } })

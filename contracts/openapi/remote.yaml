@@ -929,7 +929,7 @@ components:
             sources:
               type: array
               uniqueItems: true
-              items: { enum: [approval] }
+              items: { enum: [approval, question, timed_question] }
             verification: { const: provider_challenge }
             lease_seconds: { const: 604800 }
     PushBindingResponse:

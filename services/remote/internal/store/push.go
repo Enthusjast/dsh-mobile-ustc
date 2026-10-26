@@ -356,7 +356,7 @@ func (store *PushStore) Revoke(ctx context.Context, id, secret string) error {
 }
 
 func (store *PushStore) Capabilities() map[string]any {
-	sources := []string{}
+	sources := []string{"question", "timed_question"}
 	if store.approvals != nil {
 		sources = append(sources, "approval")
 	}

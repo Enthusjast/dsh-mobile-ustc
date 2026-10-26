@@ -57,6 +57,32 @@ func (store *PushStore) Plan(ctx context.Context) error {
 		}
 	}
 	// Fixed retention for transport metadata; interaction/control records keep their own policy.
+	_, err = tx.ExecContext(ctx, `insert into push_deliveries(binding_id,kind,source_id,runtime_id,runtime_epoch,session_id,grant_version,expires_at)
+	 select b.id,q.kind,q.id,q.runtime_id,q.runtime_epoch,q.session_id,g.grant_version,
+	 case when q.kind='question' then least(q.expires_at,clock_timestamp()+interval '10 minutes') else clock_timestamp()+interval '10 minutes' end
+	 from question_references q join sessions s on s.id=q.session_id and s.runtime_id=q.runtime_id and s.state not in ('archived','unavailable')
+	 join runtimes r on r.id=q.runtime_id and r.revoked_at is null and r.epoch=q.runtime_epoch and r.connection_id=q.connection_id
+	 and r.last_seen_at>clock_timestamp()-interval '45 seconds' and `+runtimeEnrollmentApprovedSQL+`
+	 join question_reference_feeds f on f.runtime_id=r.id and f.runtime_epoch=q.runtime_epoch and f.connection_id=q.connection_id
+	 and f.key_version=r.connection_key_version and f.updated_at<=clock_timestamp() and f.lease_until>clock_timestamp()
+	 join installations i on i.id=r.installation_id and i.revoked_at is null
+	 join hosts h on h.id=i.host_id and h.state='active'
+	 join runtime_grants g on g.runtime_id=r.id and g.role in ('owner','operator') and g.revoked_at is null and (g.expires_at is null or g.expires_at>clock_timestamp())
+	 join push_bindings b on b.org_id=h.org_id and b.user_id=g.user_id and b.provider_project=$1 and b.state='active' and b.expires_at>clock_timestamp()
+	 join devices d on d.id=b.device_id and d.user_id=b.user_id and d.revoked_at is null and d.key_version=b.device_key_version and d.proof_key_thumbprint=b.proof_key_jkt
+	 join users u on u.id=b.user_id and u.status='active' and u.issuer=$2
+	 join org_memberships m on m.user_id=u.id and m.org_id=h.org_id
+	 left join push_deliveries previous on previous.binding_id=b.id and previous.kind=q.kind and previous.source_id=q.id
+	 where q.state in ('pending','continued') and (q.expires_at is null or q.expires_at>clock_timestamp()+interval '1 second')
+	 and g.scope->'actions' @> '["session.read","question.answer"]'::jsonb
+	 and (g.scope->'workspaces' ? s.workspace_id::text or g.scope->'sessions' ? q.session_id::text)
+	 and (previous.id is null or previous.state='expired' and previous.error_code='authority_changed' and previous.expires_at>clock_timestamp())
+	 order by q.created_at,q.id,b.id limit 128
+	 on conflict(binding_id,kind,source_id) do update set state='queued',grant_version=excluded.grant_version,next_attempt_at=clock_timestamp(),error_code=null,updated_at=clock_timestamp()
+	 where push_deliveries.state='expired' and push_deliveries.error_code='authority_changed' and push_deliveries.expires_at>clock_timestamp()`, store.project, store.issuer)
+	if err != nil {
+		return push.ErrUnavailable
+	}
 	if _, err = tx.ExecContext(ctx, `delete from push_receipts where notification_id in (select id from push_deliveries where expires_at<clock_timestamp()-interval '7 days')`); err != nil {
 		return push.ErrUnavailable
 	}
@@ -158,6 +184,27 @@ func (store *PushStore) work(ctx context.Context, claim push.Claim) (pushWork, e
 			return work, push.ErrUnavailable
 		}
 		if err != nil || status.State != "pending" || status.RuntimeEpoch != work.epoch || status.SessionID != work.session {
+			return work, push.ErrAccess
+		}
+	} else if (claim.Kind == "question" || claim.Kind == "timed_question") && b.State == "active" {
+		scope, version, err := store.questionGrant(ctx, b, work.runtime)
+		if err != nil {
+			return work, err
+		}
+		if version != work.grant {
+			return work, push.ErrAccess
+		}
+		status, err := store.database.AuthorizeQuestionReference(ctx, TicketRedemption{UserID: b.User, DeviceID: b.Device, DeviceKeyVersion: b.KeyVersion, ProofKeyThumbprint: b.JKT, RuntimeID: work.runtime, GrantVersion: version, Scope: scope}, work.source)
+		if errors.Is(err, ErrDatabaseUnavailable) {
+			return work, push.ErrUnavailable
+		}
+		if err != nil || status.Kind != claim.Kind || status.SessionID != work.session || status.RuntimeEpoch != work.epoch {
+			return work, push.ErrAccess
+		}
+		if status.Availability == "state_unavailable" {
+			return work, push.ErrUnavailable
+		}
+		if status.Availability != "online" || status.State != "pending" && status.State != "continued" {
 			return work, push.ErrAccess
 		}
 	} else {

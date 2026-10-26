@@ -13,6 +13,7 @@ import { RelayApprovals } from './relay-approvals.js'
 import { RelayFiles } from './relay-files.js'
 import { RelayExports } from './relay-exports.js'
 import { PinnedExportSource } from './file-export-source.js'
+import { RelayQuestionReferences } from './relay-question-references.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
 
@@ -93,6 +94,7 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
           url: options.relayUrl, runtime, credentials,
           dshVersion: '0.2.1-rc.2', applicationVersion: options.applicationVersion!, pluginVersion: '0.0.1',
           ...(signed ? { approvals: binding => new RelayApprovals(signed!, binding) } : {}),
+          questionReferences: binding => new RelayQuestionReferences(interactions, binding),
           files: binding => new RelayFiles(runtime!.files, binding),
           ...(exportSupported?{exports:binding=>new RelayExports(runtime!.exports,client,epoch,binding)}:{}),
         })

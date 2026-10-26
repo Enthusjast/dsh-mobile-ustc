@@ -49,6 +49,8 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
     '../../../contracts/ws/v1/golden/host-command-receipt.json',
     '../../../contracts/ws/v1/golden/host-session-catalog.json',
     '../../../contracts/ws/v1/golden/host-session-catalog.ack.json',
+    '../../../contracts/push/v1/golden/question-references.json',
+    '../../../contracts/push/v1/golden/question-references-ack.json',
     '../../../contracts/ws/v1/golden/session-subscribe.json',
     '../../../contracts/ws/v1/golden/session-subscribe.forwarded.json',
     '../../../contracts/ws/v1/golden/session-snapshot.json',

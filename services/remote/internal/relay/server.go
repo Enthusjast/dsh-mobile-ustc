@@ -80,32 +80,34 @@ type Server struct {
 	fileHandoffs         *files.Handoffs
 	fileMessages         fileMessageRecorder
 	exports              *exportRouter
+	questionReferences   questionReferenceRepository
 }
 
 type liveConnection struct {
-	conn                 *websocket.Conn
-	closeTransport       func() error
-	peer                 peer
-	connectionID         string
-	runtimeID            string
-	runtimeEpoch         string
-	capabilities         map[string]struct{}
-	sendQueue            chan outboundFrame
-	done                 chan struct{}
-	stopOnce             sync.Once
-	lastHeartbeat        time.Time
-	commandWindowStart   time.Time
-	commandWindowCount   int
-	catalogSnapshotID    string
-	catalogMode          string
-	catalogNextIndex     int
-	catalogBytes         int
-	catalogItems         []store.SessionCatalogItem
-	creationOptions      *sessionCreationOptions
-	creationOptionsBytes int
-	subscriptions        map[string]*sessionSubscription
-	closing              bool // Protected by Server.mu; prevents admission during unregister.
-	filePeer             *filePeer
+	conn                   *websocket.Conn
+	closeTransport         func() error
+	peer                   peer
+	connectionID           string
+	runtimeID              string
+	runtimeEpoch           string
+	capabilities           map[string]struct{}
+	sendQueue              chan outboundFrame
+	done                   chan struct{}
+	stopOnce               sync.Once
+	lastHeartbeat          time.Time
+	lastQuestionReferences time.Time
+	commandWindowStart     time.Time
+	commandWindowCount     int
+	catalogSnapshotID      string
+	catalogMode            string
+	catalogNextIndex       int
+	catalogBytes           int
+	catalogItems           []store.SessionCatalogItem
+	creationOptions        *sessionCreationOptions
+	creationOptionsBytes   int
+	subscriptions          map[string]*sessionSubscription
+	closing                bool // Protected by Server.mu; prevents admission during unregister.
+	filePeer               *filePeer
 }
 
 type outboundFrame struct {
@@ -244,11 +246,15 @@ func New(database Repository, approvalConfigs ...ApprovalConfig) *Server {
 	if len(approvalConfigs) > 0 && approvalConfigs[0].Control != nil && approvalConfigs[0].Leases != nil {
 		server.approvals = newApprovalRouter(server, approvalConfigs[0])
 	}
+	server.questionReferences, _ = database.(questionReferenceRepository)
 	return server
 }
 
 func (server *Server) capabilities() []string {
 	capabilities := append([]string{}, supportedCapabilities...)
+	if server.questionReferences != nil {
+		capabilities = append(capabilities, questionReferencesCapability)
+	}
 	if server.approvals != nil {
 		capabilities = append(capabilities, approvalCapability, approvalInvalidationCapability)
 	}
@@ -875,6 +881,8 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			return
 		}
 		switch envelope.Type {
+		case "question.references":
+			server.routeQuestionReferences(parent, live, host, envelope, data)
 		case "file.exports.list", "file.export.request", "file.export.cancel":
 			if server.exports == nil || !live.supports(files.ExportCapability) || live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)

@@ -22,7 +22,7 @@ class LocalModel extends LlmAdapter {
       .filter(part => part.type === 'text')
       .map(part => part.text)
       .join('\n')
-    const timed = ['REMOTE_TIMED_FOREGROUND', 'REMOTE_TIMED_RELEASE', 'REMOTE_TIMED_LATE']
+    const timed = ['REMOTE_TIMED_FOREGROUND', 'REMOTE_TIMED_RELEASE', 'REMOTE_TIMED_LATE', 'REMOTE_TIMED_BACKGROUND']
       .find(marker => userText.includes(marker) && !this.timedQuestionsIssued.has(marker))
     if (timed) {
       this.timedQuestionsIssued.add(timed)

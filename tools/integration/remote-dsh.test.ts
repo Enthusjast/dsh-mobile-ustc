@@ -525,6 +525,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   mobile.send({ ...submit, request_id: questionPromptId, payload: { mode: 'queue', content: [{ type: 'text', text: questionMarker }] } })
   const questionState = await mobile.wait(frame => frame.type === 'question.snapshot' && frame.payload.items.length > 0, questionFrom)
   const question = questionState.payload.items[0]
+  assert.match(question.question_id,/^[0-9a-f-]{36}$/)
+  await until(async()=>query(`select state from question_references where id='${question.question_id}'`)==='pending'?true:undefined,'ordinary question metadata publication')
   assert.equal(question.questions[0].id, 'm0-choice')
   const answerMarker = `REMOTE_ANSWER_${randomUUID()}`
   const questionAnswer = { v: 1, type: 'question.answer', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: sessionId,
@@ -607,6 +609,29 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await mobile.wait(frame => frame.type === 'question.timed.snapshot' && frame.payload.items.some((item: any) => item.question_id === unattended.question.question_id && item.state === 'continued'), unattended.from)
   await answerTimed(unattended.question.question_id, 'agent_queued')
   await mobile.wait(frame => frame.type === 'question.timed.snapshot' && frame.session_id === timedSessionId && frame.payload.items.length === 0, unattended.from)
+
+  // Remove the timed session's only phone subscription before producing another
+  // native question. Its background reference must come from the runtime feed.
+  mobile.send({v:1,type:'session.unsubscribe',request_id:randomUUID(),runtime_id:enrollment.runtime_id,runtime_epoch:probe.runtime_epoch,
+    session_id:timedSessionId,subscription_id:timedOpening.subscription_id,payload:{}})
+  await mobile.wait(frame=>frame.type==='session.unsubscribed' && frame.subscription_id===timedOpening.subscription_id)
+  const backgroundFrom=mobile.frames.length, backgroundPrompt=randomUUID(), backgroundMarker=`REMOTE_TIMED_BACKGROUND_${randomUUID()}`
+  timedSecrets.push(backgroundMarker)
+  mobile.send({...submit,request_id:backgroundPrompt,session_id:timedSessionId,payload:{mode:'queue',content:[{type:'text',text:backgroundMarker}]}})
+  await mobile.wait(frame=>frame.type==='command.receipt' && frame.request_id===backgroundPrompt && frame.payload.state==='agent_queued',backgroundFrom)
+  const backgroundQuestion=await until(async()=>{
+    const id=query(`select id::text from question_references where session_id='${timedSessionId}' and kind='timed_question' and state='continued'
+      and id not in ('${foreground.question.question_id}','${released.question.question_id}','${unattended.question.question_id}') limit 1`)
+    return id || undefined
+  },'timed question publication without a foreground subscription')
+  assert.match(backgroundQuestion,/^[0-9a-f-]{36}$/)
+  assert.ok(!mobile.frames.slice(backgroundFrom).some(frame=>frame.type==='question.timed.snapshot' && frame.payload.items.some((item:any)=>item.question_id===backgroundQuestion)))
+  const reopenedTimed=randomUUID()
+  mobile.send({v:1,type:'session.subscribe',request_id:reopenedTimed,runtime_id:enrollment.runtime_id,session_id:timedSessionId,payload:{}})
+  await mobile.wait(frame=>frame.type==='session.snapshot' && frame.request_id===reopenedTimed,backgroundFrom)
+  await mobile.wait(frame=>frame.type==='question.timed.snapshot' && frame.payload.items.some((item:any)=>item.question_id===backgroundQuestion && item.state==='continued'),backgroundFrom)
+  await answerTimed(backgroundQuestion,'agent_queued')
+  await until(async()=>query(`select state from question_references where id='${backgroundQuestion}'`)==='ended'?true:undefined,'answered background question ended')
 
   const approvalSecrets: string[] = []
   for (const choice of ['ALLOW', 'REJECT', 'CANCEL'] as const) {
@@ -719,6 +744,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic('Native archive/restore persisted through the Go relay: archived history remained readable, writes were denied, busy archive refused, explicit archive-and-stop aborted the held turn, and a historical settled retry did not undo a later restore.')
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
+  t.diagnostic('Normal Host runtime question metadata reached PostgreSQL without a timed-session phone subscription; fresh resubscription found the same continued native question and admitted one late answer. Full database dump excluded question and answer bodies.')
   t.diagnostic('The normal plugin negotiated signed approval: current Bash context, invalid-proof nonconsumption, phone allow/reject/cancel, one actual execution, duplicate decision reconciliation and durable native result reporting passed through the real Go service.')
   t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, questions, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

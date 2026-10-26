@@ -35,7 +35,7 @@ func (store *PushStore) Renew(ctx context.Context, actor push.Actor, id string) 
 }
 
 func (store *PushStore) Reference(ctx context.Context, actor push.Actor, id string) (push.Reference, error) {
-	if !push.UUID(id) || store.approvals == nil {
+	if !push.UUID(id) {
 		return push.Reference{}, push.ErrAccess
 	}
 	tx, err := store.database.DB.BeginTx(ctx, nil)
@@ -60,6 +60,31 @@ func (store *PushStore) Reference(ctx context.Context, actor push.Actor, id stri
 		return ref, push.ErrUnavailable
 	}
 	if b.State != "active" || now.Before(b.Created) || !now.Before(b.Expiry) {
+		return ref, push.ErrAccess
+	}
+	if ref.Kind == "question" || ref.Kind == "timed_question" {
+		if tx.Commit() != nil {
+			return ref, push.ErrUnavailable
+		}
+		scope, version, err := store.questionGrant(ctx, b, ref.RuntimeID)
+		if err != nil {
+			return ref, err
+		}
+		status, err := store.database.AuthorizeQuestionReference(ctx, TicketRedemption{UserID: b.User, DeviceID: b.Device, DeviceKeyVersion: b.KeyVersion, ProofKeyThumbprint: b.JKT, RuntimeID: ref.RuntimeID, GrantVersion: version, Scope: scope}, ref.ReferenceID)
+		if errors.Is(err, ErrDatabaseUnavailable) {
+			return ref, push.ErrUnavailable
+		}
+		if err != nil || status.Kind != ref.Kind || status.SessionID != ref.SessionID || status.RuntimeEpoch != ref.RuntimeEpoch {
+			return ref, push.ErrAccess
+		}
+		ref.State = status.State
+		ref.Availability = status.Availability
+		if status.Availability == "online" {
+			ref.ExpiresAt = status.ValidUntil
+		}
+		return ref, nil
+	}
+	if store.approvals == nil {
 		return ref, push.ErrAccess
 	}
 	var scopeJSON []byte
@@ -114,6 +139,24 @@ func (store *PushStore) Reference(ctx context.Context, actor push.Actor, id stri
 		ref.State = "expired"
 	}
 	return ref, nil
+}
+
+func (store *PushStore) questionGrant(ctx context.Context, b pushBinding, runtime string) (GrantScope, int64, error) {
+	var scope GrantScope
+	var raw []byte
+	var version int64
+	err := store.database.DB.QueryRowContext(ctx, `select g.scope,g.grant_version from runtime_grants g join runtimes r on r.id=g.runtime_id
+	 join installations i on i.id=r.installation_id join hosts h on h.id=i.host_id
+	 where g.runtime_id=$1 and g.user_id=$2 and h.org_id=$3 and g.role in ('owner','operator') and g.revoked_at is null
+	 and (g.expires_at is null or g.expires_at>clock_timestamp())`, runtime, b.User, b.Org).Scan(&raw, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return scope, 0, push.ErrAccess
+	}
+	if err != nil || json.Unmarshal(raw, &scope) != nil {
+		return scope, 0, push.ErrUnavailable
+	}
+	scope.Actions = []string{"session.read", "question.answer"}
+	return scope, version, nil
 }
 
 type PushInbox struct {

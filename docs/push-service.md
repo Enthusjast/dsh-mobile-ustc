@@ -1,6 +1,6 @@
 # 通知登记与 FCM 后端
 
-可选 Go 通知服务提供设备 / 组织绑定的地址登记、推送归属挑战、加密地址与挑战队列、当前权限过滤、持久发送租约、FCM HTTP 发送和客户端回执 API。[Android 接收、设置与点击流程](android-notifications.md) 已加入，当前自动来源是已经由真实 Host 登记的 signed approval 元数据。普通 / timed question 的后台元数据发布和厂商通道仍待接入；真实 Google 送达与目标手机验收尚未完成。
+可选 Go 通知服务提供设备 / 组织绑定的地址登记、推送归属挑战、加密地址与挑战队列、当前权限过滤、持久发送租约、FCM HTTP 发送和客户端回执 API。[Android 接收、设置与点击流程](android-notifications.md) 已加入。来源包括 Host 登记的 signed approval，以及不依赖手机订阅的[普通 / 定时提问引用](question-notifications.md)。厂商通道仍待接入；真实 Google 送达与目标手机验收尚未完成。
 
 没有设置 `REMOTE_PUSH_CONFIG_FILE` 时不注册通知路由、不启动发送 worker，也不请求 Google 凭据。显式配置 `{"enabled":false}` 同样停用。源码只接受 FCM FID 地址，能力接口明确返回 `address_kind: fid` 和实际支持的 source 列表，不把旧 token 占位列或未接入的厂商通道当成可用能力。
 
@@ -17,7 +17,7 @@
 
 ## 地址、队列与当前权限
 
-迁移 `014_push_delivery` 新建 bindings、deliveries、receipts 和 lookup-key 元数据。旧 `devices.push_*` 只是从未接入的占位数据，迁移会清空，不能安全升级成新授权。
+迁移 `014_push_delivery` 新建 bindings、deliveries、receipts 和 lookup-key 元数据；`015_question_references` 加入独立的运行时问题引用和短租约。Host 引用源与 Google worker 启停分别协商 / 配置。旧 `devices.push_*` 只是从未接入的占位数据，迁移会清空，不能安全升级成新授权。
 
 地址和挑战分别以 AES-256-GCM 加密，AAD 绑定原设备、用户、组织、key version、proof thumbprint、provider/project、原请求及具体交付。日志表示和通用 JSON 序列化不会输出地址 / nonce / Google token。地址唯一索引用独立密钥的 HMAC；lookup key 的指纹在数据库中固定，不能通过静默换钥绕开地址唯一性。加密 key ID 可以轮换，但必须保留活跃通道需要的旧 key。启动时核对已有活跃密文，缺 key 或错误 key 会拒绝该显式配置。
 
@@ -25,7 +25,7 @@ worker 从审批元数据和当前 owner grant 生成每绑定 / 每审批独立
 
 队列用 PostgreSQL `FOR UPDATE SKIP LOCKED` 与二十秒 lease 协调。每次发出前检查活跃设备 / 组织、原 key、租约、当前 grant、session、Host epoch / connection 和 pending 审批；获取 Google token 后紧邻 HTTP 请求还会重查。控制面不可用时延后发送，撤权 / 代次变化失败关闭。相关 grant 更新后可以保留同一 notification UUID 重新规划尚未成功的原提醒，不能重放审批或创建新工具调用。
 
-FCM 结果丢失只能按原 UUID 至少一次重试，不能承诺外部 exactly-once。接收侧必须去重。最多八次尝试，遵守有界 `Retry-After`、有效期和退避；UNREGISTERED 停用失效地址。transport 引用默认保留七天，再按源审批 / 审计各自的生命周期处理。planner 分批处理，inbox 是已物化引用的分页视图，不是第二份问题 / 审批正文库；完整原生交互入口和更多来源仍需后续 Android / Host 集成。
+FCM 结果丢失只能按原 UUID 至少一次重试，不能承诺外部 exactly-once。接收侧必须去重。最多八次尝试，遵守有界 `Retry-After`、有效期和退避；UNREGISTERED 停用失效地址。transport 引用默认保留七天，再按源审批 / 审计各自的生命周期处理。planner 分批处理，inbox 是已物化引用的分页视图，不是第二份问题 / 审批正文库。提问来源单独核对原生 pending / continued / reply_queued 和源租约，不能把提醒 transport 的 TTL 当成原生等待期限。
 
 ## 状态与点击
 
@@ -37,7 +37,7 @@ HTTP 路由和错误形状见 `contracts/openapi/remote.yaml`；共享严格 sch
 
 ## 受保护配置
 
-先应用 014，再配置私有文件。示例只说明结构，所有 key 必须由部署方独立随机生成，不能使用示例文本：
+先依次应用到 015，再配置私有文件。示例只说明结构，所有 key 必须由部署方独立随机生成，不能使用示例文本：
 
 ```json
 {

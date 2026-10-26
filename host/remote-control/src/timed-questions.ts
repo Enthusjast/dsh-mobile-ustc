@@ -6,6 +6,7 @@ import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequ
 import { mobileSessionId } from './dsh-client.js'
 import { ProbeError } from './protocol.js'
 import type { BlockingQuestion, TimedQuestionSnapshot, TimedQuestionView } from './questions.js'
+import type { LocalQuestionReference } from './question-reference-protocol.js'
 
 interface TimedRecord {
   id: string
@@ -27,6 +28,7 @@ interface TimedRecord {
 export class TimedQuestions {
   private readonly records = new Map<string, TimedRecord>()
   private readonly listeners = new Map<string, Set<() => void>>()
+  private readonly referenceListeners = new Set<() => void>()
   private readonly invalidated = new WeakSet<Agent>()
   private revision = 0
   private bytes = 0
@@ -52,8 +54,8 @@ export class TimedQuestions {
   }
 
   private key(agent: Agent, callId: string): string { return JSON.stringify([agent.id, callId]) }
-  private live(agent: Agent): boolean {
-    return !this.closed && !this.invalidated.has(agent) && this.managed(agent) && this.ctx.agents.get(agent.id) === agent && this.ctx.agents.roots().includes(agent)
+  private live(agent: Agent, roots?: ReadonlySet<Agent>): boolean {
+    return !this.closed && !this.invalidated.has(agent) && this.managed(agent) && this.ctx.agents.get(agent.id) === agent && (roots ? roots.has(agent) : this.ctx.agents.roots().includes(agent))
   }
 
   private create(agent: Agent, callId: ToolCallId, questions: readonly AskUserQuestionItem[]): TimedRecord {
@@ -163,8 +165,8 @@ export class TimedQuestions {
     throw new ProbeError('interaction.stale')
   }
 
-  private refresh(agent: Agent): void {
-    if (!this.live(agent)) return
+  private refresh(agent: Agent, roots?: ReadonlySet<Agent>): void {
+    if (!this.live(agent, roots)) return
     const projection = this.ctx.sessionProjections.snapshot(agent.session, ['userQuestions']).values.userQuestions as UserQuestionProjectionView | undefined
     const active = new Map((projection?.active ?? []).map(item => [String(item.callId), item]))
     for (const question of active.values()) {
@@ -208,6 +210,25 @@ export class TimedQuestions {
   private changed(sessionId: string): void {
     this.revision++
     for (const listener of this.listeners.get(sessionId) ?? []) listener()
+    for (const listener of this.referenceListeners) listener()
+  }
+
+  references(): LocalQuestionReference[] {
+    const roots = new Set(this.ctx.agents.roots())
+    for (const agent of roots) this.refresh(agent, roots)
+    return [...this.records.values()].flatMap(record => {
+      const view = record.view
+      if (!view) return []
+      const common = { question_id: view.question_id, session_id: mobileSessionId(this.runtimeId, record.agent.id), kind: 'timed_question' as const }
+      return [{ nativeSessionId: record.agent.id, reference: view.state === 'open'
+        ? { ...common, state: 'pending' as const, expires_at: view.expires_at }
+        : { ...common, state: view.state, expires_at: null } }]
+    })
+  }
+
+  watchReferences(changed: () => void): () => void {
+    this.referenceListeners.add(changed)
+    return () => { this.referenceListeners.delete(changed) }
   }
 
   private release(record: TimedRecord): void {
@@ -238,5 +259,6 @@ export class TimedQuestions {
       this.remove(record)
     }
     this.listeners.clear()
+    this.referenceListeners.clear()
   }
 }

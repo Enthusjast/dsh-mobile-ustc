@@ -10,6 +10,8 @@ import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
 import { questionAnswerPayload } from './questions.js'
 import { APPROVAL_INVALIDATION_CAPABILITY, SIGNED_APPROVAL_CAPABILITY } from './approval-protocol.js'
 import type { HostApprovalPeer, HostApprovalPeerFactory } from './relay-approvals.js'
+import { QUESTION_REFERENCES_CAPABILITY } from './question-reference-protocol.js'
+import type { HostQuestionReferences, QuestionReferenceBinding } from './relay-question-references.js'
 import { CREATION_OPTIONS_CAPABILITY, creationOptionsSchema, type SessionCreationOptions } from './creation-options.js'
 import { FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY, FILE_RECONCILE_CAPABILITY, fileReference } from './file-protocol.js'
 import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
@@ -140,6 +142,7 @@ export interface HostRelayOptions {
   applicationVersion: string
   pluginVersion: string
   approvals?: HostApprovalPeerFactory
+  questionReferences?: (binding: QuestionReferenceBinding) => HostQuestionReferences
   files?: (binding: FileTransportBinding) => HostFilePeer
   exports?: (binding: FileTransportBinding) => HostExportPeer
 }
@@ -425,6 +428,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   let creationOptionsTimer: NodeJS.Timeout | undefined
   let sessions: RelaySessions | undefined
   let approvals: HostApprovalPeer | undefined
+  let questionReferences: HostQuestionReferences | undefined
   let files: HostFilePeer | undefined
   let exports: HostExportPeer | undefined
   const abortConnection = () => {
@@ -445,6 +449,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       if (options.runtime.client.creationOptions) sourceOptions = creationOptionsSchema.parse(options.runtime.client.creationOptions())
     } catch { /* The bounded metadata extension is unavailable; core Relay operations remain independent. */ }
     const offered: string[] = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
+    if (options.questionReferences) offered.push(QUESTION_REFERENCES_CAPABILITY)
     if (sourceOptions) offered.push(CREATION_OPTIONS_CAPABILITY)
     if (options.files) offered.push(FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY)
     if (options.files && options.runtime.reconcileFileMessage) offered.push(FILE_RECONCILE_CAPABILITY)
@@ -603,23 +608,28 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     }
     publishCreationOptions()
 
-    if (options.approvals) approvals = options.approvals({
-      installationId: credential.installationId, connectionId: ack.data.payload.connection_id, signal: connection.signal,
-      send: frame => sendFrame(socket, frame), fail: abortConnection,
-      publishCatalog: (nativeId, signal) => new Promise<void>((resolve, reject) => {
-        if (catalogBarriers.size >= 64 || connection.signal.aborted || signal.aborted) { reject(new ProbeError('runtime.offline')); return }
+    const publishCatalog = (nativeId: string, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+        if (catalogBarriers.size >= 128 || connection.signal.aborted || signal.aborted) { reject(new ProbeError('runtime.offline')); return }
         const lifetime = AbortSignal.any([connection.signal, signal])
         const abort = () => barrier.reject(new ProbeError('runtime.offline'))
         const cleanup = () => { catalogBarriers.delete(barrier); lifetime.removeEventListener('abort', abort) }
         const barrier = { nativeId, resolve: () => { cleanup(); resolve() }, reject: (error: Error) => { cleanup(); reject(error) } }
         catalogBarriers.add(barrier); lifetime.addEventListener('abort', abort, { once: true })
         requestCatalogRefresh({ kind: 'delta', sessionIds: [nativeId] })
-      }),
+      })
+    if (options.approvals) approvals = options.approvals({
+      installationId: credential.installationId, connectionId: ack.data.payload.connection_id, signal: connection.signal,
+      send: frame => sendFrame(socket, frame), fail: abortConnection, publishCatalog,
+    })
+    if (options.questionReferences && ack.data.payload.capabilities.includes(QUESTION_REFERENCES_CAPABILITY)) questionReferences = options.questionReferences({
+      runtimeId: options.runtime.client.runtimeId, epoch: options.runtime.epoch, signal: connection.signal,
+      send: frame => sendFrame(socket, frame), fail: abortConnection, publishCatalog,
     })
 
     const handleFrame = async (value: unknown) => {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const frame = value as Record<string, unknown>
+        if (questionReferences && await questionReferences.handle(value)) return
         if (exports && await exports.handle(value)) return
         if (files && await files.handle(value)) return
         if (approvals && await approvals.handle(value)) return
@@ -721,6 +731,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     await exports?.close()
     files?.close()
     approvals?.close()
+    questionReferences?.close()
     sessions?.close()
     if (catalogRetryTimer) clearTimeout(catalogRetryTimer)
     if (creationOptionsTimer) clearTimeout(creationOptionsTimer)
