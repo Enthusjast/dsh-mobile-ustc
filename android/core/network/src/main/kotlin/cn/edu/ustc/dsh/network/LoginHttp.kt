@@ -28,6 +28,16 @@ class RemoteRequestException(val code: String = "network.unavailable") : Illegal
 
 /** No redirects, implicit retries, cookies, logging interceptor or disk response cache. */
 class LoginHttp private constructor(private val client: OkHttpClient) {
+    suspend fun downloadAppRelease(release: AppRelease, downloadOrigins: Set<String>, directory: java.io.File, current: () -> Unit = {}, progress: (Long) -> Unit = {}): PrivateApkCandidate {
+        currentCoroutineContext().ensureActive(); current()
+        val candidate = PrivateApkCandidate(directory, release)
+        val cancellation = currentCoroutineContext()[Job]?.invokeOnCompletion { if (it != null) candidate.close() }
+        try {
+            withContext(Dispatchers.IO) { downloadAppBytes(client, candidate, downloadOrigins, current, progress); candidate.seal(current) }
+            currentCoroutineContext().ensureActive(); current()
+            return candidate
+        } catch (error: Exception) { candidate.close(); cancellation?.dispose(); throw error }
+    }
     internal suspend fun upload(prepared: PreparedFileUpload, source: () -> InputStream, current: () -> Unit, progress: (Long) -> Unit) =
         uploadFileBytes(client, prepared, source, current, progress)
     internal suspend fun download(request: Request, file: RemoteExportStatus, destination: () -> OutputStream, current: () -> Unit, progress: (Long) -> Unit): HttpReply? =

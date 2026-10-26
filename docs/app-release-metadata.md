@@ -1,6 +1,6 @@
 # APK 发行元数据与灰度选择
 
-当前交付范围是可选的 Go 发行目录、已认证查询端点、严格的 Kotlin 读取与共享样例。默认不启用发行端点。Android 应用界面尚未接入更新检查；下载、私有文件保存、安装前内容 / 签名验证及系统安装恢复仍需实现。[平台签名与安装研究](android-updates-research.md)记录下一阶段的依据，不能把本阶段元数据测试写成 APK 安装验收。
+当前交付范围是可选的 Go 发行目录、已认证查询端点、严格的 Kotlin 读取与共享样例。默认不启用发行端点。后续的[私有下载与平台 APK 校验](android-apk-preflight.md)已有独立实现和验证；Android 应用界面、打包的下载来源配置及系统安装恢复仍需接入。[平台签名与安装研究](android-updates-research.md)记录依据，不能把元数据或预安装检查写成 APK 安装验收。
 
 ## 配置与访问
 
@@ -37,7 +37,7 @@ GET /v1/app/releases/latest?organization_id=<uuid>&version_code=<integer>&protoc
 | `rollout_basis_points` | 百分之一百分点；100 = 1%，10000 = 100% |
 | `release_notes` | 有界纯文本说明；允许换行 / tab，拒绝其他控制字符 |
 
-文件地址拒绝 userinfo、query、fragment、编码路径、相对路径片段和反斜线。服务目录和客户端独立提供的来源集合都必须接受该来源；未来下载器仍需独立拒绝重定向并隔离学校凭据。当前没有实现下载器，也不支持带 query 的预签名 APK 地址。
+文件地址拒绝 userinfo、query、fragment、编码路径、相对路径片段和反斜线。服务目录和客户端独立提供的来源集合都必须接受该来源；后续下载器独立拒绝重定向并隔离学校凭据。不支持带 query 的预签名 APK 地址。
 
 选择结果包含当前请求版本、协议 1、明确的客户端版本窗口、与窗口一致的 `current_supported`，以及一个更高的适用版本或 `release: null`。候选必须位于服务公布的客户端版本窗口、覆盖当前协议、满足 Android API、组织和灰度条件。输入顺序不影响最高适用版本选择；新发行暂不适用时仍可选择较早的适用升级。已安装相同或更高版本时不推荐降级。
 
@@ -61,4 +61,4 @@ dsh-mobile-update-rollout-v1<NUL>organization_id<NUL>user_id<NUL>device_id<NUL>r
 
 Go vet 与定向 race 测试通过，完整 `npm run test:remote-kotlin` 的隔离 PostgreSQL / Go race / Kotlin / 真实 npm DSH 0.2.1-rc.2 组合通过，记录为 `.local/app-releases-go-vet.log`、`.local/app-releases-go-first.log` 和 `.local/app-releases-full-first.log`。生产入口加载 0600 目录，并在未登记任何 Host / runtime grant 时返回当前手机适用的示例元数据；同版本 / 更高版本不收到降级候选，跨组织、失去成员关系、未登记设备、Host 客户端与设备选择器被拒绝。数据库用例独立检查错误账号、设备 / key、组织、过期凭据、暂停用户与撤销。灰度用例验证稳定、扩大比例的单调性、最高适用发行及撤回行为。
 
-以上没有下载 APK、验证 APK 内容签名、发起系统安装或连接真实学校 / 云分发服务。生产签名密钥、真实发行地址、手机侧下载与安装实现、OEM 行为、版本迁移与失败恢复仍是后续工作；本阶段没有尝试 TokenWorks。
+以上元数据阶段的组合没有下载 APK、验证 APK 内容签名、发起系统安装或连接真实学校 / 云分发服务。下载和平台校验的后续证据见[独立记录](android-apk-preflight.md)；生产签名密钥、真实发行地址、完整手机更新页面与系统安装、OEM 行为、版本迁移与失败恢复仍是后续工作。本阶段没有尝试 TokenWorks。

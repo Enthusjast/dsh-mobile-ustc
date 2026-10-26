@@ -374,6 +374,26 @@ class FileUploadsTest {
         service.enqueue(reply(metadata.with("current_version_code" to 2L.json())))
         try { api.appRelease("cn.edu.ustc.dsh.mobile", 1, 26, setOf("https://updates.example.invalid")); fail("another installed-version context accepted") } catch (_: ProtocolException) {}
     }
+    @Test fun authenticatedReleaseMetadataNeverLeaksCredentialsIntoTheSeparateApkGet(): Unit = runBlocking {
+        val api = api()
+        val directory = java.nio.file.Files.createTempDirectory("dsh-apk-owner-").toFile()
+        val downloadOrigin = objects.url("/").toString().trimEnd('/')
+        val golden = JsonDocument.parse(java.io.File(System.getProperty("contracts.root"), "golden/app-release-selection.json").readBytes()).root
+        val metadata = golden.with("release" to golden.obj("release").with("download_url" to objects.url("/app.apk").toString().json(), "size_bytes" to bytes.size.toLong().json(), "sha256" to digest(bytes).json()))
+        try {
+            service.enqueue(reply(metadata).setHeader("DPoP-Nonce", "metadata-next-nonce").setHeader("Set-Cookie", "school=PRIVATE_COOKIE"))
+            val release = api.appRelease("cn.edu.ustc.dsh.mobile", 1, 26, setOf(downloadOrigin)).release!!
+            assertTrue(service.takeRequest().getHeader("Authorization")!!.startsWith("DPoP "))
+            objects.enqueue(MockResponse().setHeader("Content-Type", "application/octet-stream").setHeader("DPoP-Nonce", "untrusted-download-nonce").setBody("abc"))
+            http.downloadAppRelease(release, setOf(downloadOrigin), directory).use { candidate -> assertArrayEquals(bytes, candidate.inspectVerified { it.readBytes() }) }
+            val anonymous = objects.takeRequest()
+            for (header in listOf("Authorization", "DPoP", "Cookie")) assertNull(anonymous.getHeader(header))
+            service.enqueue(reply(metadata))
+            api.appRelease("cn.edu.ustc.dsh.mobile", 1, 26, setOf(downloadOrigin))
+            assertEquals("metadata-next-nonce", proof(service.takeRequest()).string("nonce"))
+            assertTrue(directory.listFiles()!!.isEmpty())
+        } finally { directory.deleteRecursively() }
+    }
     @Test fun retiredUpdateChecksCannotStartAnAuthenticatedRead(): Unit = runBlocking {
         val api = api()
         try { api.appRelease("cn.edu.ustc.dsh.mobile", 1, 26, setOf("https://updates.example.invalid")) { throw CancellationException() }; fail("retired check sent a request") } catch (_: CancellationException) {}

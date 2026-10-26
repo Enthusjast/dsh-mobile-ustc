@@ -19,6 +19,9 @@ class DshApplication : Application() {
         // Process death discards all staging keys. Remove the unusable ciphertext
         // before a new foreground transfer can start.
         java.io.File(cacheDir, "file-exports").deleteRecursively()
+        // APK staging is disposable. A new process must fetch current metadata
+        // and validate newly acquired bytes; no previous in-memory verdict survives.
+        java.io.File(cacheDir, "apk-updates").deleteRecursively()
         val deployment = runCatching { LoginConfiguration.parse(assets.open("deployment.json").use { it.readBytes() }).fingerprint }.getOrNull()
         notifications.reconcileDeployment(deployment, publicPushConfiguration(this)?.fingerprint)
     }

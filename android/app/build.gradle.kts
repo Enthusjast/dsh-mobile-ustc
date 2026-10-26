@@ -51,6 +51,22 @@ android {
     sourceSets.getByName("main").assets.srcDir(deploymentAssets)
 }
 tasks.named("preBuild") { dependsOn(prepareDeployment) }
+// Fixtures belong only to the test APK. The generator uses the ordinary debug
+// certificate and creates no production artifact or release signing material.
+val apkUpdateFixtures = layout.buildDirectory.dir("generated/apkUpdateFixtures")
+val prepareApkUpdateFixtures by tasks.registering(Exec::class) {
+    dependsOn("validateSigningDebug")
+    val generator = rootProject.file("../tools/integration/generate_apk_update_fixtures.py")
+    val debugStore = android.signingConfigs.getByName("debug").storeFile!!
+    inputs.file(generator)
+    inputs.file(debugStore)
+    inputs.file(android.sdkDirectory.resolve("platforms/android-36/android.jar"))
+    for (tool in listOf("source.properties", "aapt2", "zipalign", "apksigner", "lib/apksigner.jar")) inputs.file(android.sdkDirectory.resolve("build-tools/35.0.0/$tool"))
+    outputs.dir(apkUpdateFixtures)
+    commandLine("python3", generator.absolutePath, "--sdk", android.sdkDirectory.absolutePath, "--debug-keystore", debugStore.absolutePath, "--output", apkUpdateFixtures.get().asFile.absolutePath)
+}
+android.sourceSets.getByName("androidTest").assets.srcDir(prepareApkUpdateFixtures.map { it.outputs.files.singleFile })
+tasks.matching { it.name == "preDebugAndroidTestBuild" }.configureEach { dependsOn(prepareApkUpdateFixtures) }
 kotlin { jvmToolchain(17) }
 kapt { correctErrorTypes = true }
 dependencies {
