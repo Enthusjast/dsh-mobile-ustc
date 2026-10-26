@@ -10,6 +10,8 @@ Host 现在独立发布当前运行时的普通 / 定时提问引用，Go 根据
 
 普通问题发布 `pending` 和原生截止时间。定时问题区分 `pending`、`continued` 和 `reply_queued`；未取得原生前台倒计时的 pending 明确使用 null，continued / reply_queued 也使用 null。读取引用不会调用 attachWait、占用手机的前台 claim 或延长原生等待。无可靠结束原因的缺项只记为 `ended`，不把它推断成“已经回答”。
 
+来源严格匹配当前远控会话目录：精确存活、受管、可独立控制且没有父会话元数据的根 Agent。DSH 0.2.1-rc.2 在事件分发前拒绝受其他 Agent 拥有的子 Agent 人工提问，错误为 `DELEGATED_CALLER`，要求根 Agent 汇总未解决的问题；本插件保留这一原生限制。带父会话历史、尚不在远控目录内的独立 fork 也保留在原生应答链，不抢占回调或发布无法登记的引用。这防止一个不可路由的问题拖断整个 Host 连接，并不把父子历史当成新的访问授权。
+
 每条连接先确认相关会话目录，再发送完整问题快照，一次只保留一个待确认快照。后续变化合并发布；新写入至少相隔 250 毫秒，未变化时每 15 秒发送快照续租。目录确认只保留当前活动引用涉及的会话，续租不反复触发原生会话持久化。确认检查请求、runtime / epoch、sequence 和数量；拒绝或十秒确认超时会关闭该连接，从新连接重建完整快照。
 
 共享 schema / goldens 位于 `contracts/push/v1`，通用 Relay schema 中的两个定义由同一 Zod 来源生成。`npm run contracts` 同步生成，`contracts:check` 检查漂移。
@@ -32,10 +34,12 @@ REST 重新取得的是当前状态。主机断线返回 `host_offline`，运行
 
 ## 本地验证
 
-2026-10-26，240 项 Host 检查 / 构建 / 测试通过，记录为 `.local/question-references-host-final.log`。覆盖无前台 watcher 的普通问题创建 / 结束、原生定时问题的无 claim 继续、完整快照顺序 / 合并 / 续租、错误确认和确认超时，以及拒绝正文混入；真实 npm DSH CLI 的普通问题通过已关闭会话订阅的 WSS 连接发布了引用。
+2026-10-26，242 项 Host 检查 / 构建 / 测试通过，记录为 `.local/question-native-scope-final.log`。覆盖无前台 watcher 的普通问题创建 / 结束、原生定时问题的无 claim 继续、完整快照顺序 / 合并 / 续租、错误确认和确认超时、拒绝正文混入，以及保留原生子 Agent 拒绝和目录外 fork 的原生应答器；真实 npm DSH CLI 的普通问题通过已关闭会话订阅的 WSS 连接发布了引用。
 
 定向 Go race / PostgreSQL / HTTPS 用例通过，记录为 `.local/question-references-go-fourth.log`。覆盖严格 Host 方向、协商能力、共享字段、旧连接 / 跳序 / 改内容重放、目录归属、跨 epoch ID、重连后的新增预算、独立同会话提醒、租约过期、断线、设备 key / 回答权限撤销，并核对最小离线引用没有放宽正文读取。
 
-完整隔离 PostgreSQL / Go race / Kotlin / 真实 npm DSH 0.2.1-rc.2 回归通过，记录为 `.local/question-references-full-chain.log`。正常插件在没有该定时会话手机订阅时发布 continued 元数据，重新订阅后取到同一个原生问题并只提交一次后续消息。完整数据库 dump 排除了该问题 / 答案、原生正文、路径、签名与原始凭据标记。学校与模型为本地夹具，没有尝试 TokenWorks。
+完整隔离 PostgreSQL / Go race / Kotlin / 真实 npm DSH 0.2.1-rc.2 回归通过，最终记录为 `.local/question-notifications-full-final.log`。正常插件在没有该定时会话手机订阅时发布 continued 元数据，重新订阅后取到同一个原生问题并只提交一次后续消息。完整数据库 dump 排除了该问题 / 答案、原生正文、路径、签名与原始凭据标记。学校与模型为本地夹具，没有尝试 TokenWorks。
+
+[Android 点击流程](android-notifications.md) 另行通过 209 项 JVM 测试和 133 项 API 26 应用回归。普通表单和 continued 后续答复均需要新鲜原生句柄与明确操作；通知不会 claim、回答或审批。原生只读状态、结束 / 错配 ID 和重复卡片有对应设备测试。APK 的 provider 由本地夹具替代，不能把这些分层证据当成真实云端到达率。
 
 真实 FCM project/app、目标机型、Doze / 进程回收、厂商通道、通知延迟和生产规模仍待验收。这些组件测试不等于完整 APK → Go → DSH → 真实云推送的端到端交付。

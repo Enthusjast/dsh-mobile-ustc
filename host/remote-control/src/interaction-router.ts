@@ -9,6 +9,7 @@ import { ProbeError } from './protocol.js'
 import { questionItem, type BlockingQuestion, type QuestionSnapshot, type QuestionSource } from './questions.js'
 import { TimedQuestions } from './timed-questions.js'
 import type { LocalQuestionReference, QuestionReferenceSource } from './question-reference-protocol.js'
+import { routableQuestionAgent } from './question-owner.js'
 
 type Answer = { decision: 'allow_once' | 'reject' } | AskUserQuestionAnswer
 interface Pending {
@@ -89,7 +90,7 @@ export class InteractionRouter implements QuestionSource, QuestionReferenceSourc
   }
 
   private async question(request: AskUserQuestionRequest, next: () => Promise<AskUserQuestionAnswer>): Promise<AskUserQuestionAnswer> {
-    if (!this.managed(request.agent)) return next()
+    if (!routableQuestionAgent(this.ctx, request.agent, this.managed)) return next()
     if (request.wait?.timed) return this.timed.question(request)
     if (request.agent === undefined) throw new ProbeError('question.unavailable')
     const answer = await this.wait(request.agent, 'question', { questions: request.questions }, request.signal)

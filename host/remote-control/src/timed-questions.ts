@@ -7,6 +7,7 @@ import { mobileSessionId } from './dsh-client.js'
 import { ProbeError } from './protocol.js'
 import type { BlockingQuestion, TimedQuestionSnapshot, TimedQuestionView } from './questions.js'
 import type { LocalQuestionReference } from './question-reference-protocol.js'
+import { routableQuestionAgent } from './question-owner.js'
 
 interface TimedRecord {
   id: string
@@ -55,7 +56,7 @@ export class TimedQuestions {
 
   private key(agent: Agent, callId: string): string { return JSON.stringify([agent.id, callId]) }
   private live(agent: Agent, roots?: ReadonlySet<Agent>): boolean {
-    return !this.closed && !this.invalidated.has(agent) && this.managed(agent) && this.ctx.agents.get(agent.id) === agent && (roots ? roots.has(agent) : this.ctx.agents.roots().includes(agent))
+    return !this.closed && !this.invalidated.has(agent) && routableQuestionAgent(this.ctx, agent, this.managed, roots)
   }
 
   private create(agent: Agent, callId: ToolCallId, questions: readonly AskUserQuestionItem[]): TimedRecord {
