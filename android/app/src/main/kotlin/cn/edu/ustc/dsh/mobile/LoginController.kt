@@ -41,7 +41,7 @@ data class HomeState(
     val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
-    val notifications: NotificationUiState? = null, val notificationSettings: Boolean = false, val notificationNote: String? = null,
+    val notifications: NotificationUiState? = null, val notificationSettings: Boolean = false, val notificationNote: String? = null, val notificationQuestion: QuestionHandle? = null,
     val exports: SessionExportState? = null, val exportSavePicker: ExportSaveLaunch? = null, val exportSaving: Boolean = false, val exportSaved: Boolean = false, val exportSaveError: String? = null, val exportBytes: Long = 0,
     val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composerRestore: MessageDraft? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
@@ -584,7 +584,7 @@ class LoginController internal constructor(private val context: Context, private
         approvalJournal?.close(); approvalJournal = null
         creationCollector?.cancel(); creationCollector=null; creationFlow?.close(); creationFlow=null
         commandJournal?.close(); commandJournal = null
-        mutable.value = mutable.value.copy(outbox = null, uploads = null, exports = null, exportSaving = false, exportSaved = false, exportSaveError = null, exportBytes = 0, exportSavePicker = mutable.value.exportSavePicker.takeIf { pendingExportSave != null }, documentPicker = if (pendingDocument == null) null else mutable.value.documentPicker, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE)
+        mutable.value = mutable.value.copy(outbox = null, uploads = null, exports = null, exportSaving = false, exportSaved = false, exportSaveError = null, exportBytes = 0, exportSavePicker = mutable.value.exportSavePicker.takeIf { pendingExportSave != null }, documentPicker = if (pendingDocument == null) null else mutable.value.documentPicker, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE, notificationQuestion=null)
         if (!keepDesired) { desired = null; creationDesired=null }
     }
     fun foreground(active: Boolean) {
@@ -1085,6 +1085,7 @@ class LoginController internal constructor(private val context: Context, private
     private fun dismissNotificationNavigation() {
         notificationFlow?.cancelRead()
         pendingNotificationReference = null; notificationDeadline?.cancel(); notificationDeadline = null
+        mutable.value = mutable.value.copy(notificationQuestion = null, notificationNote = null)
     }
     private fun attachNotifications() {
         if (!foreground || mutable.value.phase != HomePhase.READY || notificationFlow != null) return
@@ -1154,6 +1155,18 @@ class LoginController internal constructor(private val context: Context, private
         if (state.reader?.phase != SessionReadPhase.READY) return
         if (state.reader.runtimeEpoch != ref.epoch || ref.expiresAt <= now()) {
             pendingNotificationReference = null; mutable.value = state.copy(notificationNote = "提醒对应的运行代次或有效期已结束。"); return
+        }
+        if (ref.kind == "question" || ref.kind == "timed_question") {
+            val questions = state.reader.questions
+            val kind = if (ref.kind == "question") QuestionKind.BLOCKING else QuestionKind.TIMED
+            if (!(if (kind == QuestionKind.BLOCKING) questions.blockingLoaded else questions.timedLoaded)) return
+            pendingNotificationReference = null; notificationDeadline?.cancel()
+            val question = questions.items.firstOrNull { it.batch.id == ref.referenceId && it.handle.kind == kind && it.handle.epoch == ref.epoch &&
+                it.handle.runtimeId == ref.runtimeId && it.handle.sessionId == ref.sessionId && it.answerable }
+            mutable.value = if (question != null && questions.canAnswer) state.copy(notificationQuestion = question.handle,
+                notificationNote = if (question.batch.phase == QuestionPhase.CONTINUED) "任务已继续，请核对当前提问后补充回答。" else "已核对当前提问，请在下方卡片中查看并回答。")
+            else state.copy(notificationQuestion = null, notificationNote = "提醒已结束，或当前账号无法处理此交互。")
+            return
         }
         val approvals = state.approvals ?: return
         if (!approvals.view.loaded) return

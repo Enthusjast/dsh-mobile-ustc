@@ -104,6 +104,10 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         }
                     }
                     state.notificationNote?.let { note -> item("notification-note") { Text(note, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+                    val focusedQuestion = read.questions.items.firstOrNull { it.handle == state.notificationQuestion }
+                    if (read.phase == SessionReadPhase.READY && !archived && focusedQuestion != null) item("question:${focusedQuestion.handle.kind}:${focusedQuestion.batch.id}") {
+                        QuestionCard(focusedQuestion, read.questions.canAnswer, state.submitting, state.outbox?.records ?: emptyList(), onAnswer, onClaim, onRelease, onRefreshQuestions, onQueryCommands)
+                    }
                     val transcript = read.window
                     if (archived || runtime?.access?.scope?.actions?.contains("session.archive") == true) item("archive-session") {
                         key(opened) {
@@ -135,7 +139,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         }
                     }
                     if(read.phase==SessionReadPhase.READY && !archived) {
-                        items(read.questions.items,key={"question:${it.handle.kind}:${it.batch.id}"}) {question->
+                        items(read.questions.items.filter { it.batch.id != focusedQuestion?.batch?.id },key={"question:${it.handle.kind}:${it.batch.id}"}) {question->
                             QuestionCard(question,read.questions.canAnswer,state.submitting,state.outbox?.records ?: emptyList(),onAnswer,onClaim,onRelease,onRefreshQuestions,onQueryCommands)
                         }
                         read.questions.error?.let {code->item("question-error") {Text(commandErrorText(code),color=MaterialTheme.colorScheme.error)}}

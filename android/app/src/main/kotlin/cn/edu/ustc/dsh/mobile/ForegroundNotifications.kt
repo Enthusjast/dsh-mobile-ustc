@@ -119,7 +119,7 @@ internal class ForegroundNotifications(private val api: RemoteApi, private val h
                 check(); val route = owned()?.takeIf { it.active && it.expires > System.currentTimeMillis() } ?: throw IllegalStateException("push.stale")
                 val page = api.notificationInbox(route.id, if (more) mutable.value.cursor else null); check()
                 if (!center.matches(owner.fingerprint, route.id)) throw IllegalStateException("push.stale")
-                mutable.update { it.copy(items = if (more) (it.items + page.items).distinctBy { row -> row.id }.takeLast(256) else page.items, cursor = page.cursor, error = null) }
+                mutable.update { it.copy(items = if (more) (it.items + page.items).distinctBy { row -> row.id }.takeLast(256) else page.items, cursor = page.cursor, error = null, note = null) }
                 flushReceipts()
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { mutable.update { it.copy(error = code(error)) } }
@@ -130,14 +130,14 @@ internal class ForegroundNotifications(private val api: RemoteApi, private val h
         readJob = scope.launch {
             try {
                 check(); val route = owned()?.takeIf { it.id == binding && it.active && it.expires > System.currentTimeMillis() } ?: throw IllegalStateException("push.stale")
+                mutable.update { it.copy(note = null, error = null) }
                 if (id == null) { inbox(); return@launch }
                 val ref = api.notification(id, route.id, ::check); check()
                 if (!center.matches(owner.fingerprint, binding)) throw IllegalStateException("push.stale")
                 center.opened(owner.fingerprint, id); flushReceipts()
                 check()
                 if (!center.matches(owner.fingerprint, binding)) throw IllegalStateException("push.stale")
-                if (ref.kind != "approval") mutable.update { it.copy(items = listOf(ref), note = "此版本暂不支持该提醒入口，请从在线会话核对交互。", error = null) }
-                else if (!ref.actionable()) mutable.update { it.copy(items = listOf(ref), note = notificationReferenceText(ref), error = null) }
+                if (!ref.actionable()) mutable.update { it.copy(items = listOf(ref), note = notificationReferenceText(ref), error = null) }
                 else navigate(ref)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { mutable.update { it.copy(error = code(error)) } }
@@ -150,7 +150,10 @@ internal class ForegroundNotifications(private val api: RemoteApi, private val h
 internal fun notificationReferenceText(ref: NotificationReference) = when {
     ref.availability == "host_offline" -> "主机离线，无法核对当前详情。"
     ref.availability == "stale_epoch" -> "提醒对应的运行代次已结束。"
+    ref.availability == "state_unavailable" -> "主机在线，但暂时无法核对当前交互状态。"
+    ref.kind == "timed_question" && ref.state == "reply_queued" -> "后续答复已入队，等待主机更新。"
     !ref.actionable() -> "提醒已结束或过期。"
+    ref.kind == "timed_question" && ref.state == "continued" -> "任务已继续，可在会话中补充回答。"
     ref.kind == "question" -> "有待核对的用户提问"
     ref.kind == "timed_question" -> "有待核对的限时提问"
     else -> "有待核对的工具审批"

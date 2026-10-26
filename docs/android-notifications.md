@@ -1,6 +1,6 @@
 # Android 通知与当前状态核对
 
-Android 开发 APK 现在提供可选 FCM 通道登记、后台最小引用接收、系统通知、提醒列表和点击后的在线核对。当前自动来源是 signed approval；普通问题、timed question 和厂商通道仍待后续接入。用户尚未申请厂商推送通道，也未提供学校 / Firebase 生产配置，开发继续使用隔离夹具。
+Android 开发 APK 现在提供可选 FCM 通道登记、后台最小引用接收、系统通知、提醒列表和点击后的在线核对。来源包括 signed approval 和[普通 / 定时提问引用](question-notifications.md)。厂商通道仍待接入；用户尚未申请厂商通道，也未提供学校 / Firebase 生产配置，开发继续使用隔离夹具。
 
 ## 配置与启用
 
@@ -49,25 +49,29 @@ routing vault 位于 `noBackupFilesDir`，不与账号凭据库混用。它只�
 
 本地退出先同步清除接收绑定和挂起导航、取消系统通知，再清理 OAuth / 账号密钥。仍在途中的旧包只能被丢弃。原删除 capability 保存在加密清理队列，由有界 HTTPS 请求和受系统约束的 JobScheduler 重试；请求只有原绑定的注销 capability，无学校 JWT、DPoP 或 cookie。旧通道清理失败时阻止新的登记。路由密文损坏 / 密钥丢失时失败关闭，无法恢复的 capability 也可能丢失；原服务端通道需等待租约到期或由管理员撤销，不能承诺无损自助恢复。
 
-## 点击与人工审批
+## 点击与当前交互
 
-系统入口是显式、不可变 PendingIntent，只包含 binding 和通知 UUID / inbox 路径，不接受动作、决定或签名字段。点击后先检查当前账号，再通过已认证 REST 重新取引用，然后重新取得 runtime / session / epoch、订阅和完整审批详情。主机离线、epoch 变化、权限丢失或源请求已结束时给出状态，不构造执行许可。
+系统入口是显式、不可变 PendingIntent，只包含 binding 和通知 UUID / inbox 路径，不接受动作、决定或签名字段。点击后先检查当前账号，再通过已认证 REST 重新取引用，然后重新取得 runtime / session / epoch、订阅和原生详情。主机离线、epoch 变化、权限丢失或源请求已结束时给出状态；主机在线但问题元数据租约失效时，明确显示暂时无法核对状态。
 
-新鲜引用只能打开原有审批核对页。用户仍需核对完整参数，明确选择，再完成原有单次生物识别签名；通知本身不会签名或发送决定。前后台变化、账号切换、返回设置和切换会话都会隔离未完成的提醒导航。多个提醒查询互相替换，迟到响应不能覆盖用户的新导航。
+审批引用打开原有核对页。用户仍需核对完整参数，明确选择，再完成原有单次生物识别签名；通知本身不会签名或发送决定。
+
+普通 / 定时提问引用必须匹配当前原生快照里的类型、问题 UUID、runtime / session / epoch 和回答权限，才置顶对应卡片。置顶标记保存完整的当前 QuestionHandle，包括订阅、同步代次和内容摘要；不能仅凭同一 UUID 在新订阅中重新选中问题。卡片只出现一次，点击通知不会展开表单、自动 claim 或提交答案。用户明确查看仍在等待的定时问题时，才沿原有流程请求 claim；continued 明确说明补充回答会成为后续消息，不补造原调用成功或等待倒计时。
+
+前后台变化、账号切换、返回设置和切换会话都会隔离未完成的提醒导航和置顶句柄。多个提醒查询互相替换，迟到响应不能覆盖用户的新导航。已结束或与当前表单不匹配的引用只显示状态；reply_queued 与 ended / expired 分别展示。
 
 ## 验证与边界
 
 共享 JVM 测试覆盖严格最小包、跨用途 / 错误身份拒绝、公开配置与部署绑定、REST 返回引用身份、注销不附带学校凭据及重定向拒绝。设备夹具使用真实 AndroidKeyStore、实际 NotificationManager 和账号控制器；Google transport 由显式测试 provider 替代，REST 身份端点是隔离 HTTPS 对端。
 
-2026-10-26 的 208 项共享 JVM 测试通过，无失败或跳过；`check :app:assembleDebug :app:assembleDebugAndroidTest` 包括 lint，通过最终构建。专用 API 26 AVD 的 128 项应用回归通过，用时 783 秒，包含八项通知用例，以及原有账号、会话、审批、问题、文件、归档、创建和加密缓存用例。设备登记与工具审批使用实际平台生物识别操作；模拟指纹样本只发给本次显式夹具报告的对应提示。记录为 `.local/android-push-device-regression.log` 和 `.local/android-push-review-final-build.log`。
+2026-10-26 的 209 项共享 JVM 测试通过，无失败或跳过；`check :app:assembleDebug :app:assembleDebugAndroidTest` 包括 lint，通过最终构建。专用 API 26 AVD 的 133 项应用回归通过，用时 784 秒，包含十一项通知用例，以及原有账号、会话、审批、问题、文件、归档、创建、加密缓存和实际 Hilt 启动用例。设备登记与工具审批使用实际平台生物识别操作；模拟指纹样本只发给本次显式夹具报告的对应提示。记录为 `.local/question-notifications-device-all.log` 和 `.local/question-references-android-reviewed-build.log`。
 
 页面隔离改动后，另行通过 20 项账号绑定 / 会话 / 通知 / 实际 Hilt 启动定向回归，用时 177 秒，记录为 `.local/android-push-lifecycle-fixed.log`。其中启动用例确认默认安装包不初始化 Firebase。首次定向运行的启动用例在退出时失败：新增的 `onNewIntent.setIntent()` 替换了 ActivityScenario 用于匹配生命周期的原始启动 Intent。移除这次不必要的替换，保持按传入的新 Intent 处理通知后，完整 20 项重跑通过；没有跳过该启动用例。
 
-最后一版 debug APK / 测试 APK 与 lint 通过，记录为 `.local/android-push-release-check.log`。在该 APK 上把专用 AVD 锁屏，确认前后 `deviceLocked=1`，四项本地接收 / 去重 / 加密路由用例再次通过，用时七秒，记录为 `.local/android-push-locked-routing.log`；随后恢复原测试 PIN 解锁。这验证首次解锁后的 routing key 使用和本地通知围栏，不证明真实云推送在锁屏或 Doze 下送达。
+本轮还验证了普通提问点击后取到新表单但不自动回答、continued 不自动 claim 且只在明确操作后提交一次后续消息、结束 / 错配 ID 不能选中其他问题，以及置顶卡片只显示一次、明确查看前不 claim。审批阶段另行在锁屏前后 `deviceLocked=1` 的专用 AVD 上通过四项本地接收 / 去重 / 加密路由用例，记录为 `.local/android-push-locked-routing.log`。这类本地路由测试不证明真实云推送在锁屏或 Doze 下送达。
 
 构建配置检查验证匹配的公开 assets、拒绝额外私钥字段、拒绝单独提供 pushConfig，以及无配置构建删除先前的两份 assets；记录为 `.local/android-push-assets-check.log`。合并 Manifest 确认没有自动 Firebase initializer 或通用自动展示 service，只有非导出的接收服务和受 BIND_JOB_SERVICE 保护的清理服务。默认 APK 内无登录 / 推送 assets。
 
-八项通知用例单独运行方式如下。使用本任务专用、已设置安全锁且解锁、已登记强生物识别的测试设备，先安装默认 debug APK 和对应测试 APK：
+十一项通知用例单独运行方式如下。使用本任务专用、已设置安全锁且解锁、已登记强生物识别的测试设备，先安装默认 debug APK 和对应测试 APK：
 
 ```sh
 adb -s <owned-test-serial> shell am instrument -w \
@@ -78,4 +82,4 @@ adb -s <owned-test-serial> shell am instrument -w \
 
 本轮 Go 修复也通过通知定向 PostgreSQL / HTTPS 回归和完整隔离 Go race / Kotlin / 真实 npm DSH 0.2.1-rc.2 组合，记录为 `.local/push-api-regression.log` 和 `.local/android-push-full-chain.log`；没有尝试 TokenWorks。
 
-这些证据分别验证 Android 生命周期、Go 后端和真实 npm DSH 的既有链路。尚未证明 Google 接受当前 project/app、真实推送接收、Doze / 进程回收 / OEM 后台行为、清理 Job 的真实系统调度、现代系统通知权限、通知延迟目标或物理设备稳定性。完整 Android → Go → DSH 通知组合、普通 / timed question 来源、厂商配置及目标机型验收仍是后续工作。
+这些证据分别验证 Android 生命周期、Go 后端和真实 npm DSH 的既有链路。尚未证明 Google 接受当前 project/app、真实推送接收、Doze / 进程回收 / OEM 后台行为、清理 Job 的真实系统调度、现代系统通知权限、通知延迟目标或物理设备稳定性。完整 APK → Go → DSH 通知组合、厂商配置及目标机型验收仍是后续工作。

@@ -66,4 +66,20 @@ class SessionsScreenTest {
         rule.onNodeWithText("需要电脑上线后才能读取内容。").assertDoesNotExist()
         rule.onNodeWithText("会话还没有消息。").assertDoesNotExist()
     }
+    @Test fun aNotificationFocusedQuestionAppearsOnceAndRequiresAnExplicitViewBeforeClaiming() {
+        val prompt = jsonObject("id" to "choice".json(), "question" to "来自通知的当前提问".json(), "options" to JsonArray(listOf(jsonObject("label" to "A".json()))))
+        val batch = jsonObject("question_id" to id.json(), "state" to "open".json(), "expires_at" to JsonNull, "questions" to JsonArray(listOf(prompt)))
+        val model = SessionQuestions(SessionRoute(id, id, id, id), request).apply {
+            attach(id)
+            accept(SessionContent("question.timed.snapshot", request, id, jsonObject("revision" to 1L.json(), "items" to JsonArray(listOf(batch)))))
+        }
+        var claims = 0; var answers = 0
+        rule.setContent { DshTheme { SessionsScreen(initial().copy(notificationQuestion = model.state(true).items.single().handle, notificationNote = "已核对当前提问", reader = SessionReadState(SessionReadPhase.READY, questions = model.state(true))),
+            {}, {}, {}, {}, {}, {}, onClaim = { claims++ }, onAnswer = { _, _ -> answers++ }) } }
+        rule.onNodeWithText("来自通知的当前提问").performScrollTo().assertIsDisplayed()
+        rule.onAllNodesWithText("来自通知的当前提问").assertCountEquals(1)
+        rule.runOnIdle { assertEquals(0, claims); assertEquals(0, answers) }
+        rule.onNodeWithText("查看并答复").performScrollTo().performClick()
+        rule.runOnIdle { assertEquals(1, claims); assertEquals(0, answers) }
+    }
 }

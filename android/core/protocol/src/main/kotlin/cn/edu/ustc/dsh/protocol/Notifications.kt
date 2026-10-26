@@ -64,13 +64,18 @@ class PushCapabilities private constructor(val project: String?, val packageName
 }
 class NotificationReference private constructor(val id: String, val bindingId: String, val kind: String, val referenceId: String, val runtimeId: String, val epoch: String,
     val sessionId: String, val state: String, val availability: String, val expiresAt: Long) {
-    fun actionable() = state == "pending" && availability == "online" && expiresAt > System.currentTimeMillis()
+    fun actionable() = (state == "pending" || kind == "timed_question" && state == "continued") && availability == "online" && expiresAt > System.currentTimeMillis()
     override fun toString() = "NotificationReference"
     companion object {
         fun parse(root: JsonObject): NotificationReference {
             root.exactKeys("notification_id", "binding_id", "kind", "reference_id", "runtime_id", "runtime_epoch", "session_id", "state", "availability", "expires_at")
-            if (root.string("kind") !in setOf("approval", "question", "timed_question") || root.string("availability") !in setOf("online", "host_offline", "stale_epoch", "ended") ||
-                root.string("state") !in setOf("pending", "decision_received", "allowed", "denied", "expired", "cancelled", "invalidated", "outcome_unknown", "unattended", "answered")) throw ProtocolException()
+            val states = when (root.string("kind")) {
+                "approval" -> setOf("pending", "decision_received", "allowed", "denied", "expired", "cancelled", "invalidated", "outcome_unknown")
+                "question" -> setOf("pending", "expired", "ended")
+                "timed_question" -> setOf("pending", "continued", "reply_queued", "ended")
+                else -> throw ProtocolException()
+            }
+            if (root.string("availability") !in setOf("online", "host_offline", "stale_epoch", "ended", "state_unavailable") || root.string("state") !in states) throw ProtocolException()
             return NotificationReference(Contract.uuid(root.string("notification_id")), Contract.uuid(root.string("binding_id")), root.string("kind"), Contract.uuid(root.string("reference_id")),
                 Contract.uuid(root.string("runtime_id")), Contract.uuid(root.string("runtime_epoch")), Contract.uuid(root.string("session_id")), root.string("state"), root.string("availability"), relayTime(root.string("expires_at")))
         }

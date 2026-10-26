@@ -62,6 +62,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     @Volatile var pushCleanupUnavailable = false
     @Volatile var pushReferenceAvailability = "online"
     @Volatile var pushReferenceState = "pending"
+    @Volatile var pushReferenceKind = "approval"
+    @Volatile var pushReferenceId: String? = null
     @Volatile var holdPushReference = false
     val pushRegistrations = AtomicInteger()
     val pushConfirmations = AtomicInteger()
@@ -547,7 +549,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
-        if (pushMode && path == "/v1/push/capabilities") return resourceResponse(data(jsonObject("v" to 1L.json(), "providers" to JsonArray(listOf(jsonObject("provider" to "fcm".json(), "project_id" to "fixture-project".json(), "package_name" to "cn.edu.ustc.dsh.mobile".json(), "address_kind" to "fid".json()))), "sources" to JsonArray(listOf("approval".json())), "verification" to "provider_challenge".json(), "lease_seconds" to 604800L.json())))
+        if (pushMode && path == "/v1/push/capabilities") return resourceResponse(data(jsonObject("v" to 1L.json(), "providers" to JsonArray(listOf(jsonObject("provider" to "fcm".json(), "project_id" to "fixture-project".json(), "package_name" to "cn.edu.ustc.dsh.mobile".json(), "address_kind" to "fid".json()))), "sources" to JsonArray(listOf("approval".json(), "question".json(), "timed_question".json())), "verification" to "provider_challenge".json(), "lease_seconds" to 604800L.json())))
         if (pushMode && path == "/v1/push-bindings") {
             require(request.method == "POST")
             val input = JsonDocument.parse(request.body.readByteArray()).root; input.exactKeys("binding_id", "organization_id", "provider", "address", "revoke_secret_sha256")
@@ -708,8 +710,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     }
 
     private fun pushBinding(id: String) = jsonObject("binding_id" to id.json(), "state" to pushStates[id]!!.json(), "challenge_expires_at" to Contract.timestamp(System.currentTimeMillis() + 120_000).json(), "expires_at" to Contract.timestamp(System.currentTimeMillis() + 3600_000).json())
-    private fun pushReference() = jsonObject("notification_id" to pushNotificationId.json(), "binding_id" to pushStates.entries.single { it.value == "active" }.key.json(), "kind" to "approval".json(),
-        "reference_id" to approvalBody.root["approval_id"], "runtime_id" to runtimeId.json(), "runtime_epoch" to approvalBody.root["runtime_epoch"], "session_id" to sessionId.json(), "state" to pushReferenceState.json(),
+    private fun pushReference() = jsonObject("notification_id" to pushNotificationId.json(), "binding_id" to pushStates.entries.single { it.value == "active" }.key.json(), "kind" to pushReferenceKind.json(),
+        "reference_id" to (pushReferenceId ?: when (pushReferenceKind) { "question" -> ordinaryQuestionId; "timed_question" -> timedQuestionId; else -> approvalBody.root.string("approval_id") }).json(), "runtime_id" to runtimeId.json(), "runtime_epoch" to approvalBody.root["runtime_epoch"], "session_id" to sessionId.json(), "state" to pushReferenceState.json(),
         "availability" to pushReferenceAvailability.json(), "expires_at" to Contract.timestamp(System.currentTimeMillis() + 120_000).json())
     private fun exportStatus(): JsonObject {
         val now = System.currentTimeMillis()

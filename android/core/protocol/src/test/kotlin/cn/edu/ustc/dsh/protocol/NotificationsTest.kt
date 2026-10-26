@@ -33,4 +33,16 @@ class NotificationsTest {
         val duplicate = jsonObject("items" to JsonArray(listOf(ref, ref)), "cursor" to JsonNull)
         assertThrows(ProtocolException::class.java) { NotificationPage.parse(duplicate) }
     }
+    @Test fun questionReferencesKeepNativeContinuationSeparateFromExpiryAndUnavailableMetadata() {
+        val future = Contract.timestamp(System.currentTimeMillis() + 30_000).json()
+        val question = NotificationReference.parse(sample("question-reference").with("expires_at" to future))
+        assertTrue(question.actionable())
+        val continued = sample("timed-question-reference").with("expires_at" to future)
+        assertTrue(NotificationReference.parse(continued).actionable())
+        assertFalse(NotificationReference.parse(continued.with("availability" to "state_unavailable".json())).actionable())
+        assertFalse(NotificationReference.parse(continued.with("state" to "reply_queued".json())).actionable())
+        assertFalse(NotificationReference.parse(continued.with("expires_at" to Contract.timestamp(System.currentTimeMillis() - 1).json())).actionable())
+        assertThrows(ProtocolException::class.java) { NotificationReference.parse(continued.with("kind" to "approval".json())) }
+        assertThrows(ProtocolException::class.java) { NotificationReference.parse(continued.with("kind" to "question".json())) }
+    }
 }

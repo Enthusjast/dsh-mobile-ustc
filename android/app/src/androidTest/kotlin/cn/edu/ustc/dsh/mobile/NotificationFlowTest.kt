@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import cn.edu.ustc.dsh.auth.PushDeployment
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.session.QuestionPhase
 import kotlinx.coroutines.runBlocking
 import org.junit.*
 import org.junit.Assert.*
@@ -37,7 +38,7 @@ class NotificationFlowTest {
     @Before fun setup() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("accountFixture") == "true")
         assertTrue(context.getSystemService(KeyguardManager::class.java).let { it.isDeviceSecure && !it.isDeviceLocked })
-        fixture = AccountFixture(context).also { it.pushMode = true; it.approvalMode = true; it.seed() }
+        fixture = AccountFixture(context).also { it.pushMode = true; it.approvalMode = true; it.questionMode = true; it.seed() }
         val server = fixture!!
         config = PushDeployment.parse(JsonDocument.of(jsonObject("v" to 1L.json(), "deployment_sha256" to server.config.fingerprint.json(), "package_name" to context.packageName.json(),
             "fcm" to jsonObject("project_id" to "fixture-project".json(), "application_id" to "1:123456789:android:abcdef012345".json(), "sender_id" to "123456789".json(), "api_key" to "fixture_public_key_1234567890".json()))).canonicalBytes(), server.config.fingerprint, context.packageName)
@@ -102,6 +103,41 @@ class NotificationFlowTest {
         assertNull(controller!!.state.value.selectedSessionId)
         assertNull(controller!!.state.value.reviewingApprovalId)
         assertEquals(0, fixture!!.approvalWrites.get())
+    }
+    @Test fun ordinaryQuestionTapRequiresFreshNativeStateAndAnExplicitAnswer() {
+        val server = fixture!!; server.pushReferenceKind = "question"
+        interaction()
+        main { controller!!.openNotification(center.snapshot().route!!.id, server.pushNotificationId) }
+        await { controller!!.state.value.notificationQuestion?.questionId == server.ordinaryQuestionId }
+        assertEquals(0, server.questionWrites.get()); assertEquals(0, server.claimWrites.get()); assertEquals(0, server.approvalWrites.get())
+        val row = controller!!.state.value.reader!!.questions.items.single { it.batch.id == server.ordinaryQuestionId }
+        main { controller!!.answerQuestion(row.handle, QuestionAnswers(row.batch.id, listOf(QuestionAnswer("plan", listOf("继续"), "通知后明确答复")))) }
+        await { server.questionWrites.get() == 1 && controller!!.state.value.reader!!.questions.items.none { it.batch.id == row.batch.id } }
+        assertEquals(0, server.approvalWrites.get())
+    }
+    @Test fun aContinuedTimedNotificationOpensTheFreshLateAnswerFormWithoutClaiming() {
+        val server = fixture!!; server.pushReferenceKind = "timed_question"; server.pushReferenceState = "continued"; server.blockingPending = false; server.timedQuestionState = "continued"
+        val route = center.snapshot().route!!.id
+        main { controller!!.foreground(false) }; interaction()
+        main { controller!!.openNotification(route, server.pushNotificationId); controller!!.foreground(true) }
+        await { controller!!.state.value.notificationQuestion?.questionId == server.timedQuestionId }
+        val row = controller!!.state.value.reader!!.questions.items.single { it.batch.id == server.timedQuestionId }
+        assertEquals(QuestionPhase.CONTINUED, row.batch.phase)
+        assertEquals(0, server.questionWrites.get()); assertEquals(0, server.claimWrites.get()); assertEquals(0, server.approvalWrites.get())
+        main { controller!!.answerQuestion(row.handle, QuestionAnswers(row.batch.id, listOf(QuestionAnswer("timed", listOf("回复"), "通知后补充答复")))) }
+        await { server.questionWrites.get() == 1 && controller!!.state.value.outbox?.records?.any { it.everAgentQueued } == true }
+        assertEquals(0, server.claimWrites.get()); assertEquals(0, server.approvalWrites.get())
+    }
+    @Test fun endedAndMismatchedReferencesCannotSelectAnotherCurrentQuestion() {
+        val server = fixture!!; server.pushReferenceKind = "question"; server.pushReferenceState = "ended"; server.pushReferenceAvailability = "ended"
+        interaction()
+        main { controller!!.openNotification(center.snapshot().route!!.id, server.pushNotificationId) }
+        await { controller!!.state.value.notifications?.note != null }
+        assertNull(controller!!.state.value.selectedSessionId); assertNull(controller!!.state.value.notificationQuestion)
+        server.pushReferenceState = "pending"; server.pushReferenceAvailability = "online"; server.pushReferenceId = java.util.UUID.randomUUID().toString()
+        main { controller!!.openNotification(center.snapshot().route!!.id, server.pushNotificationId) }
+        await { controller!!.state.value.notificationNote != null }
+        assertNull(controller!!.state.value.notificationQuestion); assertEquals(0, server.questionWrites.get()); assertEquals(0, server.claimWrites.get())
     }
     @Test fun localLogoutFencesLatePacketsAndCanDeleteTheChannelWithoutOldCredentials(): Unit = runBlocking {
         val original = center.snapshot().route!!.id
