@@ -28,7 +28,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
     onQueryFile: (String) -> Unit = {}, onRemoveFile: (String) -> Unit = {}, onCancelFile: () -> Unit = {},
     onBrowseExports: (ExportSource?, Boolean) -> Unit = { _, _ -> }, onExport: (ExportSource) -> Unit = {}, onQueryExports: () -> Unit = {},
     onCancelExport: (String) -> Unit = {}, onRemoveExport: (String) -> Unit = {}, onSaveExport: (String) -> Unit = {}, onExportDestination: (String, Uri?) -> Unit = { _, _ -> }, onCancelExportSave: () -> Unit = {}) {
-    val runtime = state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }
+    val runtime = state.runtimeRow(state.selectedRuntimeId)
     val opened = state.selectedSessionId
     val archived = state.sessions.firstOrNull { it.id == opened }?.state == "archived"
     val canCompose = opened != null && !archived && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
@@ -54,7 +54,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
             LazyColumn(Modifier.widthIn(max = 800.dp).fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 item("navigation") {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onBack, Modifier.heightIn(min = 48.dp)) { Text(if (opened == null) "返回电脑列表" else "返回会话列表") }
+                        TextButton(onBack, Modifier.heightIn(min = 48.dp)) { Text(if (state.knownTarget != null) "返回提醒" else if (opened == null) "返回电脑列表" else "返回会话列表") }
                         TextButton(onExit, Modifier.heightIn(min = 48.dp)) { Text("退出本机登录") }
                     }
                     Text(runtime?.hostAlias ?: "已授权的电脑", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })

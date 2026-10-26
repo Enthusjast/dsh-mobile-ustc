@@ -107,7 +107,7 @@ class SessionReader internal constructor(
     @Synchronized private fun publishQuestions(questions: SessionQuestions,canAnswer: Boolean) {
         if(!closed.get() && scope.isActive && mutable.value.phase==SessionReadPhase.READY) mutable.update {it.copy(questions=questions.state(canAnswer))}
     }
-    private fun answerAuthority(connected: SessionRelayConnection)=commands!=null && "question.answer" in readScope.actions && "command.status" in readScope.actions && "command.relay.v1" in connected.identity.capabilities
+    private fun answerAuthority(connected: SessionRelayConnection)=commands!=null && "question.answer" in readScope.actions && "command.relay.v1" in connected.identity.capabilities
     private fun requireQuestionEndpoint(handle: QuestionHandle): QuestionEndpoint {
         val target=questionEndpoint.get() ?: throw QuestionStateException("question.stale")
         if(mutable.value.phase!=SessionReadPhase.READY || !target.lifetime.isActive || target.connection!==connection.get() || target.route.runtimeId!=handle.runtimeId || target.route.sessionId!=handle.sessionId || target.route.epoch!=handle.epoch || target.route.subscriptionId!=handle.subscriptionId) throw QuestionStateException("question.stale")

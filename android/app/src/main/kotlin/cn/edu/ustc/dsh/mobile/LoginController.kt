@@ -41,6 +41,7 @@ data class HomeState(
     val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
+    val knownTarget: SessionTarget? = null,
     val notifications: NotificationUiState? = null, val notificationSettings: Boolean = false, val notificationNote: String? = null, val notificationQuestion: QuestionHandle? = null,
     val exports: SessionExportState? = null, val exportSavePicker: ExportSaveLaunch? = null, val exportSaving: Boolean = false, val exportSaved: Boolean = false, val exportSaveError: String? = null, val exportBytes: Long = 0,
     val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composerRestore: MessageDraft? = null,
@@ -49,6 +50,10 @@ data class HomeState(
     val creation: SessionCreationState? = null,
     val approvals: ApprovalClientState? = null, val reviewingApprovalId: String? = null, val approvalStage: ApprovalUiStage = ApprovalUiStage.IDLE, val approvalError: String? = null,
 )
+
+internal fun HomeState.runtimeRow(id: String?): RuntimeRow? = knownTarget?.runtime?.takeIf { it.id == id }?.let {
+    RuntimeRow(it.id, it.hostId, it.dshVersion, "已授权的电脑", it)
+} ?: runtimes.firstOrNull { it.id == id }
 
 internal class LoginEnvironment(
     val configuration: () -> ByteArray,
@@ -97,6 +102,7 @@ class LoginController internal constructor(private val context: Context, private
     private var pendingNotificationReference: NotificationReference? = null
     private var notificationDeadline: Job? = null
     private var desired: Pair<String, String?>? = null
+    private var knownSelection = false
     private var creationDesired: String? = null
     private var creationReturnsToRuntime = false
     private var creationFlow: SessionCreationFlow? = null
@@ -514,12 +520,31 @@ class LoginController internal constructor(private val context: Context, private
                 RuntimeRow(access.id, access.hostId, access.dshVersion, names[access.hostId] ?: "已授权的电脑", access)
             }
             val selectedContext = creationDesired ?: desired?.first
-            val oldAccess = mutable.value.runtimes.firstOrNull { it.id == selectedContext }?.access
+            val oldAccess = mutable.value.runtimeRow(selectedContext)?.access
+            val known = if (knownSelection && desired?.second != null) {
+                val selection = desired!!
+                val view = navigationGeneration
+                fun targetCurrent() {
+                    current(stamp)
+                    if (navigationGeneration != view || !knownSelection || desired != selection) throw CancellationException()
+                }
+                try { resource.sessionTarget(selection.first, selection.second!!, ::targetCurrent).also { targetCurrent() } }
+                catch (error: CancellationException) { throw error }
+                catch (error: RemoteRequestException) {
+                    targetCurrent()
+                    if (error.code != "access.denied") throw error
+                    retireNavigation(false)
+                    mutable.value = mutable.value.copy(knownTarget = null, selectedRuntimeId = null, selectedSessionId = null, reader = null, notificationNote = "当前授权无法读取此会话。")
+                    null
+                }
+            } else null
+            val contexts = items.mapNotNull { row -> row.access?.let { row.id to it } }.toMap().toMutableMap()
+            known?.let { contexts[it.runtime.id] = it.runtime }
             val removedRead = mutable.value.runtimes.filter { old ->
-                old.access?.scope?.actions?.contains("session.read") == true && items.firstOrNull { it.id == old.id }?.access?.scope?.actions?.contains("session.read") != true
+                old.access?.scope?.actions?.contains("session.read") == true && contexts[old.id]?.scope?.actions?.contains("session.read") != true
             }.map { it.id }
-            mutable.value = mutable.value.copy(runtimes = items, error = null)
-            val activeAccess = items.firstOrNull { it.id == selectedContext }?.access
+            mutable.value = mutable.value.copy(runtimes = items, knownTarget = known, error = null)
+            val activeAccess = contexts[selectedContext]
             if (oldAccess != null && activeAccess != null && (oldAccess.role != activeAccess.role || oldAccess.grantVersion != activeAccess.grantVersion || activeAccess.scope?.let { oldAccess.scope?.same(it) } != true)) retireNavigation(true)
             if (removedRead.isNotEmpty()) {
                 val saved = checkpoint!!
@@ -533,8 +558,8 @@ class LoginController internal constructor(private val context: Context, private
             }
             val dataOwner = checkpoint!!.let { CommandOwner(it.accountId, it.organizationId, configuration!!.fingerprint, it.userId, it.deviceId!!) }
             try {
-                val scopes = items.mapNotNull { item -> item.access?.takeIf { it.protocolVersion==1L && it.expiresAt?.let { expiry -> expiry>now() }!=false }?.scope?.let { item.id to it } }.toMap()
-                val approvalRuntimes = items.filter { it.access?.role == "owner" }.map { it.id }.toSet()
+                val scopes = contexts.mapNotNull { (id, access) -> access.takeIf { it.protocolVersion==1L && it.expiresAt?.let { expiry -> expiry>now() }!=false }?.scope?.let { id to it } }.toMap()
+                val approvalRuntimes = contexts.filterValues { it.role == "owner" }.keys
                 persistence.retainHistory(dataOwner, scopes, stamp, approvalRuntimes)
                 current(stamp)
             } catch (error: CancellationException) { throw error }
@@ -548,11 +573,14 @@ class LoginController internal constructor(private val context: Context, private
                     mutable.value=mutable.value.copy(selectedRuntimeId=null,selectedSessionId=null,sessions=emptyList(),reader=null,creation=null)
                 } else if(foreground && creationFlow==null) openCreationInternal(pendingCreation,true)
             } else if (selection != null) {
-                val entry = items.firstOrNull { it.id == selection.first }?.access
-                if (entry?.canList() != true || entry.organizationId != configuration!!.organizationId) {
+                val entry = contexts[selection.first]
+                val available = if (knownSelection) known != null && entry?.canRead() == true else entry?.canList() == true
+                if (!available || entry?.organizationId != configuration!!.organizationId) {
                     retireNavigation(false)
                     mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, sessions = emptyList(), reader = null, loadingSessions = false, sessionError = "access.denied")
-                } else if (foreground && (mutable.value.selectedRuntimeId == null || oldAccess?.grantVersion != entry.grantVersion || oldAccess?.scope?.same(entry.scope!!) != true)) navigateRuntime(selection.first, selection.second)
+                } else if (foreground && (reader == null || mutable.value.selectedRuntimeId == null || oldAccess?.grantVersion != entry.grantVersion || oldAccess?.scope?.same(entry.scope!!) != true)) {
+                    if (knownSelection && known != null) installKnownTarget(known) else navigateRuntime(selection.first, selection.second)
+                }
             }
             mutable.value = mutable.value.copy(pendingBindingId = pendingBindingId)
             if (foreground && resumeBindingView && binding == null) {
@@ -585,7 +613,8 @@ class LoginController internal constructor(private val context: Context, private
         creationCollector?.cancel(); creationCollector=null; creationFlow?.close(); creationFlow=null
         commandJournal?.close(); commandJournal = null
         mutable.value = mutable.value.copy(outbox = null, uploads = null, exports = null, exportSaving = false, exportSaved = false, exportSaveError = null, exportBytes = 0, exportSavePicker = mutable.value.exportSavePicker.takeIf { pendingExportSave != null }, documentPicker = if (pendingDocument == null) null else mutable.value.documentPicker, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE, notificationQuestion=null)
-        if (!keepDesired) { desired = null; creationDesired=null }
+        if (!keepDesired) { desired = null; creationDesired=null; knownSelection=false }
+        if (!knownSelection) mutable.value = mutable.value.copy(knownTarget = null)
     }
     fun foreground(active: Boolean) {
         if (foreground == active) return
@@ -602,7 +631,7 @@ class LoginController internal constructor(private val context: Context, private
             if (binding == null) {
                 if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
                 else if(creationDesired!=null) openCreationInternal(creationDesired!!,true)
-                else desired?.let { navigateRuntime(it.first, it.second) }
+                else desired?.let { if (knownSelection && it.second != null) navigateKnownSession(it.first, it.second!!) else navigateRuntime(it.first, it.second) }
             }
         }
     }
@@ -669,6 +698,7 @@ class LoginController internal constructor(private val context: Context, private
         if (!foreground || mutable.value.phase != HomePhase.READY || binding != null) return
         val row = mutable.value.runtimes.firstOrNull { it.id == id } ?: return
         if (row.access?.organizationId != configuration!!.organizationId || !row.access.canList()) return
+        knownSelection = false
         desired = id to resumeSession
         if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
         retireNavigation(true)
@@ -692,11 +722,36 @@ class LoginController internal constructor(private val context: Context, private
             }
         }
     }
+    private fun navigateKnownSession(runtime: String, id: String) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || binding != null) return
+        desired = runtime to id; knownSelection = true
+        if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
+        retireNavigation(true)
+        val stamp = generation; val view = navigationGeneration; val resource = api!!
+        mutable.value = mutable.value.copy(knownTarget = null, selectedRuntimeId = runtime, selectedSessionId = id, sessions = emptyList(), loadingSessions = true,
+            sessionError = null, reader = SessionReadState(SessionReadPhase.CONNECTING))
+        navigation {
+            try {
+                val target = resource.sessionTarget(runtime, id) { current(stamp); if (view != navigationGeneration || !foreground) throw CancellationException() }
+                current(stamp); if (view != navigationGeneration || !foreground) return@navigation
+                navigationJob = null; installKnownTarget(target)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(loadingSessions = false, sessionError = code(error),
+                    reader = SessionReadState(if (error is RemoteRequestException && error.code == "access.denied") SessionReadPhase.REVOKED else SessionReadPhase.ERROR, error = code(error)))
+            }
+        }
+    }
+    private fun installKnownTarget(target: SessionTarget) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || !knownSelection || desired != (target.runtime.id to target.session.id)) return
+        mutable.value = mutable.value.copy(knownTarget = target, selectedRuntimeId = target.runtime.id, selectedSessionId = target.session.id, sessions = listOf(target.session), loadingSessions = false)
+        openSessionInternal(target.session.id)
+    }
     fun openSession(id: String) { dismissNotificationNavigation(); openSessionInternal(id) }
     private fun openSessionInternal(id: String) {
         if (!foreground || mutable.value.phase != HomePhase.READY) return
         val runtimeId = mutable.value.selectedRuntimeId ?: return
-        val runtime = mutable.value.runtimes.firstOrNull { it.id == runtimeId }?.access ?: return
+        val runtime = mutable.value.runtimeRow(runtimeId)?.access ?: return
         val selected = mutable.value.sessions.firstOrNull { it.id == id } ?: return
         val allowed = selected.viewScope(runtime, includeApprovals = approval != null) ?: return
         desired = runtimeId to id
@@ -910,7 +965,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun approvalCurrent(stamp: Long, view: Long, client: SessionApprovalClient, handle: ApprovalReviewHandle) {
         current(stamp)
-        val authority = mutable.value.runtimes.firstOrNull { it.id == handle.runtimeId }?.access
+        val authority = mutable.value.runtimeRow(handle.runtimeId)?.access
         if (!foreground || navigationGeneration != view || mutable.value.phase != HomePhase.READY || reader?.approvals !== client ||
             authority?.role != "owner" || authority.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) != true || authority.expiresAt?.let { it <= now() } == true ||
             mutable.value.selectedRuntimeId != handle.runtimeId || mutable.value.selectedSessionId != handle.sessionId ||
@@ -1139,12 +1194,9 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun navigateNotificationReference(ref: NotificationReference) {
         if (!foreground || mutable.value.phase != HomePhase.READY || !ref.actionable()) return
-        if (mutable.value.runtimes.none { it.id == ref.runtimeId && it.access?.canList() == true }) {
-            mutable.value = mutable.value.copy(notificationNote = "当前运行实例不可用，请刷新授权列表后重新核对提醒。"); return
-        }
         pendingNotificationReference = ref
         mutable.value = mutable.value.copy(notificationSettings = false, notificationNote = null)
-        navigateRuntime(ref.runtimeId, ref.sessionId)
+        navigateKnownSession(ref.runtimeId, ref.sessionId)
         notificationDeadline?.cancel(); notificationDeadline = scope.launch { delay(20_000); if (pendingNotificationReference === ref) { pendingNotificationReference = null; mutable.value = mutable.value.copy(notificationNote = "暂时无法核对提醒，请在线刷新当前会话。") } }
     }
     private fun deliverNotificationReference() {
@@ -1177,10 +1229,11 @@ class LoginController internal constructor(private val context: Context, private
 
     fun loadOlder() = reader?.loadOlder()
     fun retryRead() = reader?.retry()
-    fun refreshSessions() { mutable.value.selectedRuntimeId?.let { navigateRuntime(it, mutable.value.selectedSessionId) } }
+    fun refreshSessions() { desired?.let { if (knownSelection && it.second != null) navigateKnownSession(it.first, it.second!!) else navigateRuntime(it.first, it.second) } }
     fun back() {
         dismissNotificationNavigation()
         if (mutable.value.notificationSettings) { closeNotificationSettings(); return }
+        if (knownSelection) { enterNotificationSettings(); return }
         if (binding != null) { closeBinding(); return }
         if(creationDesired!=null || mutable.value.creation!=null) {
             val target=creationDesired ?: mutable.value.selectedRuntimeId

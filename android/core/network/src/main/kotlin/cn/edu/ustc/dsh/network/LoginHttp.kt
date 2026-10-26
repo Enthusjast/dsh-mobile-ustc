@@ -224,6 +224,21 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         Contract.uuid(runtimeId)
         JsonDocument.parse(read("/v1/runtimes/$runtimeId/sessions")).root
     }
+    suspend fun sessionTarget(runtime: String, session: String, current: () -> Unit = {}): SessionTarget = mutex.withLock {
+        Contract.uuid(runtime); Contract.uuid(session)
+        val root = JsonDocument.parse(request("GET", "/v1/runtimes/$runtime/sessions/$session", beforeSend = current)).root
+        root.exactKeys("ok", "data"); if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+        SessionTarget.parse(root.obj("data")).also {
+            if (it.runtime.id != runtime || it.session.id != session || it.runtime.organizationId != config.organizationId || !it.runtime.canRead() ||
+                it.session.viewScope(it.runtime) == null) throw RemoteRequestException("access.denied")
+        }
+    }
+    suspend fun questionAnswerStatus(runtime: String, session: String, id: String): CommandReceipt = mutex.withLock {
+        listOf(runtime, session, id).forEach(Contract::uuid)
+        val root = JsonDocument.parse(read("/v1/runtimes/$runtime/sessions/$session/question-answers/$id")).root
+        root.exactKeys("ok", "data"); if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+        CommandReceipt.status(root.obj("data")).also { if (it.requestId != id || it.sessionId != session || it.workspaceId != null) throw RemoteRequestException("access.denied") }
+    }
     fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
         SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
     fun fileUploads(runtimeId: String, sessionId: String, workspace: String?, grant: RelayScope, journal: FileUploadJournal, owner: CoroutineScope): SessionUploads {
@@ -440,7 +455,7 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
     }
     suspend fun sessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
         if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide", "file.download") } ||
-            scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel", "question.answer") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
+            scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     internal suspend fun creationTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {

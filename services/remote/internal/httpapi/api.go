@@ -62,6 +62,8 @@ type Repository interface {
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
 	SessionCacheReadAccess(context.Context, store.UserIdentity, string, string, string, string, time.Time) (store.SessionReadAccess, error)
+	SessionReadTarget(context.Context, store.UserIdentity, string, string, string, string, time.Time) (store.SessionTarget, error)
+	QuestionAnswerStatus(context.Context, store.UserIdentity, string, string, string, string, string, time.Time) (store.CommandStatus, error)
 	CommandStatus(context.Context, store.UserIdentity, string, string) (store.CommandStatus, error)
 }
 
@@ -165,6 +167,8 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.Handle("GET /v1/hosts", api.protected(http.HandlerFunc(api.listHosts)))
 	mux.Handle("GET /v1/runtimes", api.protected(http.HandlerFunc(api.listRuntimes)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions", api.protected(http.HandlerFunc(api.listSessions)))
+	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}", api.protected(http.HandlerFunc(api.sessionTarget)))
+	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}/question-answers/{request_id}", api.protected(http.HandlerFunc(api.questionAnswerStatus)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}/read-access", api.protected(http.HandlerFunc(api.sessionReadAccess)))
 	mux.Handle("PUT /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.putRuntimeGrant)))
 	mux.Handle("DELETE /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.revokeRuntimeGrant)))
@@ -577,6 +581,45 @@ func (api *API) sessionReadAccess(response http.ResponseWriter, request *http.Re
 		return
 	}
 	writeData(response, http.StatusOK, access)
+}
+
+func (api *API) sessionTarget(response http.ResponseWriter, request *http.Request) {
+	if request.URL.RawQuery != "" {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	runtime, session := request.PathValue("id"), request.PathValue("session_id")
+	if !uuidPattern.MatchString(runtime) || !uuidPattern.MatchString(session) {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	device, _ := request.Context().Value(deviceContextKey{}).(string)
+	target, err := api.database.SessionReadTarget(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, device, principal.ProofKeyJKT, runtime, session, principal.ExpiresAt)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, target)
+}
+func (api *API) questionAnswerStatus(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	runtime, session, id := r.PathValue("id"), r.PathValue("session_id"), r.PathValue("request_id")
+	if !uuidPattern.MatchString(runtime) || !uuidPattern.MatchString(session) || !uuidPattern.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(r.Context())
+	device, _ := r.Context().Value(deviceContextKey{}).(string)
+	status, err := api.database.QuestionAnswerStatus(r.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, device, principal.ProofKeyJKT, runtime, session, id, principal.ExpiresAt)
+	if err != nil {
+		api.writeStoreError(w, err)
+		return
+	}
+	writeData(w, http.StatusOK, status)
 }
 
 func (api *API) putRuntimeGrant(response http.ResponseWriter, request *http.Request) {

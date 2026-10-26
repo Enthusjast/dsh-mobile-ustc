@@ -40,7 +40,7 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
     onDecide: (ApprovalReviewHandle, ApprovalChoice) -> Unit, onSend: (ApprovalReviewHandle, String) -> Unit,
     onQuery: () -> Unit, onDiscard: (String) -> Unit, onRefresh: () -> Unit, onReauthenticate: () -> Unit) {
     val id = state.reviewingApprovalId ?: return
-    val runtime = state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }
+    val runtime = state.runtimeRow(state.selectedRuntimeId)
     val authorized = runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true
     val client = state.approvals
     val current = client?.view?.items?.firstOrNull { it.status.id == id }

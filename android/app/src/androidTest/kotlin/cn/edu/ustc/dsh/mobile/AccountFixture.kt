@@ -136,6 +136,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val ordinaryQuestionId="90000000-0000-4000-8000-000000000001"
     val timedQuestionId="90000000-0000-4000-8000-000000000002"
     val questionWrites=AtomicInteger()
+    private val questionRequestIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     val claimWrites=AtomicInteger()
     val releaseWrites=AtomicInteger()
     private val publishQuestions=AtomicReference<(() -> Unit)?>(null)
@@ -154,9 +155,15 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     @Volatile var bindingExpiresAt = System.currentTimeMillis() + 299_000
     val bindingApproved get() = bindingUserConfirmed && bindingHostConfirmed
     @Volatile var allowSessionRead = true
+    @Volatile var allowSessionList = true
+    @Volatile var allowHostList = false
+    @Volatile var allowCommandStatus = true
+    @Volatile var holdSessionTarget = false
+    val targetRequests = AtomicInteger()
+    val answerStatusRequests = AtomicInteger()
     @Volatile var holdSessions = false
-    private val directoryScope get() = RelayScope((if (allowSessionRead) listOf("session.list", "session.read") else listOf("session.list")) +
-        (if (chatMode || creationMode || questionMode) listOf("message.submit", "command.status", "session.cancel") else emptyList())+
+    private val directoryScope get() = RelayScope((if (allowSessionList) listOf("session.list") else emptyList()) + (if (allowHostList) listOf("host.list") else emptyList()) + (if (allowSessionRead) listOf("session.read") else emptyList()) +
+        (if (chatMode || creationMode || questionMode) listOf("message.submit", "session.cancel") + (if (allowCommandStatus) listOf("command.status") else emptyList()) else emptyList())+
         (if(questionMode) listOf("question.answer") else emptyList())+
         (if(archiveMode) listOf("session.archive") else emptyList())+
         (if(approvalMode) listOf("approval.decide", "grant.manage") else emptyList())+
@@ -449,6 +456,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                                 val status=if(existing!=null) {require(existing.string("payload_sha256")==intent.digest);existing} else {
                                     require(if(timed) timedQuestionState in setOf("open","continued") else blockingPending)
                                     questionWrites.incrementAndGet()
+                                    questionRequestIds.add(intent.requestId)
                                     if(timed) timedQuestionState=if(state=="agent_queued") "reply_queued" else null else blockingPending=false
                                     jsonObject("request_id" to intent.requestId.json(),"session_id" to sessionId.json(),"state" to state.json(),"payload_sha256" to intent.digest.json(),"updated_at" to java.time.Instant.now().toString().json()).also {commandStatuses[intent.requestId]=it}
                                 }
@@ -637,6 +645,18 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val reply = resourceResponse(data(jsonObject("status" to status, "delivery" to "forwarded".json())))
             return if (dropApprovalReply) reply.setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else reply
         }
+        if (path == "/v1/runtimes/$runtimeId/sessions/$sessionId") {
+            targetRequests.incrementAndGet()
+            if (!allowSessionRead) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+            val reply = resourceResponse(data(jsonObject("runtime" to runtimeRow(), "session" to sessionRow(sessionId))))
+            return if (holdSessionTarget) reply.setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS) else reply
+        }
+        if (path.startsWith("/v1/runtimes/$runtimeId/sessions/$sessionId/question-answers/")) {
+            answerStatusRequests.incrementAndGet()
+            val id = path.substringAfterLast('/')
+            val status = commandStatuses[id]?.takeIf { questionMode && allowSessionRead && id in questionRequestIds }
+            return if (status != null) resourceResponse(data(status)) else resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        }
         if (path.startsWith("/v1/runtimes/$runtimeId/sessions/") && path.endsWith("/read-access")) {
             val selected=path.substringAfter("/sessions/").substringBefore('/')
             require(selected==sessionId || selected in createdSessions)
@@ -647,6 +667,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         }
         if (path.startsWith("/v1/commands/")) {
             require((chatMode || creationMode || questionMode) && request.requestUrl!!.queryParameter("device_id") == deviceId)
+            require(allowCommandStatus)
             val status = commandStatuses[path.substringAfterLast('/')]
             return if (status != null) resourceResponse(data(status)) else resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
         }
@@ -694,20 +715,25 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         }
         if (path == "/v1/runtimes/$runtimeId/sessions") {
             sessionRequests.incrementAndGet()
-            val rows=listOf(jsonObject("session_id" to sessionId.json(), "workspace_id" to JsonNull, "state" to (if (archived) "archived" else "available").json(), "last_persisted_seq" to 2L.json(), "updated_at" to java.time.Instant.now().toString().json()))+
-                createdSessions.map {id->jsonObject("session_id" to id.json(),"workspace_id" to workspaceId.json(),"state" to "available".json(),"last_persisted_seq" to (-1L).json(),"updated_at" to java.time.Instant.now().toString().json())}
+            require(allowSessionList)
+            val rows=listOf(sessionRow(sessionId)) + createdSessions.map(::sessionRow)
             val result = resourceResponse(data(jsonObject("items" to JsonArray(rows))))
             return if (holdSessions) result.setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS) else result
         }
         if (path == "/v1/hosts") {
             hostRequests.incrementAndGet()
+            if (!allowHostList && !allowSessionList) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
             return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to "44444444-4444-4444-8444-444444444444".json(), "alias" to "夹具电脑".json(), "state" to "active".json()))))))
         }
         require(path == "/v1/runtimes")
+        if (!allowHostList && !allowSessionList) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
         if (bindingMode && (!bindingApproved || bindingConfirmedElsewhere)) return resourceResponse(data(jsonObject("items" to JsonArray(emptyList()))))
-        return resourceResponse(data(jsonObject("items" to JsonArray(listOf(jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
-            "access" to jsonObject("role" to (if (approvalMode) approvalRole else if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
+        return resourceResponse(data(jsonObject("items" to JsonArray(listOf(runtimeRow())))))
     }
+    private fun sessionRow(id: String) = jsonObject("session_id" to id.json(), "workspace_id" to (if (id in createdSessions) workspaceId.json() else JsonNull),
+        "state" to (if (id == sessionId && archived) "archived" else "available").json(), "last_persisted_seq" to (if (id in createdSessions) -1L else 2L).json(), "updated_at" to java.time.Instant.now().toString().json())
+    private fun runtimeRow() = jsonObject("id" to runtimeId.json(), "host_id" to "44444444-4444-4444-8444-444444444444".json(), "organization_id" to organizationId.json(), "protocol_version" to 1L.json(), "dsh_version" to "0.2.1-rc.2".json(),
+        "access" to jsonObject("role" to (if (approvalMode) approvalRole else if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json()))
 
     private fun pushBinding(id: String) = jsonObject("binding_id" to id.json(), "state" to pushStates[id]!!.json(), "challenge_expires_at" to Contract.timestamp(System.currentTimeMillis() + 120_000).json(), "expires_at" to Contract.timestamp(System.currentTimeMillis() + 3600_000).json())
     private fun pushReference() = jsonObject("notification_id" to pushNotificationId.json(), "binding_id" to pushStates.entries.single { it.value == "active" }.key.json(), "kind" to pushReferenceKind.json(),

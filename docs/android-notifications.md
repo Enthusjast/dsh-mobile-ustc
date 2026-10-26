@@ -53,6 +53,8 @@ routing vault 位于 `noBackupFilesDir`，不与账号凭据库混用。它只�
 
 系统入口是显式、不可变 PendingIntent，只包含 binding 和通知 UUID / inbox 路径，不接受动作、决定或签名字段。点击后先检查当前账号，再通过已认证 REST 重新取引用，然后重新取得 runtime / session / epoch、订阅和原生详情。主机离线、epoch 变化、权限丢失或源请求已结束时给出状态；主机在线但问题元数据租约失效时，明确显示暂时无法核对状态。
 
+已知引用通过[精确会话接口](known-session-access.md)核对，`session.read` 不隐含 `host.list` / `session.list`，用户无需先在目录中看见该资源。临时上下文与可枚举目录分开，前后台恢复和凭据刷新重新查询；返回提醒、切换页面或退出隔离迟到响应。owner / operator 具备 `question.answer` 时可明确答复并查询本设备原答案状态，无需补授通用 `command.status`。聊天、中断、归档和创建继续使用原权限要求。
+
 审批引用打开原有核对页。用户仍需核对完整参数，明确选择，再完成原有单次生物识别签名；通知本身不会签名或发送决定。
 
 普通 / 定时提问引用必须匹配当前原生快照里的类型、问题 UUID、runtime / session / epoch 和回答权限，才置顶对应卡片。置顶标记保存完整的当前 QuestionHandle，包括订阅、同步代次和内容摘要；不能仅凭同一 UUID 在新订阅中重新选中问题。卡片只出现一次，点击通知不会展开表单、自动 claim 或提交答案。用户明确查看仍在等待的定时问题时，才沿原有流程请求 claim；continued 明确说明补充回答会成为后续消息，不补造原调用成功或等待倒计时。
@@ -68,6 +70,8 @@ routing vault 位于 `noBackupFilesDir`，不与账号凭据库混用。它只�
 页面隔离改动后，另行通过 20 项账号绑定 / 会话 / 通知 / 实际 Hilt 启动定向回归，用时 177 秒，记录为 `.local/android-push-lifecycle-fixed.log`。其中启动用例确认默认安装包不初始化 Firebase。首次定向运行的启动用例在退出时失败：新增的 `onNewIntent.setIntent()` 替换了 ActivityScenario 用于匹配生命周期的原始启动 Intent。移除这次不必要的替换，保持按传入的新 Intent 处理通知后，完整 20 项重跑通过；没有跳过该启动用例。
 
 本轮还验证了普通提问点击后取到新表单但不自动回答、continued 不自动 claim 且只在明确操作后提交一次后续消息、结束 / 错配 ID 不能选中其他问题，以及置顶卡片只显示一次、明确查看前不 claim。审批阶段另行在锁屏前后 `deviceLocked=1` 的专用 AVD 上通过四项本地接收 / 去重 / 加密路由用例，记录为 `.local/android-push-locked-routing.log`。这类本地路由测试不证明真实云推送在锁屏或 Doze 下送达。
+
+已知会话与最小答复权限改动通过 212 项 JVM 用例、含 lint 的最终 APK 构建、135 项 API 26 全量回归及导航竞态修复后的 17 项定向回归；[验证记录](known-session-access.md)分别说明目录为空时的明确答复、窄状态查询和迟到结果隔离。
 
 构建配置检查验证匹配的公开 assets、拒绝额外私钥字段、拒绝单独提供 pushConfig，以及无配置构建删除先前的两份 assets；记录为 `.local/android-push-assets-check.log`。合并 Manifest 确认没有自动 Firebase initializer 或通用自动展示 service，只有非导出的接收服务和受 BIND_JOB_SERVICE 保护的清理服务。默认 APK 内无登录 / 推送 assets。
 

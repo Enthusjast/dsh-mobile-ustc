@@ -5,6 +5,7 @@ import cn.edu.ustc.dsh.protocol.*
 class RuntimeDirectoryEntry private constructor(val id: String, val hostId: String, val organizationId: String?, val dshVersion: String,
     val protocolVersion: Long?, val scope: RelayScope?, val grantVersion: Long?, val role: String?, val expiresAt: Long?) {
     fun canList(now: Long = System.currentTimeMillis()): Boolean = protocolVersion == 1L && scope?.actions?.contains("session.list") == true && (expiresAt == null || expiresAt > now)
+    fun canRead(now: Long = System.currentTimeMillis()): Boolean = protocolVersion == 1L && scope?.actions?.contains("session.read") == true && (expiresAt == null || expiresAt > now)
     fun creationScope(now: Long = System.currentTimeMillis()): RelayScope? = if (protocolVersion == 1L && role in setOf("operator", "owner") &&
         (expiresAt == null || expiresAt > now) && scope?.actions?.containsAll(setOf("session.create", "command.status")) == true && scope.workspaces.isNotEmpty())
         RelayScope(listOf("session.create", "command.status"), scope.workspaces, emptyList()) else null
@@ -27,9 +28,10 @@ class RuntimeDirectoryEntry private constructor(val id: String, val hostId: Stri
 
 class SessionDirectoryEntry private constructor(val id: String, val workspaceId: String?, val state: String, val lastPersisted: Long, val updatedAt: Long) {
     fun viewScope(grant: RuntimeDirectoryEntry, includeApprovals: Boolean = false): RelayScope? = try {
-        if (!grant.canList() || grant.scope == null || "session.read" !in grant.scope.actions) null else {
+        if (!grant.canRead() || grant.scope == null) null else {
             val actions = mutableSetOf("session.read")
             if (state != "archived" && includeApprovals && grant.role == "owner" && "approval.decide" in grant.scope.actions) actions += "approval.decide"
+            if (state != "archived" && grant.role in setOf("operator", "owner") && "question.answer" in grant.scope.actions) actions += "question.answer"
             if ("command.status" in grant.scope.actions) {
                 actions += "command.status"
                 if (grant.role in setOf("operator", "owner")) {
@@ -37,7 +39,6 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
                     if (state != "archived") {
                         if ("message.submit" in grant.scope.actions) actions += "message.submit"
                         if ("session.cancel" in grant.scope.actions) actions += "session.cancel"
-                        if ("question.answer" in grant.scope.actions) actions += "question.answer"
                     }
                 }
             }
@@ -48,7 +49,7 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
         }
     } catch (_: ProtocolException) { null }
     fun readScope(grant: RuntimeDirectoryEntry): RelayScope? = try {
-        if (!grant.canList() || state == "unavailable") null else grant.scope?.readSession(id, workspaceId)
+        if (!grant.canRead() || state == "unavailable") null else grant.scope?.readSession(id, workspaceId)
     } catch (_: ProtocolException) { null }
     companion object {
         fun parse(root: JsonObject): SessionDirectoryEntry {
@@ -56,6 +57,15 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
             val state = root.string("state")
             if (state !in setOf("available", "running", "archived", "unavailable")) throw ProtocolException()
             return SessionDirectoryEntry(Contract.uuid(root.string("session_id")), workspace, state, root.integer("last_persisted_seq", -1), relayTime(root.string("updated_at")))
+        }
+    }
+}
+
+class SessionTarget private constructor(val runtime: RuntimeDirectoryEntry, val session: SessionDirectoryEntry) {
+    companion object {
+        fun parse(root: JsonObject): SessionTarget {
+            root.exactKeys("runtime", "session")
+            return SessionTarget(RuntimeDirectoryEntry.parse(root.obj("runtime")), SessionDirectoryEntry.parse(root.obj("session")))
         }
     }
 }

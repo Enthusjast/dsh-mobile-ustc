@@ -342,5 +342,29 @@ class FileUploadsTest {
         try { http.revokePush(origin, request, secret); fail("cleanup redirect accepted") } catch (error: RemoteRequestException) { assertEquals("push.cleanup_failed", error.code) }
         assertEquals(0, objects.requestCount)
     }
+    @Test fun knownSessionLookupAndScopedAnswerStatusNeverEnumerateOtherSessions(): Unit = runBlocking {
+        val api = api()
+        val grant = jsonObject("id" to runtime.json(), "host_id" to file.json(), "organization_id" to request.json(), "protocol_version" to 1L.json(),
+            "access" to jsonObject("role" to "operator".json(), "grant_version" to 7L.json(), "scope" to RelayScope(listOf("session.read", "question.answer"), emptyList(), listOf(session)).json()))
+        val row = jsonObject("session_id" to session.json(), "workspace_id" to JsonNull, "state" to "available".json(), "last_persisted_seq" to (-1L).json(), "updated_at" to Instant.now().toString().json())
+        service.enqueue(reply(jsonObject("runtime" to grant, "session" to row)))
+        val known = api.sessionTarget(runtime, session)
+        assertFalse(known.runtime.canList()); assertTrue(known.runtime.canRead()); assertEquals(session, known.session.id)
+        val lookup = service.takeRequest(); assertEquals("/v1/runtimes/$runtime/sessions/$session", lookup.path); proof(lookup)
+        service.enqueue(reply(jsonObject("request_id" to request.json(), "session_id" to session.json(), "state" to "settled".json(), "payload_sha256" to "a".repeat(64).json(), "updated_at" to Instant.now().toString().json())))
+        assertEquals(RemoteCommandState.SETTLED, api.questionAnswerStatus(runtime, session, request).state)
+        val status = service.takeRequest(); assertEquals("/v1/runtimes/$runtime/sessions/$session/question-answers/$request", status.path); proof(status)
+        service.enqueue(reply(jsonObject("runtime" to grant, "session" to row.with("session_id" to runtime.json()))))
+        try { api.sessionTarget(runtime, session); fail("another session identity accepted") } catch (error: RemoteRequestException) { assertEquals("access.denied", error.code) }
+        assertEquals(3, service.requestCount)
+    }
+    @Test fun questionTicketUsesItsOwnAnswerAuthorityWithoutGenericStatus(): Unit = runBlocking {
+        val api = api(); val selected = RelayScope(listOf("session.read", "question.answer"), emptyList(), listOf(session))
+        service.enqueue(reply(jsonObject("ticket" to "A".repeat(43).json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to selected.json(), "expires_at" to Instant.now().plusSeconds(30).toString().json()), 201))
+        api.sessionTicket(runtime, request, selected)
+        val call = service.takeRequest(); assertEquals("/v1/realtime/tickets", call.path)
+        assertEquals(selected.actions, RelayScope.parse(JsonDocument.parse(call.body.readByteArray()).root.obj("scope")).actions)
+        assertFalse("command.status" in selected.actions)
+    }
 
 }

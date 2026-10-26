@@ -302,6 +302,61 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes/{id}/sessions/{session_id}:
+    get:
+      description: Resolve one already-known session under current registered phone proof, membership and session.read. Returns this session's real directory metadata and the caller's current runtime grant without requiring host.list or session.list. This grants no enumeration, subscription or execution authority. Host aliases, native session IDs, paths and bodies are absent. Query selectors are rejected.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: One current runtime permission snapshot and one session metadata row.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [runtime, session]
+                    properties:
+                      runtime: { $ref: '#/components/schemas/Runtime' }
+                      session: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes/{id}/sessions/{session_id}/question-answers/{request_id}:
+    get:
+      description: Reconcile only this authenticated device's own typed question.answer request in this exact runtime/session. Requires current session.read and question.answer, owner/operator role and original resource membership; does not confer generic command.status. Records predating action classification and other command purposes are denied. Query selectors are rejected.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: request_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Current metadata of the original answer request; no answer body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandStatusResponse'
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/runtimes/{id}/sessions/{session_id}/read-access:
     get:
       description: Revalidates this exact session's current read scope and workspace independently of host presence. The response bounds a local cached-history view; it is not a credential or a subscription. Requires an active registered phone's DPoP key and rejects query selectors.

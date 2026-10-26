@@ -33,7 +33,8 @@ class NotificationFlowTest {
             if (check()) return
             Thread.sleep(25)
         }
-        throw AssertionError("notification fixture timed out; phase=${controller!!.state.value.notifications?.phase}; error=${controller!!.state.value.notifications?.error}")
+        val state = controller!!.state.value
+        throw AssertionError("notification fixture timed out; phase=${state.notifications?.phase}; error=${state.notifications?.error}; reader=${state.reader?.phase}/${state.reader?.error}; command=${state.commandError}; known=${state.knownTarget != null}; canAnswer=${state.reader?.questions?.canAnswer}; note=${state.notificationNote}; lookups=${fixture!!.targetRequests.get()}")
     }
     @Before fun setup() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("accountFixture") == "true")
@@ -138,6 +139,49 @@ class NotificationFlowTest {
         main { controller!!.openNotification(center.snapshot().route!!.id, server.pushNotificationId) }
         await { controller!!.state.value.notificationNote != null }
         assertNull(controller!!.state.value.notificationQuestion); assertEquals(0, server.questionWrites.get()); assertEquals(0, server.claimWrites.get())
+    }
+    @Test fun aKnownQuestionOpensAndReconcilesWithoutDirectoryOrGenericStatusRights() {
+        val server = fixture!!
+        server.allowSessionList = false; server.allowHostList = false; server.allowCommandStatus = false; server.pushReferenceKind = "question"
+        main { controller!!.refresh() }
+        await { !controller!!.state.value.refreshing && controller!!.state.value.runtimes.isEmpty() }
+        val lists = server.sessionRequests.get()
+        interaction(); main { controller!!.openNotification(center.snapshot().route!!.id, server.pushNotificationId) }
+        await { controller!!.state.value.notificationQuestion?.questionId == server.ordinaryQuestionId }
+        assertTrue(controller!!.state.value.runtimes.isEmpty())
+        assertFalse(controller!!.state.value.knownTarget!!.runtime.canList())
+        assertFalse("command.status" in controller!!.state.value.knownTarget!!.runtime.scope!!.actions)
+        val row = controller!!.state.value.reader!!.questions.items.single { it.batch.id == server.ordinaryQuestionId }
+        main { controller!!.answerQuestion(row.handle, QuestionAnswers(row.batch.id, listOf(QuestionAnswer("plan", listOf("继续"), "最小授权答复")))) }
+        await { controller!!.state.value.outbox?.records?.any { it.remote == cn.edu.ustc.dsh.command.RemoteCommandState.SETTLED } == true }
+        assertEquals(1, server.questionWrites.get()); assertTrue(server.answerStatusRequests.get() > 0); assertEquals(lists, server.sessionRequests.get())
+        main { controller!!.foreground(false); controller!!.foreground(true) }
+        await { server.targetRequests.get() >= 2 && controller!!.state.value.reader?.phase == cn.edu.ustc.dsh.network.SessionReadPhase.READY }
+        main { controller!!.back() }
+        assertTrue(controller!!.state.value.notificationSettings); assertNull(controller!!.state.value.knownTarget)
+        assertEquals(lists, server.sessionRequests.get())
+    }
+    @Test fun aLateKnownTargetLookupCannotRestoreTheLoggedOutAccount() {
+        val server = fixture!!; server.holdSessionTarget = true
+        interaction(); main { controller!!.openNotification(center.snapshot().route!!.id, server.pushNotificationId) }
+        await { server.targetRequests.get() == 1 }
+        main { controller!!.cancel() }
+        await { controller!!.state.value.phase == HomePhase.SIGNED_OUT }
+        Thread.sleep(2_500)
+        assertEquals(HomePhase.SIGNED_OUT, controller!!.state.value.phase); assertNull(controller!!.state.value.knownTarget); assertNull(controller!!.state.value.reader)
+    }
+    @Test fun leavingDuringARefreshCannotRestoreTheKnownSessionContext() {
+        val server = fixture!!; server.pushReferenceKind = "question"
+        interaction(); main { controller!!.openNotification(center.snapshot().route!!.id, server.pushNotificationId) }
+        await { controller!!.state.value.notificationQuestion?.questionId == server.ordinaryQuestionId }
+        val reads = server.targetRequests.get()
+        server.holdSessionTarget = true
+        main { controller!!.refresh() }
+        await { server.targetRequests.get() > reads }
+        main { controller!!.back() }
+        await { !controller!!.state.value.refreshing }
+        assertTrue(controller!!.state.value.notificationSettings)
+        assertNull(controller!!.state.value.knownTarget); assertNull(controller!!.state.value.reader); assertNull(controller!!.state.value.selectedSessionId)
     }
     @Test fun localLogoutFencesLatePacketsAndCanDeleteTheChannelWithoutOldCredentials(): Unit = runBlocking {
         val original = center.snapshot().route!!.id

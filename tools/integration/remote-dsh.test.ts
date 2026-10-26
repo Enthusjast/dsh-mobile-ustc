@@ -542,6 +542,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const results = await Promise.all([terminal(mobile, questionAnswer.request_id), terminal(siblingMobile, competingAnswer.request_id)])
   assert.deepEqual(results.map(frame => frame.payload.state).sort(), ['rejected', 'settled'], 'multiple devices completed the same question')
   const winner = results[0].payload.state === 'settled' ? { collector: mobile, answer: questionAnswer } : { collector: siblingMobile, answer: competingAnswer }
+  const knownTarget=await phone('GET',`/v1/runtimes/${enrollment.runtime_id}/sessions/${sessionId}`)
+  assert.equal(knownTarget.runtime.id,enrollment.runtime_id);assert.equal(knownTarget.session.session_id,sessionId)
+  assert.ok(!JSON.stringify(knownTarget).includes('dsh_session_id'))
+  const answerPhone=results[0].payload.state==='settled'?phone:siblingPhone
+  const ownAnswer=await answerPhone('GET',`/v1/runtimes/${enrollment.runtime_id}/sessions/${sessionId}/question-answers/${winner.answer.request_id}`)
+  assert.equal(ownAnswer.state,'settled');assert.equal(ownAnswer.payload_sha256,relayQuestionDigest(sessionId,probe.runtime_epoch,winner.answer.payload))
   const answerRetryFrom = winner.collector.frames.length
   winner.collector.send(winner.answer)
   const retriedAnswer = await winner.collector.wait(frame => frame.type === 'command.receipt' && frame.request_id === winner.answer.request_id && frame.payload.state === 'settled', answerRetryFrom)

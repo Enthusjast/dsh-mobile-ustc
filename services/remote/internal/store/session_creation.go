@@ -52,7 +52,7 @@ func (postgres *Postgres) RecordRealtimeSessionCreate(ctx context.Context, ticke
 	if !grantScopeSubset(ticket.Scope, scope) || !slices.Contains(scope.Actions, "session.create") || !slices.Contains(scope.Workspaces, workspaceID) {
 		return CommandStatus{}, ErrAccessDenied
 	}
-	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, "", workspaceID, digest, orgID)
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, "", workspaceID, digest, orgID, "session.create")
 }
 
 func validateCreatedSession(receipt RelayCommandReceipt) error {

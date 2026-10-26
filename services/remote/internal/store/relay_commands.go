@@ -109,18 +109,19 @@ func (postgres *Postgres) recordRealtimeCommand(ctx context.Context, ticket Tick
 	if admission != nil {
 		check = func(status CommandStatus) error { return admission(ctx, transaction, status) }
 	}
-	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID, check)
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID, commandType, check)
 }
 
-func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID string, admission ...func(CommandStatus) error) (CommandStatus, error) {
+func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID, action string, admission ...func(CommandStatus) error) (CommandStatus, error) {
 	var status CommandStatus
 	var existingUserID, existingRuntimeID string
+	var existingAction sql.NullString
 	err := transaction.QueryRowContext(ctx, `
-		select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at
+		select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action
 		from commands where device_id = $1 and request_id = $2 for update`, ticket.DeviceID, requestID).
-		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction)
 	if err == nil {
-		if existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256 {
+		if existingAction.Valid && existingAction.String != action || existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256 {
 			return CommandStatus{}, ErrCommandConflict
 		}
 		if len(admission) > 0 && admission[0] != nil {
@@ -138,20 +139,20 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 	}
 
 	err = transaction.QueryRowContext(ctx, `
-		insert into commands (device_id, request_id, user_id, runtime_id, session_id, payload_sha256, workspace_id, state)
-		values ($1, $2, $3, $4, nullif($5, '')::uuid, $6, nullif($7, '')::uuid, 'received')
+		insert into commands (device_id, request_id, user_id, runtime_id, session_id, payload_sha256, workspace_id, state, action)
+		values ($1, $2, $3, $4, nullif($5, '')::uuid, $6, nullif($7, '')::uuid, 'received', $8)
 		on conflict (device_id, request_id) do nothing
-		returning request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at`,
-		ticket.DeviceID, requestID, ticket.UserID, ticket.RuntimeID, sessionID, payloadSHA256, workspaceID).
-		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		returning request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action`,
+		ticket.DeviceID, requestID, ticket.UserID, ticket.RuntimeID, sessionID, payloadSHA256, workspaceID, action).
+		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction)
 	inserted := err == nil
 	if errors.Is(err, sql.ErrNoRows) {
 		// A concurrent retry inserted the same primary key after the first lookup.
 		err = transaction.QueryRowContext(ctx, `
-			select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at
+			select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action
 			from commands where device_id = $1 and request_id = $2 for update`, ticket.DeviceID, requestID).
-			Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
-		if err == nil && (existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256) {
+			Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction)
+		if err == nil && (existingAction.Valid && existingAction.String != action || existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256) {
 			return CommandStatus{}, ErrCommandConflict
 		}
 	}

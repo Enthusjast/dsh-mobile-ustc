@@ -62,7 +62,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
             CommandKind.QUESTION -> "question.blocking.v1"
             CommandKind.TIMED_QUESTION -> "question.timed.v1"
         }
-        return kind.action in scopeGrant.actions && "command.status" in scopeGrant.actions &&
+        return kind.action in scopeGrant.actions && (kind.question || "command.status" in scopeGrant.actions) &&
             "command.relay.v1" in connection.identity.capabilities && capability in connection.identity.capabilities
     }
     private fun canSend(connection: SessionRelayConnection) = if (session == null) supports(CommandKind.CREATE, connection)
@@ -109,7 +109,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
     internal suspend fun answerQuestion(answers: QuestionAnswers,timed: Boolean,expectedEpoch: String,definition: String): String {
         val target=endpoint.get() ?: throw RelayException("runtime.offline")
         val capability=if(timed) "question.timed.v1" else "question.blocking.v1"
-        if(!scope.isActive || session==null || "question.answer" !in scopeGrant.actions || "command.status" !in scopeGrant.actions ||
+        if(!scope.isActive || session==null || "question.answer" !in scopeGrant.actions ||
             "command.relay.v1" !in target.connection.identity.capabilities || capability !in target.connection.identity.capabilities) throw RemoteRequestException("access.denied")
         if(target.epoch!=expectedEpoch) throw CommandDataException("runtime.changed")
         val intent=CommandIntent.answerQuestion(UUID.randomUUID().toString(),runtime,session,expectedEpoch,timed,answers,definition)
@@ -148,7 +148,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
                 if (known.intent.fileIds().isNotEmpty() && FILE_MESSAGE_CAPABILITY !in target.connection.identity.capabilities) throw CommandDataException("file.unsupported")
                 if (known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 if (known.attempts > 0) {
-                    val proof = try { api.commandStatus(event.id, journal.owner.deviceId) }
+                    val proof = try { status(known) }
                     catch (error: RemoteRequestException) {
                         if (known.intent.fileIds().isEmpty() || known.remote != null || known.everHostSaved || known.everAgentQueued) throw error
                         val files = known.intent.fileIds().map { api.fileStatus(it) }
@@ -179,13 +179,14 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
     private suspend fun refresh() {
         try {
             val records = localRecords()
-            if (!statusAuthorized.get() || "command.status" !in scopeGrant.actions) return
+            if (!statusAuthorized.get()) return
             val version = generation.get()
             for (record in records) {
                 if (generation.get() != version || !scope.isActive) return
                 if (record.attempts == 0L || record.remote in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)) continue
+                if ("command.status" !in scopeGrant.actions && (!record.intent.kind.question || "question.answer" !in scopeGrant.actions)) continue
                 try {
-                    val status = api.commandStatus(record.intent.requestId, journal.owner.deviceId)
+                    val status = status(record)
                     currentCoroutineContext().ensureActive()
                     if (generation.get() != version) return
                     journal.record(status)
@@ -197,6 +198,9 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         } catch (error: CancellationException) { throw error }
         catch (_: Exception) { update { it.copy(error = "data.unavailable") } }
     }
+    private suspend fun status(record: PendingCommand): CommandReceipt = if ("command.status" in scopeGrant.actions) api.commandStatus(record.intent.requestId, journal.owner.deviceId)
+        else if (record.intent.kind.question && "question.answer" in scopeGrant.actions && session != null) api.questionAnswerStatus(runtime, session, record.intent.requestId)
+        else throw RemoteRequestException("access.denied")
     @Synchronized private fun update(transform: (CommandOutboxState) -> CommandOutboxState) { if (!closed.get()) mutable.update(transform) }
     @Synchronized override fun close() {
         if (!closed.compareAndSet(false, true)) return

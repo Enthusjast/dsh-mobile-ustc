@@ -319,6 +319,43 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		}
 		repo.cacheAccessErr = nil
 	})
+	t.Run("known targets and answer status use the verified actor instead of caller selectors", func(t *testing.T) {
+		const runtime = "55555555-5555-4555-8555-555555555555"
+		const session = "66666666-6666-4666-8666-666666666666"
+		const id = "77777777-7777-4777-8777-777777777777"
+		repo.target = store.SessionTarget{Runtime: store.Runtime{ID: runtime, HostID: runtime, ProtocolVersion: 1, Access: &store.RuntimeAccess{Role: "operator", GrantVersion: 7, Scope: store.GrantScope{Actions: []string{"session.read", "question.answer"}, Sessions: []string{session}, Workspaces: []string{}}}}, Session: store.Session{ID: session, State: "available", UpdatedAt: now}}
+		repo.answerStatus = store.CommandStatus{RequestID: id, SessionID: session, State: "settled", PayloadSHA256: strings.Repeat("a", 64), UpdatedAt: now}
+		nonce := ""
+		sequence := 0
+		send := func(token, path string) *httptest.ResponseRecorder {
+			sequence++
+			result := sendDPoPRequest(t, hostAPI, token, proofKey, proofJWK, http.MethodGet, path, fmt.Sprintf("known-proof-%04d", sequence), nonce)
+			nonce = result.Header().Get("DPoP-Nonce")
+			if result.Code == http.StatusUnauthorized {
+				sequence++
+				result = sendDPoPRequest(t, hostAPI, token, proofKey, proofJWK, http.MethodGet, path, fmt.Sprintf("known-proof-%04d", sequence), nonce)
+				nonce = result.Header().Get("DPoP-Nonce")
+			}
+			return result
+		}
+		base := "https://api.example.edu/v1/runtimes/" + runtime + "/sessions/" + session
+		for _, path := range []string{base, base + "/question-answers/" + id} {
+			response := send(access, path)
+			if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || repo.cacheIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.cacheDevice != deviceID || repo.cacheJKT != proofJKT || repo.cacheRuntime != runtime || repo.cacheSession != session || !repo.cacheCredentialUntil.Equal(now.Add(5*time.Minute)) {
+				t.Fatal("known-resource authority lost its authenticated context", response.Code)
+			}
+			before := repo.targetCalls + repo.answerStatusCalls
+			if response = send(access, path+"?device_id=untrusted"); response.Code != 400 || before != repo.targetCalls+repo.answerStatusCalls {
+				t.Fatal("caller selector reached resource lookup", response.Code)
+			}
+			if response = send(hostAccess, path); response.Code != 403 || before != repo.targetCalls+repo.answerStatusCalls {
+				t.Fatal("host OAuth client reached phone resource lookup", response.Code)
+			}
+		}
+		if repo.targetCalls != 1 || repo.answerStatusCalls != 1 || repo.answerRequest != id {
+			t.Fatal("known-resource routes did not select their own operations")
+		}
+	})
 
 }
 

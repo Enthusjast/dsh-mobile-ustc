@@ -38,6 +38,13 @@ type fakeRepository struct {
 	cacheRuntime            string
 	cacheSession            string
 	cacheCredentialUntil    time.Time
+	target                  store.SessionTarget
+	targetErr               error
+	targetCalls             int
+	answerStatus            store.CommandStatus
+	answerStatusErr         error
+	answerStatusCalls       int
+	answerRequest           string
 	ticketCalls             int
 	enrollmentCalls         int
 	enrollmentResult        store.EnrollmentCreated
@@ -214,6 +221,33 @@ func (fake *fakeRepository) SessionCacheReadAccess(_ context.Context, identity s
 		return store.SessionReadAccess{}, store.ErrAccessDenied
 	}
 	return fake.cacheAccess, fake.cacheAccessErr
+}
+func (fake *fakeRepository) SessionReadTarget(_ context.Context, identity store.UserIdentity, device, proof, runtime, session string, until time.Time) (store.SessionTarget, error) {
+	fake.targetCalls++
+	fake.cacheIdentity = identity
+	fake.cacheDevice = device
+	fake.cacheJKT = proof
+	fake.cacheRuntime = runtime
+	fake.cacheSession = session
+	fake.cacheCredentialUntil = until
+	if fake.target.Runtime.ID == "" && fake.targetErr == nil {
+		return store.SessionTarget{}, store.ErrAccessDenied
+	}
+	return fake.target, fake.targetErr
+}
+func (fake *fakeRepository) QuestionAnswerStatus(_ context.Context, identity store.UserIdentity, device, proof, runtime, session, id string, until time.Time) (store.CommandStatus, error) {
+	fake.answerStatusCalls++
+	fake.answerRequest = id
+	fake.cacheIdentity = identity
+	fake.cacheDevice = device
+	fake.cacheJKT = proof
+	fake.cacheRuntime = runtime
+	fake.cacheSession = session
+	fake.cacheCredentialUntil = until
+	if fake.answerStatus.RequestID == "" && fake.answerStatusErr == nil {
+		return store.CommandStatus{}, store.ErrAccessDenied
+	}
+	return fake.answerStatus, fake.answerStatusErr
 }
 func (fake *fakeRepository) CommandStatus(context.Context, store.UserIdentity, string, string) (store.CommandStatus, error) {
 	fake.commandCalls++

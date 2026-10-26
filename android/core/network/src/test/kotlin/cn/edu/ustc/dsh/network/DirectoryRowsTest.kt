@@ -66,5 +66,14 @@ class DirectoryRowsTest {
         assertTrue(session().viewScope(narrow)!!.workspaces.isEmpty())
         assertEquals(setOf(session), session().viewScope(narrow)!!.sessions)
     }
+    @Test fun knownReadableSessionNeedsNeitherEnumerationNorGenericCommandStatus() {
+        val grant = RuntimeDirectoryEntry.parse(row().with("access" to access(listOf("session.read", "question.answer")).with("role" to "operator".json())))
+        assertFalse(grant.canList()); assertTrue(grant.canRead())
+        val selected = session().viewScope(grant)!!
+        assertEquals(setOf("session.read", "question.answer"), selected.actions)
+        assertFalse("command.status" in selected.actions); assertFalse("session.list" in selected.actions)
+        assertNotNull(session().readScope(grant))
+        assertNull(session(JsonNull).viewScope(RuntimeDirectoryEntry.parse(row().with("access" to access(listOf("session.read"), sessions = emptyList())))))
+    }
 
 }
