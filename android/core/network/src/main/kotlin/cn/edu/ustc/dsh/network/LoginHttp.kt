@@ -92,6 +92,26 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
         task.start()
     }
 
+    /** Deletion-only cleanup: never carries a school token, DPoP proof or cookie. */
+    suspend fun revokePush(origin: String, bindingId: String, secret: String) {
+        Contract.uuid(bindingId)
+        if (Contract.base64url(secret).size != 32) throw ProtocolException()
+        val uri = try { URI(origin) } catch (_: Exception) { throw ProtocolException() }
+        if (uri.scheme != "https" || uri.host.isNullOrBlank() || uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null || uri.rawPath !in listOf("", "/")) throw ProtocolException()
+        val request = Request.Builder().url(origin.trimEnd('/') + "/v1/push-bindings/$bindingId").delete().header("Authorization", "DSH-Push-Revoke $secret").header("Cache-Control", "no-store").build()
+        suspendCancellableCoroutine<Unit> { continuation ->
+            val call = client.newCall(request); call.timeout().timeout(5, TimeUnit.SECONDS)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) { if (continuation.isActive) continuation.resumeWithException(RemoteRequestException("push.cleanup_failed")) }
+                override fun onResponse(call: Call, response: Response) {
+                    val accepted = response.use { it.code == 204 }
+                    if (continuation.isActive) { if (accepted) continuation.resume(Unit) else continuation.resumeWithException(RemoteRequestException("push.cleanup_failed")) }
+                }
+            })
+        }
+    }
+
     private suspend fun get(url: String): ByteArray = checked(execute(Request.Builder().url(url).header("Accept", "application/json").header("Cache-Control", "no-store").build())).bytes
 
     internal suspend fun execute(request: Request): HttpReply {
@@ -130,7 +150,7 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
             // Only protocol codes reach presentation; untrusted error bodies/messages do not.
             throw RemoteRequestException(if (code in setOf("auth.expired", "auth.proof_invalid", "access.denied", "access.revoked", "device.invalid", "device.registration_conflict", "internal",
                     "approval.conflict", "approval.expired", "approval.assurance_required", "rate.limited", "protocol.invalid", "file.request_conflict", "file.quota_exceeded",
-                    "file.state_changed", "file.scanner_unavailable", "file.unavailable", "file.staging_required", "file.already_bound")) code!! else "network.request_failed")
+                    "push.invalid", "push.conflict", "push.expired", "push.unavailable", "file.state_changed", "file.scanner_unavailable", "file.unavailable", "file.staging_required", "file.already_bound")) code!! else "network.request_failed")
         }
         return reply
     }
@@ -247,6 +267,42 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         if (root["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
         CommandReceipt.status(root.obj("data")).also { if (it.requestId != id) throw RemoteRequestException("network.invalid_response") }
     }
+    suspend fun pushCapabilities(): PushCapabilities = mutex.withLock { PushCapabilities.parse(pushData(read("/v1/push/capabilities"))) }
+    suspend fun registerPush(input: PushRegistration, current: () -> Unit = {}): PushBinding = mutex.withLock {
+        if (input.organizationId != config.organizationId) throw RemoteRequestException("auth.identity_mismatch")
+        pushBinding(request("POST", "/v1/push-bindings", input.json(), current), input.bindingId)
+    }
+    suspend fun pushStatus(id: String): PushBinding = mutex.withLock { pushBinding(read("/v1/push-bindings/${Contract.uuid(id)}"), id) }
+    suspend fun confirmPush(id: String, challenge: PushPacket.Challenge, current: () -> Unit = {}): PushBinding = mutex.withLock {
+        Contract.uuid(id)
+        if (challenge.bindingId != id || !challenge.current()) throw RemoteRequestException("push.expired")
+        pushBinding(request("POST", "/v1/push-bindings/$id/confirm", challenge.confirmation()) { current(); if (!challenge.current()) throw RemoteRequestException("push.expired") }, id)
+    }
+    suspend fun renewPush(id: String, current: () -> Unit = {}): PushBinding = mutex.withLock { pushBinding(request("POST", "/v1/push-bindings/${Contract.uuid(id)}/lease", jsonObject(), current), id) }
+    suspend fun notification(id: String, binding: String, current: () -> Unit = {}): NotificationReference = mutex.withLock {
+        Contract.uuid(id); Contract.uuid(binding)
+        val data = pushData(request("GET", "/v1/notifications/$id", beforeSend = current)); data.exactKeys("reference")
+        NotificationReference.parse(data.obj("reference")).also { if (it.id != id || it.bindingId != binding) throw RemoteRequestException("auth.identity_mismatch") }
+    }
+    suspend fun notificationInbox(binding: String, after: String? = null): NotificationPage = mutex.withLock {
+        Contract.uuid(binding); after?.let(Contract::uuid)
+        NotificationPage.parse(pushData(read("/v1/notifications?binding_id=$binding" + (after?.let { "&after=$it" } ?: "")))).also { if (it.items.any { item -> item.bindingId != binding }) throw RemoteRequestException("auth.identity_mismatch") }
+    }
+    suspend fun notificationReceipt(id: String, state: String, current: () -> Unit = {}) = mutex.withLock {
+        Contract.uuid(id); if (state !in setOf("posted", "opened", "blocked")) throw ProtocolException()
+        val data = pushData(request("POST", "/v1/notifications/$id/receipts", jsonObject("state" to state.json()), current)); data.exactKeys("recorded")
+        if (data["recorded"] != JsonBoolean(true)) throw ProtocolException()
+    }
+    private fun pushData(bytes: ByteArray): JsonObject {
+        val root = JsonDocument.parse(bytes).root; root.exactKeys("ok", "data")
+        if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+        return root.obj("data")
+    }
+    private fun pushBinding(bytes: ByteArray, expected: String): PushBinding {
+        val data = pushData(bytes); data.exactKeys("binding")
+        return PushBinding.parse(data.obj("binding")).also { if (it.id != expected) throw RemoteRequestException("auth.identity_mismatch") }
+    }
+
     suspend fun registerFile(runtimeId: String, sessionId: String, requestId: String, manifest: FileManifest): PreparedFileUpload = mutex.withLock {
         Contract.uuid(runtimeId); Contract.uuid(sessionId); Contract.uuid(requestId)
         preparedFile(request("POST", "/v1/runtimes/$runtimeId/sessions/$sessionId/files", manifest.json().with("request_id" to requestId.json())), runtimeId, sessionId, manifest)

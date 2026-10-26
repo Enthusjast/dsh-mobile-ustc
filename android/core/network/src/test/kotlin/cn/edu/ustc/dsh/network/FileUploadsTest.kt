@@ -306,4 +306,41 @@ class FileUploadsTest {
         task.cancelAndJoin(); assertTrue(out.closed.get())
     }
 
+    private fun pushBinding(state: String = "pending", id: String = request) = jsonObject("binding_id" to id.json(), "state" to state.json(), "challenge_expires_at" to time(120_000), "expires_at" to time(600_000))
+    @Test fun pushRegistrationConfirmsOnlyTheOriginalProviderChallengeAndReadsFreshReferences(): Unit = runBlocking {
+        val api = api()
+        val intent = PushRegistration(request, request, "c" + "A".repeat(21), "a".repeat(64))
+        service.enqueue(reply(jsonObject("binding" to pushBinding()), 201))
+        assertEquals(PushBindingState.PENDING, api.registerPush(intent).state)
+        val registration = service.takeRequest()
+        assertEquals("/v1/push-bindings", registration.path); assertEquals("POST", registration.method)
+        assertEquals(JsonDocument.of(intent.json()).canonicalText(), registration.body.readUtf8()); proof(registration)
+        val packet = PushPacket.parse(mapOf("v" to "1", "kind" to "registration_challenge", "binding_id" to request, "challenge" to "A".repeat(43), "expires_at" to java.time.Instant.now().plusSeconds(60).toString())) as PushPacket.Challenge
+        service.enqueue(reply(jsonObject("binding" to pushBinding("active"))))
+        assertEquals(PushBindingState.ACTIVE, api.confirmPush(request, packet).state)
+        val confirmation = service.takeRequest(); assertEquals("/v1/push-bindings/$request/confirm", confirmation.path)
+        assertEquals(setOf("challenge"), JsonDocument.parse(confirmation.body.readByteArray()).root.fields.keys)
+        val reference = jsonObject("notification_id" to file.json(), "binding_id" to request.json(), "kind" to "approval".json(), "reference_id" to request.json(), "runtime_id" to runtime.json(),
+            "runtime_epoch" to request.json(), "session_id" to session.json(), "state" to "pending".json(), "availability" to "online".json(), "expires_at" to time(60_000))
+        service.enqueue(reply(jsonObject("reference" to reference)))
+        assertTrue(api.notification(file, request).actionable()); assertEquals("GET", service.takeRequest().method)
+        service.enqueue(reply(jsonObject("reference" to reference.with("binding_id" to runtime.json()))))
+        try { api.notification(file, request); fail("another binding reference accepted") } catch (error: RemoteRequestException) { assertEquals("auth.identity_mismatch", error.code) }
+        service.takeRequest()
+        var current = true
+        current = false
+        try { api.registerPush(intent) { if (!current) throw RemoteRequestException("push.stale") }; fail("retired owner mutated the binding") } catch (error: RemoteRequestException) { assertEquals("push.stale", error.code) }
+        assertEquals(4, service.requestCount)
+    }
+    @Test fun logoutPushCleanupIsAnonymousBoundedAndNeverFollowsRedirects(): Unit = runBlocking {
+        val secret = "A".repeat(43)
+        service.enqueue(MockResponse().setResponseCode(204).setHeader("DPoP-Nonce", "untrusted-cleanup-nonce"))
+        http.revokePush(origin, request, secret)
+        val cleanup = service.takeRequest(); assertEquals("DELETE", cleanup.method); assertEquals("DSH-Push-Revoke $secret", cleanup.getHeader("Authorization"))
+        assertNull(cleanup.getHeader("DPoP")); assertNull(cleanup.getHeader("Cookie")); assertEquals(0, cleanup.bodySize)
+        service.enqueue(MockResponse().setResponseCode(307).setHeader("Location", objects.url("/must-not-delete")))
+        try { http.revokePush(origin, request, secret); fail("cleanup redirect accepted") } catch (error: RemoteRequestException) { assertEquals("push.cleanup_failed", error.code) }
+        assertEquals(0, objects.requestCount)
+    }
+
 }
