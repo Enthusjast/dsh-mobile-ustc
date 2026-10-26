@@ -60,6 +60,14 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var chatMode = false
     @Volatile var fileMode = false
+    @Volatile var exportMode = false
+    @Volatile var exportSlow = false
+    val exportSelections = AtomicInteger()
+    val exportDownloads = AtomicInteger()
+    val exportSourceId = UUID.randomUUID().toString()
+    val exportFileId = UUID.randomUUID().toString()
+    val exportBytes = "public APK export fixture\n".repeat(6000).toByteArray()
+    private val exportRequests = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var fileState = "scanning"
     @Volatile var fileReady = false
     private class FileEntry(val id: String, val requestId: String, val manifest: FileManifest, val createdAt: Long) {
@@ -136,7 +144,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         (if(questionMode) listOf("question.answer") else emptyList())+
         (if(archiveMode) listOf("session.archive") else emptyList())+
         (if(approvalMode) listOf("approval.decide", "grant.manage") else emptyList())+
-        (if(creationMode) listOf("session.create") else emptyList()) + (if(fileMode) listOf("file.upload") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
+        (if(creationMode) listOf("session.create") else emptyList()) + (if(fileMode) listOf("file.upload") else emptyList()) + (if(exportMode) listOf("file.download") else emptyList()), if(creationMode) listOf(workspaceId) else emptyList(), listOf(sessionId))
     private val currentRelay = AtomicReference<WebSocket?>()
     @Volatile var relayProofReceived = false
     private var relayScope: RelayScope? = null
@@ -310,6 +318,22 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         val frame = JsonDocument.parse(text).root
                         val payload = frame.obj("payload")
                         when (frame.string("type")) {
+                            "file.exports.list", "file.export.request" -> {
+                                require(exportMode && "file.download" in subscribedScope.actions && frame.string("session_id") == sessionId && frame.string("runtime_epoch") == epoch)
+                                val result = if (frame.string("type") == "file.exports.list") {
+                                    jsonObject("items" to JsonArray(listOf(jsonObject("source_id" to exportSourceId.json(), "kind" to "file".json(), "origin" to "session_attachment".json(),
+                                        "name" to "APK export.txt".json(), "size_bytes" to exportBytes.size.toLong().json(), "expires_at" to Contract.timestamp(System.currentTimeMillis() + 120_000).json()))), "directory_id" to JsonNull, "cursor" to JsonNull)
+                                } else {
+                                    require(payload.string("source_id") == exportSourceId)
+                                    val id = frame.string("request_id")
+                                    val owner = CommandOwner(accountId, organizationId, config.fingerprint, userId, deviceId)
+                                    SqlCommandJournal.open(context, owner).use { database -> require(kotlinx.coroutines.runBlocking { database.exports(runtimeId, sessionId).any { it.intent.requestId == id } }) }
+                                    exportRequests.putIfAbsent(id, exportStatus()); exportSelections.incrementAndGet()
+                                    jsonObject("file" to exportRequests[id]!!)
+                                }
+                                webSocket.send(JsonDocument.of(frame.with("type" to (if (frame.string("type") == "file.exports.list") "file.exports.result" else "file.export.accepted").json(), "payload" to result)).canonicalText()); return
+                            }
+                            "file.export.cancel" -> return
                             "approval.subscribe" -> {
                                 require(approvalMode && approvalRole == "owner" && "approval.decide" in subscribedScope.actions)
                                 approvalWatch = frame.string("request_id")
@@ -445,7 +469,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
                         val capabilities = payload.array("capabilities").map { (it as JsonString).value }
-                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", FILE_MESSAGE_CAPABILITY, "session.archive.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", FILE_MESSAGE_CAPABILITY, FILE_EXPORT_CAPABILITY, "session.archive.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
                         require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
                         relayProofReceived = true
                         if ("approval.signed.v1" in capabilities) approvalEndpoint.set(ApprovalEndpoint(connectionId, subscribedScope))
@@ -501,6 +525,18 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (exportMode && (path.startsWith("/v1/file-exports/") || path == "/v1/files/$exportFileId")) {
+            require(request.method == "GET")
+            if (path.startsWith("/v1/file-exports/") && !exportRequests.containsKey(path.substringAfterLast('/')))
+                return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+            return resourceResponse(data(jsonObject("file" to exportStatus())))
+        }
+        if (exportMode && path == "/v1/files/$exportFileId/content") {
+            require(request.method == "GET" && request.getHeader("Range") == null && request.getHeader("Accept-Encoding") == "identity")
+            exportDownloads.incrementAndGet()
+            val reply = MockResponse().setHeader("Content-Type", "application/octet-stream").setHeader("Content-Encoding", "identity").setHeader("X-DSH-Content-SHA256", sha256(exportBytes)).setBody(okio.Buffer().write(exportBytes))
+            return if (exportSlow) reply.throttleBody(1, 1, java.util.concurrent.TimeUnit.SECONDS) else reply
+        }
         if (fileMode && path == "/v1/runtimes/$runtimeId/sessions/$sessionId/files") {
             require(request.method == "POST" && "file.upload" in directoryScope.actions)
             val body = JsonDocument.parse(request.body.readByteArray()).root
@@ -595,7 +631,8 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             val body = JsonDocument.parse(request.body.readByteArray()).root
             require(body.string("runtime_id") == "55555555-5555-4555-8555-555555555555")
             relayScope = RelayScope.parse(body.obj("scope"))
-            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer","command.status", "session.create", "approval.decide") })
+            require(relayScope!!.actions.all { it in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer","command.status", "session.create", "approval.decide", "file.download") })
+            if ("file.download" in relayScope!!.actions) require(exportMode)
             if ("approval.decide" in relayScope!!.actions) require(approvalMode && approvalRole == "owner")
             relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
             relayAccessExpiresAt = claims.integer("exp") * 1000
@@ -620,6 +657,11 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             "access" to jsonObject("role" to (if (approvalMode) approvalRole else if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
     }
 
+    private fun exportStatus(): JsonObject {
+        val now = System.currentTimeMillis()
+        return ExportManifest("APK export.txt", exportBytes.size.toLong(), sha256(exportBytes)).json().with("file_id" to exportFileId.json(), "runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "direction" to "from_host".json(),
+            "state" to "clean".json(), "created_at" to Contract.timestamp(now - 1000).json(), "upload_expires_at" to Contract.timestamp(now + 300_000).json(), "expires_at" to Contract.timestamp(now + 600_000).json())
+    }
     private fun fileStatus(file: FileEntry): JsonObject {
         val state = if (file.committed) fileState else "uploading"
         var status = file.manifest.json().with("file_id" to file.id.json(), "runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "direction" to "to_host".json(),

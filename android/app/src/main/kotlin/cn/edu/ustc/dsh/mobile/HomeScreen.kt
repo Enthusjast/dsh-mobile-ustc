@@ -39,7 +39,9 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
         SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
             model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, {state.selectedRuntimeId?.let(model::openCreation)},model::answerQuestion,model::claimQuestion,model::releaseQuestion,model::refreshQuestions,
             model::reviewApproval, model::queryApprovals, model::archiveSession,
-            model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload)
+            model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload,
+            model::browseExports, model::requestExport, model::queryExports, model::cancelExport, model::removeExport,
+            model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave)
     } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding,model::openCreation)
 }
 

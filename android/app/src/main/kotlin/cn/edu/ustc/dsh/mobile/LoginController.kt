@@ -29,6 +29,7 @@ enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT,
 class BrowserLaunch(val id: Long, val uri: Uri)
 class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<*>, val title: String = "确认登记此设备", val subtitle: String = "将这部手机的独立密钥登记到学校账号")
 class DocumentPickLaunch(val id: String)
+class ExportSaveLaunch(val id: String, val name: String) { override fun toString() = "ExportSaveLaunch" }
 class MessageDraft(val text: String, val mode: String, val runtimeId: String, val sessionId: String) { override fun toString() = "MessageDraft" }
 enum class ApprovalUiStage { IDLE, PREPARING, AUTHENTICATING, SENDING }
 data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String, val access: RuntimeDirectoryEntry? = null)
@@ -40,6 +41,7 @@ data class HomeState(
     val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
+    val exports: SessionExportState? = null, val exportSavePicker: ExportSaveLaunch? = null, val exportSaving: Boolean = false, val exportSaved: Boolean = false, val exportSaveError: String? = null, val exportBytes: Long = 0,
     val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composerRestore: MessageDraft? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
     val outbox: CommandOutboxState? = null, val commandError: String? = null, val submitting: Boolean = false, val composerRevision: Long = 0,
@@ -95,6 +97,11 @@ class LoginController internal constructor(private val context: Context, private
     private var commandCollector: Job? = null
     private var uploads: SessionUploads? = null
     private var uploadCollector: Job? = null
+    private var exportCollector: Job? = null
+    private var exportSaveJob: Job? = null
+    private class PendingExportSave(val id: String, val generation: Long, val runtime: String, val session: String, val request: String, val file: RemoteExportStatus) { var result: Uri? = null }
+    private var pendingExportSave: PendingExportSave? = null
+    private val abandonedSavePickers = linkedSetOf<String>()
     private class PendingDocument(val id: String, val generation: Long, val runtime: String, val session: String, val resume: String?, val draft: MessageDraft) { var result: Uri? = null }
     private var pendingDocument: PendingDocument? = null
     private var commandJob: Job? = null
@@ -550,6 +557,14 @@ class LoginController internal constructor(private val context: Context, private
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
         uploadCollector?.cancel(); uploadCollector = null; uploads?.close(); uploads = null
+        exportCollector?.cancel(); exportCollector = null; exportSaveJob?.cancel(); exportSaveJob = null
+        if (!keepDesired || pendingExportSave?.let { it.generation != generation || desired != (it.runtime to it.session) } == true) {
+            pendingExportSave?.let { pending ->
+                if (pending.result == null) { abandonedSavePickers += pending.id; while (abandonedSavePickers.size > 32) abandonedSavePickers.remove(abandonedSavePickers.first()) }
+                else pending.result?.let { uri -> scope.launch(Dispatchers.IO) { discardExportDocument(context, uri) } }
+            }
+            pendingExportSave = null
+        }
         if (!keepDesired || pendingDocument?.let { it.runtime != desired?.first || it.session != desired?.second } == true) { pendingDocument = null }
         if (!keepDesired || mutable.value.composerRestore?.let { desired != (it.runtimeId to it.sessionId) } == true) mutable.value = mutable.value.copy(composerRestore = null)
         abortApprovalAuthentication(null)
@@ -559,7 +574,7 @@ class LoginController internal constructor(private val context: Context, private
         approvalJournal?.close(); approvalJournal = null
         creationCollector?.cancel(); creationCollector=null; creationFlow?.close(); creationFlow=null
         commandJournal?.close(); commandJournal = null
-        mutable.value = mutable.value.copy(outbox = null, uploads = null, documentPicker = if (pendingDocument == null) null else mutable.value.documentPicker, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE)
+        mutable.value = mutable.value.copy(outbox = null, uploads = null, exports = null, exportSaving = false, exportSaved = false, exportSaveError = null, exportBytes = 0, exportSavePicker = mutable.value.exportSavePicker.takeIf { pendingExportSave != null }, documentPicker = if (pendingDocument == null) null else mutable.value.documentPicker, commandError = null, submitting = false, creation=null, approvals=null, reviewingApprovalId=null, approvalError=null, approvalStage=ApprovalUiStage.IDLE)
         if (!keepDesired) { desired = null; creationDesired=null }
     }
     fun foreground(active: Boolean) {
@@ -694,7 +709,7 @@ class LoginController internal constructor(private val context: Context, private
                     approvalJournal = decisions
                     SessionApprovalAccount(runtime.hostId, key, decisions)
                 } else null
-                val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId, approvalAccount = approvalAccount)
+                val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId, approvalAccount = approvalAccount, exportJournal = database.takeIf { "file.download" in allowed.actions })
                     else resource.reader(saved.deviceId!!, runtimeId, id, runtime.scope!!.readSession(id, selected.workspaceId), scope)
                 commandJournal = database; database = null; reader = opened
                 if (commandJournal != null && selected.state != "archived" && runtime.role in setOf("operator", "owner") && runtime.scope?.actions?.contains("file.upload") == true) {
@@ -703,6 +718,10 @@ class LoginController internal constructor(private val context: Context, private
                     uploadCollector = scope.launch { files.state.collect { value -> if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(uploads = value) } }
                     drainDocument()
                 } else { pendingDocument = null; mutable.value = mutable.value.copy(uploads = null, documentPicker = null) }
+                drainExportSave()
+                opened.exports?.let { exports -> exportCollector = scope.launch {
+                    exports.state.collect { value -> if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(exports = value) }
+                } }
                 questionScope=CoroutineScope(SupervisorJob(scope.coroutineContext[Job])+Dispatchers.Main.immediate)
                 opened.approvals?.let { client -> approvalCollector = scope.launch {
                     client.state.collect {
@@ -783,6 +802,67 @@ class LoginController internal constructor(private val context: Context, private
     fun queryUpload(id: String) = uploads?.query(id)
     fun removeUpload(id: String) = uploads?.remove(id)
     fun cancelUpload() = uploads?.cancelTransfer()
+    fun chooseExportDestination(id: String) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.exportSaving || pendingExportSave != null) return
+        val row = reader?.exports?.state?.value?.rows?.firstOrNull { it.stored.intent.requestId == id } ?: return
+        val file = row.status?.takeIf { it.downloadable() && row.stored.manifest?.same(it.manifest) == true } ?: return
+        val token = UUID.randomUUID().toString()
+        pendingExportSave = PendingExportSave(token, generation, file.runtimeId, file.sessionId, id, file)
+        mutable.value = mutable.value.copy(exportSavePicker = ExportSaveLaunch(token, file.manifest.name), exportSaved = false, exportSaveError = null)
+    }
+    fun exportDestinationPicked(token: String, uri: Uri?) {
+        val pending = pendingExportSave
+        if (pending == null || pending.id != token || pending.generation != generation || desired != (pending.runtime to pending.session)) {
+            if (abandonedSavePickers.remove(token)) uri?.let { scope.launch(Dispatchers.IO) { discardExportDocument(context, it) } }; return
+        }
+        mutable.value = mutable.value.copy(exportSavePicker = null)
+        if (uri == null) { pendingExportSave = null; return }
+        pending.result = uri; drainExportSave()
+    }
+    private fun drainExportSave() {
+        val pending = pendingExportSave ?: return
+        val uri = pending.result ?: return
+        val journal = commandJournal ?: return
+        val resource = api ?: return
+        if (!foreground || pending.generation != generation || desired != (pending.runtime to pending.session)) return
+        pendingExportSave = null
+        val stamp = generation; val view = navigationGeneration
+        mutable.value = mutable.value.copy(exportSaving = true, exportSaved = false, exportSaveError = null, exportBytes = 0)
+        exportSaveJob = scope.launch {
+            var savedSuccessfully = false
+            try {
+                val original = journal.exports(pending.runtime, pending.session).firstOrNull { it.intent.requestId == pending.request } ?: throw RemoteRequestException("file.export_reconcile")
+                if (original.fileId != pending.file.id || original.manifest?.same(pending.file.manifest) != true) throw RemoteRequestException("file.request_conflict")
+                val lifetime = currentCoroutineContext()
+                val lastProgress = java.util.concurrent.atomic.AtomicLong()
+                saveExportDocument(context, uri, resource, pending.file, {
+                    lifetime.ensureActive(); session?.accessTokenForRequest(System.currentTimeMillis()) ?: throw RemoteRequestException("auth.expired")
+                    if (!foreground || generation != stamp || navigationGeneration != view || desired != (pending.runtime to pending.session) ||
+                        mutable.value.phase != HomePhase.READY || mutable.value.reader?.phase in setOf(SessionReadPhase.REVOKED, SessionReadPhase.AUTH_REQUIRED)) throw RemoteRequestException("file.export_stale")
+                    if (!pending.file.downloadable()) throw RemoteRequestException("file.expired")
+                }) { bytes ->
+                    val tick = System.nanoTime(); val previous = lastProgress.get()
+                    if ((tick - previous >= 250_000_000 || bytes == pending.file.manifest.sizeBytes) && lastProgress.compareAndSet(previous, tick))
+                        scope.launch { if (generation == stamp && navigationGeneration == view) mutable.value = mutable.value.copy(exportBytes = bytes) }
+                }
+                current(stamp)
+                savedSuccessfully = true
+                if (view == navigationGeneration) mutable.value = mutable.value.copy(exportSaved = true)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp && navigationGeneration == view) mutable.value = mutable.value.copy(exportSaveError = code(error))
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { if (!savedSuccessfully) discardExportDocument(context, uri) }
+                if (generation == stamp && navigationGeneration == view) mutable.value = mutable.value.copy(exportSaving = false)
+            }
+        }
+    }
+    fun cancelExportSave() { mutable.value = mutable.value.copy(exportSaveError = "file.save_cancelled"); exportSaveJob?.cancel() }
+    fun browseExports(source: ExportSource? = null, more: Boolean = false) = reader?.exports?.browse(source, more)
+    fun requestExport(source: ExportSource) = reader?.exports?.request(source)
+    fun queryExports() = reader?.exports?.query()
+    fun cancelExport(id: String) = reader?.exports?.cancel(id)
+    fun removeExport(id: String) = reader?.exports?.remove(id)
     fun queryCommands() { reader?.commands?.query() }
     fun refreshQuestions() {reader?.refreshQuestions()}
     fun reviewApproval(id: String) {
@@ -1126,6 +1206,14 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun queryUpload(id: String) = login.queryUpload(id)
     fun removeUpload(id: String) = login.removeUpload(id)
     fun cancelUpload() = login.cancelUpload()
+    fun chooseExportDestination(id: String) = login.chooseExportDestination(id)
+    fun exportDestinationPicked(token: String, uri: Uri?) = login.exportDestinationPicked(token, uri)
+    fun cancelExportSave() = login.cancelExportSave()
+    fun browseExports(source: ExportSource?, more: Boolean) = login.browseExports(source, more)
+    fun requestExport(source: ExportSource) = login.requestExport(source)
+    fun queryExports() = login.queryExports()
+    fun cancelExport(id: String) = login.cancelExport(id)
+    fun removeExport(id: String) = login.removeExport(id)
     fun queryCommands() = login.queryCommands()
     fun answerQuestion(handle: QuestionHandle,answers: QuestionAnswers) = login.answerQuestion(handle,answers)
     fun claimQuestion(handle: QuestionHandle) = login.claimQuestion(handle)

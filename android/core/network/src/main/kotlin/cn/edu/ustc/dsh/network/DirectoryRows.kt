@@ -41,7 +41,10 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
                     }
                 }
             }
-            grant.scope.session(id, workspaceId, actions)
+            if ("file.download" in grant.scope.actions) actions += "file.download"
+            val selected = grant.scope.session(id, workspaceId, actions)
+            if ("file.download" in actions && workspaceId != null && workspaceId in grant.scope.workspaces)
+                RelayScope(actions, listOf(workspaceId), selected.sessions) else selected
         }
     } catch (_: ProtocolException) { null }
     fun readScope(grant: RuntimeDirectoryEntry): RelayScope? = try {

@@ -56,4 +56,15 @@ class DirectoryRowsTest {
         assertEquals(setOf("session.read", "command.status"), session(state = "archived").viewScope(viewer)!!.actions)
         assertFalse("session.archive" in session(state = "unavailable").viewScope(owner)!!.actions)
     }
+    @Test fun exportTicketRetainsOnlyExplicitWorkspaceAuthorityIncludingForArchivedViewers() {
+        val actions = listOf("session.list", "session.read", "file.download")
+        val broad = RuntimeDirectoryEntry.parse(row().with("access" to access(actions)))
+        val archived = session(state = "archived").viewScope(broad)!!
+        assertEquals(setOf(workspace), archived.workspaces); assertEquals(setOf(session), archived.sessions)
+        assertTrue(broad.scope!!.contains(archived)); assertTrue("file.download" in archived.actions)
+        val narrow = RuntimeDirectoryEntry.parse(row().with("access" to access(actions, workspaces = emptyList())))
+        assertTrue(session().viewScope(narrow)!!.workspaces.isEmpty())
+        assertEquals(setOf(session), session().viewScope(narrow)!!.sessions)
+    }
+
 }

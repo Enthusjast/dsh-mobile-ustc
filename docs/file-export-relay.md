@@ -1,6 +1,6 @@
 # 受限来源经 Relay 导出
 
-正常插件已将 [Host 来源层](file-export-sources.md) 与 [Go 导出 / 扫描 / 下载](file-export-service.md) 接入 `file.export.v1`。开启后端 exports.enabled 且双方实际协商该能力时，手机可按会话浏览来源、选择文件并启动导出。Android 的类型适配、浏览 / 保存 / 恢复界面仍需接入。
+正常插件已将 [Host 来源层](file-export-sources.md) 与 [Go 导出 / 扫描 / 下载](file-export-service.md) 接入 `file.export.v1`。开启后端 exports.enabled 且双方实际协商该能力时，手机可按会话浏览来源、选择文件并启动导出。Android 已接入严格类型、会话来源浏览、加密原请求恢复和系统文档保存，见 [Android 文件流程](android-files.md)。
 
 当前 Host 来源适配要求 Linux procfs；不支持的平台不宣告能力。旧服务不接受该扩展时，插件继续提供已协商的聊天 / 审批等能力，不把新文件请求变成普通消息或本机路径读取。真实 DSH CLI 的握手回归同时验证新能力摘要和旧服务未接受该能力的组合。
 
@@ -55,4 +55,4 @@ Go 给每次 Host 操作生成新的 request ID，并保存原手机 request ID�
 
 原生组合的记录为 `.local/export-relay-native-empty-fixed.log`；前置来源、传输和权限用例见 `.local/export-catalog-tests-first.log`、`.local/export-transport-tests-first.log`、`.local/export-scope-postgres-first.log`。完整 `npm run verify` 的契约 / 类型 / 构建与 236 项 Host 测试通过，记录为 `.local/export-relay-host-verify-second.log`；Go vet 与全部隔离 PostgreSQL / Go race / Kotlin / 真实 DSH 联合回归通过，记录为 `.local/export-relay-go-vet.log`、`.local/export-relay-full-kotlin-chain.log`。
 
-这仍是本地夹具组合。Android 保存入口与 APK 导出组合、大尺寸实际扫描 / 传输、macOS / Windows 来源适配和生产基础设施验收尚未完成；没有使用 TokenWorks 或真实学校配置。
+这仍是本地夹具组合。APK 到真实 Go / DSH 的导出组合、大尺寸实际扫描 / 传输、macOS / Windows 来源适配和生产基础设施验收尚未完成；没有使用 TokenWorks 或真实学校配置。

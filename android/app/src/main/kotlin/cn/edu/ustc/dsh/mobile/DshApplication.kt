@@ -10,7 +10,14 @@ import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
 @HiltAndroidApp
-class DshApplication : Application()
+class DshApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        // Process death discards all staging keys. Remove the unusable ciphertext
+        // before a new foreground transfer can start.
+        java.io.File(cacheDir, "file-exports").deleteRecursively()
+    }
+}
 
 @Module
 @InstallIn(SingletonComponent::class)
