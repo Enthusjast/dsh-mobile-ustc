@@ -1,6 +1,6 @@
 # Android 文件协议、传输与附件命令
 
-Android 已提供系统文件选择、前台上传、受保护文件 API、匿名流式 PUT、加密上传意图和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。会话历史已显示受限附件摘要；[导出的 Host 来源层](file-export-sources.md)、[服务端鉴权下载](file-export-service.md) 和 [Relay 协调](file-export-relay.md) 已实现，Android 已接入来源浏览、原请求恢复和系统文档保存；APK 到真实 Go / DSH 的完整文件联合验收仍待完成。
+Android 已提供系统文件选择、前台上传、受保护文件 API、匿名流式 PUT、加密上传意图和文件 ID 命令。实际 Kotlin 客户端已通过 TLS Go / PostgreSQL、S3 SDK 协议对端、扫描协议对端和真实 npm DSH 的联合测试。会话历史已显示受限附件摘要；[导出的 Host 来源层](file-export-sources.md)、[服务端鉴权下载](file-export-service.md) 和 [Relay 协调](file-export-relay.md) 已实现，Android 已接入来源浏览、原请求恢复和系统文档保存；API 26 APK 已通过真实 Go / DSH 的受控文件组合，生产基础设施与目标真机验收仍待完成。
 
 ## 系统选择器与恢复
 
@@ -77,7 +77,7 @@ Host 将原生 file 块转换为现有 text 显示块，例如 `[附件：资料
 - Kotlin 模型测试使用同一 Go / Node 上传样例和文件消息摘要，覆盖字段白名单、路径 / receipt 混入、大小 / Unicode、重复引用和存储格式恢复。
 - 实际 HTTPS 对端验证注册 nonce、匿名 PUT 的准确字节与 header、服务 / 对象 nonce 隔离、重定向拒绝、TLS 身份错误、跨 API 句柄、空文件、到期与取消关闭输入源。
 - Kotlin 会话客户端测试确认文件命令先保存后发送，旧 peer 不接收文件帧；既有聊天、问题、审批和归档同时回归。
-- `npm run test:remote-kotlin` 增加实际文件组合：Kotlin 登记两次仍为同一文件、匿名直传、Go worker 扫描、轮询 ready、现有命令组件发送、DSH 实际附件入队。最终只有一个文件归属、一条原生用户消息和一次 prompt 调用。该 JVM 组合使用内存命令日志测试适配器，文件消息的实际 SQLCipher / WAL 生命周期仍需 APK 场景验证。
+- `npm run test:remote-kotlin` 增加实际文件组合：Kotlin 登记两次仍为同一文件、匿名直传、Go worker 扫描、轮询 ready、现有命令组件发送、DSH 实际附件入队。最终只有一个文件归属、一条原生用户消息和一次 prompt 调用。该 JVM 组合使用内存命令日志测试适配器，文件消息的实际 SQLCipher / WAL 生命周期另由下述 APK 组合验证。
 
 上述协议基线记录为 `.local/android-files-network-first.log`、`.local/android-files-expiry-test.log`、`.local/android-files-full-check-second.log`、`.local/android-files-kotlin-chain-final.log`、`.local/android-files-host-contract-final.log`。
 
@@ -89,8 +89,14 @@ Host 将原生 file 块转换为现有 text 显示块，例如 `[附件：资料
 
 Android 导出接入又通过 150 项协议 / 命令 / 网络 JVM 测试、完整 Android check、Lint 与开发 APK / test APK 构建。API 26 安全模拟器进一步通过 27 项相关设备回归，其中新增十项覆盖导出加密记录、v5→v6 迁移、稳定 / 变化 URI 的文档提供者、回读损坏、清理失败、账号退出和前后台切换；原上传、选择器、聊天与输入框一并回归。记录为 `.local/android-exports-core-tests.log`、`.local/android-export-lint-final.log`、`.local/android-export-final-check.log`、`.local/android-export-save-final-build.log` 和 `.local/android-export-save-device-final.log`。
 
-新增 APK 组合从创建文档的结果处理入口注入单次 URI 授权，经过生产 SessionExports / RemoteApi、JWT / DPoP / TLS 协议夹具、真实 SQLCipher / WAL 与独立进程 Binder DocumentsProvider 完成保存。用例确认登记前已有原记录，系统选择器导致的前台重开不重新准入，重复 Activity Result 不删除已保存文件，迟到账号结果不下载，后台取消清理目标。提供者由测试 APK 的 MANAGE_DOCUMENTS 权限保护，只给目标应用具体文档的读取 / 写入授权；生产 APK 没有增加文档管理权限。这不是人工操作 DocumentsUI，也不是 APK 到真实 Go / DSH 的导出组合验收。
+新增 APK 组合从创建文档的结果处理入口注入单次 URI 授权，经过生产 SessionExports / RemoteApi、JWT / DPoP / TLS 协议夹具、真实 SQLCipher / WAL 与独立进程 Binder DocumentsProvider 完成保存。用例确认登记前已有原记录，系统选择器导致的前台重开不重新准入，重复 Activity Result 不删除已保存文件，迟到账号结果不下载，后台取消清理目标。提供者由测试 APK 的 MANAGE_DOCUMENTS 权限保护，只给目标应用具体文档的读取 / 写入授权；生产 APK 没有增加文档管理权限。这组提供者用例没有人工操作 DocumentsUI，与下述真实 Go / DSH 组合分开记录。
 
-随后 `npm run test:remote-kotlin` 再次通过完整隔离 PostgreSQL / Go race / Kotlin / 真实 npm DSH 0.2.1-rc.2 联合回归，记录为 `.local/android-export-save-kotlin-chain.log`。该回归覆盖已有真实服务和原生运行时组合；新增 APK 导出仍须继续接入这条真实后端链路。
+随后 `npm run test:remote-kotlin` 再次通过完整隔离 PostgreSQL / Go race / Kotlin / 真实 npm DSH 0.2.1-rc.2 联合回归，记录为 `.local/android-export-save-kotlin-chain.log`。该回归覆盖已有真实服务和原生运行时组合；新增 APK 文件路径另由下述显式设备组合验证。
+
+2026-10-26 的 `npm run test:remote-android -- emulator-5594` 扩展组合已通过：同一个真实 npm DSH CLI / 正常插件会话先执行两次签名审批，再接收 APK 的扫描后文件消息；随后 APK 浏览并导出普通工作区二进制、空文件和该持久附件，经真实 Go 文件服务 / Relay、S3 SDK 协议对端、扫描 worker 和带单 URI 授权的 Binder DocumentsProvider 完成保存与回读校验。提供者重命名会改变 URI。控制器重开还原同一上传 / 消息关联和三个导出原请求，并查询真实 REST 原请求接口。
+
+原生侧独立核对一次附件准入、三个 prompt 调用和三条原生用户消息，导出没有额外发起 prompt。PostgreSQL 核对一个上传 / 消息归属、三个带 origin / workspace 的已上传导出、四个 clean 扫描 attempt、三个 served 下载审计，以及四次成功匿名 PUT；重开没有增加对象。完整审批 / 归档 / 文件组合耗时约 199 秒，记录为 `.local/android-real-files-catalog-fixed.log`，运行方式见 [APK 组合说明](android-device-composition.md)。这仍是小文件、本地协议夹具和安全模拟器的证据，不覆盖真实学校、对象服务、病毒引擎或物理手机。
+
+扩展设备组合完成后，隔离 PostgreSQL 的全部 Go race / Kotlin / 真实 DSH 回归再次通过，记录为 `.local/android-real-files-full-regression.log`。
 
 对象 / scanner / 身份 / 模型仍是夹具；没有使用 TokenWorks，也没有声称完成实际学校、KMS、病毒签名引擎或文件全链路实机验收。

@@ -55,4 +55,6 @@ Go 给每次 Host 操作生成新的 request ID，并保存原手机 request ID�
 
 原生组合的记录为 `.local/export-relay-native-empty-fixed.log`；前置来源、传输和权限用例见 `.local/export-catalog-tests-first.log`、`.local/export-transport-tests-first.log`、`.local/export-scope-postgres-first.log`。完整 `npm run verify` 的契约 / 类型 / 构建与 236 项 Host 测试通过，记录为 `.local/export-relay-host-verify-second.log`；Go vet 与全部隔离 PostgreSQL / Go race / Kotlin / 真实 DSH 联合回归通过，记录为 `.local/export-relay-go-vet.log`、`.local/export-relay-full-kotlin-chain.log`。
 
-这仍是本地夹具组合。APK 到真实 Go / DSH 的导出组合、大尺寸实际扫描 / 传输、macOS / Windows 来源适配和生产基础设施验收尚未完成；没有使用 TokenWorks 或真实学校配置。
+API 26 APK 的显式组合进一步通过真实 Go / DSH CLI 的普通文件、空文件、持久附件导出和系统文档回读校验；三个原请求在加密重开后仍是原文件，记录为 `.local/android-real-files-catalog-fixed.log`，详见 [设备组合](android-device-composition.md)。
+
+这仍是本地协议夹具和安全模拟器组合。大尺寸实际扫描 / 传输、目标物理设备、macOS / Windows 来源适配和生产基础设施验收尚未完成；没有使用 TokenWorks 或真实学校配置。

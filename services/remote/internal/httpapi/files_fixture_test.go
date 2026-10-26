@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,15 +36,16 @@ type fileWireObject struct {
 	checksum          string
 }
 type fileObjectPeer struct {
-	mu           sync.Mutex
-	objects      map[string]fileWireObject
-	aead         cipher.AEAD
-	blockGet     bool
-	blockHeaders bool
-	pauseAfter   int
-	getStarted   chan struct{}
-	getCancelled chan struct{}
-	getOnce      sync.Once
+	mu            sync.Mutex
+	objects       map[string]fileWireObject
+	aead          cipher.AEAD
+	blockGet      bool
+	blockHeaders  bool
+	pauseAfter    int
+	getStarted    chan struct{}
+	getCancelled  chan struct{}
+	getOnce       sync.Once
+	anonymousPuts atomic.Int32
 }
 
 func newFileObjectPeer(t *testing.T) (*fileObjectPeer, *files.S3, *httptest.Server) {
@@ -141,6 +143,9 @@ func (peer *fileObjectPeer) serve(response http.ResponseWriter, request *http.Re
 		peer.mu.Lock()
 		peer.objects[request.URL.Path] = object
 		peer.mu.Unlock()
+		if request.Header.Get("Authorization") == "" {
+			peer.anonymousPuts.Add(1)
+		}
 	} else if !exists {
 		fileObjectError(response, 404, "NoSuchKey")
 		return

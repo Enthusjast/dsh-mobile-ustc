@@ -1,7 +1,7 @@
 // Test-only normal DSH host. The phone receives no host credential/private key.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
@@ -15,14 +15,21 @@ assert.ok(cluster && path.startsWith(resolve(cluster)+'/'), 'private cluster req
 const fixture = JSON.parse(await readFile(path,'utf8'))
 const root = dirname(path), workspace = join(root,'workspace'), socketPath = join(root,'ipc','host.sock'), ca = join(root,'ca.pem')
 await mkdir(workspace)
-await writeFile(ca,fixture.ca_pem,{mode:0o600})
+await mkdir(join(workspace,'output'))
+const artifacts = [ {name:'report.bin',bytes:Buffer.concat([Buffer.from('Android real DSH artifact'),Buffer.from([0,255])])}, {name:'empty.bin',bytes:Buffer.alloc(0)} ]
+for(const artifact of artifacts) await writeFile(join(workspace,'output',artifact.name),artifact.bytes)
+const manifests = artifacts.map(artifact=>({name:artifact.name,size_bytes:artifact.bytes.length,sha256:createHash('sha256').update(artifact.bytes).digest('hex')}))
+const inspection = join(root,'native-file-inspection.json')
+await writeFile(ca,fixture.ca_pem+'\n'+fixture.object_ca_pem,{mode:0o600})
 const wrapper = join(root,'plugin.mjs')
 await writeFile(wrapper,[
   "import {createPrivateKey,sign} from 'node:crypto'",
   `import {createRemoteControlPlugin} from ${JSON.stringify(pathToFileURL(resolve('host/remote-control/lib/index.js')).href)}`,
+  `import {inspectAndroidFiles} from ${JSON.stringify(pathToFileURL(resolve('tools/integration/android-file-inspection.mjs')).href)}`,
   `const key=createPrivateKey({format:'jwk',key:${JSON.stringify(fixture.host_private_jwk)}})`,
   `const plugin=createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(fixture.host_installation_id)},credential:${JSON.stringify(fixture.host_credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key,dsaEncoding:'ieee-p1363'})}}}}},{hostId:${JSON.stringify(fixture.approval_host_id)},installationId:${JSON.stringify(fixture.host_installation_id)},policyVersion:7,requiredAssurance:${JSON.stringify(fixture.approval_policy)},authorities:[${JSON.stringify(fixture.approval_authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
-  'export const {name,inject,apply}=plugin','',
+  'export const {name,inject}=plugin',
+  `export async function apply(ctx,config){inspectAndroidFiles(ctx,${JSON.stringify(inspection)});return plugin.apply(ctx,config)}`,'',
 ].join('\n'),{mode:0o600})
 const patch = join(root,'host.patch.yml')
 await writeFile(patch,[
@@ -31,6 +38,7 @@ await writeFile(patch,[
   `        runtimeId: ${fixture.runtime_id}`, `        socketPath: ${JSON.stringify(socketPath)}`, `        relayUrl: ${JSON.stringify(fixture.deployment.remote_origin)}`,
   '        applicationVersion: android-device-fixture', `        commandJournalPath: ${JSON.stringify(join(root,'commands.sqlite'))}`,
   '        workspaces:', '          - id: probe', `            remoteId: ${fixture.workspace_id}`, `            cwd: ${JSON.stringify(workspace)}`,
+  '            exportRoots:', '              - id: reports', '                directory: output',
   '        presets: [standard]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline','',
 ].join('\n'),{mode:0o600})
 const dsh = spawn(process.execPath,[join(dirname(require.resolve('@deepseek-ai/dsh/package.json')),'lib/bin.js'),'--profile','android-device','--from-default-profile','web','--patch',patch,'--host','127.0.0.1','--port','0','--no-open'],{
@@ -56,7 +64,8 @@ try {
   phase='session-create'
   const created=await local('POST','/m0/command',{v:0,type:'session.create',request_id:randomUUID(),runtime_epoch:probe.runtime_epoch,payload:{workspace:'probe',preset:'standard'}})
   const input=join(root,'android-input.json'), result=join(root,'android-result.json')
-  await writeFile(input,JSON.stringify({run_id:randomUUID(),secret:fixture.android_secret,deployment:fixture.deployment,ca_pem:fixture.ca_pem,runtime_id:fixture.runtime_id,session_id:created.payload.session_id}),{mode:0o600})
+  await writeFile(input,JSON.stringify({run_id:randomUUID(),secret:fixture.android_secret,deployment:fixture.deployment,ca_pem:fixture.ca_pem,
+    object_origin:fixture.object_origin,object_ca_pem:fixture.object_ca_pem,artifact_manifests:manifests,runtime_id:fixture.runtime_id,session_id:created.payload.session_id}),{mode:0o600})
   phase='android-instrumentation'
   device=spawn('python3',[resolve('tools/integration/run_android_device.py'),input,fixture.android_serial,result],{env:process.env,stdio:['ignore','pipe','pipe']})
   let output='';for(const stream of [device.stdout,device.stderr])stream.setEncoding('utf8').on('data',value=>{output=(output+value).slice(-4096)})
@@ -68,11 +77,23 @@ try {
   const completed=JSON.parse(await readFile(result,'utf8'))
   assert.equal(completed.session_id,created.payload.session_id)
   assert.equal(new Set(completed.archive_requests).size,2)
+  assert.equal(completed.exports.length,3)
+  assert.equal(new Set(completed.exports.map(item=>item.request_id)).size,3)
+  const observed=JSON.parse(await readFile(inspection,'utf8'))
+  assert.equal(observed.prompt_calls,3,'file export/reopen admitted another native prompt')
+  assert.equal(observed.human_messages,3,'native user messages were duplicated')
+  assert.deepEqual(observed.uploads,[{sha256:completed.upload.sha256,size_bytes:completed.upload.size_bytes}])
+  assert.deepEqual(observed.file_messages,observed.uploads,'native attachment bytes did not match the phone upload')
+  for(const manifest of manifests) assert.ok(completed.exports.some(item=>item.origin==='workspace_artifact'&&item.name===manifest.name&&item.sha256===manifest.sha256&&item.size_bytes===manifest.size_bytes))
+  assert.ok(completed.exports.some(item=>item.origin==='session_attachment'&&item.sha256===completed.upload.sha256&&item.size_bytes===completed.upload.size_bytes))
   const catalog=await local('POST','/m0/command',{v:0,type:'session.list',request_id:randomUUID(),runtime_epoch:probe.runtime_epoch,payload:{}})
   assert.equal(catalog.payload.items.find(item=>item.session_id===completed.session_id).archived,false,'phone restore did not reach the native registry')
   process.stdout.write(output)
-  console.log('Android APK / real Go TLS / npm DSH: one allowed Bash append, no rejected invocation file, native archive/restore and encrypted original recovery passed')
-} catch(error){throw new Error('Android/Go/DSH composition failed at '+phase,{cause:error})}
+  console.log('Android APK / real Go TLS / npm DSH: biometric approvals, native archive/restore, scanned upload/file message, artifact/empty/persisted-attachment exports, verified document saves and encrypted original recovery passed')
+} catch(error){
+  try { console.error('Native file counts/digests:',await readFile(inspection,'utf8')) } catch {}
+  throw new Error('Android/Go/DSH composition failed at '+phase,{cause:error})
+}
 finally {
   stopping=true;if(device&&device.exitCode===null&&device.signalCode===null)device.kill('SIGTERM')
   if(dsh.exitCode===null&&dsh.signalCode===null)dsh.kill('SIGINT')

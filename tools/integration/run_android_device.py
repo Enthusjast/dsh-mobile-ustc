@@ -37,8 +37,13 @@ def main():
     owned()
     package = "cn.edu.ustc.dsh.mobile"
     directory = "no_backup/device-composition/" + run_id
-    port = str(urlparse(fixture["deployment"]["remote_origin"]).port)
-    reverse = False
+    ports = set()
+    for origin in (fixture["deployment"]["remote_origin"], fixture["object_origin"]):
+        endpoint = urlparse(origin)
+        if endpoint.scheme != "https" or endpoint.hostname not in ("127.0.0.1", "localhost", "::1") or endpoint.port is None or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+            raise RuntimeError("explicit local TLS fixture endpoint required")
+        ports.add(str(endpoint.port))
+    reverses = []
     process = None
     log = source.parent / "android-instrumentation.log"
     try:
@@ -46,10 +51,11 @@ def main():
         for apk in (repo / "android/app/build/outputs/apk/debug/app-debug.apk", repo / "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"):
             call(["install", "-r", str(apk)], timeout=180, stdout=subprocess.DEVNULL)
         existing = call(["reverse", "--list"], capture_output=True, text=True).stdout
-        if any("tcp:" + port in line.split() for line in existing.splitlines()):
-            raise RuntimeError("fixture reverse port is already in use")
-        call(["reverse", "tcp:" + port, "tcp:" + port], stdout=subprocess.DEVNULL)
-        reverse = True
+        for port in sorted(ports):
+            if any("tcp:" + port in line.split() for line in existing.splitlines()):
+                raise RuntimeError("fixture reverse port is already in use")
+            call(["reverse", "tcp:" + port, "tcp:" + port], stdout=subprocess.DEVNULL)
+            reverses.append(port)
         call(["shell", "run-as", package, "mkdir", "-p", directory], stdout=subprocess.DEVNULL)
         script = "umask 077; cat > " + directory + "/input.json"
         call(["shell", "run-as", package, "sh", "-c", shlex.quote(script)], input=source.read_bytes(), stdout=subprocess.DEVNULL)
@@ -87,14 +93,14 @@ def main():
             raise RuntimeError("native result does not match this run")
         result.write_bytes(encoded)
         result.chmod(0o600)
-        print("Native APK PKCE/DPoP, device registration, biometric allow/reject and encrypted reopen passed", flush=True)
+        print("Native APK PKCE/DPoP, device registration, biometric allow/reject, scanned files, verified export saves and encrypted reopen passed", flush=True)
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
             try: process.wait(timeout=5)
             except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
             call(["shell", "am", "force-stop", package], stdout=subprocess.DEVNULL)
-        if reverse:
+        for port in reversed(reverses):
             call(["reverse", "--remove", "tcp:" + port], stdout=subprocess.DEVNULL)
         call(["shell", "run-as", package, "rm", "-rf", directory], stdout=subprocess.DEVNULL)
 
