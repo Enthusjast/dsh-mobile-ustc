@@ -199,4 +199,26 @@ class AppInstallationsTest {
         catch (error: RemoteRequestException) { assertEquals("update.installation_unknown", error.code) }
         assertTrue(context.packageManager.packageInstaller.mySessions.isEmpty())
     }
+    @Test fun aRetiredCleanupCallerCannotAbandonOrEraseAPreparedAttempt(): Unit = runBlocking {
+        val saved = prepare()
+        try { backend.cleanupOrphans(slot) { throw CancellationException("view retired") }; fail("retired cleanup ran") }
+        catch (_: CancellationException) {}
+        assertEquals(saved.revision, backend.read(slot)!!.revision); assertNotNull(backend.ownSession(saved.record.sessionId))
+    }
+    @Test fun cleanupWaitsForCommitAndRechecksTheCallerAfterAcquiringOwnership(): Unit = runBlocking {
+        val saved = prepare()
+        val authorizing = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val commit = launch { backend.commit(slot, id, { authorizing.complete(Unit); release.await() }) {} }
+        authorizing.await()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val started = CompletableDeferred<Unit>()
+        val cleanup = launch {
+            started.complete(Unit)
+            backend.cleanupOrphans(slot) { calls.incrementAndGet(); throw CancellationException("view retired while queued") }
+        }
+        started.await(); yield(); assertEquals(0, calls.get())
+        release.complete(Unit); commit.join(); cleanup.join(); pending()
+        assertEquals(1, calls.get()); assertTrue(cleanup.isCancelled)
+        assertEquals(saved.record.sessionId, backend.read(slot)!!.record.sessionId); assertNotNull(backend.ownSession(saved.record.sessionId))
+    }
 }

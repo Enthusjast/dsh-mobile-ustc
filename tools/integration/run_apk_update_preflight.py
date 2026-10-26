@@ -20,8 +20,11 @@ def main():
     parser.add_argument("--adb", type=Path)
     parser.add_argument("--prepare-dex", action="store_true", help="Compile app/test dex after installation, for slow software emulators")
     parser.add_argument("--installer-fixture", action="store_true", help="Test encrypted installation records and system consent; never approve the candidate APK")
+    parser.add_argument("--update-flow-fixture", action="store_true", help="Also test signed-in update flow and Compose controls; requires a secure unlocked AVD with enrolled fingerprint")
     parser.add_argument("--log", type=Path, help="Write this run to a distinct log inside the repository's .local directory")
     options = parser.parse_args()
+    if options.update_flow_fixture and not options.installer_fixture:
+        parser.error("--update-flow-fixture requires --installer-fixture")
     if not re.fullmatch(r"emulator-[0-9]+", options.serial) or not re.fullmatch(r"dsh-remote-api[0-9]+", options.avd):
         parser.error("an exact task-owned test emulator is required; preview/physical devices are excluded")
     repo = Path(__file__).resolve().parents[2]
@@ -72,6 +75,11 @@ def main():
             source = repo / f"android/app/src/androidTest/kotlin/cn/edu/ustc/dsh/mobile/{name}.kt"
             count += len(re.findall(r"@Test\s+fun\b", source.read_text()))
             classes += ",cn.edu.ustc.dsh.mobile." + name
+    if options.update_flow_fixture:
+        for name in ["AppUpdatesScreenTest", "AccountAppUpdateTest"]:
+            source = repo / f"android/app/src/androidTest/kotlin/cn/edu/ustc/dsh/mobile/{name}.kt"
+            count += len(re.findall(r"@Test\s+fun\b", source.read_text()))
+            classes += ",cn.edu.ustc.dsh.mobile." + name
     owned()
     original_mode = None
     restoration_error = None
@@ -84,9 +92,9 @@ def main():
             original_mode = match.group(1) if match else "default"
             call("shell", "appops", "set", "cn.edu.ustc.dsh.mobile", "REQUEST_INSTALL_PACKAGES", "allow")
         with log.open("w") as stream:
-            result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-e", "networkFixture", "true", "-e", "installerFixture", str(options.installer_fixture).lower(), "-e", "class", classes,
+            result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-e", "networkFixture", "true", "-e", "accountFixture", str(options.update_flow_fixture).lower(), "-e", "installerFixture", str(options.installer_fixture).lower(), "-e", "class", classes,
                                           "cn.edu.ustc.dsh.mobile.test/androidx.test.runner.AndroidJUnitRunner"],
-                                    stdout=stream, stderr=subprocess.STDOUT, timeout=600)
+                                    stdout=stream, stderr=subprocess.STDOUT, timeout=1200 if options.update_flow_fixture else 600)
     finally:
         if original_mode is not None:
             try:

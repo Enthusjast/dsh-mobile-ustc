@@ -36,6 +36,13 @@ class MainActivity : FragmentActivity() {
         NotificationOpen.parse(intent)?.let { model.openNotification(it.bindingId, it.notificationId) }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    model.appUpdateEvents.collect { event ->
+                        val action = model.consumeAppUpdateLaunch(event) ?: return@collect
+                        try { startActivity(action()) }
+                        catch (_: Exception) { model.appUpdateLaunchFailed(event) }
+                    }
+                }
                 model.state.collect { state ->
                     biometrics.update(state.authenticationId, state.biometric)
                     state.browser?.let { browser ->

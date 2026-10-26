@@ -17,6 +17,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -50,10 +52,10 @@ internal class AppInstallations @Inject constructor(@param:ApplicationContext pr
     private fun relevantSessions() = installer.mySessions.filter { it.appPackageName == null || it.appPackageName == context.packageName }
 
     suspend fun prepare(slot: String, id: String, owner: LocalDataOwner, configuration: AppUpdateDeployment, candidate: PrivateApkCandidate,
-        expected: AndroidApkVerifier.Installed, current: () -> Unit): StoredAppInstallation {
+        expected: AndroidApkVerifier.Installed, current: () -> Unit): StoredAppInstallation = mutations.withLock {
         var created: Int? = null
         try {
-            return withContext(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 val lifetime = currentCoroutineContext()
                 val check = { lifetime.ensureActive(); current() }
                 check()
@@ -93,11 +95,11 @@ internal class AppInstallations @Inject constructor(@param:ApplicationContext pr
     }
 
     /** Reuses the original session. Unknown results never create a second session here. */
-    suspend fun commit(slot: String, id: String, authorize: suspend (AppInstallationRecord) -> Unit, current: () -> Unit) {
+    suspend fun commit(slot: String, id: String, authorize: suspend (AppInstallationRecord) -> Unit, current: () -> Unit): Unit = mutations.withLock {
         var attempted = false
         var originallyPrepared: Int? = null
         try {
-            withContext(Dispatchers.IO) {
+            withContext<Unit>(Dispatchers.IO) {
                 val lifetime = currentCoroutineContext()
                 val check = { lifetime.ensureActive(); current() }
                 check()
@@ -154,20 +156,25 @@ internal class AppInstallations @Inject constructor(@param:ApplicationContext pr
         forgetPrepared(slot, id)
         prompts.remove(slot); mutableChanges.tryEmit(slot)
     }
-    suspend fun cancel(slot: String, id: String) = withContext(Dispatchers.IO) {
+    suspend fun cancel(slot: String, id: String): Unit = mutations.withLock { withContext<Unit>(Dispatchers.IO) {
         val saved = journal(slot).read() ?: return@withContext
         if (saved.record.id != id) fail("update.installation_unknown")
         ownSessionLocked(saved.record.sessionId)?.let { installer.abandonSession(it.sessionId) }
         if (!saved.record.phase.terminal) journal(slot).save(saved.record.transition(AppInstallPhase.RETIRED, System.currentTimeMillis()), saved.revision)
         forgetPrepared(slot, id)
         prompts.remove(slot); mutableChanges.tryEmit(slot)
-    }
+    } }
     /** Explicit recovery for unreadable state; never an uninstall or a downgrade. */
-    suspend fun cleanupOrphans(slot: String) = withContext(Dispatchers.IO) {
-        for (session in relevantSessions()) installer.abandonSession(session.sessionId)
+    suspend fun cleanupOrphans(slot: String, current: () -> Unit = {}): Unit = mutations.withLock { withContext<Unit>(Dispatchers.IO) {
+        val lifetime = currentCoroutineContext()
+        fun check() { lifetime.ensureActive(); current() }
+        check()
+        for (session in relevantSessions()) { check(); installer.abandonSession(session.sessionId) }
+        check()
         if (relevantSessions().isNotEmpty()) fail("update.pending_installation")
+        check()
         journal(slot).resetAfterSessionCleanup(); prepared.remove(slot); prompts.remove(slot); mutableChanges.tryEmit(slot)
-    }
+    } }
     suspend fun installedArtifact(record: AppInstallationRecord, current: () -> Unit = {}): Boolean = withContext(Dispatchers.IO) {
         val lifetime = currentCoroutineContext()
         val check = { lifetime.ensureActive(); current() }
@@ -181,11 +188,11 @@ internal class AppInstallations @Inject constructor(@param:ApplicationContext pr
         @Suppress("DEPRECATION") val after = packages.getPackageInfo(context.packageName, 0).applicationInfo?.sourceDir
         verifier.installed() == installed && after == path
     }
-    suspend fun confirmInstalled(slot: String, id: String, current: () -> Unit): StoredAppInstallation = withContext(Dispatchers.IO) {
+    suspend fun confirmInstalled(slot: String, id: String, current: () -> Unit): StoredAppInstallation = mutations.withLock { withContext(Dispatchers.IO) {
         val storage = journal(slot); val saved = storage.read() ?: fail("update.installation_unknown")
         if (saved.record.id != id || saved.record.phase == AppInstallPhase.RETIRED || !installedArtifact(saved.record, current)) fail("update.installation_unknown")
         current(); storage.save(saved.record.transition(AppInstallPhase.INSTALLED, System.currentTimeMillis()), saved.revision).also { prompts.remove(slot); mutableChanges.tryEmit(slot) }
-    }
+    } }
     fun takePrompt(slot: String, record: AppInstallationRecord): Intent? {
         val pending = prompts[slot] ?: return null
         if (pending.recordId != record.id || pending.sessionId != record.sessionId || pending.nonce != record.nonce) return null
@@ -255,6 +262,7 @@ internal class AppInstallations @Inject constructor(@param:ApplicationContext pr
         fun intent(source: Intent): Intent? = source.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
     }
     companion object {
+        private val mutations = Mutex()
         const val ACTION = "cn.edu.ustc.dsh.mobile.INSTALL_RESULT"
         const val SCHEME = "dsh-app-install-result"
         private fun fail(code: String): Nothing = throw RemoteRequestException(code)

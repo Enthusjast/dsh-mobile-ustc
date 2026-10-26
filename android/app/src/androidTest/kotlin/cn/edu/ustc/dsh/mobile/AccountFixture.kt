@@ -57,6 +57,14 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val bindingWrites = AtomicInteger()
     val bindingStatusReads = AtomicInteger()
     val commandWrites = AtomicInteger()
+    @Volatile var appUpdateMode = false
+    @Volatile var appUpdateRelease: AppRelease? = null
+    @Volatile var appUpdateBytes = ByteArray(0)
+    @Volatile var holdAppUpdateMetadata = false
+    @Volatile var slowAppUpdateDownload = false
+    val appUpdateQueries = AtomicInteger()
+    val appUpdateDownloads = AtomicInteger()
+    val appUpdateDownloadFailure = AtomicReference<String?>()
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
     @Volatile var pushMode = false
     @Volatile var pushCleanupUnavailable = false
@@ -219,12 +227,18 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         server.start()
         origin = server.url("/").toString().trimEnd('/')
         transport = OkHttpClient.Builder().sslSocketFactory(clientCertificates.sslSocketFactory(), clientCertificates.trustManager)
+            .eventListener(object : EventListener() {
+                override fun callFailed(call: Call, ioe: java.io.IOException) {
+                    if (call.request().url.encodedPath == "/app-updates/candidate.apk") appUpdateDownloadFailure.set(ioe.stackTraceToString())
+                }
+            })
             .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).cookieJar(CookieJar.NO_COOKIES)
             .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS).readTimeout(5, java.util.concurrent.TimeUnit.SECONDS).callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
         // The production factory still trusts system TLS only. Reflection is confined to this test APK.
         http = LoginHttp::class.java.getDeclaredConstructor(OkHttpClient::class.java).apply { isAccessible = true }.newInstance(transport)
     }
-    fun environment(minimumValidity: Long = 0, approvalPromptMillis: Long = MAX_DECISION_AGE_MS, pushProvider: ((NotificationCenter) -> DevicePushProvider)? = null) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity, approvalPromptMillis = approvalPromptMillis, pushProvider = pushProvider)
+    fun environment(minimumValidity: Long = 0, approvalPromptMillis: Long = MAX_DECISION_AGE_MS, pushProvider: ((NotificationCenter) -> DevicePushProvider)? = null,
+        appUpdateConfiguration: (() -> ByteArray)? = null) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity, approvalPromptMillis = approvalPromptMillis, pushProvider = pushProvider, appUpdateConfiguration = appUpdateConfiguration)
     private fun discovery() = jsonObject("issuer" to issuer.json(), "authorization_endpoint" to "$origin/authorize".json(),
         "token_endpoint" to "$origin/token".json(), "jwks_uri" to "$origin/jwks".json(),
         "response_types_supported" to JsonArray(listOf("code".json())), "id_token_signing_alg_values_supported" to JsonArray(listOf("ES256".json())))
@@ -255,6 +269,12 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     }
     @Synchronized private fun respond(request: RecordedRequest): MockResponse {
         val path = request.requestUrl!!.encodedPath
+        if (appUpdateMode && path == "/app-updates/candidate.apk") {
+            require(request.method == "GET" && listOf("Authorization", "DPoP", "Cookie").all { request.getHeader(it) == null })
+            appUpdateDownloads.incrementAndGet()
+            val reply = MockResponse().setHeader("Content-Type", "application/vnd.android.package-archive").setBody(okio.Buffer().write(appUpdateBytes))
+            return if (slowAppUpdateDownload) reply.setBodyDelay(2, java.util.concurrent.TimeUnit.SECONDS) else reply
+        }
         if (pushMode && request.method == "DELETE" && path.startsWith("/v1/push-bindings/")) {
             require(request.getHeader("DPoP") == null && request.getHeader("Cookie") == null)
             val id = path.substringAfterLast('/')
@@ -557,6 +577,19 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (appUpdateMode && path == "/v1/app/releases/latest") {
+            require(request.method == "GET")
+            val url = request.requestUrl!!
+            require(url.queryParameterNames == setOf("organization_id", "version_code", "protocol_version", "android_api"))
+            require(url.queryParameter("organization_id") == organizationId && url.queryParameter("protocol_version") == "1" && url.queryParameter("android_api")!!.toLong() in 26..100)
+            val version = url.queryParameter("version_code")!!.toLong()
+            appUpdateQueries.incrementAndGet()
+            val reply = resourceResponse(data(jsonObject("v" to 1L.json(), "package_name" to context.packageName.json(), "protocol_version" to 1L.json(),
+                "current_version_code" to version.json(), "current_supported" to JsonBoolean(version in 1..100),
+                "supported_client_versions" to jsonObject("minimum" to 1L.json(), "maximum" to 100L.json()),
+                "release" to (appUpdateRelease?.takeIf { it.versionCode > version }?.document?.root ?: JsonNull))))
+            return if (holdAppUpdateMetadata) reply.setBodyDelay(2, java.util.concurrent.TimeUnit.SECONDS) else reply
+        }
         if (pushMode && path == "/v1/push/capabilities") return resourceResponse(data(jsonObject("v" to 1L.json(), "providers" to JsonArray(listOf(jsonObject("provider" to "fcm".json(), "project_id" to "fixture-project".json(), "package_name" to "cn.edu.ustc.dsh.mobile".json(), "address_kind" to "fid".json()))), "sources" to JsonArray(listOf("approval".json(), "question".json(), "timed_question".json())), "verification" to "provider_challenge".json(), "lease_seconds" to 604800L.json())))
         if (pushMode && path == "/v1/push-bindings") {
             require(request.method == "POST")
@@ -771,7 +804,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     }
     fun replaceQuestions() {publishQuestions.get()?.invoke()}
 
-    fun seed(registering: Boolean = false, refreshing: Boolean = false) {
+    fun seed(registering: Boolean = false, refreshing: Boolean = false, ttlSeconds: Long = 120) {
         val now = System.currentTimeMillis()
         val ledger = PendingKeyLedger(context, ledgerName); ledger.add(reference)
         DeviceKeyStore(context).use { owner ->
@@ -780,7 +813,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             proofJkt = proof.thumbprint; approvalJkt = approval.thumbprint; approvalPublic = approval.publicJwk; active = true
             val attempt = PendingLogin(OidcDiscovery.parse(JsonDocument.of(discovery()).canonicalBytes(), config), proof.thumbprint, now)
             val exchange = attempt.acceptCallback(LoginConfiguration.REDIRECT_URI + "?state=${attempt.state}&code=seed", now)
-            val session = TokenVerifier.authorizationCodeResponse(JsonDocument.of(tokenReply(proof.thumbprint, subject, attempt.nonce, 120)).canonicalBytes(), exchange, IssuerKeys.parse(JsonDocument.of(jsonObject("keys" to JsonArray(listOf(JsonDocument.parse(issuerKey.toPublicJWK().toJSONString()).root)))).canonicalBytes()), System.currentTimeMillis())
+            val session = TokenVerifier.authorizationCodeResponse(JsonDocument.of(tokenReply(proof.thumbprint, subject, attempt.nonce, ttlSeconds)).canonicalBytes(), exchange, IssuerKeys.parse(JsonDocument.of(jsonObject("keys" to JsonArray(listOf(JsonDocument.parse(issuerKey.toPublicJWK().toJSONString()).root)))).canonicalBytes()), System.currentTimeMillis())
             var saved = AccountCheckpoint.create(accountId, config, userId, session, System.currentTimeMillis()).withApprovalKey(approval.thumbprint, System.currentTimeMillis()).beginEnrollment("校园夹具手机", System.currentTimeMillis())
             if (!registering) saved = saved.deviceAccepted(deviceId, 1, System.currentTimeMillis())
             if (refreshing) saved = saved.beginRefresh(System.currentTimeMillis())

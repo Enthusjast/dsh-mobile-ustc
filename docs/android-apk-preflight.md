@@ -1,6 +1,6 @@
 # APK 私有下载与安装前校验
 
-本阶段实现[发行元数据](app-release-metadata.md)之后的匿名 HTTPS 下载、私有候选文件与平台 APK 校验。后续的独立下载来源配置、系统安装后端与恢复边界见[安装会话记录](android-apk-installation.md)；应用页面和当前发行复查仍待接入。验证结果不代表已安装，也不构成可持久复用的安装授权。
+本阶段实现[发行元数据](app-release-metadata.md)之后的匿名 HTTPS 下载、私有候选文件与平台 APK 校验。后续独立下载来源配置、系统安装后端与恢复边界见[安装会话记录](android-apk-installation.md)，页面与当前发行复查见[应用更新](android-app-updates.md)。验证结果不代表已安装，也不构成可持久复用的安装授权。
 
 ## 下载与候选文件
 

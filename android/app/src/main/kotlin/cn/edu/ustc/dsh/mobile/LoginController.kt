@@ -16,6 +16,7 @@ import cn.edu.ustc.dsh.session.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationServiceConfiguration
@@ -43,6 +44,7 @@ data class HomeState(
     val reader: SessionReadState? = null,
     val knownTarget: SessionTarget? = null,
     val notifications: NotificationUiState? = null, val notificationSettings: Boolean = false, val notificationNote: String? = null, val notificationQuestion: QuestionHandle? = null,
+    val appUpdates: AppUpdateUiState? = null, val appUpdateSettings: Boolean = false,
     val exports: SessionExportState? = null, val exportSavePicker: ExportSaveLaunch? = null, val exportSaving: Boolean = false, val exportSaved: Boolean = false, val exportSaveError: String? = null, val exportBytes: Long = 0,
     val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composerRestore: MessageDraft? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
@@ -64,15 +66,18 @@ internal class LoginEnvironment(
     val minimumValidityMillis: Long = 60_000,
     val approvalPromptMillis: Long = MAX_DECISION_AGE_MS,
     val pushProvider: ((NotificationCenter) -> DevicePushProvider)? = null,
+    val appUpdateConfiguration: (() -> ByteArray)? = null,
 ) { init { require(approvalPromptMillis in 1..MAX_DECISION_AGE_MS) } }
 
 @Singleton
-class LoginController internal constructor(private val context: Context, private val http: LoginHttp, private val environment: LoginEnvironment, private val notificationCenter: NotificationCenter = NotificationCenter(context, environment.storageSlot)) : AutoCloseable {
-    @Inject constructor(@ApplicationContext context: Context, http: LoginHttp, notifications: NotificationCenter) : this(context, http, LoginEnvironment({ context.assets.open("deployment.json").use { it.readBytes() } }), notifications)
+class LoginController internal constructor(private val context: Context, private val http: LoginHttp, private val environment: LoginEnvironment, private val notificationCenter: NotificationCenter = NotificationCenter(context, environment.storageSlot), private val installations: AppInstallations = AppInstallations(context)) : AutoCloseable {
+    @Inject internal constructor(@ApplicationContext context: Context, http: LoginHttp, notifications: NotificationCenter, installations: AppInstallations) : this(context, http, LoginEnvironment({ context.assets.open("deployment.json").use { it.readBytes() } }), notifications, installations)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutable = MutableStateFlow(HomeState())
     val state: StateFlow<HomeState> = mutable.asStateFlow()
+    private val updateLaunches = Channel<AppUpdateLaunch>(4)
+    val appUpdateEvents = updateLaunches.receiveAsFlow()
     @Volatile private var generation = 0L
     private val persistence = AccountPersistence(context, environment.storageSlot, environment.ledgerName) { it == generation && scope.isActive }
     private var configuration: LoginConfiguration? = null
@@ -101,6 +106,9 @@ class LoginController internal constructor(private val context: Context, private
     private var pendingNotificationOpen: NotificationOpen? = null
     private var pendingNotificationReference: NotificationReference? = null
     private var notificationDeadline: Job? = null
+    private var appUpdateFlow: AppUpdateFlow? = null
+    private var appUpdateCollector: Job? = null
+    private var appUpdateEventCollector: Job? = null
     private var desired: Pair<String, String?>? = null
     private var knownSelection = false
     private var creationDesired: String? = null
@@ -587,10 +595,11 @@ class LoginController internal constructor(private val context: Context, private
                 resumeBindingView = false
                 pendingBindingId?.let(::openBinding)
             }
-        } finally { if (generation == stamp) { mutable.value = mutable.value.copy(refreshing = false); attachNotifications() } }
+        } finally { if (generation == stamp) { mutable.value = mutable.value.copy(refreshing = false); attachNotifications(); attachAppUpdates() } }
     }
 
     private fun retireNavigation(keepDesired: Boolean) {
+        retireAppUpdates(keepDesired)
         pendingNotificationReference?.let { ref -> if (!keepDesired || desired != (ref.runtimeId to ref.sessionId)) dismissNotificationNavigation() }
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
@@ -628,7 +637,8 @@ class LoginController internal constructor(private val context: Context, private
                 outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1, composerRestore = pendingDocument?.draft)
         } else if (mutable.value.phase == HomePhase.READY) {
             attachNotifications()
-            if (binding == null) {
+            if (mutable.value.appUpdateSettings) attachAppUpdates()
+            else if (binding == null) {
                 if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
                 else if(creationDesired!=null) openCreationInternal(creationDesired!!,true)
                 else desired?.let { if (knownSelection && it.second != null) navigateKnownSession(it.first, it.second!!) else navigateRuntime(it.first, it.second) }
@@ -1137,6 +1147,70 @@ class LoginController internal constructor(private val context: Context, private
         notificationCollector?.cancel(); notificationCollector = null
         notificationFlow?.close(); notificationFlow = null
     }
+    private fun retireAppUpdates(keepPage: Boolean = false) {
+        appUpdateCollector?.cancel(); appUpdateCollector = null
+        appUpdateEventCollector?.cancel(); appUpdateEventCollector = null
+        appUpdateFlow?.close(); appUpdateFlow = null
+        mutable.value = mutable.value.copy(appUpdates = null, appUpdateSettings = keepPage && mutable.value.appUpdateSettings)
+    }
+    fun openAppUpdates() {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
+        dismissNotificationNavigation(); closeBinding(); resumeBindingView = false; retireNavigation(false)
+        mutable.value = mutable.value.copy(appUpdateSettings = true, notificationSettings = false, selectedRuntimeId = null, selectedSessionId = null,
+            sessions = emptyList(), reader = null, loadingSessions = false, sessionError = null)
+        attachAppUpdates()
+    }
+    private fun attachAppUpdates() {
+        if (!foreground || mutable.value.phase != HomePhase.READY || !mutable.value.appUpdateSettings || appUpdateFlow != null) return
+        val resource = api ?: return; val saved = checkpoint ?: return; val config = configuration ?: return; val device = saved.deviceId ?: return
+        val actor = LocalDataOwner(saved.accountId, saved.organizationId, config.fingerprint, saved.userId, device)
+        val stamp = generation; val view = navigationGeneration
+        fun viewCurrent() {
+            current(stamp)
+            if (!foreground || view != navigationGeneration || mutable.value.phase != HomePhase.READY || !mutable.value.appUpdateSettings ||
+                checkpoint?.accountId != actor.accountId || checkpoint?.deviceId != actor.deviceId) throw CancellationException()
+            if ((session?.accessExpiresAt ?: 0) <= now()) throw RemoteRequestException("auth.expired")
+        }
+        val opened = AppUpdateFlow(actor, { loadAppUpdateConfiguration(context, actor, environment.appUpdateConfiguration) },
+            AndroidAppUpdateAccess(context, resource, http, installations, environment.storageSlot), scope, ::viewCurrent,
+            authorityFailure = { code ->
+                if (generation == stamp && navigationGeneration == view && mutable.value.phase == HomePhase.READY) {
+                    if (code in setOf("auth.expired", "auth.proof_invalid", "auth.reauthentication_required")) renew() else refresh()
+                }
+            })
+        appUpdateFlow = opened
+        mutable.value = mutable.value.copy(appUpdates = opened.state.value)
+        appUpdateCollector = scope.launch {
+            opened.state.collect { value ->
+                if (generation == stamp && navigationGeneration == view && appUpdateFlow === opened && foreground && mutable.value.phase == HomePhase.READY)
+                    mutable.value = mutable.value.copy(appUpdates = value)
+            }
+        }
+        appUpdateEventCollector = scope.launch {
+            opened.events.collect { event ->
+                if (generation == stamp && navigationGeneration == view && appUpdateFlow === opened && foreground && mutable.value.phase == HomePhase.READY && !updateLaunches.trySend(event).isSuccess)
+                    opened.launchFailed(event)
+            }
+        }
+    }
+    fun closeAppUpdates() = retireAppUpdates()
+    private fun currentAppUpdate(view: String?): AppUpdateFlow? = appUpdateFlow?.takeIf {
+        view != null && foreground && mutable.value.phase == HomePhase.READY && mutable.value.appUpdateSettings && it.state.value.viewId == view
+    }
+    fun checkAppUpdates(view: String? = mutable.value.appUpdates?.viewId) = currentAppUpdate(view)?.checkLatest()
+    fun downloadAppUpdate(view: String? = mutable.value.appUpdates?.viewId, publication: String? = mutable.value.appUpdates?.release?.document?.sha256()) = currentAppUpdate(view)?.download(publication)
+    fun installAppUpdate(view: String? = mutable.value.appUpdates?.viewId, attempt: String? = mutable.value.appUpdates?.attemptId,
+        publication: String? = mutable.value.appUpdates?.release?.document?.sha256()) = currentAppUpdate(view)?.install(attempt, publication)
+    fun requestAppInstallPermission(view: String? = mutable.value.appUpdates?.viewId) = currentAppUpdate(view)?.requestPermission()
+    fun cleanupAppUpdate(view: String? = mutable.value.appUpdates?.viewId, context: String? = mutable.value.appUpdates?.cleanupToken) = currentAppUpdate(view)?.cleanup(context)
+    fun cancelAppUpdateDownload(view: String? = mutable.value.appUpdates?.viewId) = currentAppUpdate(view)?.cancelDownload()
+    fun consumeAppUpdateLaunch(event: AppUpdateLaunch): (() -> android.content.Intent)? {
+        if (!foreground || mutable.value.phase != HomePhase.READY || !mutable.value.appUpdateSettings) return null
+        if ((session?.accessExpiresAt ?: 0) <= now()) { renew(); return null }
+        return appUpdateFlow?.consume(event)
+    }
+    fun appUpdateLaunchFailed(event: AppUpdateLaunch) = appUpdateFlow?.launchFailed(event)
     private fun dismissNotificationNavigation() {
         notificationFlow?.cancelRead()
         pendingNotificationReference = null; notificationDeadline?.cancel(); notificationDeadline = null
@@ -1231,6 +1305,7 @@ class LoginController internal constructor(private val context: Context, private
     fun retryRead() = reader?.retry()
     fun refreshSessions() { desired?.let { if (knownSelection && it.second != null) navigateKnownSession(it.first, it.second!!) else navigateRuntime(it.first, it.second) } }
     fun back() {
+        if (mutable.value.appUpdateSettings) { closeAppUpdates(); return }
         dismissNotificationNavigation()
         if (mutable.value.notificationSettings) { closeNotificationSettings(); return }
         if (knownSelection) { enterNotificationSettings(); return }
@@ -1349,12 +1424,23 @@ class LoginController internal constructor(private val context: Context, private
         else -> "network.unavailable"
     }
     /** Process/owner disposal preserves durable credentials; explicit local exit uses cancel(). */
-    override fun close() { fence(closeKeys = true); scope.cancel() }
+    override fun close() { fence(closeKeys = true); updateLaunches.close(); scope.cancel() }
 }
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(private val login: LoginController) : ViewModel() {
     val state = login.state
+    val appUpdateEvents = login.appUpdateEvents
+    fun openAppUpdates() = login.openAppUpdates()
+    fun closeAppUpdates() = login.closeAppUpdates()
+    fun checkAppUpdates(view: String) = login.checkAppUpdates(view)
+    fun downloadAppUpdate(view: String, publication: String?) = login.downloadAppUpdate(view, publication)
+    fun installAppUpdate(view: String, attempt: String?, publication: String?) = login.installAppUpdate(view, attempt, publication)
+    fun requestAppInstallPermission(view: String) = login.requestAppInstallPermission(view)
+    fun cleanupAppUpdate(view: String, context: String) = login.cleanupAppUpdate(view, context)
+    fun cancelAppUpdateDownload(view: String) = login.cancelAppUpdateDownload(view)
+    fun consumeAppUpdateLaunch(event: AppUpdateLaunch) = login.consumeAppUpdateLaunch(event)
+    fun appUpdateLaunchFailed(event: AppUpdateLaunch) = login.appUpdateLaunchFailed(event)
     fun login() = login.login()
     fun register(name: String) = login.register(name)
     fun cancel() = login.cancel()
