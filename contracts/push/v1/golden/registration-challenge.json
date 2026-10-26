@@ -1,0 +1,7 @@
+{
+  "v": "1",
+  "kind": "registration_challenge",
+  "binding_id": "11111111-1111-4111-8111-111111111111",
+  "challenge": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "expires_at": "2026-10-26T12:03:00.000Z"
+}

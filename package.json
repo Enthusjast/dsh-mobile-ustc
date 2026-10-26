@@ -6,8 +6,8 @@
   "workspaces": ["host/remote-control"],
   "scripts": {
     "build": "npm run build --workspaces",
-    "contracts": "tsx tools/generate-m0-contract.ts && tsx tools/generate-approval-contract.ts && tsx tools/generate-file-contract.ts && tsx tools/generate-export-contract.ts",
-    "contracts:check": "tsx tools/generate-m0-contract.ts --check && tsx tools/generate-approval-contract.ts --check && tsx tools/generate-file-contract.ts --check && tsx tools/generate-export-contract.ts --check",
+    "contracts": "tsx tools/generate-m0-contract.ts && tsx tools/generate-approval-contract.ts && tsx tools/generate-file-contract.ts && tsx tools/generate-export-contract.ts && tsx tools/generate-push-contract.ts",
+    "contracts:check": "tsx tools/generate-m0-contract.ts --check && tsx tools/generate-approval-contract.ts --check && tsx tools/generate-file-contract.ts --check && tsx tools/generate-export-contract.ts --check && tsx tools/generate-push-contract.ts --check",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "tsx --test host/remote-control/tests/*.test.ts",
     "verify": "npm run contracts:check && npm run check && npm run build && npm test",

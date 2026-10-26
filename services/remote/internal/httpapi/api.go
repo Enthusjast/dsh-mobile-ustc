@@ -73,6 +73,7 @@ type API struct {
 	files        *files.Service
 	fileHandoffs *files.Handoffs
 	fileExports  *files.Exports
+	push         *store.PushStore
 }
 
 type Handler struct {
@@ -104,6 +105,7 @@ type Config struct {
 	Files         *files.Service
 	FileHandoffs  *files.Handoffs
 	FileExports   *files.Exports
+	Push          *store.PushStore
 }
 
 type deviceRequest struct {
@@ -178,6 +180,18 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 		mux.Handle("POST /v1/approvals/{id}/decisions", api.protected(http.HandlerFunc(api.decideApproval)))
 	}
 	mux.Handle("GET /v1/commands/{id}", api.protected(http.HandlerFunc(api.commandStatus)))
+	if len(configs) > 0 && configs[0].Push != nil {
+		api.push = configs[0].Push
+		mux.Handle("GET /v1/push/capabilities", api.protected(http.HandlerFunc(api.pushCapabilities)))
+		mux.Handle("POST /v1/push-bindings", api.protected(http.HandlerFunc(api.pushRegister)))
+		mux.Handle("GET /v1/push-bindings/{id}", api.protected(http.HandlerFunc(api.pushStatus)))
+		mux.Handle("POST /v1/push-bindings/{id}/confirm", api.protected(http.HandlerFunc(api.pushConfirm)))
+		mux.Handle("POST /v1/push-bindings/{id}/lease", api.protected(http.HandlerFunc(api.pushRenew)))
+		mux.HandleFunc("DELETE /v1/push-bindings/{id}", api.pushRevoke)
+		mux.Handle("GET /v1/notifications", api.protected(http.HandlerFunc(api.pushInbox)))
+		mux.Handle("GET /v1/notifications/{id}", api.protected(http.HandlerFunc(api.pushReference)))
+		mux.Handle("POST /v1/notifications/{id}/receipts", api.protected(http.HandlerFunc(api.pushReceipt)))
+	}
 	if len(configs) > 0 && configs[0].Files != nil {
 		api.files = configs[0].Files
 		mux.Handle("POST /v1/runtimes/{id}/sessions/{session_id}/files", api.protected(http.HandlerFunc(api.registerFile)))

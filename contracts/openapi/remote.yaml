@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: DSH Mobile Remote Control API
   version: 0.1.0
-  description: Authenticated control plane and optional quarantined file uploads implemented by the Go service. File routes require explicit protected storage/scanner configuration and an operational scanner probe.
+  description: Authenticated control plane and optional quarantined file uploads implemented by the Go service. File routes require explicit protected storage/scanner configuration and an operational scanner probe. Push routes and workers require a separate protected configuration; provider acceptance never grants interaction authority.
 servers:
   - url: https://remote.example.edu
 security:
@@ -699,6 +699,177 @@ paths:
         '404': { description: File service is not configured. }
         '409': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/push/capabilities:
+    get:
+      description: Optional notification service capabilities for an active DPoP-bound device. Routes are absent unless protected push configuration is enabled. Provider configuration is public metadata, not a delivery guarantee.
+      responses:
+        '200':
+          description: Supported provider/address and source kinds.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PushCapabilitiesResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/push-bindings:
+    post:
+      description: Persist the original device/org-bound intent and encrypted FCM FID. A NORMAL-priority provider message carries a short one-use challenge; the HTTP response never returns that challenge or address. The channel stays pending until the same device proves receipt. Reusing the ID with another endpoint, org, key or deletion-secret hash conflicts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '../push/v1/registration.schema.json' }
+      responses:
+        '201':
+          description: Original pending/active channel metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PushBindingResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/push-bindings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/UUID'
+    get:
+      description: Read only this original device/key/org registration; it cannot create, verify or revive a channel.
+      responses:
+        '200':
+          description: Current registration metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PushBindingResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+    delete:
+      security: []
+      description: Deletion-only logout cleanup using the client-generated 32-byte secret whose SHA-256 was registered. It remains usable after OAuth logout. No secret in a query/body; this endpoint cannot read data or move an address to another account. Unknown/incorrect secrets have the same empty response. Clients must clear local notification routing before calling.
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema: { type: string, pattern: '^DSH-Push-Revoke [A-Za-z0-9_-]{43}$' }
+      responses:
+        '204': { description: Cleanup request processed without disclosing registration existence. }
+        '400': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/push-bindings/{id}/confirm:
+    post:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      description: Confirm the provider-delivered challenge under the original current device/key/org. Pending registrations cannot displace an active address. The original holder must disable the old channel before a verified transfer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [challenge]
+              properties:
+                challenge: { type: string, minLength: 43, maxLength: 43, writeOnly: true }
+      responses:
+        '200':
+          description: Verified active channel, or the same original confirmation result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PushBindingResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /v1/push-bindings/{id}/lease:
+    post:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      description: Renew a currently confirmed, unexpired channel using the original active device proof. An expired or changed-key channel needs a new explicit registration and provider challenge.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        '200':
+          description: Current channel lease metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PushBindingResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /v1/notifications:
+    get:
+      description: Paged materialized notification references for this original channel, independently filtered by current device/key/org and source authority. This is not a second body store or an execution API. Reconcile native session state for details and any action.
+      parameters:
+        - in: query
+          name: binding_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: after
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: At most 64 authorized references and the next opaque UUID position.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [items, cursor]
+                    properties:
+                      items:
+                        type: array
+                        maxItems: 64
+                        items: { $ref: '../push/v1/reference.schema.json' }
+                      cursor: { type: [string, 'null'], format: uuid }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/notifications/{id}:
+    get:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      description: Reauthorize a pushed opaque ID against the current device, org, grant and source metadata. Returns no approval parameters, question body, decision, signature or callback. Original-epoch and host availability are explicit facts, not authorization to approve.
+      responses:
+        '200':
+          description: Current source reference.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [reference]
+                    properties:
+                      reference: { $ref: '../push/v1/reference.schema.json' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/notifications/{id}/receipts:
+    post:
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      description: Idempotent current-device telemetry only. Posted means the client reports an OS posting attempt, not that a human saw it; opened and blocked never authorize or change the underlying interaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [state]
+              properties:
+                state: { enum: [posted, opened, blocked] }
+      responses:
+        '200': { description: Client report stored or already present. }
+        '403': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     HostFileTicket:
@@ -732,6 +903,55 @@ components:
       description: One-use nonce to include in the next DPoP proof for this key.
       schema: { type: string, minLength: 32, maxLength: 64 }
   schemas:
+    PushCapabilitiesResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [v, providers, sources, verification, lease_seconds]
+          properties:
+            v: { const: 1 }
+            providers:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [provider, project_id, package_name, address_kind]
+                properties:
+                  provider: { const: fcm }
+                  project_id: { type: string }
+                  package_name: { type: string }
+                  address_kind: { const: fid }
+            sources:
+              type: array
+              uniqueItems: true
+              items: { enum: [approval] }
+            verification: { const: provider_challenge }
+            lease_seconds: { const: 604800 }
+    PushBindingResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [binding]
+          properties:
+            binding:
+              type: object
+              additionalProperties: false
+              required: [binding_id, state, challenge_expires_at, expires_at]
+              properties:
+                binding_id: { type: string, format: uuid }
+                state: { enum: [pending, active, disabled, expired] }
+                challenge_expires_at: { type: string, format: date-time }
+                expires_at: { type: string, format: date-time }
     FileRegistration:
       type: object
       additionalProperties: false

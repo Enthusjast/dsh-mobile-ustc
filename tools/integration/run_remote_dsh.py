@@ -14,11 +14,14 @@ def main():
     arguments.add_argument("--kotlin-relay", action="store_true", help="Also run the actual Kotlin Relay client against Go/PostgreSQL over TLS")
     arguments.add_argument("--android-relay", metavar="SERIAL", help="Run the APK/Go/DSH composition on an explicitly owned emulator")
     arguments.add_argument("--android-avd", default="dsh-remote-api26", help="Exact owned AVD identity for the Android composition")
+    arguments.add_argument("--go-run", metavar="REGEX", help="Run matching Go cases in the isolated cluster, without the separate Node composition")
     options = arguments.parse_args()
     if options.android_relay is not None and not options.android_relay:
         arguments.error("An explicit nonempty owned-emulator serial is required")
     if options.android_relay and options.kotlin_relay:
         arguments.error("Select either Kotlin JVM composition or Android APK composition")
+    if options.android_relay and options.go_run:
+        arguments.error("The Android composition selects its own Go case")
     repo = Path(__file__).resolve().parents[2]
     kotlin_classpath = None
     java = None
@@ -77,9 +80,14 @@ def main():
                 env.update(REMOTE_TEST_KOTLIN_CLASSPATH=kotlin_classpath, REMOTE_TEST_JAVA=java)
             # Each Go integration test owns a private database in this cluster.
             # Running here ensures the security tests cannot silently skip PG.
-            result = subprocess.run([go, "test", "-race", "-count=1", "./..."], cwd=repo / "services/remote", env=env)
+            command = [go, "test", "-race", "-count=1"]
+            if options.go_run:
+                command += ["-run", options.go_run, "-v"]
+            result = subprocess.run(command + ["./..."], cwd=repo / "services/remote", env=env)
             if result.returncode:
                 return result.returncode
+            if options.go_run:
+                return 0
             result = subprocess.run([str(repo / "node_modules/.bin/tsx"), "--test", str(repo / "tools/integration/remote-dsh.test.ts")], cwd=repo, env=env)
             if result.returncode:
                 for line in log.read_text().splitlines():

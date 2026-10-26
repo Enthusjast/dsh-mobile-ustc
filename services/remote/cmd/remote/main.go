@@ -52,12 +52,19 @@ func run() error {
 		return err
 	}
 	defer fileRuntime.Close()
+	pushRuntime, err := loadPushRuntime(os.Getenv("REMOTE_PUSH_CONFIG_FILE"), database, os.Getenv("REMOTE_ISSUER"), approvalConfig)
+	if err != nil {
+		return err
+	}
 
 	apiConfig := httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig}
 	if fileRuntime != nil {
 		apiConfig.Files = fileRuntime.service
 		apiConfig.FileHandoffs = fileRuntime.handoffs
 		apiConfig.FileExports = fileRuntime.exports
+	}
+	if pushRuntime != nil {
+		apiConfig.Push = pushRuntime.repository
 	}
 	handler := httpapi.New(database, verifier, apiConfig)
 	server := &http.Server{
@@ -80,7 +87,13 @@ func run() error {
 	} else {
 		close(filesDone)
 	}
-	defer func() { stopControl(); <-controlDone; <-filesDone }()
+	pushDone := make(chan struct{})
+	if pushRuntime != nil {
+		go func() { defer close(pushDone); pushRuntime.Run(controlCtx) }()
+	} else {
+		close(pushDone)
+	}
+	defer func() { stopControl(); <-controlDone; <-filesDone; <-pushDone }()
 	result := make(chan error, 1)
 	go func() { result <- server.ListenAndServe() }()
 	select {
