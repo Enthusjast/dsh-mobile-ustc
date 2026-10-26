@@ -41,6 +41,7 @@ data class HomeState(
     val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
+    val notifications: NotificationUiState? = null, val notificationSettings: Boolean = false, val notificationNote: String? = null,
     val exports: SessionExportState? = null, val exportSavePicker: ExportSaveLaunch? = null, val exportSaving: Boolean = false, val exportSaved: Boolean = false, val exportSaveError: String? = null, val exportBytes: Long = 0,
     val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composerRestore: MessageDraft? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
@@ -57,11 +58,12 @@ internal class LoginEnvironment(
     val refreshLeadMillis: Long = 30_000,
     val minimumValidityMillis: Long = 60_000,
     val approvalPromptMillis: Long = MAX_DECISION_AGE_MS,
+    val pushProvider: ((NotificationCenter) -> DevicePushProvider)? = null,
 ) { init { require(approvalPromptMillis in 1..MAX_DECISION_AGE_MS) } }
 
 @Singleton
-class LoginController internal constructor(private val context: Context, private val http: LoginHttp, private val environment: LoginEnvironment) : AutoCloseable {
-    @Inject constructor(@ApplicationContext context: Context, http: LoginHttp) : this(context, http, LoginEnvironment({ context.assets.open("deployment.json").use { it.readBytes() } }))
+class LoginController internal constructor(private val context: Context, private val http: LoginHttp, private val environment: LoginEnvironment, private val notificationCenter: NotificationCenter = NotificationCenter(context, environment.storageSlot)) : AutoCloseable {
+    @Inject constructor(@ApplicationContext context: Context, http: LoginHttp, notifications: NotificationCenter) : this(context, http, LoginEnvironment({ context.assets.open("deployment.json").use { it.readBytes() } }), notifications)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutable = MutableStateFlow(HomeState())
@@ -88,6 +90,12 @@ class LoginController internal constructor(private val context: Context, private
     private var navigationJob: Job? = null
     private var readerJob: Job? = null
     private var reader: SessionReader? = null
+    private val pushProvider by lazy { environment.pushProvider?.invoke(notificationCenter) ?: FcmPushProvider(context) }
+    private var notificationFlow: ForegroundNotifications? = null
+    private var notificationCollector: Job? = null
+    private var pendingNotificationOpen: NotificationOpen? = null
+    private var pendingNotificationReference: NotificationReference? = null
+    private var notificationDeadline: Job? = null
     private var desired: Pair<String, String?>? = null
     private var creationDesired: String? = null
     private var creationReturnsToRuntime = false
@@ -462,6 +470,7 @@ class LoginController internal constructor(private val context: Context, private
         current(stamp); showReauthentication(error)
     }
     private fun showReauthentication(error: String?) {
+        closeNotificationFlow()
         retireNavigation(false)
         retireBinding(false)
         deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
@@ -550,10 +559,11 @@ class LoginController internal constructor(private val context: Context, private
                 resumeBindingView = false
                 pendingBindingId?.let(::openBinding)
             }
-        } finally { if (generation == stamp) mutable.value = mutable.value.copy(refreshing = false) }
+        } finally { if (generation == stamp) { mutable.value = mutable.value.copy(refreshing = false); attachNotifications() } }
     }
 
     private fun retireNavigation(keepDesired: Boolean) {
+        pendingNotificationReference?.let { ref -> if (!keepDesired || desired != (ref.runtimeId to ref.sessionId)) dismissNotificationNavigation() }
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
         uploadCollector?.cancel(); uploadCollector = null; uploads?.close(); uploads = null
@@ -582,20 +592,25 @@ class LoginController internal constructor(private val context: Context, private
         foreground = active
         binding?.foreground(active)
         if (!active) {
+            pendingNotificationReference = null; notificationDeadline?.cancel()
+            closeNotificationFlow()
             retireNavigation(true)
             mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null, questions = SessionQuestionState()), loadingSessions = false, binding = binding?.state?.value,
                 outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1, composerRestore = pendingDocument?.draft)
-        } else if (mutable.value.phase == HomePhase.READY && binding == null) {
-            if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
-            else if(creationDesired!=null) openCreationInternal(creationDesired!!,true)
-            else desired?.let { navigateRuntime(it.first, it.second) }
+        } else if (mutable.value.phase == HomePhase.READY) {
+            attachNotifications()
+            if (binding == null) {
+                if (resumeBindingView) { resumeBindingView = false; pendingBindingId?.let(::openBinding) }
+                else if(creationDesired!=null) openCreationInternal(creationDesired!!,true)
+                else desired?.let { navigateRuntime(it.first, it.second) }
+            }
         }
     }
     private fun navigation(block: suspend CoroutineScope.() -> Unit) {
         val task = scope.launch(start = CoroutineStart.LAZY, block = block); navigationJob = task; task.start()
     }
-    fun openRuntime(id: String) { creationDesired=null; navigateRuntime(id, null) }
-    fun openCreation(id: String) = openCreationInternal(id,false)
+    fun openRuntime(id: String) { dismissNotificationNavigation(); creationDesired=null; navigateRuntime(id, null) }
+    fun openCreation(id: String) { dismissNotificationNavigation(); openCreationInternal(id,false) }
     private fun openCreationInternal(id: String, restoring: Boolean) {
         if(!foreground || mutable.value.phase!=HomePhase.READY || binding!=null) return
         val row=mutable.value.runtimes.firstOrNull { it.id==id }?.access ?: return
@@ -667,7 +682,7 @@ class LoginController internal constructor(private val context: Context, private
                 val entries = response.obj("data").array("items").map { SessionDirectoryEntry.parse(it as? JsonObject ?: throw RemoteRequestException("network.invalid_response")) }
                 if (entries.map { it.id }.toSet().size != entries.size) throw RemoteRequestException("network.invalid_response")
                 mutable.value = mutable.value.copy(sessions = entries, loadingSessions = false)
-                if (resumeSession != null && entries.any { it.id == resumeSession }) { navigationJob = null; openSession(resumeSession) }
+                if (resumeSession != null && entries.any { it.id == resumeSession }) { navigationJob = null; openSessionInternal(resumeSession) }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 if (generation == stamp && view == navigationGeneration) {
@@ -677,7 +692,8 @@ class LoginController internal constructor(private val context: Context, private
             }
         }
     }
-    fun openSession(id: String) {
+    fun openSession(id: String) { dismissNotificationNavigation(); openSessionInternal(id) }
+    private fun openSessionInternal(id: String) {
         if (!foreground || mutable.value.phase != HomePhase.READY) return
         val runtimeId = mutable.value.selectedRuntimeId ?: return
         val runtime = mutable.value.runtimes.firstOrNull { it.id == runtimeId }?.access ?: return
@@ -728,6 +744,7 @@ class LoginController internal constructor(private val context: Context, private
                         if (generation != stamp || navigationGeneration != view || !foreground) return@collect
                         val next = client.state.value
                         mutable.value = mutable.value.copy(approvals = next)
+                        deliverNotificationReference()
                         val handle = approvalPreparingHandle ?: approvalAuthentication?.handle
                         if (handle != null && (!next.connected || !next.contentReady || next.view.items.none { it.handle == handle } ||
                                 approvalAuthentication != null && !next.signing)) abortApprovalAuthentication("approval.stale")
@@ -742,6 +759,7 @@ class LoginController internal constructor(private val context: Context, private
             opened.state.collect { state ->
                 if (generation != stamp || view != navigationGeneration || !foreground) return@collect
                 mutable.value = mutable.value.copy(reader = state)
+                deliverNotificationReference()
                 if (state.phase == SessionReadPhase.AUTH_REQUIRED && mutable.value.phase == HomePhase.READY) renew()
                 else if (state.phase == SessionReadPhase.REVOKED && mutable.value.phase == HomePhase.READY) refresh()
             }
@@ -1060,10 +1078,96 @@ class LoginController internal constructor(private val context: Context, private
             finally { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(submitting = false) }
         }
     }
+    private fun closeNotificationFlow() {
+        notificationCollector?.cancel(); notificationCollector = null
+        notificationFlow?.close(); notificationFlow = null
+    }
+    private fun dismissNotificationNavigation() {
+        notificationFlow?.cancelRead()
+        pendingNotificationReference = null; notificationDeadline?.cancel(); notificationDeadline = null
+    }
+    private fun attachNotifications() {
+        if (!foreground || mutable.value.phase != HomePhase.READY || notificationFlow != null) return
+        val resource = api ?: return; val saved = checkpoint ?: return; val device = saved.deviceId ?: return; val config = configuration ?: return
+        val stamp = generation
+        val owner = CommandOwner(saved.accountId, saved.organizationId, config.fingerprint, saved.userId, device)
+        val flow = ForegroundNotifications(resource, http, notificationCenter, pushProvider, owner, config.remoteOrigin, scope, {
+            if (!foreground || generation != stamp || api !== resource || mutable.value.phase != HomePhase.READY) throw CancellationException()
+        }, ::navigateNotificationReference)
+        notificationFlow = flow
+        notificationCollector = scope.launch { flow.state.collect { value -> if (foreground && generation == stamp && notificationFlow === flow) mutable.value = mutable.value.copy(notifications = value) } }
+        val pending = pendingNotificationOpen
+        if (pending != null) {
+            pendingNotificationOpen = null
+            val route = runCatching { notificationCenter.snapshot().route }.getOrNull()
+            if (route?.owner == owner.fingerprint && route.id == pending.bindingId) {
+                enterNotificationSettings()
+                flow.open(pending.bindingId, pending.notificationId)
+            }
+        }
+    }
+    fun openNotificationSettings() {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        enterNotificationSettings(); attachNotifications()
+    }
+    private fun enterNotificationSettings() {
+        dismissNotificationNavigation()
+        closeBinding(); resumeBindingView = false; retireNavigation(false)
+        mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, sessions = emptyList(), loadingSessions = false, sessionError = null,
+            reader = null, notificationSettings = true, notificationNote = null)
+    }
+    fun closeNotificationSettings() { dismissNotificationNavigation(); mutable.value = mutable.value.copy(notificationSettings = false) }
+    fun refreshNotifications() { attachNotifications(); notificationFlow?.refresh() }
+    fun enableNotifications() { attachNotifications(); notificationFlow?.enable() }
+    fun disableNotifications() = notificationFlow?.disable()
+    fun renewNotifications() = notificationFlow?.renew()
+    fun notificationInbox(more: Boolean = false) = notificationFlow?.inbox(more)
+    fun openNotification(binding: String, id: String?) {
+        if (!runCatching { Contract.uuid(binding); id?.let(Contract::uuid); true }.getOrDefault(false)) return
+        val route = runCatching { notificationCenter.snapshot().route }.getOrNull() ?: return
+        if (!route.active || route.id != binding || route.expires <= now()) return
+        pendingNotificationOpen = NotificationOpen(binding, id)
+        if (foreground && mutable.value.phase == HomePhase.READY) {
+            val saved = checkpoint ?: return
+            val owner = CommandOwner(saved.accountId, saved.organizationId, configuration!!.fingerprint, saved.userId, saved.deviceId!!)
+            if (route.owner != owner.fingerprint) { pendingNotificationOpen = null; return }
+            pendingNotificationOpen = null
+            enterNotificationSettings(); attachNotifications()
+            notificationFlow?.open(binding, id)
+        }
+    }
+    private fun navigateNotificationReference(ref: NotificationReference) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || !ref.actionable()) return
+        if (mutable.value.runtimes.none { it.id == ref.runtimeId && it.access?.canList() == true }) {
+            mutable.value = mutable.value.copy(notificationNote = "当前运行实例不可用，请刷新授权列表后重新核对提醒。"); return
+        }
+        pendingNotificationReference = ref
+        mutable.value = mutable.value.copy(notificationSettings = false, notificationNote = null)
+        navigateRuntime(ref.runtimeId, ref.sessionId)
+        notificationDeadline?.cancel(); notificationDeadline = scope.launch { delay(20_000); if (pendingNotificationReference === ref) { pendingNotificationReference = null; mutable.value = mutable.value.copy(notificationNote = "暂时无法核对提醒，请在线刷新当前会话。") } }
+    }
+    private fun deliverNotificationReference() {
+        val ref = pendingNotificationReference ?: return
+        val state = mutable.value
+        if (state.selectedRuntimeId != ref.runtimeId || state.selectedSessionId != ref.sessionId) return
+        if (state.reader?.phase == SessionReadPhase.OFFLINE) { pendingNotificationReference = null; mutable.value = state.copy(notificationNote = "主机离线，无法核对当前详情。"); return }
+        if (state.reader?.phase != SessionReadPhase.READY) return
+        if (state.reader.runtimeEpoch != ref.epoch || ref.expiresAt <= now()) {
+            pendingNotificationReference = null; mutable.value = state.copy(notificationNote = "提醒对应的运行代次或有效期已结束。"); return
+        }
+        val approvals = state.approvals ?: return
+        if (!approvals.view.loaded) return
+        pendingNotificationReference = null; notificationDeadline?.cancel()
+        if (ref.kind == "approval" && approvals.view.items.any { it.status.id == ref.referenceId && it.status.epoch == ref.epoch && it.canReview }) reviewApproval(ref.referenceId)
+        else mutable.value = state.copy(notificationNote = "提醒已结束，或当前账号无法处理此交互。")
+    }
+
     fun loadOlder() = reader?.loadOlder()
     fun retryRead() = reader?.retry()
     fun refreshSessions() { mutable.value.selectedRuntimeId?.let { navigateRuntime(it, mutable.value.selectedSessionId) } }
     fun back() {
+        dismissNotificationNavigation()
+        if (mutable.value.notificationSettings) { closeNotificationSettings(); return }
         if (binding != null) { closeBinding(); return }
         if(creationDesired!=null || mutable.value.creation!=null) {
             val target=creationDesired ?: mutable.value.selectedRuntimeId
@@ -1083,6 +1187,7 @@ class LoginController internal constructor(private val context: Context, private
         }
     }
     private fun fence(closeKeys: Boolean, preserveSelection: Boolean = false): Long {
+        closeNotificationFlow(); pendingNotificationReference = null; notificationDeadline?.cancel()
         pendingDocument = null
         mutable.value = mutable.value.copy(documentPicker = null, composerRestore = null)
         retireNavigation(preserveSelection)
@@ -1093,6 +1198,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     fun cancel() { clearAccount(null) }
     private fun clearAccount(error: String?) {
+        pendingNotificationOpen = null; notificationCenter.retire()
         val old = reference
         val stamp = fence(closeKeys = true)
         cleanupPending = true
@@ -1109,6 +1215,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun handle(error: Exception, stamp: Long) {
         if (generation != stamp) return
+        closeNotificationFlow()
         deadline?.cancel()
         retireNavigation(false)
         retireBinding(false)
@@ -1126,6 +1233,7 @@ class LoginController internal constructor(private val context: Context, private
     }
     fun openBinding(resumeId: String? = pendingBindingId) {
         if (!foreground || mutable.value.phase != HomePhase.READY) return
+        dismissNotificationNavigation()
         if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) {
             pendingBindingId = resumeId; renew(); resumeBindingView = resumeId != null; return
         }
@@ -1194,6 +1302,14 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun queryCreation() = login.queryCreation()
     fun sendPendingCreation(id: String) = login.sendPendingCreation(id)
     fun openCreatedSession(id: String) = login.openCreatedSession(id)
+    fun openNotificationSettings() = login.openNotificationSettings()
+    fun closeNotificationSettings() = login.closeNotificationSettings()
+    fun refreshNotifications() = login.refreshNotifications()
+    fun enableNotifications() = login.enableNotifications()
+    fun disableNotifications() = login.disableNotifications()
+    fun renewNotifications() = login.renewNotifications()
+    fun notificationInbox(more: Boolean = false) = login.notificationInbox(more)
+    fun openNotification(binding: String, id: String?) = login.openNotification(binding, id)
     fun loadOlder() = login.loadOlder()
     fun retryRead() = login.retryRead()
     fun refreshSessions() = login.refreshSessions()

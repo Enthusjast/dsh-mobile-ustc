@@ -8,11 +8,15 @@ plugins {
 
 val deploymentAssets = layout.buildDirectory.dir("generated/deploymentAssets")
 val deploymentSource = providers.gradleProperty("deploymentConfig")
+val pushSource = providers.gradleProperty("pushConfig")
 val prepareDeployment by tasks.registering {
     inputs.property("configuration", deploymentSource.orElse("<absent>"))
+    inputs.property("pushConfiguration", pushSource.orElse("<absent>"))
+    pushSource.orNull?.let { inputs.file(rootProject.file(it)) }
     deploymentSource.orNull?.let { inputs.file(rootProject.file(it)) }
     outputs.dir(deploymentAssets)
     if (deploymentSource.isPresent) dependsOn(":core:auth:validateDeployment")
+    if (pushSource.isPresent) { check(deploymentSource.isPresent) { "pushConfig requires deploymentConfig" }; dependsOn(":core:auth:validatePushDeployment") }
     doLast {
         val directory = deploymentAssets.get().asFile
         // A build without configuration must also remove a previous build's asset.
@@ -22,6 +26,7 @@ val prepareDeployment by tasks.registering {
             val input = rootProject.file("core/auth/build/generated/validatedDeployment/deployment.json")
             check(input.isFile && input.length() <= 128 * 1024) { "Invalid public deployment configuration file" }
             input.copyTo(directory.resolve("deployment.json"))
+            if (pushSource.isPresent) rootProject.file("core/auth/build/generated/validatedDeployment/push-deployment.json").copyTo(directory.resolve("push-deployment.json"))
         }
     }
 }
@@ -61,6 +66,7 @@ dependencies {
     implementation(libs.coroutines.android)
     implementation(libs.androidx.browser)
     implementation(libs.appauth)
+    implementation(libs.firebase.messaging)
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)
     androidTestImplementation(platform(libs.compose.bom))

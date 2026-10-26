@@ -19,6 +19,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import cn.edu.ustc.dsh.ui.DshTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeFalse
 import org.junit.Rule
 import org.junit.Test
@@ -132,6 +133,7 @@ class MainStartupTest {
         assumeFalse(context.assets.list("")!!.contains("deployment.json"))
         rule.waitUntil(10_000) { rule.onAllNodesWithText("等待学校配置").fetchSemanticsNodes().isNotEmpty() }
         rule.onNodeWithText("等待学校配置").assertIsNotEnabled()
+        assertTrue("default startup must not initialize Firebase", com.google.firebase.FirebaseApp.getApps(context).isEmpty())
         rule.activity.startActivity(Intent(context, LoginRedirectActivity::class.java).setData(Uri.parse("cn.edu.ustc.dsh.mobile:/oauth2redirect?code=unsolicited&state=wrong")))
         rule.waitForIdle()
         rule.onNodeWithText("等待学校配置").assertIsNotEnabled()

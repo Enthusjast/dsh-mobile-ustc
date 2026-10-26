@@ -103,6 +103,7 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                             }
                         }
                     }
+                    state.notificationNote?.let { note -> item("notification-note") { Text(note, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
                     val transcript = read.window
                     if (archived || runtime?.access?.scope?.actions?.contains("session.archive") == true) item("archive-session") {
                         key(opened) {

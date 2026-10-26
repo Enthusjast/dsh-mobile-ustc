@@ -1,0 +1,120 @@
+package cn.edu.ustc.dsh.mobile
+
+import android.app.KeyguardManager
+import android.app.NotificationManager
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import cn.edu.ustc.dsh.auth.PushDeployment
+import cn.edu.ustc.dsh.protocol.*
+import kotlinx.coroutines.runBlocking
+import org.junit.*
+import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
+import org.junit.runner.RunWith
+import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
+
+@RunWith(AndroidJUnit4::class)
+class NotificationFlowTest {
+    private val instrumentation = InstrumentationRegistry.getInstrumentation()
+    private val context = instrumentation.targetContext
+    private var fixture: AccountFixture? = null
+    private var controller: LoginController? = null
+    private lateinit var environment: LoginEnvironment
+    private lateinit var center: NotificationCenter
+    private lateinit var config: PushDeployment
+    private val providerCalls = AtomicInteger()
+    private fun main(action: () -> Unit) = instrumentation.runOnMainSync(action)
+    private fun await(check: () -> Boolean) {
+        val deadline = android.os.SystemClock.elapsedRealtime() + 45_000
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            fixture!!.failure.get()?.let { throw AssertionError(it) }
+            if (check()) return
+            Thread.sleep(25)
+        }
+        throw AssertionError("notification fixture timed out; phase=${controller!!.state.value.notifications?.phase}; error=${controller!!.state.value.notifications?.error}")
+    }
+    @Before fun setup() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("accountFixture") == "true")
+        assertTrue(context.getSystemService(KeyguardManager::class.java).let { it.isDeviceSecure && !it.isDeviceLocked })
+        fixture = AccountFixture(context).also { it.pushMode = true; it.approvalMode = true; it.seed() }
+        val server = fixture!!
+        config = PushDeployment.parse(JsonDocument.of(jsonObject("v" to 1L.json(), "deployment_sha256" to server.config.fingerprint.json(), "package_name" to context.packageName.json(),
+            "fcm" to jsonObject("project_id" to "fixture-project".json(), "application_id" to "1:123456789:android:abcdef012345".json(), "sender_id" to "123456789".json(), "api_key" to "fixture_public_key_1234567890".json()))).canonicalBytes(), server.config.fingerprint, context.packageName)
+        environment = server.environment(pushProvider = { hub ->
+            center = hub
+            server.pushDeliver = { packet -> hub.receive(config, config.senderId, packet) }
+            object : DevicePushProvider {
+                override val configuration = config
+                override fun availability() = "ready"
+                override suspend fun register(): String { providerCalls.incrementAndGet(); return "c" + "A".repeat(21) }
+                override suspend fun unregister() {}
+            }
+        })
+        main { controller = LoginController(context, server.http, environment); controller!!.foreground(true) }
+        await { controller!!.state.value.let { it.phase == HomePhase.READY && !it.refreshing && it.notifications?.let { n -> !n.busy && n.canEnable } == true } }
+        main { controller!!.enableNotifications() }
+        await { controller!!.state.value.notifications?.let { !it.busy && it.phase == NotificationPhase.ACTIVE } == true }
+    }
+    @After fun cleanup() {
+        if (::center.isInitialized) { center.retire(); fixture?.let { runBlocking { center.drain(it.http) } }; PushStorage(context, environment.storageSlot).destroy() }
+        main { controller?.close() }; fixture?.close()
+    }
+    private fun interaction() {
+        val route = center.snapshot().route!!
+        center.receive(config, config.senderId, mapOf("v" to "1", "kind" to "interaction", "binding_id" to route.id, "notification_id" to fixture!!.pushNotificationId, "expires_at" to Instant.now().plusSeconds(60).toString()))
+    }
+    @Test fun backgroundReceptionAndTapReauthorizeBeforeOpeningAFreshUnsignedReview() {
+        val owner = controller!!; val original = center.snapshot().route!!.id
+        assertEquals(1, fixture!!.pushRegistrations.get()); assertEquals(1, fixture!!.pushConfirmations.get())
+        main { owner.openBinding(); owner.foreground(false) }; interaction()
+        assertTrue(center.snapshot().notices.single().posted)
+        main { owner.openNotification(original, fixture!!.pushNotificationId); owner.foreground(true) }
+        await { owner.state.value.notifications?.phase == NotificationPhase.ACTIVE }
+        await { owner.state.value.reviewingApprovalId == fixture!!.approvalBody.root.string("approval_id") && owner.state.value.approvals?.view?.items?.any { it.handle != null } == true }
+        assertNull(owner.state.value.binding)
+        assertEquals(1, fixture!!.pushReads.get())
+        assertEquals(ApprovalUiStage.IDLE, owner.state.value.approvalStage); assertNull(owner.state.value.authenticationId)
+        assertEquals(0, fixture!!.approvalWrites.get())
+    }
+    @Test fun recreationOnlyQueriesTheOriginalChannelAndEndedReferencesCannotOpenAReview() {
+        val original = center.snapshot().route!!.id
+        main { controller!!.close(); controller = LoginController(context, fixture!!.http, environment); controller!!.foreground(true) }
+        await { controller!!.state.value.notifications?.phase == NotificationPhase.ACTIVE }
+        assertEquals(original, center.snapshot().route!!.id); assertEquals(1, fixture!!.pushRegistrations.get()); assertEquals(1, providerCalls.get())
+        interaction(); fixture!!.pushReferenceState = "denied"; fixture!!.pushReferenceAvailability = "ended"
+        main { controller!!.openNotification(original, fixture!!.pushNotificationId) }
+        await { controller!!.state.value.notifications?.note != null }
+        assertNull(controller!!.state.value.reviewingApprovalId); assertEquals(0, fixture!!.approvalWrites.get())
+    }
+    @Test fun leavingNotificationSettingsFencesAnInFlightReferenceRead() {
+        main { controller!!.openRuntime(fixture!!.runtimeId) }
+        await { controller!!.state.value.sessions.isNotEmpty() }
+        main { controller!!.openSession(fixture!!.sessionId) }
+        await { controller!!.state.value.reader?.phase == cn.edu.ustc.dsh.network.SessionReadPhase.READY }
+        interaction(); fixture!!.holdPushReference = true
+        main { controller!!.openNotification(center.snapshot().route!!.id, fixture!!.pushNotificationId) }
+        await { fixture!!.pushReads.get() == 1 }
+        assertNull(controller!!.state.value.reader)
+        main { controller!!.back() }
+        Thread.sleep(2_500)
+        assertFalse(controller!!.state.value.notificationSettings)
+        assertNull(controller!!.state.value.selectedSessionId)
+        assertNull(controller!!.state.value.reviewingApprovalId)
+        assertEquals(0, fixture!!.approvalWrites.get())
+    }
+    @Test fun localLogoutFencesLatePacketsAndCanDeleteTheChannelWithoutOldCredentials(): Unit = runBlocking {
+        val original = center.snapshot().route!!.id
+        main { controller!!.foreground(false) }; interaction()
+        fixture!!.pushCleanupUnavailable = true
+        main { controller!!.cancel() }
+        await { controller!!.state.value.phase == HomePhase.SIGNED_OUT }
+        assertNull(center.snapshot().route)
+        assertEquals(original, center.snapshot().revocations.single().id)
+        center.receive(config, config.senderId, mapOf("v" to "1", "kind" to "interaction", "binding_id" to original, "notification_id" to fixture!!.pushNotificationId, "expires_at" to Instant.now().plusSeconds(60).toString()))
+        assertTrue(context.getSystemService(NotificationManager::class.java).activeNotifications.none { it.tag == "dsh-interactions-${environment.storageSlot}" })
+        assertFalse(center.drain(fixture!!.http)); fixture!!.pushCleanupUnavailable = false
+        assertTrue(center.drain(fixture!!.http)); assertEquals(1, fixture!!.pushCleanups.get())
+        assertEquals("disabled", fixture!!.pushStates[original])
+    }
+}

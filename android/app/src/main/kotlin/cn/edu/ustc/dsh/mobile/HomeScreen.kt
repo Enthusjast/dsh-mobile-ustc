@@ -24,7 +24,12 @@ import androidx.activity.compose.BackHandler
 fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
     val state by model.state.collectAsStateWithLifecycle()
     val bindingState = state.binding
-    if (state.phase == HomePhase.READY && state.reviewingApprovalId != null) {
+    if (state.phase == HomePhase.READY && state.notificationSettings) {
+        BackHandler { model.closeNotificationSettings() }
+        val notifications = state.notifications ?: NotificationUiState()
+        NotificationsScreen(notifications.copy(note = state.notificationNote ?: notifications.note), model::refreshNotifications, model::enableNotifications, model::disableNotifications, model::renewNotifications,
+            { model.notificationInbox(false) }, { model.notificationInbox(true) }, model::openNotification, model::closeNotificationSettings)
+    } else if (state.phase == HomePhase.READY && state.reviewingApprovalId != null) {
         BackHandler { model.closeApprovalReview() }
         ApprovalReviewScreen(state, model::closeApprovalReview, model::reviewApproval, model::decideApproval, model::sendOriginalApproval,
             model::queryApprovals, model::discardUnsentApproval, model::refreshApprovals, model::reauthenticateApproval)
@@ -42,11 +47,11 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
             model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload,
             model::browseExports, model::requestExport, model::queryExports, model::cancelExport, model::removeExport,
             model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave)
-    } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding,model::openCreation)
+    } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding,model::openCreation,model::openNotificationSettings)
 }
 
 @Composable
-fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit, onRuntime: (String) -> Unit = {}, onBinding: () -> Unit = {}, onCreate: (String)->Unit={}) {
+fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit, onRuntime: (String) -> Unit = {}, onBinding: () -> Unit = {}, onCreate: (String)->Unit={}, onNotifications: () -> Unit = {}) {
     var name by rememberSaveable { mutableStateOf("${Build.MANUFACTURER} ${Build.MODEL}".trim()) }
     val displayName = state.deviceName ?: name
     val nameValid = displayName.trim().isNotEmpty() && displayName.trim().toByteArray(Charsets.UTF_8).size <= 160 && displayName.none { it < ' ' || it == '\u007f' }
@@ -101,6 +106,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                                 Text("可以查看当前账号获授权的运行实例。", style = MaterialTheme.typography.bodyLarge)
                                 Text(state.subject, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 OutlinedButton(onRefresh, enabled = !state.refreshing, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.refreshing) "正在刷新…" else "刷新运行实例") }
+                                OutlinedButton(onNotifications, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("通知与待核对提醒") }
                                 Button(onBinding, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.pendingBindingId == null) "绑定电脑" else "核对待确认的电脑绑定") }
                             }
                             HomePhase.REGISTRATION_UNKNOWN -> {

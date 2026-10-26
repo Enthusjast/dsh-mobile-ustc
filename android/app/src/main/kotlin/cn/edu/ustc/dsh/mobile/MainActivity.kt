@@ -33,6 +33,7 @@ class MainActivity : FragmentActivity() {
         setContent {
             DshTheme { HomeRoute(model, onSecuritySettings = ::securitySettings) { biometrics.cancel(); model.cancel() } }
         }
+        NotificationOpen.parse(intent)?.let { model.openNotification(it.bindingId, it.notificationId) }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 model.state.collect { state ->
@@ -45,6 +46,11 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        NotificationOpen.parse(intent)?.let { model.openNotification(it.bindingId, it.notificationId) }
     }
 
     private fun securitySettings() {

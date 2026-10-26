@@ -21,6 +21,7 @@ room = "2.8.5"
 sqlite = "2.7.1"
 sqlcipher = "4.19.1"
 ksp = "2.3.12"
+firebase-messaging = "26.0.1"
 
 [libraries]
 jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
@@ -55,6 +56,8 @@ room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
 room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
 sqlite = { module = "androidx.sqlite:sqlite", version.ref = "sqlite" }
 sqlcipher = { module = "net.zetetic:sqlcipher-android", version.ref = "sqlcipher" }
+
+firebase-messaging = { module = "com.google.firebase:firebase-messaging", version.ref = "firebase-messaging" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

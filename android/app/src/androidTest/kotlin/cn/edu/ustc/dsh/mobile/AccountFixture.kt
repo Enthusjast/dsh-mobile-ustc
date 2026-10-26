@@ -58,6 +58,20 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val bindingStatusReads = AtomicInteger()
     val commandWrites = AtomicInteger()
     val commandStatuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
+    @Volatile var pushMode = false
+    @Volatile var pushCleanupUnavailable = false
+    @Volatile var pushReferenceAvailability = "online"
+    @Volatile var pushReferenceState = "pending"
+    @Volatile var holdPushReference = false
+    val pushRegistrations = AtomicInteger()
+    val pushConfirmations = AtomicInteger()
+    val pushCleanups = AtomicInteger()
+    val pushReads = AtomicInteger()
+    val pushStates = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val pushIntents = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
+    var pushDeliver: ((Map<String, String>) -> Unit)? = null
+    val pushNonce = "Q".repeat(42) + "A"
+    val pushNotificationId = UUID.randomUUID().toString()
     @Volatile var chatMode = false
     @Volatile var fileMode = false
     @Volatile var exportMode = false
@@ -201,7 +215,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
         // The production factory still trusts system TLS only. Reflection is confined to this test APK.
         http = LoginHttp::class.java.getDeclaredConstructor(OkHttpClient::class.java).apply { isAccessible = true }.newInstance(transport)
     }
-    fun environment(minimumValidity: Long = 0, approvalPromptMillis: Long = MAX_DECISION_AGE_MS) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity, approvalPromptMillis = approvalPromptMillis)
+    fun environment(minimumValidity: Long = 0, approvalPromptMillis: Long = MAX_DECISION_AGE_MS, pushProvider: ((NotificationCenter) -> DevicePushProvider)? = null) = LoginEnvironment({ configBytes }, slot, ledgerName, refreshLeadMillis = 0, minimumValidityMillis = minimumValidity, approvalPromptMillis = approvalPromptMillis, pushProvider = pushProvider)
     private fun discovery() = jsonObject("issuer" to issuer.json(), "authorization_endpoint" to "$origin/authorize".json(),
         "token_endpoint" to "$origin/token".json(), "jwks_uri" to "$origin/jwks".json(),
         "response_types_supported" to JsonArray(listOf("code".json())), "id_token_signing_alg_values_supported" to JsonArray(listOf("ES256".json())))
@@ -232,6 +246,14 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     }
     @Synchronized private fun respond(request: RecordedRequest): MockResponse {
         val path = request.requestUrl!!.encodedPath
+        if (pushMode && request.method == "DELETE" && path.startsWith("/v1/push-bindings/")) {
+            require(request.getHeader("DPoP") == null && request.getHeader("Cookie") == null)
+            val id = path.substringAfterLast('/')
+            val secret = request.getHeader("Authorization")!!.removePrefix("DSH-Push-Revoke ")
+            require(sha256(secret.toByteArray()) == pushIntents[id]!!.string("revoke_secret_sha256"))
+            if (pushCleanupUnavailable) return response(jsonObject("ok" to JsonBoolean(false)), 503)
+            pushStates[id] = "disabled"; pushCleanups.incrementAndGet(); return MockResponse().setResponseCode(204)
+        }
         if (path.startsWith("/quarantine/")) {
             require(fileMode && request.method == "PUT")
             require(listOf("Authorization", "DPoP", "Cookie").all { request.getHeader(it) == null })
@@ -525,6 +547,34 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             return resourceResponse(data(value))
         }
         if (!active || revoked || requestJkt != proofJkt) return resourceResponse(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json())), 403)
+        if (pushMode && path == "/v1/push/capabilities") return resourceResponse(data(jsonObject("v" to 1L.json(), "providers" to JsonArray(listOf(jsonObject("provider" to "fcm".json(), "project_id" to "fixture-project".json(), "package_name" to "cn.edu.ustc.dsh.mobile".json(), "address_kind" to "fid".json()))), "sources" to JsonArray(listOf("approval".json())), "verification" to "provider_challenge".json(), "lease_seconds" to 604800L.json())))
+        if (pushMode && path == "/v1/push-bindings") {
+            require(request.method == "POST")
+            val input = JsonDocument.parse(request.body.readByteArray()).root; input.exactKeys("binding_id", "organization_id", "provider", "address", "revoke_secret_sha256")
+            require(input.string("organization_id") == organizationId && input.string("provider") == "fcm")
+            val id = Contract.uuid(input.string("binding_id"))
+            val previous = pushIntents.putIfAbsent(id, input)
+            if (previous == null) { pushStates[id] = "pending"; pushRegistrations.incrementAndGet() } else require(JsonDocument.of(previous).canonicalText() == JsonDocument.of(input).canonicalText())
+            pushDeliver?.invoke(mapOf("v" to "1", "kind" to "registration_challenge", "binding_id" to id, "challenge" to pushNonce, "expires_at" to Contract.timestamp(System.currentTimeMillis() + 120_000)))
+            return resourceResponse(data(jsonObject("binding" to pushBinding(id))), 201)
+        }
+        if (pushMode && path.startsWith("/v1/push-bindings/")) {
+            val id = path.removePrefix("/v1/push-bindings/").substringBefore('/')
+            require(pushIntents.containsKey(id))
+            if (path.endsWith("/confirm")) {
+                val input = JsonDocument.parse(request.body.readByteArray()).root; input.exactKeys("challenge"); require(input.string("challenge") == pushNonce)
+                pushStates[id] = "active"; pushConfirmations.incrementAndGet()
+            } else if (path.endsWith("/lease")) require(pushStates[id] == "active") else require(request.method == "GET")
+            return resourceResponse(data(jsonObject("binding" to pushBinding(id))))
+        }
+        if (pushMode && path.startsWith("/v1/notifications/")) {
+            if (path.endsWith("/receipts")) return resourceResponse(data(jsonObject("recorded" to JsonBoolean(true))))
+            pushReads.incrementAndGet()
+            require(path.substringAfterLast('/') == pushNotificationId)
+            val reply = resourceResponse(data(jsonObject("reference" to pushReference())))
+            return if (holdPushReference) reply.setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS) else reply
+        }
+        if (pushMode && path == "/v1/notifications") return resourceResponse(data(jsonObject("items" to JsonArray(listOf(pushReference())), "cursor" to JsonNull)))
         if (exportMode && (path.startsWith("/v1/file-exports/") || path == "/v1/files/$exportFileId")) {
             require(request.method == "GET")
             if (path.startsWith("/v1/file-exports/") && !exportRequests.containsKey(path.substringAfterLast('/')))
@@ -657,6 +707,10 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             "access" to jsonObject("role" to (if (approvalMode) approvalRole else if (bindingMode) "owner" else if (chatMode || creationMode || questionMode) "operator" else "viewer").json(), "grant_version" to (if (allowSessionRead) 7L else 8L).json(), "scope" to directoryScope.json())))))))
     }
 
+    private fun pushBinding(id: String) = jsonObject("binding_id" to id.json(), "state" to pushStates[id]!!.json(), "challenge_expires_at" to Contract.timestamp(System.currentTimeMillis() + 120_000).json(), "expires_at" to Contract.timestamp(System.currentTimeMillis() + 3600_000).json())
+    private fun pushReference() = jsonObject("notification_id" to pushNotificationId.json(), "binding_id" to pushStates.entries.single { it.value == "active" }.key.json(), "kind" to "approval".json(),
+        "reference_id" to approvalBody.root["approval_id"], "runtime_id" to runtimeId.json(), "runtime_epoch" to approvalBody.root["runtime_epoch"], "session_id" to sessionId.json(), "state" to pushReferenceState.json(),
+        "availability" to pushReferenceAvailability.json(), "expires_at" to Contract.timestamp(System.currentTimeMillis() + 120_000).json())
     private fun exportStatus(): JsonObject {
         val now = System.currentTimeMillis()
         return ExportManifest("APK export.txt", exportBytes.size.toLong(), sha256(exportBytes)).json().with("file_id" to exportFileId.json(), "runtime_id" to runtimeId.json(), "session_id" to sessionId.json(), "direction" to "from_host".json(),
