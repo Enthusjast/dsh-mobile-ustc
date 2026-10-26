@@ -33,7 +33,11 @@ class LoginHttp private constructor(private val client: OkHttpClient) {
         val candidate = PrivateApkCandidate(directory, release)
         val cancellation = currentCoroutineContext()[Job]?.invokeOnCompletion { if (it != null) candidate.close() }
         try {
-            withContext(Dispatchers.IO) { downloadAppBytes(client, candidate, downloadOrigins, current, progress); candidate.seal(current) }
+            withContext(Dispatchers.IO) {
+                val lifetime = currentCoroutineContext()
+                val check = { lifetime.ensureActive(); current() }
+                downloadAppBytes(client, candidate, downloadOrigins, check, progress); candidate.seal(check)
+            }
             currentCoroutineContext().ensureActive(); current()
             return candidate
         } catch (error: Exception) { candidate.close(); cancellation?.dispose(); throw error }

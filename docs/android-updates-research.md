@@ -97,3 +97,82 @@
 [installer]: https://developer.android.com/reference/android/content/pm/PackageInstaller
 [intent]: https://developer.android.com/reference/android/content/Intent#ACTION_INSTALL_PACKAGE
 [file-provider]: https://developer.android.com/reference/androidx/core/content/FileProvider
+
+## 2026-10-27：Session 封存、读取与进程重建恢复
+
+本节只讨论本应用拥有的普通、非 staged、非 DataLoader、未转移所有权的单 APK session。**跨 API 26–36 的内容读取 / 摘要核对应在首次 `commit()` 前完成；已收到 `STATUS_PENDING_USER_ACTION` 的恢复分支不能再依赖 `getNames()/openRead()`。** 再次 `commit()` 是恢复安装流程的动作，不是只读状态查询，也不保证一定返回确认 Intent。以下是固定源码核对结果，尚未进行设备验证。
+
+### 内容读取的前置条件
+
+正常调用者须拥有 session；`openSession(id)` 会检查访问权并准备 session。`openRead(name)` 的名称须对应先前写入的文件；准备好并不代表文件存在、已写完或字节正确。应用仍应关闭写流、检查精确文件集合并读取实际 session 字节计算摘要，再首次提交。[公开 Session / openSession 文档][install-session] [PackageInstaller 文档][installer]
+
+| 固定平台源码 | `getNames()` | `openRead(name)` | 提交后等待用户确认时 |
+| --- | --- | --- | --- |
+| API 26，`android-8.0.0_r1` | 调用 `assertPreparedAndNotSealed`：要求 `mPrepared && !mSealed`；未准备抛 `IllegalStateException`，已封存抛 `SecurityException`。[断言与列举][session26-read] | 同一断言；名称还须是有效文件名，打开文件可能产生 I/O 错误。[读取][session26-open-read] | 首次 commit 已设置 `mSealed=true`；两个方法均不可调用，即使安装尚未完成。[提交][session26-commit] |
+| API 28，`android-9.0.0_r1` | 要求 owner / root、`mPrepared && !mCommitted && !mDestroyed`。[列举][session28-read] | 相同状态与身份要求。[读取][session28-open-read] | commit 在发送处理消息前设置 `mCommitted=true`；两个方法均不可调用。单独 sealed 且尚未 committed 的状态与此不同，不能混为一谈。[断言][session28-assert] [提交][session28-commit] |
+| API 36，`android-16.0.0_r1` | 放宽到 owner / root 或合格系统 verifier，且 `mPrepared && !mDestroyed`；committed 时从 stageDir 列举。可能为空，不能据此证明已安装。[列举][session36-read] | 仍要求 owner / root、非 DataLoader，以及 `mPrepared && !mCommitted && !mDestroyed`；committed 时抛 `SecurityException`。[读取][session36-open-read] [断言][session36-assert] | 正常提交路径在发送确认 Intent 前已 committed；`getNames()` 可能可用，`openRead()` 不可用。因此不能利用列举成功来认定 session 可重新读取校验。[提交处理][session36-stream] [等待确认][session36-pending] |
+
+当前公开文档也有方法间差异：`getNames()` 只列 abandoned 的 `SecurityException`，`openRead()` 仍明确列 committed 或 abandoned。[Session 文档][install-session] API 26 / 28 的固定实现比当前 `getNames()` 文档限制更严；不要把最新文档的读取能力倒推到旧系统。session 状态检查与下一次 Binder 调用之间也可变化，读取失败应作为当前操作失败 / 待核对处理，不能改用未验证的外部文件来冒充已经核对过的 session。
+
+### `isSealed` / `isCommitted` 的恢复含义
+
+`SessionInfo.isSealed()` 自 API 26 公开，描述 session 已封存、不能再修改；`isCommitted()` 自 API 29 公开，描述曾调用 commit，API 26 / 28 不能调用它。[SessionInfo 文档][session-info] 两者都不表示用户已经同意、仍在等待确认或安装已经成功。固定源码还表明：
+
+- API 26 的销毁路径也将 `mSealed=true`；所以 sealed 本身不是一个可继续操作的存活证明。[销毁][session26-destroy]
+- API 36 首先封存，随后异步 `streamValidateAndCommit()` 才设置内部 `mCommitted`，`SessionInfo` 直接导出这两个状态。因此 `sealed=true && committed=false` 可能是提交处理中的快照；不能因为 `!isCommitted` 就回到可写的 PREPARED 分支。[状态导出][session36-info] [封存][session36-seal] [异步提交][session36-stream]
+- `isSealed=false` 只排除当时已封存；仍须实际打开、核对文件集合及内容，不能由此单独恢复“已验证 PREPARED”。`isActive()` 也不是安装结果：仅持有打开的 Session 即可被视为 active。[SessionInfo 文档][session-info]
+
+### 再次 commit 能否重新取得确认 Intent
+
+公开 `commit()` 文档从 API 26 就明确允许“设备重启且 session 尚未 finalized”后再次提交；`close()` 文档允许重新打开未结束的 session。文档没有逐字承诺“应用进程重建后一定重新发确认 Intent”。但以下三版服务端实现均支持**同一安装 UID 重新打开仍存在、未销毁、仍需用户确认的原 session，替换回调并再次驱动确认流程**，这是源码核对结论。[API 26 公开契约][session26-public-commit] [当前公开契约][install-session]
+
+| 平台 | 再次 commit 的已确认路径与限制 |
+| --- | --- |
+| API 26 | `commit(statusReceiver)` 要求非空回调；第一次检查写流并封存，再次提交不会因已封存而拒绝。它创建新 observer，Handler 将其替换为 `mRemoteObserver`；`commitLocked()` 要求未销毁且已封存，若 `!mPermissionsAccepted` 再次调用 `onUserActionRequired`。应用应通过 owner 检查的 `openSession()` 重开；不是任意 session id 均可恢复。[commit / observer][session26-commit] [确认分支][session26-pending] [访问控制][session26-service] |
+| API 28 | 要求 owner / root、prepared、未销毁、普通 commit 的安装 UID 未发生 transfer。先替换 observer；已经 sealed 就跳过重新封存，并**不因 `mCommitted=true` 拒绝再次提交**。Handler 再检查 `needToAskForPermissionsLocked()`，仍需要时再发确认 Intent。第一次封存前必须关闭写流。[commit][session28-commit] [确认分支][session28-pending] |
+| API 36 | `markAsSealed()` 注释及代码明确支持多次调用来更新回调：要求 owner / root、prepared、未销毁、无未关闭写传输，并检查 transfer / FRP 等限制；更新回调后，已 sealed 直接返回成功。后续 `streamValidateAndCommit()` 遇已 committed 直接返回 true，再进入 `handleInstall()` 的用户确认判断。target >=35 的回调 PendingIntent 必须可变。[封存 / 回调][session36-seal] [再次驱动][session36-stream] [确认分支][session36-pending] [公开 commit 文档][install-session] |
+
+这里的“重新取得”是通过新绑定回调异步接收 `STATUS_PENDING_USER_ACTION` 与 `Intent.EXTRA_INTENT`；不是 `commit()` 的返回值。API 26 / 28 adapter 和 API 36 发送方法都会捕获 IntentSender 发送失败，因此提交调用返回也不能证明回调已送达。[API 26 adapter][session26-adapter] [API 28 adapter][session28-adapter] [API 36 发送][session36-send] 仅在用户主动恢复且仍需确认时展示返回的系统 Intent；后台只保存待处理状态。[状态码文档][installer]
+
+**实施建议：**恢复先查询实际已安装包，再查询原 session。只有未封存的原 session 才进入 `getNames/openRead` 校验；已封存的恢复沿用首次提交前持久保存的 session id、候选发行身份、session 字节摘要与验证记录，不能因旧系统拒绝读取就误判“APK 篡改”。在确认仍为本次待确认流程、用户主动继续时，可重新绑定限定到本应用且绑定该 session 的回调并再次 commit。缺少可靠关联记录时保持未知，不能把其他 session 或新下载文件的摘要移植过来。不要在轮询、每次页面恢复或所有 sealed 状态上自动反复 commit：用户可能已确认、安装正在进行，API 26 的旧路径也没有把重复提交定义成无副作用查询。[API 26 提交后执行路径][session26-pending] [API 36 安装处理][session36-pending]
+
+### 成功、失败与未知
+
+- **成功：**本仓仅在重新查询到目标包的真实已安装 version code 和当前签名符合本次候选时确认。受绑定回调的 `STATUS_SUCCESS` 作为触发核对的事件，不能单独作为安装证明；sealed、committed、active、确认页已打开也都不是证明。公开状态只说相应操作成功；staged / preapproval 还有不同的成功含义，本节实现不启用这些模式。[状态文档][installer] [Session 文档][install-session]
+- **失败：**与本次 session 可靠关联的最终失败 / 用户拒绝应记录失败，并重新查询安装事实；`SecurityException`、`IOException` 或 `IllegalStateException` 表示该方法当次不能完成，单次异常不能证明候选内容被篡改，也不能证明其他安装操作未成功。[读取 / commit 文档][install-session]
+- **未知：**丢失回调、缺少确认 Intent、session 不存在、归属不符、已封存但无法核对关联、状态检查期间竞态，均先保留待核对状态。普通 session 成功和失败后都可能被移出活动表，因此 `getSessionInfo(id)==null` 不区分成功与失败；有 session 也不保证下一次调用仍有效。应再次核对安装包后再决定是否允许新的尝试。[API 文档][installer] [API 26 清理][session26-finish] [API 28 清理][session28-finish] [API 36 清理][session36-finish]
+
+本节没有验证 OEM 分支和运行时回调送达情况，也不把 AOSP 的可重提交流程扩展为恰好一次安装、确认 Intent 必然送达、或者所有 sealed session 都可恢复的保证。
+
+### 同日设备补充：未封存 `openRead` 的 SELinux 限制
+
+随后在本仓任务专用 AOSP API 26 x86_64 模拟器、普通应用 UID、SELinux Enforcing 下执行时，未封存 `openRead("base.apk")` 仍失败。内核 / logcat 明确拒绝向 `untrusted_app` 交付 `apk_tmp_file` 的 read FD；客户端表现为 `RuntimeException(DeadSystemException)`，而同一个 system_server PID 持续存活。失败证据为 `.local/app-install-api26-diagnostic-device.log` 和 `.local/app-install-api26-diagnostic-logcat.txt`。因此上述 Java 状态前置条件是必要条件，不能据其声称普通应用在该镜像上必能读回。没有修改 SELinux 策略或获取特权安装权限。
+
+本仓后端据此采用已验证私有候选的完整写流摘要、fsync 和本应用独占写入约束，保留进程内的原候选关联；未提交 session 丢失该关联就退役重做准备。持久的封存前摘要证明实际输出过哪些字节，不独立证明系统暂存盘读回；平台最终验签与安装后 base APK 全量摘要分别负责后续校验。已封存、确曾等待确认的原 session 恢复条件不变。具体实现边界和设备验证见[安装会话记录](android-apk-installation.md)。
+
+[session-info]: https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionInfo
+[session26-read]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#323
+[session26-open-read]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#496
+[session26-commit]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#522
+[session26-pending]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#564
+[session26-destroy]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#1182
+[session26-service]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerService.java#788
+[session26-adapter]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerService.java#1051
+[session26-finish]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerService.java#1275
+[session26-public-commit]: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r1/core/java/android/content/pm/PackageInstaller.java#870
+[session28-read]: https://android.googlesource.com/platform/frameworks/base/+/android-9.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#554
+[session28-open-read]: https://android.googlesource.com/platform/frameworks/base/+/android-9.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#725
+[session28-assert]: https://android.googlesource.com/platform/frameworks/base/+/android-9.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#478
+[session28-commit]: https://android.googlesource.com/platform/frameworks/base/+/android-9.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#781
+[session28-pending]: https://android.googlesource.com/platform/frameworks/base/+/android-9.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#930
+[session28-adapter]: https://android.googlesource.com/platform/frameworks/base/+/android-9.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerService.java#881
+[session28-finish]: https://android.googlesource.com/platform/frameworks/base/+/android-9.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerService.java#1105
+[session36-read]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#1564
+[session36-open-read]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#2100
+[session36-assert]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#1498
+[session36-info]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#1375
+[session36-seal]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#2433
+[session36-stream]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#2296
+[session36-pending]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#2838
+[session36-send]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerSession.java#5582
+[session36-finish]: https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageInstallerService.java#2300

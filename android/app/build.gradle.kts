@@ -9,14 +9,18 @@ plugins {
 val deploymentAssets = layout.buildDirectory.dir("generated/deploymentAssets")
 val deploymentSource = providers.gradleProperty("deploymentConfig")
 val pushSource = providers.gradleProperty("pushConfig")
+val appUpdateSource = providers.gradleProperty("appUpdateConfig")
 val prepareDeployment by tasks.registering {
     inputs.property("configuration", deploymentSource.orElse("<absent>"))
     inputs.property("pushConfiguration", pushSource.orElse("<absent>"))
+    inputs.property("appUpdateConfiguration", appUpdateSource.orElse("<absent>"))
     pushSource.orNull?.let { inputs.file(rootProject.file(it)) }
+    appUpdateSource.orNull?.let { inputs.file(rootProject.file(it)) }
     deploymentSource.orNull?.let { inputs.file(rootProject.file(it)) }
     outputs.dir(deploymentAssets)
     if (deploymentSource.isPresent) dependsOn(":core:auth:validateDeployment")
     if (pushSource.isPresent) { check(deploymentSource.isPresent) { "pushConfig requires deploymentConfig" }; dependsOn(":core:auth:validatePushDeployment") }
+    if (appUpdateSource.isPresent) { check(deploymentSource.isPresent) { "appUpdateConfig requires deploymentConfig" }; dependsOn(":core:auth:validateAppUpdateDeployment") }
     doLast {
         val directory = deploymentAssets.get().asFile
         // A build without configuration must also remove a previous build's asset.
@@ -27,6 +31,7 @@ val prepareDeployment by tasks.registering {
             check(input.isFile && input.length() <= 128 * 1024) { "Invalid public deployment configuration file" }
             input.copyTo(directory.resolve("deployment.json"))
             if (pushSource.isPresent) rootProject.file("core/auth/build/generated/validatedDeployment/push-deployment.json").copyTo(directory.resolve("push-deployment.json"))
+            if (appUpdateSource.isPresent) rootProject.file("core/auth/build/generated/validatedDeployment/app-update-deployment.json").copyTo(directory.resolve("app-update-deployment.json"))
         }
     }
 }
@@ -70,6 +75,7 @@ tasks.matching { it.name == "preDebugAndroidTestBuild" }.configureEach { depends
 kotlin { jvmToolchain(17) }
 kapt { correctErrorTypes = true }
 dependencies {
+    implementation(platform(libs.compose.bom))
     implementation(project(":core:auth"))
     implementation(project(":core:network"))
     implementation(project(":core:keystore"))
@@ -85,6 +91,7 @@ dependencies {
     implementation(libs.firebase.messaging)
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)
+    testImplementation(libs.junit)
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.test.runner)

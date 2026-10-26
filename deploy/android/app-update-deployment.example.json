@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "deployment_sha256": "715c9534192f753addea33537ee2ecd7d2495d785ebcd994b8d4279aec95cd59",
+  "package_name": "cn.edu.ustc.dsh.mobile",
+  "download_origins": [
+    "https://updates.example.invalid"
+  ]
+}

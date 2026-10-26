@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run APK download/signature checks on an explicitly owned, booted test AVD.
+"""Run APK verification and optional installer-consent checks on an owned test AVD.
 
-No APK update is installed by these cases. The normal debug app/test APKs are
+No candidate APK is installed by these cases. The normal debug app/test APKs are
 installed with -r; userdata, device keys and other emulator processes are kept.
 """
 import argparse
@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--avd", required=True)
     parser.add_argument("--adb", type=Path)
     parser.add_argument("--prepare-dex", action="store_true", help="Compile app/test dex after installation, for slow software emulators")
+    parser.add_argument("--installer-fixture", action="store_true", help="Test encrypted installation records and system consent; never approve the candidate APK")
     parser.add_argument("--log", type=Path, help="Write this run to a distinct log inside the repository's .local directory")
     options = parser.parse_args()
     if not re.fullmatch(r"emulator-[0-9]+", options.serial) or not re.fullmatch(r"dsh-remote-api[0-9]+", options.avd):
@@ -44,7 +45,7 @@ def main():
     app = repo / "android/app/build/outputs/apk/debug/app-debug.apk"
     tests = repo / "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
     with zipfile.ZipFile(app) as archive:
-        if archive.testzip() is not None or any(name in archive.namelist() for name in ["assets/deployment.json", "assets/push-deployment.json"]) or any(name.startswith("assets/apk-updates/") for name in archive.namelist()):
+        if archive.testzip() is not None or any(name in archive.namelist() for name in ["assets/deployment.json", "assets/push-deployment.json", "assets/app-update-deployment.json"]) or any(name.startswith("assets/apk-updates/") for name in archive.namelist()):
             raise RuntimeError("a complete unconfigured debug app without test APK assets is required")
     with zipfile.ZipFile(tests) as archive:
         if archive.testzip() is not None:
@@ -66,16 +67,39 @@ def main():
     count = len(re.findall(r"@Test\s+fun\b", source.read_text())) + 1  # actual Hilt startup case
     log.parent.mkdir(exist_ok=True)
     classes = "cn.edu.ustc.dsh.mobile.AndroidApkVerifierTest,cn.edu.ustc.dsh.mobile.MainStartupTest"
+    if options.installer_fixture:
+        for name in ["AppInstallationStorageTest", "AppInstallationsTest"]:
+            source = repo / f"android/app/src/androidTest/kotlin/cn/edu/ustc/dsh/mobile/{name}.kt"
+            count += len(re.findall(r"@Test\s+fun\b", source.read_text()))
+            classes += ",cn.edu.ustc.dsh.mobile." + name
     owned()
-    with log.open("w") as stream:
-        result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-e", "networkFixture", "true", "-e", "class", classes,
-                                      "cn.edu.ustc.dsh.mobile.test/androidx.test.runner.AndroidJUnitRunner"],
-                                stdout=stream, stderr=subprocess.STDOUT, timeout=600)
+    original_mode = None
+    restoration_error = None
+    try:
+        if options.installer_fixture:
+            text = call("shell", "appops", "get", "cn.edu.ustc.dsh.mobile", "REQUEST_INSTALL_PACKAGES").stdout
+            match = re.search(r"REQUEST_INSTALL_PACKAGES:\s*(allow|ignore|deny|default|foreground)\b", text)
+            if not match and "No operations" not in text:
+                raise RuntimeError("cannot preserve original unknown-source app-op: " + text)
+            original_mode = match.group(1) if match else "default"
+            call("shell", "appops", "set", "cn.edu.ustc.dsh.mobile", "REQUEST_INSTALL_PACKAGES", "allow")
+        with log.open("w") as stream:
+            result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-e", "networkFixture", "true", "-e", "installerFixture", str(options.installer_fixture).lower(), "-e", "class", classes,
+                                          "cn.edu.ustc.dsh.mobile.test/androidx.test.runner.AndroidJUnitRunner"],
+                                    stdout=stream, stderr=subprocess.STDOUT, timeout=600)
+    finally:
+        if original_mode is not None:
+            try:
+                owned(); call("shell", "appops", "set", "cn.edu.ustc.dsh.mobile", "REQUEST_INSTALL_PACKAGES", original_mode)
+            except (subprocess.SubprocessError, RuntimeError) as error:
+                restoration_error = f"restore REQUEST_INSTALL_PACKAGES to {original_mode}: {type(error).__name__}"
     text = log.read_text()
     print(text, flush=True)
     if result.returncode != 0 or f"OK ({count} tests)" not in text or "FAILURES" in text:
-        raise RuntimeError("APK platform preflight did not pass; inspect " + str(log))
-    print(f"API {api}: {count} APK/startup cases passed; no update installation attempted", flush=True)
+        raise RuntimeError("APK platform preflight did not pass; inspect " + str(log) + ("; cleanup required: " + restoration_error if restoration_error else ""))
+    if restoration_error:
+        raise RuntimeError("APK tests completed but fixture cleanup failed: " + restoration_error)
+    print(f"API {api}: {count} APK/startup/installer cases passed; no candidate update installed", flush=True)
 
 
 if __name__ == "__main__":

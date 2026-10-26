@@ -33,3 +33,15 @@ tasks.register<JavaExec>("validatePushDeployment") {
     outputs.file(validatedPush)
     doFirst { args(rootProject.file(source.get()).absolutePath, validatedDeployment.get().asFile.absolutePath, validatedPush.get().asFile.absolutePath) }
 }
+
+val validatedUpdates = layout.buildDirectory.file("generated/validatedDeployment/app-update-deployment.json")
+tasks.register<JavaExec>("validateAppUpdateDeployment") {
+    dependsOn("validateDeployment")
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("cn.edu.ustc.dsh.auth.ValidateAppUpdateDeployment")
+    val source = providers.gradleProperty("appUpdateConfig")
+    source.orNull?.let { inputs.file(rootProject.file(it)) }
+    inputs.file(validatedDeployment)
+    outputs.file(validatedUpdates)
+    doFirst { args(rootProject.file(source.get()).absolutePath, validatedDeployment.get().asFile.absolutePath, validatedUpdates.get().asFile.absolutePath) }
+}
