@@ -37,6 +37,7 @@ func (api *API) pushCapabilities(w http.ResponseWriter, r *http.Request) {
 func (api *API) pushRegister(w http.ResponseWriter, r *http.Request) {
 	var body push.Registration
 	if !decodeBody(w, r, &body) {
+		writeError(w, http.StatusBadRequest, "protocol.invalid")
 		return
 	}
 	ctx, cancel, actor := pushOperation(r)
@@ -63,6 +64,7 @@ func (api *API) pushConfirm(w http.ResponseWriter, r *http.Request) {
 		Challenge string `json:"challenge"`
 	}
 	if !decodeBody(w, r, &body) {
+		writeError(w, http.StatusBadRequest, "protocol.invalid")
 		return
 	}
 	ctx, cancel, actor := pushOperation(r)
@@ -77,6 +79,7 @@ func (api *API) pushConfirm(w http.ResponseWriter, r *http.Request) {
 func (api *API) pushRenew(w http.ResponseWriter, r *http.Request) {
 	var body struct{}
 	if !decodeBody(w, r, &body) {
+		writeError(w, http.StatusBadRequest, "protocol.invalid")
 		return
 	}
 	ctx, cancel, actor := pushOperation(r)
@@ -142,6 +145,7 @@ func (api *API) pushReceipt(w http.ResponseWriter, r *http.Request) {
 		State string `json:"state"`
 	}
 	if !decodeBody(w, r, &body) {
+		writeError(w, http.StatusBadRequest, "protocol.invalid")
 		return
 	}
 	ctx, cancel, actor := pushOperation(r)

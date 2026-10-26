@@ -171,6 +171,12 @@ func TestPushHTTPSDPoPOwnershipChallengeThroughRealOAuthAndFCMTransport(t *testi
 	if unauthenticated.StatusCode != 401 {
 		t.Fatal("push skipped authentication")
 	}
+	for _, path := range []string{"/v1/push-bindings", "/v1/push-bindings/" + id + "/confirm", "/v1/push-bindings/" + id + "/lease", "/v1/notifications/" + id + "/receipts"} {
+		code, body := caller.call(token(proofJKT), "POST", path, map[string]string{"untrusted": "must-reject"})
+		if code != 400 || !strings.Contains(string(body), "protocol.invalid") {
+			t.Fatal("invalid notification request body looked successful")
+		}
+	}
 	code, raw := caller.call(token(proofJKT), "POST", "/v1/push-bindings", registration)
 	if code != 201 || strings.Contains(string(raw), registration.Address) || strings.Contains(string(raw), registration.RevokeSHA256) {
 		t.Fatalf("registration response exposed endpoint or failed: %d", code)
