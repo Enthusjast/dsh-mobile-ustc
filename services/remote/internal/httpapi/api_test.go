@@ -45,6 +45,14 @@ type fakeRepository struct {
 	answerStatusErr         error
 	answerStatusCalls       int
 	answerRequest           string
+	releaseUser             string
+	releaseErr              error
+	releaseCalls            int
+	releaseIdentity         store.UserIdentity
+	releaseDevice           string
+	releaseProof            string
+	releaseOrganization     string
+	releaseUntil            time.Time
 	ticketCalls             int
 	enrollmentCalls         int
 	enrollmentResult        store.EnrollmentCreated
@@ -75,6 +83,11 @@ type fakeRepository struct {
 }
 
 func (fake *fakeRepository) Ready(context.Context) error { return fake.readyError }
+func (fake *fakeRepository) AppReleaseAccess(_ context.Context, identity store.UserIdentity, device, proof, organization string, until time.Time) (string, error) {
+	fake.releaseCalls++
+	fake.releaseIdentity, fake.releaseDevice, fake.releaseProof, fake.releaseOrganization, fake.releaseUntil = identity, device, proof, organization, until
+	return fake.releaseUser, fake.releaseErr
+}
 func (fake *fakeRepository) AccountIdentity(_ context.Context, identity store.UserIdentity) (store.AccountIdentity, error) {
 	fake.accountCalls++
 	fake.accountLookup = identity

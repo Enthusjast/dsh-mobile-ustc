@@ -156,11 +156,16 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await writeFile(approvalPolicyFile, JSON.stringify({ policy: { version: 7, assurance_profile: 'fixture/step-up', max_auth_age_seconds: 60 },
     mappings: [{ profile: 'fixture/step-up', issuer, client_id: 'fixture-phone', acr: 'urn:fixture:verified', required_amr: ['otp'] }],
     signing: { issuer: authority.issuer, key_id: authority.key_id, private_key_file: approvalSigningFile, valid_from: authority.valid_from, valid_until: authority.valid_until } }), { mode: 0o600 })
+  const releasesFile = join(root, 'app-releases.json')
+  const releases = JSON.parse(await readFile(resolve('deploy/android/releases.example.json'), 'utf8'))
+  releases.publications[0].organization_ids = [orgId]
+  await writeFile(releasesFile, JSON.stringify(releases), { mode: 0o600 })
   const service = await startProcess(serviceBin, [], {
     PATH: process.env.PATH ?? '', REMOTE_ISSUER: issuer, REMOTE_JWKS_URL: `${issuer}/jwks`, REMOTE_AUDIENCE: 'urn:dsh-e2e',
     REMOTE_CLIENT_IDS: 'fixture-host,fixture-phone', REMOTE_HOST_CLIENT_IDS: 'fixture-host', REMOTE_REQUIRED_SCOPES: 'remote.access',
     REMOTE_PUBLIC_ORIGIN: origin, REMOTE_DATABASE_URL: database, REMOTE_LISTEN_ADDR: `127.0.0.1:${address.port}`,
     REMOTE_APPROVAL_POLICY_FILE: approvalPolicyFile,
+    REMOTE_APP_RELEASES_FILE: releasesFile,
   })
   t.after(async () => { const [code] = await service.stop('SIGTERM'); assert.equal(code, 0, 'Go service did not drain cleanly') })
   await until(async () => {
@@ -221,6 +226,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     }),
   }), 201)
   assert.deepEqual(await phone('GET', '/v1/devices/current'), { state: 'unregistered' })
+  const releaseQuery = `/v1/app/releases/latest?organization_id=${orgId}&version_code=1&protocol_version=1&android_api=26`
+  await phone('GET', releaseQuery, undefined, 403)
   const device = await register(phone, phoneKey, approvalKey, 'phone')
   assert.deepEqual(await register(phone, phoneKey, approvalKey, 'phone'), device)
   assert.deepEqual(await phone('GET', '/v1/devices/current?device_id=untrusted'), { state: 'active', device: {
@@ -228,6 +235,22 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   } })
   const siblingDevice = await register(siblingPhone, siblingKey, siblingApprovalKey, 'phone')
   await register(outsider, outsiderKey, outsiderApprovalKey, 'outsider')
+  // No host has been enrolled and no runtime grant exists yet. APK metadata
+  // depends on the current organization/account/phone, independently of lists.
+  const publication = await phone('GET', releaseQuery)
+  assert.equal(publication.current_supported, true)
+  assert.deepEqual(publication.release, releases.publications[0].release)
+  assert.equal((await phone('GET', releaseQuery.replace('version_code=1', 'version_code=2'))).release, null)
+  const newerClient = await phone('GET', releaseQuery.replace('version_code=1', 'version_code=3'))
+  assert.equal(newerClient.current_supported, false); assert.equal(newerClient.release, null)
+  await owner('GET', releaseQuery, undefined, 403)
+  await phone('GET', releaseQuery + `&device_id=${siblingDevice.device_id}`, undefined, 400)
+  await phone('GET', releaseQuery.replace(orgId, randomUUID()), undefined, 403)
+  query(`delete from org_memberships where user_id='${phoneUserId}'`)
+  await phone('GET', releaseQuery, undefined, 403)
+  query(`insert into org_memberships(org_id,user_id,role) values ('${orgId}','${phoneUserId}','member')`)
+  assert.deepEqual((await phone('GET', releaseQuery)).release, publication.release)
+  t.diagnostic('Configured APK metadata selected the supported newer fixture under the current registered phone and organization before any runtime grant; current/newer clients, foreign organization, host client and caller device selectors were fenced. No APK bytes or installation were involved.')
   const code = randomBytes(32).toString('base64url')
   const enrollment = await owner('POST', '/v1/enrollments', {
     request_id: randomUUID(), organization_id: orgId, alias: 'DSH integration', profile_ref: 'e2e', dsh_version: '0.2.1-rc.2',

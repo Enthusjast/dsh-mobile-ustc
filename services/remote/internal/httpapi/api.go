@@ -18,6 +18,7 @@ import (
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/files"
 	"dsh-mobile-ustc/services/remote/internal/relay"
+	"dsh-mobile-ustc/services/remote/internal/releases"
 	"dsh-mobile-ustc/services/remote/internal/store"
 )
 
@@ -28,6 +29,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-
 type Repository interface {
 	Ready(context.Context) error
 	AccountIdentity(context.Context, store.UserIdentity) (store.AccountIdentity, error)
+	AppReleaseAccess(context.Context, store.UserIdentity, string, string, string, time.Time) (string, error)
 	CurrentDevice(context.Context, store.UserIdentity, string) (store.CurrentDevice, error)
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
 	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
@@ -76,6 +78,7 @@ type API struct {
 	fileHandoffs *files.Handoffs
 	fileExports  *files.Exports
 	push         *store.PushStore
+	releases     *releases.Catalog
 }
 
 type Handler struct {
@@ -108,6 +111,7 @@ type Config struct {
 	FileHandoffs  *files.Handoffs
 	FileExports   *files.Exports
 	Push          *store.PushStore
+	Releases      *releases.Catalog
 }
 
 type deviceRequest struct {
@@ -154,6 +158,10 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.HandleFunc("GET /healthz", api.health)
 	mux.HandleFunc("GET /readyz", api.ready)
 	mux.Handle("GET /v1/me", api.authenticated(http.HandlerFunc(api.me)))
+	if len(configs) > 0 && configs[0].Releases != nil {
+		api.releases = configs[0].Releases
+		mux.Handle("GET /v1/app/releases/latest", api.protected(http.HandlerFunc(api.appRelease)))
+	}
 	mux.Handle("POST /v1/devices", api.phoneAuthenticated(http.HandlerFunc(api.registerDevice)))
 	mux.Handle("GET /v1/devices/current", api.phoneAuthenticated(http.HandlerFunc(api.currentDevice)))
 	mux.Handle("POST /v1/enrollments", api.hostAuthenticated(http.HandlerFunc(api.createEnrollment)))

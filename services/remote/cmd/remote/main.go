@@ -66,6 +66,10 @@ func run() error {
 	if pushRuntime != nil {
 		apiConfig.Push = pushRuntime.repository
 	}
+	apiConfig.Releases, err = loadAppReleases(os.Getenv("REMOTE_APP_RELEASES_FILE"))
+	if err != nil {
+		return err
+	}
 	handler := httpapi.New(database, verifier, apiConfig)
 	server := &http.Server{
 		Addr:              envOr("REMOTE_LISTEN_ADDR", "127.0.0.1:8080"),

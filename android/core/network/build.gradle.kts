@@ -24,3 +24,7 @@ dependencies {
     testImplementation(libs.okhttp.tls)
     testImplementation(libs.nimbus.jose)
 }
+tasks.test {
+    inputs.file(rootProject.file("../contracts/golden/app-release-selection.json"))
+    systemProperty("contracts.root", rootProject.file("../contracts").absolutePath)
+}

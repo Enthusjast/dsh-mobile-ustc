@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "package_name": "cn.edu.ustc.dsh.mobile",
+  "protocol_version": 1,
+  "current_version_code": 1,
+  "current_supported": true,
+  "supported_client_versions": {"minimum": 1, "maximum": 2},
+  "release": {
+    "release_id": "99999999-9999-4999-8999-999999999999",
+    "version_code": 2,
+    "version_name": "0.1.1-example",
+    "package_name": "cn.edu.ustc.dsh.mobile",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size_bytes": 12345678,
+    "signing_cert_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "download_url": "https://updates.example.invalid/android/dsh-mobile-2.apk",
+    "minimum_protocol_version": 1,
+    "maximum_protocol_version": 1,
+    "minimum_android_api": 26,
+    "rollout_basis_points": 10000,
+    "release_notes": "示例发行数据；发布前替换为实际 APK、证书摘要和验证过的版本窗口。"
+  }
+}

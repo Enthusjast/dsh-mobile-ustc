@@ -239,6 +239,14 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         root.exactKeys("ok", "data"); if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
         CommandReceipt.status(root.obj("data")).also { if (it.requestId != id || it.sessionId != session || it.workspaceId != null) throw RemoteRequestException("access.denied") }
     }
+    suspend fun appRelease(packageName: String, installedVersion: Long, androidApi: Long, downloadOrigins: Set<String>, current: () -> Unit = {}): AppReleaseSelection = mutex.withLock {
+        if (installedVersion !in 1..MAX_SAFE_INTEGER || androidApi !in 26..100) throw ProtocolException()
+        val path = "/v1/app/releases/latest?organization_id=${config.organizationId}&version_code=$installedVersion&protocol_version=$APP_UPDATE_PROTOCOL&android_api=$androidApi"
+        val root = JsonDocument.parse(request("GET", path, beforeSend = current)).root
+        current()
+        root.exactKeys("ok", "data"); if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+        AppReleaseSelection.parse(root.obj("data"), packageName, installedVersion, androidApi, downloadOrigins)
+    }
     fun reader(deviceId: String, runtimeId: String, sessionId: String, scope: RelayScope, owner: CoroutineScope): SessionReader =
         SessionReader(this, deviceId, runtimeId, sessionId, scope, owner)
     fun fileUploads(runtimeId: String, sessionId: String, workspace: String?, grant: RelayScope, journal: FileUploadJournal, owner: CoroutineScope): SessionUploads {

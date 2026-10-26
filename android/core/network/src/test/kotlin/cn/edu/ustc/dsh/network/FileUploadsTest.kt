@@ -358,6 +358,27 @@ class FileUploadsTest {
         try { api.sessionTarget(runtime, session); fail("another session identity accepted") } catch (error: RemoteRequestException) { assertEquals("access.denied", error.code) }
         assertEquals(3, service.requestCount)
     }
+    @Test fun appReleaseReadUsesCurrentOrganizationAndFreshProofBeforeAcceptingMetadata(): Unit = runBlocking {
+        val api = api()
+        val metadata = JsonDocument.parse(java.io.File(System.getProperty("contracts.root"), "golden/app-release-selection.json").readBytes()).root
+        service.enqueue(MockResponse().setResponseCode(401).setHeader("Content-Type", "application/json").setHeader("DPoP-Nonce", "release-nonce")
+            .setHeader("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\"").setBody("{\"ok\":false,\"error\":{\"code\":\"auth.proof_invalid\"}}"))
+        service.enqueue(reply(metadata))
+        val result = api.appRelease("cn.edu.ustc.dsh.mobile", 1, 26, setOf("https://updates.example.invalid"))
+        assertEquals(2L, result.release!!.versionCode)
+        val first = service.takeRequest(); val retried = service.takeRequest()
+        assertEquals("GET", retried.method); assertEquals("/v1/app/releases/latest?organization_id=$request&version_code=1&protocol_version=1&android_api=26", retried.path)
+        assertEquals("$origin/v1/app/releases/latest", proof(retried).string("htu")); assertEquals("release-nonce", proof(retried).string("nonce"))
+        assertNotEquals(proof(first).string("jti"), proof(retried).string("jti")); assertTrue(retried.getHeader("Authorization")!!.startsWith("DPoP "))
+        assertEquals(0, objects.requestCount)
+        service.enqueue(reply(metadata.with("current_version_code" to 2L.json())))
+        try { api.appRelease("cn.edu.ustc.dsh.mobile", 1, 26, setOf("https://updates.example.invalid")); fail("another installed-version context accepted") } catch (_: ProtocolException) {}
+    }
+    @Test fun retiredUpdateChecksCannotStartAnAuthenticatedRead(): Unit = runBlocking {
+        val api = api()
+        try { api.appRelease("cn.edu.ustc.dsh.mobile", 1, 26, setOf("https://updates.example.invalid")) { throw CancellationException() }; fail("retired check sent a request") } catch (_: CancellationException) {}
+        assertEquals(0, service.requestCount)
+    }
     @Test fun questionTicketUsesItsOwnAnswerAuthorityWithoutGenericStatus(): Unit = runBlocking {
         val api = api(); val selected = RelayScope(listOf("session.read", "question.answer"), emptyList(), listOf(session))
         service.enqueue(reply(jsonObject("ticket" to "A".repeat(43).json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to selected.json(), "expires_at" to Instant.now().plusSeconds(30).toString().json()), 201))

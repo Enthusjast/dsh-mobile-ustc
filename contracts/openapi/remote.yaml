@@ -227,6 +227,43 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/app/releases/latest:
+    get:
+      description: Optional configured APK metadata selection. Rechecks the registered phone proof, active school user, exact organization membership and token validity; no runtime/list/content grant is required. The query cannot choose a user or device. Client version/API claims select metadata only. Selection uses stable per-release organization/user/device rollout and the current protocol/Android compatibility gates. No APK bytes, signing private keys or installation action are returned. Unknown, duplicate and noncanonical numeric selectors are rejected. The route is absent without REMOTE_APP_RELEASES_FILE.
+      parameters:
+        - in: query
+          name: organization_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: version_code
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        - in: query
+          name: protocol_version
+          required: true
+          schema: { const: 1 }
+        - in: query
+          name: android_api
+          required: true
+          schema: { type: integer, minimum: 26, maximum: 100 }
+      responses:
+        '200':
+          description: Current client support window and the highest eligible newer release, or null. This does not force an update or authorize installation.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, data]
+                properties:
+                  ok: { const: true }
+                  data: { $ref: '#/components/schemas/AppReleaseSelection' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { description: APK release publication is not configured. }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/hosts:
     get:
       responses:
@@ -1503,6 +1540,46 @@ components:
         id: { type: string, format: uuid }
         alias: { type: string }
         state: { const: active }
+    ClientVersionWindow:
+      type: object
+      additionalProperties: false
+      required: [minimum, maximum]
+      properties:
+        minimum: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        maximum: { type: integer, minimum: 1, maximum: 9007199254740991, description: Inclusive; must be at least minimum. }
+    AppReleaseSelection:
+      type: object
+      additionalProperties: false
+      required: [v, package_name, protocol_version, current_version_code, current_supported, supported_client_versions, release]
+      properties:
+        v: { const: 1 }
+        package_name: { type: string, maxLength: 255 }
+        protocol_version: { const: 1 }
+        current_version_code: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        current_supported: { type: boolean, description: Must agree with the inclusive published client version window; does not itself enforce or force an update. }
+        supported_client_versions: { $ref: '#/components/schemas/ClientVersionWindow' }
+        release:
+          oneOf:
+            - { type: 'null' }
+            - { $ref: '#/components/schemas/AppRelease' }
+    AppRelease:
+      type: object
+      additionalProperties: false
+      required: [release_id, version_code, version_name, package_name, sha256, size_bytes, signing_cert_sha256, download_url, minimum_protocol_version, maximum_protocol_version, minimum_android_api, rollout_basis_points, release_notes]
+      properties:
+        release_id: { type: string, format: uuid }
+        version_code: { type: integer, minimum: 1, maximum: 9007199254740991, description: Must be newer than the actual installed version and inside the service's supported client window. }
+        version_name: { type: string, minLength: 1, maxLength: 64, description: At most 64 UTF-8 bytes; no control characters. }
+        package_name: { type: string, maxLength: 255 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        size_bytes: { type: integer, minimum: 1, maximum: 536870912 }
+        signing_cert_sha256: { type: string, pattern: '^[0-9a-f]{64}$', description: Candidate certificate digest to compare with the independently verified installed signing trust anchor; metadata cannot create new trust. }
+        download_url: { type: string, format: uri, maxLength: 2048, description: Canonical HTTPS URL from a provisioned download-origin allowlist; no userinfo, query, fragment, encoded/relative path or redirects. }
+        minimum_protocol_version: { type: integer, minimum: 1, maximum: 32 }
+        maximum_protocol_version: { type: integer, minimum: 1, maximum: 32, description: Inclusive and at least minimum_protocol_version. }
+        minimum_android_api: { type: integer, minimum: 26, maximum: 100 }
+        rollout_basis_points: { type: integer, minimum: 1, maximum: 10000, description: One percent is 100 basis points. Zero-percent publications cannot be selected. }
+        release_notes: { type: string, minLength: 1, maxLength: 8192, description: Nonblank plain text limited to 8192 UTF-8 bytes; newline/tab allowed, other control characters denied. }
     Runtime:
       type: object
       additionalProperties: false
