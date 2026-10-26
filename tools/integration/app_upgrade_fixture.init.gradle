@@ -1,0 +1,28 @@
+// Dedicated debug v2 output. Never changes the normal APK watched by the preview.
+def fixtureOutput = null
+gradle.settingsEvaluated { settings ->
+    def properties = gradle.startParameter.projectProperties
+    if (!properties.containsKey('appUpgradeOutput')) throw new GradleException('appUpgradeOutput is required')
+    for (name in ['deploymentConfig', 'pushConfig', 'appUpdateConfig', 'android.injected.testOnly']) {
+        if (properties.containsKey(name)) throw new GradleException('Public/deployment and IDE overrides are not accepted by this fixture')
+    }
+    if (gradle.startParameter.taskNames != [':app:assembleDebug']) throw new GradleException('Only :app:assembleDebug is allowed by this fixture')
+    def local = new File(settings.settingsDir.parentFile, '.local').canonicalFile
+    fixtureOutput = new File(properties.get('appUpgradeOutput')).canonicalFile
+    if (fixtureOutput == local || !fixtureOutput.toPath().startsWith(local.toPath())) throw new GradleException('Fixture outputs must be inside repository .local')
+}
+gradle.beforeProject { project ->
+    if (fixtureOutput == null) throw new GradleException('Fixture output was not validated')
+    def name = project.path == ':' ? 'root' : project.path.substring(1).replace(':', '/')
+    project.layout.buildDirectory.set(new File(fixtureOutput, name))
+    project.plugins.withId('com.android.application') {
+        project.extensions.getByName('androidComponents').finalizeDsl { android ->
+            if (project.path != ':app' || android.defaultConfig.applicationId != 'cn.edu.ustc.dsh.mobile' ||
+                android.defaultConfig.versionCode != 1 || android.defaultConfig.versionName != '0.1.0-dev') {
+                throw new GradleException('Expected the ordinary version 1 application as fixture baseline')
+            }
+            android.defaultConfig.versionCode = 2
+            android.defaultConfig.versionName = '0.2.0-upgrade-fixture'
+        }
+    }
+}
