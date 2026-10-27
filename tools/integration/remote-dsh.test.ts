@@ -15,6 +15,7 @@ import { CompactSign } from 'jose'
 import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext, type ApprovalDecision } from '../../host/remote-control/src/approval-contract.js'
 import { canonicalObject } from '../../host/remote-control/src/canonical.js'
 import { relayNodeFixtures } from './relay-node-fixture.js'
+import { HostCredentialError, HostRestCredentialProvider, type HostResourceAccess, type HostRestCredentialOptions } from '../../host/remote-control/src/host-credentials.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -337,28 +338,47 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(runtimeAccess.access.grant_version >= 1)
   assert.ok(runtimeAccess.access.scope.actions.includes('session.read'))
   assert.ok(runtimeAccess.access.scope.workspaces.includes(enrollment.workspaces[0].workspace_id))
-  const challenge = await owner('POST', '/v1/host-credentials/challenges', undefined, 201)
-  const credential = await owner('POST', '/v1/host-credentials', {
-    challenge_id: challenge.challenge_id,
-    proof: jws(installationKey.privateKey, { alg: 'ES256', typ: 'dsh-host-credential-proof+jwt' }, {
-      iss: enrollment.installation_id, aud: challenge.audience, challenge_id: challenge.challenge_id, nonce: challenge.challenge, iat: now(), jti: randomUUID(),
+  // This local issuer owns and verifies the fixture identity. Production supplies
+  // the existing verified resource-session adapter; no OAuth login lives here.
+  const hostAccessIssued = now()
+  const hostAccess: HostResourceAccess = {
+    issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host', tokenType: 'DPoP',
+    proofKeyThumbprint: installationKey.jkt, expiresAt: (hostAccessIssued + 300) * 1000, scopes: ['remote.access'],
+    token: jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
+      iss: issuer, sub: 'owner', aud: 'urn:dsh-e2e', client_id: 'fixture-host', jti: randomUUID(), iat: hostAccessIssued, exp: hostAccessIssued + 300,
+      scope: 'remote.access', cnf: { jkt: installationKey.jkt },
     }),
-  }, 201)
+  }
+  const hostIdentity = { issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host' }
+  const resourceLifetime = new AbortController()
+  const credentialOptions: HostRestCredentialOptions = { origin, identity: hostIdentity, installationId: enrollment.installation_id,
+    publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
+    signer: { sign(input) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } },
+    requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
+  }
+  const credentialProvider = new HostRestCredentialProvider(credentialOptions)
+  t.after(() => credentialProvider.close())
+  const credential = await credentialProvider.acquire(AbortSignal.timeout(5000))
+  assert.equal(credential.installationId, enrollment.installation_id)
+  assert.equal(await credentialProvider.acquire(AbortSignal.timeout(1000)), credential, 'valid credential cache minted another key proof')
 
   const workspace = join(root, 'workspace'), socketPath = join(root, 'ipc', 'host.sock')
   await mkdir(workspace)
   const plugin = pathToFileURL(resolve('host/remote-control/lib/index.js')).href
   const wrapper = join(root, 'plugin.mjs')
+  const accessFile = join(root, 'host-resource-session.json')
+  await writeFile(accessFile, JSON.stringify(hostAccess), { mode: 0o600 })
   const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
   const checkpointFailureSecret = `PRIVATE_CHECKPOINT_FAILURE_${randomUUID()}`
   await writeFile(wrapper, [
     "import { createPrivateKey, sign } from 'node:crypto'",
     "import { writeFile, readFile } from 'node:fs/promises'",
-    `import { createRemoteControlPlugin } from ${JSON.stringify(plugin)}`,
+    `import { createRemoteControlPlugin, HostRestCredentialProvider } from ${JSON.stringify(plugin)}`,
     `const privateKey = createPrivateKey({format:'jwk',key:${JSON.stringify(installationKey.privateKey.export({ format: 'jwk' }))}})`,
-    `const plugin = createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(enrollment.installation_id)},credential:${JSON.stringify(credential.credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}}}}}, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
+    `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(enrollment.installation_id)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}},account:{signal:new AbortController().signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
+    `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>()=>credentialProvider.close());ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -406,6 +426,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(probe.payload.dsh_version, '0.2.1-rc.2')
   await until(async () => query(`select count(*) from runtimes where id='${enrollment.runtime_id}' and epoch='${probe.runtime_epoch}' and connection_id is not null`) === '1' ? true : undefined,
     'committed host attachment')
+  assert.equal(query(`select count(*) from audit_log where action='host.credential.issue'`), '2', 'normal plugin did not issue its own provider credential')
+  t.diagnostic('The normal npm DSH plugin acquires its credential through the exported REST provider, current resource JWT/DPoP, one-use installation challenge and registered key. A separate parent acquisition checks the live cache; no static connection secret is embedded in the plugin fixture.')
   const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {
     v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId === undefined ? {} : { session_id: sessionId }),
   })
@@ -793,7 +815,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
 
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, ticket.ticket]) {
+  for (const secret of [marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, hostAccess.token, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
@@ -870,7 +892,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(metricSample(finalMetrics, 'approval_host_transitions_total', { to: 'denied' }, true) > 0)
   assert.ok(metricSample(finalMetrics, 'approval_lease_lifetime_seconds_count', { decision: 'allow_once' }) > 0)
   for (const secret of [orgId, ownerId, phoneUserId, device.device_id, enrollment.runtime_id, sessionId, revokeMarker, revokeProof,
-    checkpointFailureSecret, checkpointFailureFile, (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
+    checkpointFailureSecret, checkpointFailureFile, hostAccess.token, credential.credential, (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
   t.diagnostic('Private Prometheus endpoint observed actual signed Host/phone connections, native traffic, command forwarding/retries and completed local revocation propagation without resource IDs, bodies or proofs.')
   t.diagnostic('Committed command creation counters match PostgreSQL rows for every action; Host transition counters match durable receipt audits despite retries. Stage ages/dwell and repository attempts were observed at the owner node.')
   t.diagnostic('Approval registration/decision and Host fact counters match durable audits; signed lease preparation counts match committed authorization audits, without counting approval as execution completion.')
@@ -884,5 +906,26 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
   t.diagnostic('Normal Host runtime question metadata reached PostgreSQL without a timed-session phone subscription; fresh resubscription found the same continued native question and admitted one late answer. Full database dump excluded question and answer bodies.')
   t.diagnostic('The normal plugin negotiated signed approval: current Bash context, invalid-proof nonconsumption, phone allow/reject/cancel, one actual execution, duplicate decision reconciliation and durable native result reporting passed through the real Go service.')
+  // Retire only this owned fixture installation. Both a cached bearer string and
+  // fresh REST acquisition must remain subject to the current server authority.
+  query(`update installations set revoked_at=clock_timestamp() where id='${enrollment.installation_id}'`)
+  await until(async () => query(`select connection_id is null from runtimes where id='${enrollment.runtime_id}'`) === 't' ? true : undefined,
+    'revoked Host connection detached', 5000)
+  const freshProvider = new HostRestCredentialProvider(credentialOptions)
+  t.after(() => freshProvider.close())
+  await assert.rejects(freshProvider.acquire(AbortSignal.timeout(5000)), cause => cause instanceof HostCredentialError && cause.code === 'host.credentials.denied')
+  const rejected = new WebSocket(origin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', {
+    headers: { Authorization: `DSH-Host ${credential.credential}` }, handshakeTimeout: 3000,
+  })
+  rejected.on('error', () => {})
+  await new Promise<void>((accept, reject) => {
+    const timer = setTimeout(() => { rejected.terminate(); reject(new Error('revoked Host credential was not refused')) }, 3500)
+    rejected.once('unexpected-response', (_request: unknown, response: any) => {
+      clearTimeout(timer); response.resume(); rejected.terminate()
+      try { assert.equal(response.statusCode, 401); accept() } catch (cause) { reject(cause) }
+    })
+    rejected.once('open', () => { clearTimeout(timer); rejected.terminate(); reject(new Error('revoked cached credential opened a socket')) })
+  })
+  t.diagnostic('Revoking the fixture installation detached the normal Host, denied fresh provider acquisition and refused an old cached connection secret at HTTP upgrade. No client cache restored authority.')
   t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, questions, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })

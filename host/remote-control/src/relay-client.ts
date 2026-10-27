@@ -122,6 +122,8 @@ export interface HostConnectionCredential {
 
 /** The provider owns key storage and may refresh the short-lived REST credential before each connect. */
 export interface HostCredentialProvider {
+  readonly origin?: string
+  readonly signal?: AbortSignal
   acquire(signal: AbortSignal): Promise<HostConnectionCredential>
 }
 
@@ -825,6 +827,9 @@ function withAbort<Value>(promise: Promise<Value>, signal: AbortSignal): Promise
 
 export function startHostRelay(options: HostRelayOptions) {
   const url = endpoint(options.url)
+  const origin = new URL(url)
+  origin.protocol = origin.protocol === 'wss:' ? 'https:' : 'http:'
+  if (options.credentials.origin !== undefined && options.credentials.origin !== origin.origin) throw new Error('Relay origin does not match its credential provider')
   if ([options.applicationVersion, options.dshVersion, options.pluginVersion].some(value =>
     !value || value !== value.trim() || Buffer.byteLength(value) > 128 || /\p{Cc}/u.test(value))) {
     throw new Error('Relay version metadata must be non-empty, bounded, and contain no control characters')
@@ -833,7 +838,8 @@ export function startHostRelay(options: HostRelayOptions) {
     throw new Error('Relay runtime identity must use UUIDs')
   }
   const controller = new AbortController()
-  const task = run(options, url, controller.signal).catch(() => {})
+  const lifetime = options.credentials.signal ? AbortSignal.any([controller.signal, options.credentials.signal]) : controller.signal
+  const task = run(options, url, lifetime).catch(() => {})
   return {
     async close() {
       controller.abort()

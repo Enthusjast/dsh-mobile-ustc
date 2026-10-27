@@ -15,6 +15,8 @@ import { RelayExports } from './relay-exports.js'
 import { PinnedExportSource } from './file-export-source.js'
 import { RelayQuestionReferences } from './relay-question-references.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
+export { HostRestCredentialProvider, HostCredentialError } from './host-credentials.js'
+export type { HostResourceIdentity, HostResourceAccess, HostResourceRequest, HostResourceAccessProvider, HostRestCredentialOptions } from './host-credentials.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
 
 export const name = 'ustc-remote-control'

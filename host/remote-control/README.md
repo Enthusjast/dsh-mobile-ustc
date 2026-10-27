@@ -115,3 +115,11 @@ time and a monotonic lifetime. Pongs cannot extend the original credential;
 expiry triggers a new provider acquisition and proof. Stable authenticated
 transports reset accumulated failure backoff, while short flaps keep exponential
 delay. The same lifecycle record documents timing/skew limits and fixture scope.
+
+The exported [REST credential provider](../../docs/host-credential-provider.md)
+obtains short-lived credentials from the existing Go API with a current verified
+resource-session adapter and the enrolled installation signer. It pins the
+account/key/origin, shares concurrent minting, caches valid credentials and never
+automatically replays an uncertain POST. Its account lifetime also retires the
+Host socket. School login verification/refresh and the production OS key store
+remain responsibilities of the explicit integration adapter.

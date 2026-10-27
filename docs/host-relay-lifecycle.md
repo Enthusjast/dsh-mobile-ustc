@@ -40,7 +40,8 @@ server-relative 剩余量中较短者，再同时用墙钟与单调时钟约束�
 pong、业务流量和新的审批授权证明均不能重置这条连接的原始期限。
 
 到期后仍通过 provider 再次获取凭据、完成新 challenge，而不是在旧 socket 内更新权限。
-生产 provider 必须自行取得有效新凭据；接口本身不代表学校 token 刷新或 OS 私钥存储已经实现。
+可使用现有 Go API 的[REST provider](host-credential-provider.md)取得有效新凭据；它仍依赖
+已经验证的资源登录态与安装 signer，不代表学校 token 刷新或 OS 私钥存储已经实现。
 如果 provider 返回已经到期的原值，Relay 仍会拒绝，不在客户端静默延长或绕过认证。
 
 退避基数从一秒指数增加到最多 60 秒，每次额外加入少于基数 25% 的随机等待。
