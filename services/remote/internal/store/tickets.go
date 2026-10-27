@@ -35,12 +35,18 @@ type TicketRedemption struct {
 }
 
 func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity UserIdentity, deviceID, runtimeID string, requestedScope GrantScope) (RealtimeTicket, error) {
+	return retrySerializable(ctx, func() (RealtimeTicket, error) {
+		return postgres.issueRealtimeTicketOnce(ctx, identity, deviceID, runtimeID, requestedScope)
+	}, postgres.admissionGate())
+}
+
+func (postgres *Postgres) issueRealtimeTicketOnce(ctx context.Context, identity UserIdentity, deviceID, runtimeID string, requestedScope GrantScope) (RealtimeTicket, error) {
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	defer transaction.Rollback()
-	userID, err := postgres.userID(ctx, transaction, identity.Issuer, identity.Subject)
+	userID, err := postgres.userIDForSerializable(ctx, transaction, identity.Issuer, identity.Subject)
 	if err != nil {
 		return RealtimeTicket{}, err
 	}
@@ -55,7 +61,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 		return RealtimeTicket{}, ErrDeviceNotFound
 	}
 	if err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	var orgID string
 	err = transaction.QueryRowContext(ctx, `
@@ -68,7 +74,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 		return RealtimeTicket{}, ErrAccessDenied
 	}
 	if err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	var membershipRole string
 	err = transaction.QueryRowContext(ctx, `
@@ -77,7 +83,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 		return RealtimeTicket{}, ErrAccessDenied
 	}
 	if err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	var role string
 	var grantScopeJSON []byte
@@ -91,7 +97,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 		return RealtimeTicket{}, ErrAccessDenied
 	}
 	if err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	scope, err := NormalizeTicketScope(role, requestedScope)
 	if err != nil {
@@ -99,7 +105,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 	}
 	var grantScope GrantScope
 	if err := json.Unmarshal(grantScopeJSON, &grantScope); err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	if !grantScopeSubset(scope, grantScope) {
 		return RealtimeTicket{}, ErrAccessDenied
@@ -109,7 +115,7 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(secret)
 	for index := range secret {
@@ -125,16 +131,16 @@ func (postgres *Postgres) IssueRealtimeTicket(ctx context.Context, identity User
 		insert into realtime_tickets (token_sha256, user_id, device_id, device_key_version, proof_key_thumbprint, runtime_id, grant_version, scope, expires_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, clock_timestamp() + interval '30 seconds')
 		returning expires_at`, digest[:], userID, deviceID, deviceKeyVersion, proofKeyThumbprint, runtimeID, grantVersion, string(scopeJSON)).Scan(&expiresAt); err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	metadata, _ := json.Marshal(map[string]any{"device_id": deviceID, "runtime_id": runtimeID, "grant_version": grantVersion, "expires_at": expiresAt})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, action, result, metadata)
 		values ($1, 'device', $2::uuid::text, $2, $3, 'realtime.ticket.issue', 'success', $4::jsonb)`, orgID, deviceID, runtimeID, string(metadata)); err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return RealtimeTicket{}, ErrDatabaseUnavailable
+		return RealtimeTicket{}, transactionFailure(err)
 	}
 	return RealtimeTicket{Token: token, RuntimeID: runtimeID, GrantVersion: grantVersion, Scope: scope, ExpiresAt: expiresAt}, nil
 }
@@ -158,13 +164,17 @@ func realtimeTicketDigest(token string) ([]byte, error) {
 // key without consuming it. The Relay verifies the fresh key proof first, then
 // calls ConsumeRealtimeTicket to recheck current access and claim the ticket.
 func (postgres *Postgres) PrepareRealtimeTicket(ctx context.Context, token string) (TicketRedemption, error) {
+	return retrySerializable(ctx, func() (TicketRedemption, error) { return postgres.prepareRealtimeTicketOnce(ctx, token) }, postgres.admissionGate())
+}
+
+func (postgres *Postgres) prepareRealtimeTicketOnce(ctx context.Context, token string) (TicketRedemption, error) {
 	digest, err := realtimeTicketDigest(token)
 	if err != nil {
 		return TicketRedemption{}, err
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	defer transaction.Rollback()
 	redemption, err := loadRealtimeTicket(ctx, transaction, digest, false)
@@ -172,7 +182,7 @@ func (postgres *Postgres) PrepareRealtimeTicket(ctx context.Context, token strin
 		return TicketRedemption{}, err
 	}
 	if err := transaction.Commit(); err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	return redemption, nil
 }
@@ -180,13 +190,17 @@ func (postgres *Postgres) PrepareRealtimeTicket(ctx context.Context, token strin
 // ConsumeRealtimeTicket atomically claims a ticket after the Relay has verified
 // the challenge proof. The active device key and grant are rechecked here.
 func (postgres *Postgres) ConsumeRealtimeTicket(ctx context.Context, token string) (TicketRedemption, error) {
+	return retrySerializable(ctx, func() (TicketRedemption, error) { return postgres.consumeRealtimeTicketOnce(ctx, token) }, postgres.admissionGate())
+}
+
+func (postgres *Postgres) consumeRealtimeTicketOnce(ctx context.Context, token string) (TicketRedemption, error) {
 	digest, err := realtimeTicketDigest(token)
 	if err != nil {
 		return TicketRedemption{}, err
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	defer transaction.Rollback()
 	redemption, err := loadRealtimeTicket(ctx, transaction, digest, true)
@@ -201,16 +215,16 @@ func (postgres *Postgres) ConsumeRealtimeTicket(ctx context.Context, token strin
 		return TicketRedemption{}, ErrTicketInvalid
 	}
 	if err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	metadata, _ := json.Marshal(map[string]any{"runtime_id": redemption.RuntimeID, "grant_version": redemption.GrantVersion})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (actor_type, actor_id, device_id, runtime_id, action, result, metadata)
 		values ('device', $1::uuid::text, $1, $2, 'realtime.ticket.consume', 'success', $3::jsonb)`, redemption.DeviceID, redemption.RuntimeID, string(metadata)); err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	return redemption, nil
 }
@@ -280,13 +294,13 @@ func loadRealtimeTicket(ctx context.Context, transaction *sql.Tx, digest []byte,
 		return TicketRedemption{}, ErrTicketInvalid
 	}
 	if err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	if consumedAt.Valid || !ticketCurrent {
 		return TicketRedemption{}, ErrTicketInvalid
 	}
 	if err := json.Unmarshal(scopeJSON, &redemption.Scope); err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	var currentScopeJSON, proofPublicJWK []byte
 	err = transaction.QueryRowContext(ctx, `
@@ -307,7 +321,7 @@ func loadRealtimeTicket(ctx context.Context, transaction *sql.Tx, digest []byte,
 		return TicketRedemption{}, ErrTicketInvalid
 	}
 	if err != nil {
-		return TicketRedemption{}, ErrDatabaseUnavailable
+		return TicketRedemption{}, transactionFailure(err)
 	}
 	var currentScope GrantScope
 	if err := json.Unmarshal(currentScopeJSON, &currentScope); err != nil || !grantScopeSubset(redemption.Scope, currentScope) {

@@ -45,15 +45,21 @@ type HostCredentialIdentity struct {
 // CreateHostCredentialChallenge returns a random challenge only to the active
 // owner of the installation whose DPoP key is registered as its host key.
 func (postgres *Postgres) CreateHostCredentialChallenge(ctx context.Context, identity UserIdentity, proofKeyJKT string) (HostCredentialChallenge, error) {
+	return retrySerializable(ctx, func() (HostCredentialChallenge, error) {
+		return postgres.createHostCredentialChallengeOnce(ctx, identity, proofKeyJKT)
+	}, postgres.admissionGate())
+}
+
+func (postgres *Postgres) createHostCredentialChallengeOnce(ctx context.Context, identity UserIdentity, proofKeyJKT string) (HostCredentialChallenge, error) {
 	if !keyThumbprintPattern.MatchString(proofKeyJKT) {
 		return HostCredentialChallenge{}, ErrAccessDenied
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	defer transaction.Rollback()
-	userID, err := postgres.userID(ctx, transaction, identity.Issuer, identity.Subject)
+	userID, err := postgres.userIDForSerializable(ctx, transaction, identity.Issuer, identity.Subject)
 	if err != nil {
 		return HostCredentialChallenge{}, err
 	}
@@ -69,23 +75,23 @@ func (postgres *Postgres) CreateHostCredentialChallenge(ctx context.Context, ide
 		return HostCredentialChallenge{}, ErrAccessDenied
 	}
 	if err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
 		delete from installation_challenges
 		where installation_id = $1 and created_at <= clock_timestamp() - interval '5 minutes'`, installationID); err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
 		delete from host_connection_credentials
 		where installation_id = $1 and (revoked_at is not null or expires_at <= clock_timestamp() or key_version <> $2)`, installationID, keyVersion); err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	var pending int
 	if err := transaction.QueryRowContext(ctx, `
 		select count(*) from installation_challenges
 		where installation_id = $1 and consumed_at is null and expires_at > clock_timestamp()`, installationID).Scan(&pending); err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	if pending >= 4 {
 		return HostCredentialChallenge{}, ErrHostChallengeLimit
@@ -94,14 +100,14 @@ func (postgres *Postgres) CreateHostCredentialChallenge(ctx context.Context, ide
 	if err := transaction.QueryRowContext(ctx, `
 		select count(*) from installation_challenges
 		where installation_id = $1 and created_at > clock_timestamp() - interval '5 minutes'`, installationID).Scan(&recent); err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	if recent >= 20 {
 		return HostCredentialChallenge{}, ErrHostChallengeLimit
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	challenge := base64.RawURLEncoding.EncodeToString(secret)
 	for index := range secret {
@@ -117,16 +123,16 @@ func (postgres *Postgres) CreateHostCredentialChallenge(ctx context.Context, ide
 		values ($1, $2, $3, clock_timestamp() + interval '90 seconds')
 		returning id::text, expires_at`, installationID, keyVersion, digest[:]).Scan(&result.ChallengeID, &result.ExpiresAt)
 	if err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	metadata, _ := json.Marshal(map[string]any{"installation_id": installationID, "challenge_id": result.ChallengeID})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (org_id, actor_type, actor_id, action, result, metadata)
 		values ($1, 'installation', $2, 'host.credential.challenge', 'success', $3::jsonb)`, orgID, installationID, string(metadata)); err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return HostCredentialChallenge{}, ErrDatabaseUnavailable
+		return HostCredentialChallenge{}, transactionFailure(err)
 	}
 	return result, nil
 }
@@ -134,15 +140,21 @@ func (postgres *Postgres) CreateHostCredentialChallenge(ctx context.Context, ide
 // ExchangeHostCredential consumes one challenge and stores only the digest of
 // a five-minute installation credential.
 func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity UserIdentity, proofKeyJKT, challengeID, proof string) (HostConnectionCredential, error) {
+	return retrySerializable(ctx, func() (HostConnectionCredential, error) {
+		return postgres.exchangeHostCredentialOnce(ctx, identity, proofKeyJKT, challengeID, proof)
+	}, postgres.admissionGate())
+}
+
+func (postgres *Postgres) exchangeHostCredentialOnce(ctx context.Context, identity UserIdentity, proofKeyJKT, challengeID, proof string) (HostConnectionCredential, error) {
 	if !keyThumbprintPattern.MatchString(proofKeyJKT) || !grantUUIDPattern.MatchString(challengeID) || len(proof) == 0 || len(proof) > 8<<10 {
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	defer transaction.Rollback()
-	userID, err := postgres.userID(ctx, transaction, identity.Issuer, identity.Subject)
+	userID, err := postgres.userIDForSerializable(ctx, transaction, identity.Issuer, identity.Subject)
 	if err != nil {
 		if errors.Is(err, ErrIdentityNotProvisioned) {
 			return HostConnectionCredential{}, ErrHostCredentialInvalid
@@ -156,7 +168,7 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
 	}
 	if err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	var installationID, orgID, publicKeyThumbprint string
 	var publicJWK []byte
@@ -173,7 +185,7 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
 	}
 	if err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	var challengeDigest []byte
 	var challengeKeyVersion int64
@@ -191,7 +203,7 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
 	}
 	if err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	if challengeKeyVersion != keyVersion {
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
@@ -203,14 +215,14 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 	if err := transaction.QueryRowContext(ctx, `
 		select count(*) from host_connection_credentials
 		where installation_id = $1 and key_version = $2 and revoked_at is null and expires_at > clock_timestamp()`, installationID, keyVersion).Scan(&activeCredentials); err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	if activeCredentials >= 8 {
 		return HostConnectionCredential{}, ErrHostCredentialLimit
 	}
 	credentialSecret := make([]byte, 32)
 	if _, err := rand.Read(credentialSecret); err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	credential := base64.RawURLEncoding.EncodeToString(credentialSecret)
 	for index := range credentialSecret {
@@ -223,7 +235,7 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 		returning consumed_at`, challengeID).Scan(new(time.Time)); errors.Is(err, sql.ErrNoRows) {
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
 	} else if err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	result := HostConnectionCredential{
 		Credential: credential, TokenType: "DSH-Host", InstallationID: installationID,
@@ -234,16 +246,16 @@ func (postgres *Postgres) ExchangeHostCredential(ctx context.Context, identity U
 		values ($1, $2, $3, clock_timestamp() + interval '5 minutes')
 		returning expires_at`, credentialDigest[:], installationID, keyVersion).Scan(&result.ExpiresAt)
 	if err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	metadata, _ := json.Marshal(map[string]any{"installation_id": installationID, "key_version": keyVersion})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (org_id, actor_type, actor_id, action, result, metadata)
 		values ($1, 'installation', $2, 'host.credential.issue', 'success', $3::jsonb)`, orgID, installationID, string(metadata)); err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return HostConnectionCredential{}, ErrDatabaseUnavailable
+		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	return result, nil
 }

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -44,6 +45,17 @@ func run() error {
 		return errors.New("remote service database is unavailable or insecurely configured")
 	}
 	defer database.Close()
+	admissions := store.DefaultSerializableAdmissions
+	if configured := strings.TrimSpace(os.Getenv("REMOTE_SERIALIZABLE_ADMISSIONS")); configured != "" {
+		parsed, parseErr := strconv.Atoi(configured)
+		if parseErr != nil {
+			return errors.New("remote serializable admission budget is invalid")
+		}
+		admissions = parsed
+	}
+	if err := database.ConfigureSerializableAdmissions(admissions); err != nil {
+		return errors.New("remote serializable admission budget must be between 1 and 30")
+	}
 	approvalConfig, err := loadApprovalConfig(os.Getenv("REMOTE_APPROVAL_POLICY_FILE"), database, os.Getenv("REMOTE_ISSUER"), csv(os.Getenv("REMOTE_CLIENT_IDS")))
 	if err != nil {
 		return err

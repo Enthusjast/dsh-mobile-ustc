@@ -54,6 +54,13 @@ func (postgres *Postgres) SyncRealtimeSessionCatalog(
 	replace bool,
 	items []SessionCatalogItem,
 ) error {
+	_, err := retrySerializable(ctx, func() (struct{}, error) {
+		return struct{}{}, postgres.syncRealtimeSessionCatalogOnce(ctx, connection, keyVersion, replace, items)
+	}, postgres.admissionGate())
+	return err
+}
+
+func (postgres *Postgres) syncRealtimeSessionCatalogOnce(ctx context.Context, connection RuntimeConnection, keyVersion int64, replace bool, items []SessionCatalogItem) error {
 	if !grantUUIDPattern.MatchString(connection.InstallationID) || !grantUUIDPattern.MatchString(connection.RuntimeID) ||
 		!grantUUIDPattern.MatchString(connection.RuntimeEpoch) || !grantUUIDPattern.MatchString(connection.ConnectionID) ||
 		keyVersion <= 0 || len(items) > maxSessionCatalogItems {
@@ -95,7 +102,7 @@ func (postgres *Postgres) SyncRealtimeSessionCatalog(
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	defer transaction.Rollback()
 	var orgID string
@@ -113,13 +120,13 @@ func (postgres *Postgres) SyncRealtimeSessionCatalog(
 		return ErrRuntimeConnectionStale
 	}
 	if err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	if replace {
 		if _, err := transaction.ExecContext(ctx, `
 			update sessions set state = 'unavailable', workspace_id = null, updated_at = clock_timestamp()
 			where runtime_id = $1`, connection.RuntimeID); err != nil {
-			return ErrDatabaseUnavailable
+			return transactionFailure(err)
 		}
 	}
 	result, err := transaction.ExecContext(ctx, `
@@ -138,7 +145,7 @@ func (postgres *Postgres) SyncRealtimeSessionCatalog(
 			updated_at = excluded.updated_at`,
 		connection.RuntimeID, string(encoded))
 	if err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil || rows != int64(len(items)) {
@@ -153,10 +160,10 @@ func (postgres *Postgres) SyncRealtimeSessionCatalog(
 		insert into audit_log (org_id, actor_type, actor_id, runtime_id, action, result, metadata)
 		values ($1, 'installation', $2, $3, 'session.catalog.sync', 'success', $4::jsonb)`,
 		orgID, connection.InstallationID, connection.RuntimeID, string(metadata)); err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	return nil
 }

@@ -392,7 +392,7 @@ func validateGrantResources(ctx context.Context, tx *sql.Tx, runtimeID string, s
 		var count int
 		query := "select count(*) from " + resource.table + " where runtime_id = $1 and id::text = any($2::text[])"
 		if err := tx.QueryRowContext(ctx, query, runtimeID, resource.ids).Scan(&count); err != nil {
-			return ErrDatabaseUnavailable
+			return transactionFailure(err)
 		}
 		if count != len(resource.ids) {
 			return ErrGrantInvalid

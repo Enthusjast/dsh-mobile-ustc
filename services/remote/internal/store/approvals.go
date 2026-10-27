@@ -412,10 +412,10 @@ func approvalChange(ctx context.Context, transaction *sql.Tx, orgID, actorType, 
 		insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, session_id, action, result, metadata)
 		values ($1, $2, $3, nullif($4, '')::uuid, $5, $6, $7, 'success', $8::jsonb)`,
 		orgID, actorType, actorID, deviceID, status.RuntimeID, status.SessionID, topic, string(metadata)); err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	if _, err := transaction.ExecContext(ctx, `insert into control_outbox (org_id, topic, payload) values ($1, $2, $3::jsonb)`, orgID, topic, string(metadata)); err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	return nil
 }
@@ -434,7 +434,7 @@ func endRuntimeApprovals(ctx context.Context, transaction *sql.Tx, orgID, runtim
 		    coalesce(host_state, ''), coalesce(execution_outcome, '')`,
 		runtimeID, connectionID, expiredOnly)
 	if err != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(err)
 	}
 	statuses := []ApprovalStatus{}
 	for rows.Next() {
@@ -442,14 +442,14 @@ func endRuntimeApprovals(ctx context.Context, transaction *sql.Tx, orgID, runtim
 		if err := rows.Scan(&status.ApprovalID, &status.RuntimeEpoch, &status.SessionID, &status.ExecutionID,
 			&status.BindingSHA256, &status.State, &status.Decision, &status.PayloadSHA256, &status.ExpiresAt, &status.HostState, &status.Outcome); err != nil {
 			_ = rows.Close()
-			return ErrDatabaseUnavailable
+			return transactionFailure(err)
 		}
 		statuses = append(statuses, status)
 	}
 	readErr := rows.Err()
 	closeErr := rows.Close()
 	if readErr != nil || closeErr != nil {
-		return ErrDatabaseUnavailable
+		return transactionFailure(errors.Join(readErr, closeErr))
 	}
 	for _, status := range statuses {
 		if err := approvalChange(ctx, transaction, orgID, "system", "approval-lifecycle", "", "approval.ended", status); err != nil {

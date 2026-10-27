@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -23,7 +24,33 @@ var ErrDeviceNotFound = errors.New("store: device not found")
 
 // Postgres owns a bounded database/sql pool over the pinned pgx driver.
 type Postgres struct {
-	DB *sql.DB
+	DB            *sql.DB
+	admissionOnce sync.Once
+	admission     chan struct{}
+}
+
+const DefaultSerializableAdmissions = 4
+const MaximumSerializableAdmissions = 30
+
+// ConfigureSerializableAdmissions is a startup-only resource budget. Once a
+// request can observe the gate it cannot be resized underneath active holders.
+func (postgres *Postgres) ConfigureSerializableAdmissions(limit int) error {
+	if limit < 1 || limit > MaximumSerializableAdmissions {
+		return ErrDatabaseConfig
+	}
+	configured := false
+	postgres.admissionOnce.Do(func() { postgres.admission = make(chan struct{}, limit); configured = true })
+	if !configured {
+		return ErrDatabaseConfig
+	}
+	return nil
+}
+
+// Bound simultaneous serializable admission transactions independently of
+// read/heartbeat connections. Queueing precedes the transaction snapshot.
+func (postgres *Postgres) admissionGate() chan struct{} {
+	postgres.admissionOnce.Do(func() { postgres.admission = make(chan struct{}, DefaultSerializableAdmissions) })
+	return postgres.admission
 }
 
 type Host struct {
@@ -153,6 +180,14 @@ func (postgres *Postgres) Close() error {
 }
 
 func (postgres *Postgres) userID(ctx context.Context, tx *sql.Tx, issuer, subject string) (string, error) {
+	id, err := postgres.userIDForSerializable(ctx, tx, issuer, subject)
+	if errors.Is(err, ErrDatabaseUnavailable) {
+		return "", ErrDatabaseUnavailable
+	}
+	return id, err
+}
+
+func (postgres *Postgres) userIDForSerializable(ctx context.Context, tx *sql.Tx, issuer, subject string) (string, error) {
 	var id string
 	err := tx.QueryRowContext(ctx, `
 		select id::text from users
@@ -162,7 +197,7 @@ func (postgres *Postgres) userID(ctx context.Context, tx *sql.Tx, issuer, subjec
 		return "", ErrIdentityNotProvisioned
 	}
 	if err != nil {
-		return "", ErrDatabaseUnavailable
+		return "", transactionFailure(err)
 	}
 	return id, nil
 }

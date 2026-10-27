@@ -1,0 +1,1 @@
+drop index host_connection_credentials_installation;

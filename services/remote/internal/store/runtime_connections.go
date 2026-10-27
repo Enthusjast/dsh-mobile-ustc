@@ -33,6 +33,10 @@ type RuntimeConnection struct {
 }
 
 func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input RuntimeConnectionInput) (RuntimeConnection, error) {
+	return retrySerializable(ctx, func() (RuntimeConnection, error) { return postgres.attachRuntimeConnectionOnce(ctx, input) }, postgres.admissionGate())
+}
+
+func (postgres *Postgres) attachRuntimeConnectionOnce(ctx context.Context, input RuntimeConnectionInput) (RuntimeConnection, error) {
 	input.DSHVersion = strings.TrimSpace(input.DSHVersion)
 	input.ApplicationVersion = strings.TrimSpace(input.ApplicationVersion)
 	input.PluginVersion = strings.TrimSpace(input.PluginVersion)
@@ -48,7 +52,7 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return RuntimeConnection{}, ErrDatabaseUnavailable
+		return RuntimeConnection{}, transactionFailure(err)
 	}
 	defer transaction.Rollback()
 	var protocolVersion int
@@ -64,7 +68,7 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 		return RuntimeConnection{}, ErrHostCredentialInvalid
 	}
 	if err != nil {
-		return RuntimeConnection{}, ErrDatabaseUnavailable
+		return RuntimeConnection{}, transactionFailure(err)
 	}
 	if protocolVersion != input.ProtocolVersion {
 		return RuntimeConnection{}, ErrRuntimeProtocolUnsupported
@@ -76,12 +80,12 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 		where id = $6 and installation_id = $7 and revoked_at is null`,
 		input.RuntimeEpoch, input.ConnectionID, input.DSHVersion, input.ApplicationVersion,
 		input.PluginVersion, input.RuntimeID, input.InstallationID, input.KeyVersion); err != nil {
-		return RuntimeConnection{}, ErrDatabaseUnavailable
+		return RuntimeConnection{}, transactionFailure(err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
 		update sessions set state = 'unavailable', updated_at = clock_timestamp()
 		where runtime_id = $1`, input.RuntimeID); err != nil {
-		return RuntimeConnection{}, ErrDatabaseUnavailable
+		return RuntimeConnection{}, transactionFailure(err)
 	}
 	if err := endRuntimeApprovals(ctx, transaction, orgID, input.RuntimeID, "", false); err != nil {
 		return RuntimeConnection{}, err
@@ -94,10 +98,10 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 		insert into audit_log (org_id, actor_type, actor_id, runtime_id, action, result, metadata)
 		values ($1, 'installation', $2, $3, 'host.runtime.connect', 'success', $4::jsonb)`,
 		orgID, input.InstallationID, input.RuntimeID, string(metadata)); err != nil {
-		return RuntimeConnection{}, ErrDatabaseUnavailable
+		return RuntimeConnection{}, transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return RuntimeConnection{}, ErrDatabaseUnavailable
+		return RuntimeConnection{}, transactionFailure(err)
 	}
 	return RuntimeConnection{
 		InstallationID: input.InstallationID, RuntimeID: input.RuntimeID,
