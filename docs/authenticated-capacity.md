@@ -47,3 +47,11 @@ Linux amd64、Go 1.26.10、16 GiB 宿主，保留可见 API 36 preview，关闭�
 对应目录 `.local/relay-capacity/baseline-1000-gated/` 与 `.local/relay-capacity/baseline-3000-lease-joins/`。后者 loaded 时服务 RSS 276774912 B、heap 88325232 B、6050 goroutine、3052 fd；这些是采样点，非历史峰值，也不包含驱动、TLS 入口和 PostgreSQL 的占用。所有已配置连接在窗口后保持，当前排队字节为零；完整角色快照和驱动资源在各自报告中。
 
 早期 1000 / 3000 的失败分别定位到[准入冲突](serializable-admission.md)和[批量租约](lease-validation-capacity.md)，原目录 / 日志保留。新批次成功没有改写旧批次。3000 是计划中的单节点测量点；集群 12000 与 2000 活跃会话 × 20 Hz 仍待实现和测量。
+
+## 当前提交的独立复核
+
+提交 `848aec8bae575863b2614f813c62270e05b80319` 再次运行相同的 3000 / 200 × 20 Hz / 30 s 配置，日志 `.local/capacity-848aec8-3000.log`，证据 `.local/relay-capacity/848aec8-3000/`。源码脏文件列表为空（按约定排除未跟踪的 PLAN.md），实际服务 SHA-256 为 `c0a9154787a8de9580f82f2be45e3c66b0b3c5e7a556b42a09704896270c2592`。
+
+本轮准入 5.508 秒，120000 帧和 124178000 字节 JSON 协议内容全部交付，客户端 p95 33.326 ms / p99 97.249 ms / max 327.595 ms，Go route 的 300 ms 桶比例为 1，撤权样本 230.36 ms。每个 peer 至少三次心跳；唯一 challenge / 凭据、各准入 audit、关闭后的连接 / 订阅 / runtime connection 归零和正常退出均由该批次严格断言。787 个 `40001` 在服务内部处理。
+
+这些是独立重复样本，时间差异保留而不取最好值。最终 race smoke 记录为 `.local/capacity-race-smoke-final.log`；完整 PostgreSQL race suite 与真实 npm DSH 0.2.1-rc.2 组合记录为 `.local/capacity-full-regression.log`。TypeScript check、Go vet、CLI 互斥 / 边界 / 不覆盖证据及小样本 nearest-rank 分位回归均通过。指标和报告的字节数不包含 TLS / TCP 包头与 framing。
