@@ -69,7 +69,13 @@ def main():
     test_apk = repo / "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
     before = inspect_apk(baseline, sdk, 1, "0.1.0-dev")
     test_hash = digest(test_apk) if test_apk.exists() else None
-    output.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True)
+    artifacts = output / "artifacts"
+    artifacts.mkdir()
+    retained_baseline = artifacts / "app-full-v1.apk"
+    shutil.copyfile(baseline, retained_baseline)
+    if digest(retained_baseline) != before["sha256"]:
+        raise RuntimeError("retained baseline differs from verified ordinary build output")
     log = output / "build.log"
     environment = os.environ.copy()
     environment.update(ANDROID_HOME=str(sdk), ANDROID_SDK_ROOT=str(sdk))
@@ -87,8 +93,6 @@ def main():
         # Switching the same Gradle project back to its normal build directory
         # can delete previous task outputs as stale. Retain the verified artifact
         # outside all Gradle-owned output paths before any later normal build.
-        artifacts = output / "artifacts"
-        artifacts.mkdir(exist_ok=True)
         candidate = artifacts / "app-full-v2.apk"
         shutil.copyfile(built, candidate)
         if digest(candidate) != after["sha256"]:
@@ -97,7 +101,7 @@ def main():
         dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, check=True, capture_output=True, text=True).stdout.splitlines()
         receipt = {"v": 1, "kind": "full-executable-app-upgrade-fixture", "source_revision": revision,
                    "source_dirty_files": [line[3:] for line in dirty if line[3:] != "PLAN.md"],
-                   "baseline": {"path": str(baseline), **before}, "candidate": {"path": str(candidate), **after},
+                   "baseline": {"path": str(retained_baseline), **before}, "candidate": {"path": str(candidate), **after},
                    "minimum_android_api": 26, "target_android_api": 36, "production_signing": False}
         receipt_path = output / "fixture.json"
         receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")

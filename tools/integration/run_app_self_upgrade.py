@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -67,6 +68,11 @@ def main():
     if version() not in {None, 1}:
         raise RuntimeError("dedicated device must be on ordinary baseline v1; never silently downgrade or wipe")
     directory = "no_backup/app-self-upgrade/" + run
+    evidence = repo / ".local/app-self-upgrade" / run
+    evidence.mkdir(parents=True, mode=0o700)
+    print("Private upgrade evidence: " + str(evidence), flush=True)
+    proof = {"v": 1, "run_id": run, "serial": options.serial, "avd": options.avd, "state": "failed",
+             "baseline_sha256": receipt["baseline"]["sha256"], "candidate_sha256": receipt["candidate"]["sha256"]}
     mode = None; reversed_port = False; process = None
     stopped = False
     def stop(*_):
@@ -119,6 +125,7 @@ def main():
         if not re.fullmatch(r"/data/app/[A-Za-z0-9_./=+~-]+/base\.apk", installed): raise RuntimeError("unexpected installed base APK path")
         actual = output("shell", "sha256sum", installed).split()[0]
         if actual != receipt["candidate"]["sha256"]: raise RuntimeError("installed APK bytes differ from target")
+        proof["installed_sha256"] = actual
         if process.poll() is None:
             process.wait(timeout=30)
         postlog = source.parent / "post-upgrade.log"
@@ -132,19 +139,32 @@ def main():
         if verified["run_id"] != run or verified["state"] != "passed" or verified["installed_sha256"] != actual:
             raise RuntimeError("native result does not prove this upgrade")
         result.write_text(json.dumps(verified) + "\n"); result.chmod(0o600)
+        proof["state"] = "native_passed"
         print("System settings roundtrip, full executable v2 replacement, same identity/keys and encrypted Room recovery passed", flush=True)
     finally:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try: process.wait(timeout=5)
-            except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
-            call("shell", "am", "force-stop", package, stdout=subprocess.DEVNULL)
-        if mode is not None:
-            owned(); call("shell", "appops", "set", package, "REQUEST_INSTALL_PACKAGES", mode, stdout=subprocess.DEVNULL)
-        if reversed_port:
-            call("reverse", "--remove", "tcp:" + str(origin.port), stdout=subprocess.DEVNULL)
-        # Result/diagnostic input stay protected in app-private storage on failure.
-        if result.exists(): call("shell", "run-as", package, "rm", "-rf", directory, stdout=subprocess.DEVNULL)
+        try:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try: process.wait(timeout=5)
+                except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
+                call("shell", "am", "force-stop", package, stdout=subprocess.DEVNULL)
+            if mode is not None:
+                owned(); call("shell", "appops", "set", package, "REQUEST_INSTALL_PACKAGES", mode, stdout=subprocess.DEVNULL)
+            if reversed_port:
+                call("reverse", "--remove", "tcp:" + str(origin.port), stdout=subprocess.DEVNULL)
+            # Result/diagnostic input stay protected in app-private storage on failure.
+            if result.exists(): call("shell", "run-as", package, "rm", "-rf", directory, stdout=subprocess.DEVNULL)
+        finally:
+            # The host cluster is disposable. Preserve only named native diagnostics
+            # and public proof, never its private OIDC input, CA or database dump.
+            for name in ("pre-upgrade.log", "post-upgrade.log", "result.json"):
+                source_log = source.parent / name
+                if source_log.is_file():
+                    destination = evidence / name
+                    shutil.copyfile(source_log, destination)
+                    destination.chmod(0o600)
+            summary = evidence / "summary.json"
+            summary.write_text(json.dumps(proof, indent=2) + "\n"); summary.chmod(0o600)
 
 
 if __name__ == "__main__":

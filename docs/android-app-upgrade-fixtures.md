@@ -7,11 +7,11 @@ python3 tools/integration/build_app_upgrade_fixture.py \
   --output .local/apk-upgrade/example-v2
 ```
 
-运行前需已有正常的 versionCode 1 / `0.1.0-dev` debug APK。构建使用独立 Gradle init script，把所有项目 build 目录移到指定 `.local` 子目录，并在 Android DSL 最终确认阶段设置测试版本 `2` / `0.2.0-upgrade-fixture`。脚本只允许 `:app:assembleDebug`；拒绝其他任务、部署配置、IDE testOnly 参数以及仓库 `.local` 之外的输出。
+运行前需从当前源码完成正常的 versionCode 1 / `0.1.0-dev` debug APK 构建。输出目录必须尚不存在，防止覆盖先前批次的证据。构建使用独立 Gradle init script，把所有项目 build 目录移到指定 `.local` 子目录，并在 Android DSL 最终确认阶段设置测试版本 `2` / `0.2.0-upgrade-fixture`。脚本只允许 `:app:assembleDebug`；拒绝其他任务、部署配置、IDE testOnly 参数以及仓库 `.local` 之外的输出。
 
 完成后输出 `fixture.json`，包含实际构建的包名、版本、大小、完整 SHA-256、经宿主工具验证的单一证书摘要、基线和候选路径，以及 Git 提交与未提交文件列表。主 APK 不包含学校 / 推送 / 更新部署资产或微型候选。检查实际 Manifest 和 DEX，要求 `MainActivity`、`DshApplication`、`LoginController`、`AppInstallations` 代码存在，不接受无代码或 testOnly 包。基线与 v2 必须使用同一 debug signer。
 
-验证后的 APK 另行复制到输出目录的 `artifacts/app-full-v2.apk`，收据指向这份保留副本。Gradle 在同一项目切回正常 build 目录时可能清理旧任务输出，因此 `builds/app/outputs/...` 只作为临时构建路径，不能作为后续设备验收的长期制品位置。
+验证后的 v1 和 v2 分别复制到输出目录的 `artifacts/app-full-v1.apk` 和 `artifacts/app-full-v2.apk`，收据指向这两份保留副本。Gradle 在同一项目切回正常 build 目录时可能清理旧任务输出，也可能重新生成正常 v1；收据不能引用任何可变的 Gradle 输出。后续正常构建不会改变本批次准备安装的基线或候选，设备驱动继续逐项检查实际字节。
 
 构建前后核对常规 app/test APK 摘要，保证可见预览继续使用原来的正常输出。临时 APK 和生成记录均保留在 `.local`，不进入 Git；没有使用生产签名材料。
 
