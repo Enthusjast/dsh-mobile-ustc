@@ -85,9 +85,13 @@ type API struct {
 type Handler struct {
 	router   http.Handler
 	realtime *relay.Server
+	api      *API
 }
 
 func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if handler.api != nil && handler.api.forwardOwnerRequest(response, request) {
+		return
+	}
 	handler.router.ServeHTTP(response, request)
 }
 
@@ -108,7 +112,7 @@ func (handler *Handler) ConfigureRouting(config relay.RoutingConfig) error {
 }
 
 func (handler *Handler) PrivateRelayHandler() http.Handler {
-	return handler.realtime.PrivateRelayHandler()
+	return handler.realtime.PrivateRelayHandler(handler.router)
 }
 
 type deviceContextKey struct{}
@@ -235,7 +239,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 			mux.HandleFunc("GET /v1/host-files/{id}/content", api.hostFileContent)
 		}
 	}
-	return &Handler{router: mux, realtime: realtime}
+	return &Handler{router: mux, realtime: realtime, api: api}
 }
 
 func (api *API) protected(next http.Handler) http.Handler {

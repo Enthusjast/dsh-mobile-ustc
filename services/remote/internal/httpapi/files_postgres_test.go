@@ -99,7 +99,7 @@ type fileHTTPFixture struct {
 	scannerAddress, jwksURL                string
 }
 
-func newFileHTTPFixture(t *testing.T) *fileHTTPFixture {
+func newFileHTTPFixture(t *testing.T, crossNode ...bool) *fileHTTPFixture {
 	t.Helper()
 	ctx, database := testsupport.PostgresDatabase(t)
 	postgres := &store.Postgres{DB: database}
@@ -164,7 +164,11 @@ func newFileHTTPFixture(t *testing.T) *fileHTTPFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(exports.Close)
-	handler = httpapi.New(postgres, identity, httpapi.Config{HostClientIDs: []string{"host-client"}, Files: service, FileHandoffs: handoffs, FileExports: exports})
+	config := httpapi.Config{HostClientIDs: []string{"host-client"}, Files: service, FileHandoffs: handoffs, FileExports: exports}
+	handler = httpapi.New(postgres, identity, config)
+	if len(crossNode) > 0 && crossNode[0] {
+		handler = fileOwnerRoutingHandler(t, ctx, postgres, identity, config)
+	}
 	token := func(client, jkt string) string {
 		now := time.Now()
 		return approvalSign(t, issuer, jose.ES256, "file-issuer", "at+jwt", map[string]any{"iss": "https://id.example.edu", "sub": "file-owner", "aud": "urn:dsh-files", "client_id": client, "jti": "file-access-" + client + jkt, "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "scope": "remote.access", "cnf": map[string]any{"jkt": jkt}}, nil)

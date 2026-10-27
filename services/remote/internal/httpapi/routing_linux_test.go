@@ -381,6 +381,27 @@ func TestProductionRoutingPrivateAdmissionAndProxyBudget(t *testing.T) {
 		t.Fatal("private listener accepted missing client certificate")
 	}
 	noCertificate.CloseIdleConnections()
+	// HTTP uses the same node/generation gate and an explicit route allowlist.
+	for _, check := range []struct {
+		path, generation string
+		status           int
+	}{
+		{"/v1/devices", f.nodes["b"].generation, 403},
+		{"/v1/files/" + capacityID(), capacityID(), 503},
+		{"/v1/files/" + capacityID(), f.nodes["b"].generation, 404}, // Files disabled: the normal owner router applies.
+	} {
+		req := request(f.nodes["b"].id, check.generation, route, ticket.Token)
+		req.URL.Path = "/internal/relay/v1/http"
+		req.Header.Set("X-DSH-Relay-Original-Path", check.path)
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != check.status {
+			t.Fatal("private HTTP route bypassed owner admission", response.StatusCode)
+		}
+	}
 	// A correct CA/hostname with the wrong node URI must fail before the ticket
 	// is sent, even if directory metadata points at that other TLS endpoint.
 	if _, err := f.db.ExecContext(f.ctx, `update control_consumers set relay_origin=$2 where node_id=$1`, f.nodes["a"].id, f.nodes["b"].privateOrigin); err != nil {

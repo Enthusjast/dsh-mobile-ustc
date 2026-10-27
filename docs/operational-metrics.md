@@ -83,3 +83,12 @@ go test -run '^$' -bench 'Benchmark(FrameMetrics|RelayMetrics)' \
 ```
 
 这些是本地组件及真实 DSH 组合证据。学校生产、物理手机、目标负载与故障 SLO 未在本轮验收；后续还需覆盖 Host 原始 / 合并事件、命令原生阶段与 checkpoint 失败、审批终态、文件扫描 / 交接与推送结果，并完成认证负载、备份恢复和多节点共享 replay / 路由 / fanout。
+
+## 跨节点补充
+
+[节点路由](relay-routing.md)新增 `dsh_remote_relay_proxy_tunnels`、按固定方向统计的
+`dsh_remote_relay_proxy_inflight_bytes`、`dsh_remote_relay_tunnel_transit_duration_seconds`
+和 `dsh_remote_relay_owner_http_forwards`。入口隧道与 owner 业务连接分别计数；前者包括尚在准入的隧道。
+HTTP 转发上限为 128。隧道时延只覆盖一个入口转发方向，已有 session route 只覆盖 owner
+处理路径；不能相加两个 p95 来宣称完整跨节点 SLO，需认证客户端端到端负载另测。
+共享 DPoP、控制逐节点分发和双节点业务链路已有分阶段证据，目标集群容量、备份恢复和更广故障窗口仍待验收。

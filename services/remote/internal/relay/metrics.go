@@ -26,6 +26,7 @@ var relayMetricDescriptions = []*prometheus.Desc{
 	relayDesc("draining", "One after the relay begins draining."),
 	relayDesc("proxy_tunnels", "Current ingress proxy tunnels, including pending owner admission; distinct from owner sockets."),
 	relayDesc("proxy_inflight_bytes", "Proxy payload bytes held between read and write; no user-space backlog.", "direction"),
+	relayDesc("owner_http_forwards", "Current ingress HTTP requests forwarded to a host owner; budget 128."),
 }
 
 // ConfigureMetrics is called once before serving; the registry and collector
@@ -89,6 +90,7 @@ func (server *Server) Collect(out chan<- prometheus.Metric) {
 	}
 	subscriptions, catalog, options := len(server.subscriptions), server.catalogBytes, server.creationOptionsBytes
 	tunnels := len(server.tunnels)
+	httpForwards := len(server.httpForwards)
 	var inflight [2]int64
 	for tunnel := range server.tunnels {
 		for i := range inflight {
@@ -121,4 +123,5 @@ func (server *Server) Collect(out chan<- prometheus.Metric) {
 	for i, label := range []string{"phone_to_owner", "owner_to_phone"} {
 		out <- prometheus.MustNewConstMetric(relayMetricDescriptions[11], prometheus.GaugeValue, float64(inflight[i]), label)
 	}
+	out <- prometheus.MustNewConstMetric(relayMetricDescriptions[12], prometheus.GaugeValue, float64(httpForwards))
 }

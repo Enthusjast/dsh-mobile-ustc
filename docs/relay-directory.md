@@ -29,5 +29,7 @@ Validated on October 27, 2026 with private PostgreSQL and Go race instrumentatio
 `TestRelayDirectoryFencesConnectionAndNodeReplacement` and
 `TestRelayDirectoryExpiryAndFailedAttachDoNotPublishOwnership` cover cross-node
 resolution, old-close protection, generation fencing, expired leases, endpoint
-reset and rollback under a blocked registry lock. This directory alone does not
-provide an inter-node transport or demonstrate cluster capacity.
+reset and rollback under a blocked registry lock. The production entrypoint now
+uses this repository for every host attachment; [private relay transport and
+owner HTTP routing](relay-routing.md) have separate integration evidence.
+Directory tests alone do not demonstrate cluster capacity.

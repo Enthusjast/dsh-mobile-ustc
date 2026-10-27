@@ -16,3 +16,8 @@ npm run verify
 Android 工程使用 JDK 17 或 21。`npm run test:android` 运行 Kotlin 测试和 Android lint，平台模块需要 SDK 36 / Build Tools 35.0.0；`npm run test:android:core` 验证协议、签名、登录和 HTTPS 共享模块，无需 Android SDK。首次执行需要下载 Gradle 和锁定的 Maven 依赖。
 
 构建 Android 开发 APK：`cd android && ./gradlew :app:assembleDebug`。默认不包含学校配置并禁用登录；[登录与构建说明](docs/android-authentication.md) 说明可信公开配置、测试证据及尚未完成的前台功能。
+
+[跨节点路由](docs/relay-routing.md)已接入共享连接目录和私有双向 TLS。
+`python3 tools/integration/run_remote_dsh.py --cross-node` 验证真实 npm DSH Host
+进入 A、手机 HTTP/WSS 进入 B，包括聊天、问题、审批和撤权；文件另有双实例原生链路测试。
+学校身份、物理设备和目标集群容量仍需独立验收。

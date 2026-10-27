@@ -24,7 +24,7 @@ func TestProtectedFileHandoffToRealNativeDSHAndRevocation(t *testing.T) {
 	if os.Getenv("REMOTE_TEST_CLUSTER_ROOT") == "" {
 		t.Skip("requires explicit isolated PostgreSQL/native DSH runner")
 	}
-	scenarios := []string{"revoke", "message", "reconcile", "reconcile-unknown"}
+	scenarios := []string{"revoke", "message", "reconcile", "reconcile-unknown", "cross-node-message"}
 	if os.Getenv("REMOTE_TEST_KOTLIN_CLASSPATH") != "" {
 		scenarios = append(scenarios, "kotlin")
 	}
@@ -34,7 +34,7 @@ func TestProtectedFileHandoffToRealNativeDSHAndRevocation(t *testing.T) {
 }
 
 func testProtectedFileHandoffNative(t *testing.T, scenario string) {
-	h := newFileHTTPFixture(t)
+	h := newFileHTTPFixture(t, scenario == "cross-node-message")
 	allowFileMessages(t, h)
 	key := approvalKey(t)
 	public, thumb := approvalPublic(t, key)

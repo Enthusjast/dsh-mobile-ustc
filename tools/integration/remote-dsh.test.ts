@@ -201,7 +201,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
       try { if ((await fetch(`${phoneOrigin}/readyz`, { signal: AbortSignal.timeout(500) })).status === 204) return true } catch {}
       return undefined
     }, 'phone ingress readiness')
-    t.diagnostic('Native Host enters node A; all phone WebSockets enter node B and traverse the private mutual-TLS relay tunnel.')
+    t.diagnostic('Native Host enters node A; all phone HTTP/WebSockets enter node B. Live approval HTTP and phone WebSockets traverse the private mutual-TLS owner route.')
   }
   await until(async () => {
     service.check()
@@ -241,7 +241,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
           htm: method, htu: origin + path.split('?')[0], ath: hash(token), jti: proofJTI, iat: now(), nonce,
         })
         const requestBody = typeof body === 'function' ? body(proofJTI) : body
-        const response = await fetch(origin + path, {
+        const response = await fetch((clientId === 'fixture-phone' ? phoneOrigin : origin) + path, {
           method, headers: { authorization: `DPoP ${token}`, dpop: proof, ...(requestBody === undefined ? {} : { 'content-type': 'application/json' }) },
           ...(requestBody === undefined ? {} : { body: JSON.stringify(requestBody) }), signal: AbortSignal.timeout(5000),
         })

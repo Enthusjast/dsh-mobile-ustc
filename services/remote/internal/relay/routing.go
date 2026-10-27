@@ -122,8 +122,14 @@ func (server *Server) resolveDevice(response http.ResponseWriter, request *http.
 	return nil, true
 }
 
-func (server *Server) PrivateRelayHandler() http.Handler {
-	return http.HandlerFunc(server.servePrivateRelay)
+func (server *Server) PrivateRelayHandler(owner ...http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == privateOwnerHTTPPath && len(owner) == 1 {
+			server.servePrivateOwnerHTTP(w, r, owner[0])
+			return
+		}
+		server.servePrivateRelay(w, r)
+	})
 }
 
 func singleHeader(request *http.Request, name string) string {
@@ -136,24 +142,13 @@ func singleHeader(request *http.Request, name string) string {
 
 func (server *Server) servePrivateRelay(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
-	if server.routing == nil || server.routing.ClientTLS == nil || request.Method != "GET" || request.URL.Path != privateRelayPath ||
-		request.URL.RawQuery != "" || request.URL.ForceQuery || request.TLS == nil || len(request.TLS.VerifiedChains) == 0 || len(request.TLS.PeerCertificates) == 0 {
+	if request.Method != "GET" || request.URL.Path != privateRelayPath {
 		writeError(response, http.StatusForbidden, "access.denied")
 		return
 	}
-	node, err := RelayCertificateNode(request.TLS.PeerCertificates[0])
-	if err != nil || node != singleHeader(request, relayNodeHeader) {
-		writeError(response, http.StatusForbidden, "access.denied")
-		return
-	}
-	if err := server.routing.Directory.ValidateRelayNode(request.Context(), node, singleHeader(request, relayGenerationHeader)); err != nil {
-		writeError(response, http.StatusServiceUnavailable, "access.denied")
-		return
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(singleHeader(request, relayRouteHeader))
-	var expected store.RuntimeRoute
-	if err != nil || len(raw) > 4096 || decodePayload(raw, &expected) != nil || expected.RelayNode != server.routing.identity {
-		writeError(response, http.StatusConflict, "runtime.changed")
+	expected, status, code := server.inspectPrivateRoute(request)
+	if status != 0 {
+		writeError(response, status, code)
 		return
 	}
 	identity, err := server.authenticateCredential(request)
@@ -183,7 +178,7 @@ func (server *Server) currentDeviceRoute(ctx context.Context, expected store.Run
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	host := server.hosts[expected.RuntimeID]
-	return host != nil && !host.closing && host.runtimeEpoch == expected.RuntimeEpoch && host.connectionID == expected.ConnectionID
+	return !server.draining && host != nil && !host.closing && host.runtimeEpoch == expected.RuntimeEpoch && host.connectionID == expected.ConnectionID
 }
 
 func (server *Server) proxyDevice(response http.ResponseWriter, request *http.Request, identity peer, route store.RuntimeRoute) {
@@ -211,43 +206,15 @@ func (server *Server) proxyDevice(response http.ResponseWriter, request *http.Re
 		server.mu.Unlock()
 		server.active.Done()
 	}()
-	clientTLS := routing.ClientTLS.Clone()
-	previousVerify := clientTLS.VerifyConnection
-	clientTLS.VerifyConnection = func(state tls.ConnectionState) error {
-		if previousVerify != nil {
-			if err := previousVerify(state); err != nil {
-				return err
-			}
-		}
-		if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
-			return errors.New("relay: unverified owner")
-		}
-		node, err := RelayCertificateNode(state.PeerCertificates[0])
-		if err != nil || node != route.NodeID {
-			return errors.New("relay: wrong owner certificate")
-		}
-		return nil
-	}
-	transport := &http.Transport{TLSClientConfig: clientTLS, Proxy: nil,
-		DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 3 * time.Second, MaxResponseHeaderBytes: 8 << 10}
-	transport.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		dial, stop := context.WithTimeout(ctx, 3*time.Second)
-		defer stop()
-		connection, err := (&tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}, Config: clientTLS}).DialContext(dial, network, address)
-		if err != nil {
-			return nil, err
-		}
+	transport := routing.ownerTransport(route, func(connection net.Conn) error {
 		tunnel.mu.Lock()
+		defer tunnel.mu.Unlock()
 		if tunnel.ctx.Err() != nil {
-			tunnel.mu.Unlock()
-			_ = connection.Close()
-			return nil, net.ErrClosed
+			return net.ErrClosed
 		}
 		tunnel.backClose = forceTransportCloser(connection)
-		tunnel.mu.Unlock()
-		return connection, nil
-	}
+		return nil
+	})
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	raw, _ := json.Marshal(route)
@@ -342,4 +309,43 @@ func (tunnel *relayTunnel) close() {
 	if back != nil {
 		_ = back.CloseNow()
 	}
+}
+
+func (routing *nodeRouting) ownerTransport(route store.RuntimeRoute, capture func(net.Conn) error) *http.Transport {
+	clientTLS := routing.ClientTLS.Clone()
+	previousVerify := clientTLS.VerifyConnection
+	clientTLS.VerifyConnection = func(state tls.ConnectionState) error {
+		if previousVerify != nil {
+			if err := previousVerify(state); err != nil {
+				return err
+			}
+		}
+		if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+			return errors.New("relay: unverified owner")
+		}
+		node, err := RelayCertificateNode(state.PeerCertificates[0])
+		if err != nil || node != route.NodeID {
+			return errors.New("relay: wrong owner certificate")
+		}
+		return nil
+	}
+	transport := &http.Transport{TLSClientConfig: clientTLS, Proxy: nil,
+		DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 3 * time.Second, MaxResponseHeaderBytes: 8 << 10}
+	transport.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dial, stop := context.WithTimeout(ctx, 3*time.Second)
+		defer stop()
+		connection, err := (&tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}, Config: clientTLS}).DialContext(dial, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if capture != nil {
+			if err := capture(connection); err != nil {
+				_ = connection.Close()
+				return nil, err
+			}
+		}
+		return connection, nil
+	}
+	return transport
 }

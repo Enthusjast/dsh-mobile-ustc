@@ -38,3 +38,8 @@ Nonce 与成功消费的 replay tombstone 采用数据库时钟的五分钟期�
 生产入口使用 PostgreSQL 后，同一单节点 3000 连接、200 活跃会话 × 20 Hz、30 秒窗口通过，120000 帧全部送达，准入 6.572 秒，端到端 p95 30.343 ms / p99 64.814 ms，Go route 的 300 ms 桶比例为 1。记录 `.local/shared-proof-3000.log` 与 `.local/relay-capacity/shared-proof-3000/`。这些是该夹具的独立条件，不把前后不同运行的延迟差异归因于单项优化。
 
 本阶段只完成共享认证状态。后续的[持久控制事件逐节点分发](control-fanout.md)另有验证；跨节点连接路由、12000 集群 / 目标 40000 源帧每秒、生产身份与物理设备仍未完成。
+
+后续[跨节点路由](relay-routing.md)已验证两生产进程的 Host / 手机业务链路。
+需要 owner 的 HTTP 在入口只作只读验签选路，原始 DPoP proof 在 owner 的正常 middleware
+原子消费一次；不会将调用方提供的 principal 视为认证，也不允许两次消费后绕过 replay 检查。
+集群容量与恢复仍有独立验收门槛。

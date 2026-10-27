@@ -37,3 +37,7 @@ outbox 250 ms 轮询与原一秒权威连接检查继续独立，128 条批上�
 最终完整回归 `.local/control-fanout-full-final.log` 再次通过，实际 npm DSH 组合约 11.975 秒；`go vet ./...` 通过。开启新 consumer 的生产进程也通过相同单节点 3000 连接、200 活跃会话 × 20 Hz、30 秒：120000 帧全部交付，准入 6.650 秒、客户端 p95 33.134 ms / p99 83.132 ms，Go route 的 300 ms 桶比例为 1，撤权样本 67.09 ms。记录 `.local/control-fanout-3000.log` 与 `.local/relay-capacity/control-fanout-3000/`，报告明确记录 `postgres_per_node_snapshots`，不混写成两节点业务路由负载。
 
 快照检查点属于当前数据库事务历史。安全恢复不能沿用回退 / 异构数据库的旧覆盖状态直接服务，也不能仅清空确认表来恢复；需要先使旧凭据 / 连接失效并同步当前权威状态，再按恢复方案建立检查点。这一恢复演练尚未在本阶段完成。
+
+后续[跨节点业务路由](relay-routing.md)已使用本 registry 的节点 UUID / generation
+发布共享 runtime 连接目录，并通过私有双向 TLS 转交手机连接及 owner HTTP。
+其双节点原生联调独立于本页的控制事件分发测试；本页历史容量仍是单节点结果。

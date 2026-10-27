@@ -136,7 +136,13 @@ func (h *fileHTTPFixture) cleanForHandoff(t *testing.T, data []byte) files.Uploa
 }
 
 func TestFileOfferAndSenderConstrainedHTTPStreamUseCurrentHostConnection(t *testing.T) {
-	h := newFileHTTPFixture(t)
+	for _, crossNode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "single", true: "cross-node"}[crossNode], func(t *testing.T) { testFileOfferAndSenderConstrainedHTTPStream(t, crossNode) })
+	}
+}
+
+func testFileOfferAndSenderConstrainedHTTPStream(t *testing.T, crossNode bool) {
+	h := newFileHTTPFixture(t, crossNode)
 	data := bytes.Repeat([]byte("verified handoff bytes\x00\xff"), 1024)
 	prepared := h.cleanForHandoff(t, data)
 	host := connectFileHost(t, h)
@@ -193,9 +199,12 @@ func TestProtectedHostFileReadCancelsSourceOnCurrentGrantRevocation(t *testing.T
 			testProtectedHostFileReadCancellation(t, headers)
 		})
 	}
+	for _, headers := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cross-node-body", true: "cross-node-headers"}[headers], func(t *testing.T) { testProtectedHostFileReadCancellation(t, headers, true) })
+	}
 }
-func testProtectedHostFileReadCancellation(t *testing.T, headers bool) {
-	h := newFileHTTPFixture(t)
+func testProtectedHostFileReadCancellation(t *testing.T, headers bool, crossNode ...bool) {
+	h := newFileHTTPFixture(t, crossNode...)
 	h.cleanForHandoff(t, []byte("waiting protected source bytes"))
 	host := connectFileHost(t, h)
 	offer := host.offer(t)

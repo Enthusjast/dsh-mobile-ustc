@@ -86,6 +86,7 @@ type Server struct {
 	metrics              *observability.Metrics
 	routing              *nodeRouting
 	tunnels              map[*relayTunnel]struct{}
+	httpForwards         map[*ownerHTTPForward]struct{}
 }
 
 type liveConnection struct {
@@ -583,6 +584,9 @@ func (server *Server) Drain(ctx context.Context) error {
 	tunnels := make([]*relayTunnel, 0, len(server.tunnels))
 	for tunnel := range server.tunnels {
 		tunnels = append(tunnels, tunnel)
+	}
+	for forward := range server.httpForwards {
+		forward.cancel()
 	}
 	server.mu.Unlock()
 	for _, tunnel := range tunnels {

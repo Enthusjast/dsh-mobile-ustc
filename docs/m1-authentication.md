@@ -42,4 +42,13 @@ The [Android development client](android-authentication.md) now implements S256 
 
 The production [shared DPoP repository](shared-dpop-state.md) now atomically consumes nonce/jti and rotates the next nonce in PostgreSQL, with cross-process/restart and unavailable-store tests. This closes the process-local replay prerequisite only; real-school identity, routing, durable control fanout and full milestone acceptance remain separate.
 
-[Per-node control consumption](control-fanout.md) now has independent acknowledgements, commit-visible snapshot coverage, generation fencing and two-production-process revoke/restart evidence. Cross-node content/command routing and cluster workload/failure gates remain unfinished.
+[Per-node control consumption](control-fanout.md) now has independent acknowledgements, commit-visible snapshot coverage, generation fencing and two-production-process revoke/restart evidence. Cross-node content/command routing now has [private node transport and owner HTTP routing](relay-routing.md) evidence; cluster workload/failure gates remain unfinished.
+
+The production entrypoint now publishes fenced runtime routes and transfers a
+phone entering another node to the Host owner over mutual TLS. Approval HTTP,
+Host file downloads and file-status requests also resolve that owner. Routing
+inspection never consumes or substitutes for the original DPoP/file proof;
+normal owner admission still runs once. Actual two-process npm DSH and separate
+two-instance native-file/revoke fixtures passed; see the routing record for
+precise boundaries. No school identity or complete milestone acceptance is
+inferred from these local tests.

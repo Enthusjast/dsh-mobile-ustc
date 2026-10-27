@@ -30,6 +30,24 @@ the certificate chain, hostname, lifetime, usages and node identity. The listene
 binds an explicit literal private or loopback IP. Configure network access so
 only relay nodes can reach it; the public HTTP router has no private RPC route.
 
+The same private endpoint routes an explicit HTTP allowlist: approval decision
+POSTs, host-file content GETs and file-status GETs. The ingress checks JWT/DPoP
+cryptographic possession and current metadata only to select the owner. It does
+not consume the nonce/JTI or attach an authenticated handler context. The owner
+reconstructs the original allowlisted public path and runs the complete normal
+middleware, consuming the original proof once. Caller-supplied principal claims
+are never forwarded as authority. Host-file routing inspects the unconsumed
+ticket and verifies its installation proof; the owner alone redeems the ticket,
+binds the stream to the live host, and checks ongoing file authority.
+
+HTTP forwarding has a separate 128-request budget, a 16 KiB approval body limit,
+an eight-second approval deadline and 64 KiB file-copy buffer. It uses the same
+certificate/node/generation checks, with redirects, ambient HTTP proxies and
+application retries disabled. Drain cancels forwards. Partial upstream files
+abort the response; no successful complete-file result is manufactured.
+File registration/commit can temporarily return a conservative `waiting` hint;
+subsequent file-status requests resolve the owner's current staged-ack hint.
+
 Both sides verify certificate chains and node URI identity. The receiver checks
 the caller's current database generation and lease, its own exact target
 identity, and the committed runtime epoch/connection. The device still proves
@@ -59,6 +77,7 @@ checks retain their existing independent fail-closed deadlines.
 Metrics distinguish `dsh_remote_relay_proxy_tunnels` and directional
 `dsh_remote_relay_proxy_inflight_bytes` from owner sockets. The directional
 `dsh_remote_relay_tunnel_transit_duration_seconds` measures one proxy leg.
+`dsh_remote_relay_owner_http_forwards` reports the separate active HTTP budget.
 The existing session route histogram measures the owner handler; it excludes
 the added ingress leg. Quantiles must not be added or presented as complete
 cross-node end-to-end latency. No resource identity or body appears in labels.
@@ -73,11 +92,21 @@ Validated October 27, 2026:
   race/private-PostgreSQL suite and the actual installed npm DSH 0.2.1-rc.2
   composition. Host entered A; every phone WebSocket entered B. Native session
   creation, chat, history, cancel/archive, questions, signed approval decisions,
-  grant invalidation and the database body boundary passed. REST entered A in
-  this fixture. Identity/model were local fixtures; no TokenWorks was attempted.
+  grant invalidation and the database body boundary passed. The final fixture
+  sends every phone HTTP/WebSocket to B, including approval submissions.
+  Identity/model were local fixtures; no TokenWorks was attempted.
+- Separate file tests run two independent production API/relay instances with
+  private mutual TLS, a shared private PostgreSQL database and explicit local
+  object/scanner/issuer peers. Host WSS enters A; phone HTTP/WSS and Host file
+  downloads enter B. Real npm DSH stages the attachment, creates its native
+  receipt and admits the file message once. Wrong-key and repeated file reads
+  are denied; revoke cancels the source both before headers and during its body.
+  These file cases run as two API instances in one test process, distinct from
+  the two-production-process native chat/approval composition.
 
-This stage provides WebSocket affinity. REST approval decisions and host-file
-downloads still require their owner process; generic REST load balancing is not
-yet accepted. The native fixture does not exercise cross-node file transfers,
-physical Android devices, school SSO, OEM push, 12000 connections or the target
-2000 active sessions × 20 Hz workload.
+Final evidence: `.local/relay-routing-full-final.log` passed the complete Go
+race/private-PostgreSQL suite and the cross-node production/native composition
+(about 11.509 seconds for native); `.local/relay-owner-files-first.log` records
+the focused native-file/read/revoke scenarios. `go vet ./...` and TypeScript
+check passed. These fixtures do not establish physical Android, school SSO,
+OEM push, 12000 connections or 2000 active sessions × 20 Hz capacity.
