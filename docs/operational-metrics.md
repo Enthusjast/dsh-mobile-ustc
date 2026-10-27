@@ -36,7 +36,7 @@ REMOTE_METRICS_LISTEN_ADDR=127.0.0.1:9090 go run ./cmd/remote
 | `relay_protocol_errors_total{class}` / `relay_resyncs_total` | 固定类别的协议错误尝试，以及要求重同步的错误 / 订阅失效次数 |
 | `command_forward_duration_seconds{result}` | 已登记命令的当前租约复查、转发和回执处理；区分 forwarded / duplicate / denied / queue_full / unknown / reconcile_unavailable |
 | `relay_revoked_connections_total{role,reason}` | 选中进行授权失效处理的连接，每个连接最多累计一次；区分 access_revoked / authority_unavailable |
-| `control_run_duration_seconds{worker,result}` | outbox / leases 两个独立 worker 的尝试耗时，区分 ok / error / cancelled |
+| `control_run_duration_seconds{worker,result}` | outbox / leases / consumer 所有权 / consumer_cleanup 的独立尝试耗时，区分 ok / error / cancelled |
 | `control_available{worker}` | 最近一次尝试成功为 1，失败或首次成功前为 0；停止时取消不更新可用性 |
 | `control_last_success_timestamp_seconds{worker}` | 最近成功的 Unix 时间，尚未成功为 0 |
 | `control_events_total{topic,result}` | 本进程 apply_error / ack_error / published 尝试数；重试不等同新的业务事件 |
@@ -52,6 +52,8 @@ frame 指项目协议的完整 WebSocket message，不是底层线缆分片；�
 session 路由时间由服务内部单调时钟记录，入口时间不接受远端字段且不写入协议。只观察成功写出的帧，失败 / 重同步需结合其他指标及负载的完整投递检查。300 ms 桶用于指定负载预算；详细条件和真实 TLS 客户端计时见[认证容量样本](authenticated-capacity.md)。
 
 控制事件年龄包含轮询积压、处理、通知 / 连接关闭及数据库确认。它只证明当前单进程处理窗口，不能代替手机实际收到通知、原生副作用停止或多节点传播的测量。未来时间单独计数；不把时钟偏差截成零延迟。控制 worker 与授权失败关闭行为保持独立，指标不延长任何租约。
+
+采用[逐节点确认](control-fanout.md)后，各进程独立记录该窗口；实例之间需在采集端区分，不能把首个实例的成功当作全节点完成。节点失去 consumer 所有权时停止服务，`consumer_cleanup` 失败单独报告。
 
 ## 采集示例
 

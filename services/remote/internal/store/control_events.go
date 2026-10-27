@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"time"
 )
@@ -31,6 +32,10 @@ func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
 	}
+	return readControlEvents(rows)
+}
+
+func readControlEvents(rows *sql.Rows) ([]ControlEvent, error) {
 	defer rows.Close()
 	events := []ControlEvent{}
 	for rows.Next() {

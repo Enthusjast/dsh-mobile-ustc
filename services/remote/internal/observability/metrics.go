@@ -79,7 +79,7 @@ func New() *Metrics {
 		m.writtenFrames.WithLabelValues(role)
 		m.writtenBytes.WithLabelValues(role)
 	}
-	for _, worker := range []string{"outbox", "leases"} {
+	for _, worker := range []string{"outbox", "leases", "consumer", "consumer_cleanup"} {
 		m.controlReady.WithLabelValues(worker).Set(0)
 		m.controlSuccess.WithLabelValues(worker).Set(0)
 	}
@@ -213,7 +213,7 @@ func (m *Metrics) ControlRun(worker, result string, elapsed time.Duration) {
 	if m == nil {
 		return
 	}
-	worker, result = fixed(worker, "outbox", "leases"), fixed(result, "ok", "error", "cancelled")
+	worker, result = fixed(worker, "outbox", "leases", "consumer", "consumer_cleanup"), fixed(result, "ok", "error", "cancelled")
 	m.controlRuns.WithLabelValues(worker, result).Observe(elapsed.Seconds())
 	if result == "ok" {
 		m.controlReady.WithLabelValues(worker).Set(1)

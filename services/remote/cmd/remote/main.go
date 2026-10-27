@@ -106,6 +106,17 @@ func run() error {
 		return err
 	}
 	handler := httpapi.New(database, verifier, apiConfig)
+	consumer, err := database.NewControlConsumer(context.Background(), strings.TrimSpace(os.Getenv("REMOTE_RELAY_NODE_ID")))
+	if err != nil {
+		return errors.New("remote control consumer is unavailable or already active")
+	}
+	defer func() {
+		release, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := consumer.Release(release); err != nil {
+			log.Print("remote control consumer release unavailable=true")
+		}
+	}()
 	metricsEndpoint, err := startMetricsEndpoint(metricsAddress, metrics)
 	if err != nil {
 		return err
@@ -124,9 +135,15 @@ func run() error {
 	defer stop()
 	controlCtx, stopControl := context.WithCancel(ctx)
 	controlDone := make(chan struct{})
+	controlFailure := make(chan error, 1)
 	proofsDone := make(chan struct{})
 	go func() { defer close(proofsDone); proofs.Run(controlCtx) }()
-	go func() { defer close(controlDone); control.Run(controlCtx, database, handler, metrics) }()
+	go func() {
+		defer close(controlDone)
+		if err := control.RunConsumer(controlCtx, consumer, handler, metrics); err != nil {
+			controlFailure <- err
+		}
+	}()
 	filesDone := make(chan struct{})
 	if fileRuntime != nil {
 		go func() { defer close(filesDone); fileRuntime.service.Run(controlCtx) }()
@@ -187,6 +204,14 @@ func run() error {
 			return fmt.Errorf("remote metrics failed and realtime drain failed: %w", err)
 		}
 		return errors.New("remote metrics listener failed")
+	case <-controlFailure:
+		_ = server.Close()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := handler.Drain(shutdown); err != nil {
+			return fmt.Errorf("remote control consumer failed and realtime drain failed: %w", err)
+		}
+		return errors.New("remote control consumer authority unavailable")
 	}
 }
 

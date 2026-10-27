@@ -317,6 +317,8 @@ func TestAuthenticatedRelayCapacity(t *testing.T) {
 		"database_max_connections": 30, "native_model_processes": 0, "go_version": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "started_at": time.Now().UTC().Format(time.RFC3339)}
 	report["serializable_admissions"] = store.DefaultSerializableAdmissions
 	report["proof_state_backend"] = "postgres"
+	report["control_state_backend"] = "postgres_per_node_snapshots"
+	report["control_node_identity"] = "ephemeral"
 	report["proof_buckets"], report["proof_entries_per_bucket"] = 256, store.DefaultProofEntriesPerBucket
 	report["thresholds"] = map[string]any{"delivery_p95_ms": 500, "source_max_lag_ms": 250, "final_delivery_wait_seconds": 5, "revocation_seconds": 5, "admission_seconds": 120}
 	report["workload"] = map[string]any{"fanout": 1, "merge_window_ms": 0, "source_schedule": "phase-spread fixed interval", "directory": "preprovisioned fixture users, devices and approved runtimes", "identity": "local signed issuer with real resource/DPoP/registered-key verification"}
