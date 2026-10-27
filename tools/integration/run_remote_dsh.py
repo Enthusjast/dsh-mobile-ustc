@@ -7,15 +7,25 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import re
 
 
 def main():
     arguments = argparse.ArgumentParser()
     arguments.add_argument("--kotlin-relay", action="store_true", help="Also run the actual Kotlin Relay client against Go/PostgreSQL over TLS")
     arguments.add_argument("--android-relay", metavar="SERIAL", help="Run the APK/Go/DSH composition on an explicitly owned emulator")
+    arguments.add_argument("--android-upgrade", metavar="SERIAL", help="Run actual full APK self-upgrade with host OIDC/API surviving replacement")
+    arguments.add_argument("--upgrade-receipt", type=Path, help="Verified full-executable version-2 fixture receipt")
     arguments.add_argument("--android-avd", default="dsh-remote-api26", help="Exact owned AVD identity for the Android composition")
     arguments.add_argument("--go-run", metavar="REGEX", help="Run matching Go cases in the isolated cluster, without the separate Node composition")
     options = arguments.parse_args()
+    if options.android_upgrade is not None and (not re.fullmatch(r"emulator-[0-9]+", options.android_upgrade) or not re.fullmatch(r"dsh-remote-api(?:26|36)", options.android_avd)):
+        arguments.error("--android-upgrade requires an exact dedicated test AVD")
+    if options.android_upgrade and (options.android_relay or options.kotlin_relay or options.go_run or not options.upgrade_receipt):
+        arguments.error("--android-upgrade requires --upgrade-receipt and its own composition invocation")
+    if options.upgrade_receipt and not options.android_upgrade:
+        arguments.error("--upgrade-receipt requires --android-upgrade")
+    android_serial = options.android_upgrade or options.android_relay
     if options.android_relay is not None and not options.android_relay:
         arguments.error("An explicit nonempty owned-emulator serial is required")
     if options.android_relay and options.kotlin_relay:
@@ -26,15 +36,15 @@ def main():
     kotlin_classpath = None
     java = None
     adb = None
-    if options.android_relay:
+    if android_serial:
         adb = os.environ.get("REMOTE_TEST_ADB") or str(repo / ".local/android-sdk/platform-tools/adb")
         if not Path(adb).is_file():
             adb = shutil.which("adb")
         if not adb:
             raise SystemExit("Set REMOTE_TEST_ADB to the installed Android platform-tools adb.")
         subprocess.run([str(repo / "android/gradlew"), "--no-daemon", "--max-workers=1", "-Pkotlin.compiler.execution.strategy=in-process", ":app:assembleDebug", ":app:assembleDebugAndroidTest"], cwd=repo / "android", check=True)
-        name = subprocess.run([adb, "-s", options.android_relay, "emu", "avd", "name"], check=True, capture_output=True, text=True, timeout=15).stdout.splitlines()[0]
-        if name != options.android_avd or not options.android_relay.startswith("emulator-"):
+        name = subprocess.run([adb, "-s", android_serial, "emu", "avd", "name"], check=True, capture_output=True, text=True, timeout=15).stdout.splitlines()[0]
+        if name != options.android_avd or not android_serial.startswith("emulator-"):
             raise SystemExit("The Android composition requires the exact dedicated owned AVD.")
     if options.kotlin_relay:
         java = shutil.which("java")
@@ -63,12 +73,18 @@ def main():
             for migration in sorted((repo / "deploy/sql").glob("*.up.sql")):
                 subprocess.run([str(pg_bin / "psql"), "-X", "--dbname", dsn, "-v", "ON_ERROR_STOP=1", "-q", "-f", str(migration)], check=True, stdout=subprocess.DEVNULL)
             subprocess.run([go, "build", "-o", str(binary), "./cmd/remote"], cwd=repo / "services/remote", check=True)
-            subprocess.run(["npm", "run", "build"], cwd=repo, check=True)
+            if not options.android_upgrade:
+                subprocess.run(["npm", "run", "build"], cwd=repo, check=True)
             env = dict(os.environ, REMOTE_TEST_CLUSTER_ROOT=root, REMOTE_TEST_DATABASE_URL=dsn,
                        REMOTE_TEST_PSQL=str(pg_bin / "psql"), REMOTE_TEST_PG_DUMP=str(pg_bin / "pg_dump"), REMOTE_TEST_SERVICE_BIN=str(binary))
             # Activation is explicit per invocation, never inherited from a prior run.
-            for field in ("REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC"):
+            for field in ("REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC", "REMOTE_TEST_ANDROID_UPGRADE_SERIAL", "REMOTE_TEST_ANDROID_UPGRADE_RECEIPT"):
                 env.pop(field, None)
+            if options.android_upgrade:
+                env.update(REMOTE_TEST_ANDROID_UPGRADE_SERIAL=options.android_upgrade, REMOTE_TEST_ANDROID_AVD=options.android_avd,
+                           REMOTE_TEST_ADB=adb, REMOTE_TEST_ANDROID_UPGRADE_RECEIPT=str(options.upgrade_receipt.resolve()))
+                return subprocess.run([go, "test", "-race", "-count=1", "-v", "-timeout=30m", "-run", "^TestAndroidAppSelfUpgradePreservesIdentityAndData$", "./internal/httpapi"],
+                                      cwd=repo / "services/remote", env=env).returncode
             if options.android_relay:
                 env.update(REMOTE_TEST_ANDROID_SERIAL=options.android_relay, REMOTE_TEST_ANDROID_AVD=options.android_avd,
                            REMOTE_TEST_ADB=adb, REMOTE_TEST_ANDROID_BIOMETRIC="1")
