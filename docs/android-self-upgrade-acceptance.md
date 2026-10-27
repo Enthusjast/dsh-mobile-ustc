@@ -19,4 +19,29 @@
 - 安装后原账号、设备与两把密钥指纹比较通过，但 SQLCipher 数据库页 HMAC 校验失败，因此整体验收失败，日志 `.local/app-self-upgrade-api36-sixth.log` 和 `.local/app-self-upgrade-post-first-logcat.txt`。
 - 独立并发首次打开复现出存储建立竞态，已另行修复和回归，见[数据库建立约束](android-database-setup.md)。需重新使用修复后的基线和 v2 完成整条链路，不能把原失败批次改记为通过。
 
-当前验收框架已编译且完成上述实际阶段，完整成功仍待重跑。系统 UI 在软件模拟下的冷启动 ANR、来源权限恢复、宿主时间长间隔及正常 / 失败退出的日志均需保留；这些夹具不代表学校生产、目标 OEM 或冷启动性能验收。
+原第六轮的失败结论保持不变。系统 UI 在软件模拟下的冷启动 ANR、来源权限恢复、宿主时间长间隔及正常 / 失败退出的日志均需保留；这些夹具不代表学校生产、目标 OEM 或冷启动性能验收。
+
+## 2026-10-27 修复后 API 36 完整通过
+
+专用 `dsh-remote-api36` / `emulator-5596` 使用保留 userdata 的调试基线准备后，完成一次新的系统 v1→v2 自升级。准备操作仅针对已核对 AVD、DEBUGGABLE、已安装完整摘要及同一签名的测试包；显式 `adb install -r -d` 恢复 v1 前后，68 个持久私有文件的路径 / 内容组合摘要相同，原失败批次的数据没有删除。这不是产品降级能力，也不是本轮升级成功的依据。准备记录为 `.local/app-self-upgrade-fixed-baseline-restoration.json`。
+
+本轮使用 `.local/apk-upgrade/pinned-baseline-fixed-v2/fixture.json` 的两份固定完整 APK：
+
+| 工件 | versionCode | 完整 SHA-256 |
+| --- | --- | --- |
+| 修复后基线 | 1 | `01cde7360665592066938364abce815651323a4c83939fdf52157462808ed773` |
+| 修复后候选及实际安装包 | 2 | `b86f2310c82b75e971dbb3aaa97e5024ce4827a26a75407d614599b92a9939b2` |
+
+证书摘要仍为 `e2a2a295e9b3365ecc68befd446aa7a4dd7edd19e2bb37f67d2a9061db7049d5`。候选生产代码包含并发建立修复；夹具收据准确保留构建时的 Git 提交和未提交测试工具变更。两份保留工件在后续正常 Gradle 构建后重新验签 / 核对仍一致。
+
+执行命令：
+
+```sh
+python3 tools/integration/run_remote_dsh.py \
+  --android-upgrade emulator-5596 --android-avd dsh-remote-api36 \
+  --upgrade-receipt .local/apk-upgrade/pinned-baseline-fixed-v2/fixture.json
+```
+
+外层 Go/PostgreSQL 用例 `TestAndroidAppSelfUpgradePreservesIdentityAndData` 在 229.18 秒内通过，日志 `.local/app-self-upgrade-fixed-api36-second.log`。原生两阶段证据为 `.local/app-self-upgrade/299c43fa-0ace-46cd-96b3-6554e5638c6a/`，安装后独立方法通过，耗时 48.919 秒。它证明系统来源设置往返、用户确认完整 APK 替换、旧进程实际死亡、精确安装字节、原账号 / 用户 / 设备 / 两把密钥指纹、SQLCipher 原请求 / 摘要 / 尝试次数 1 / RECONCILE 状态，以及生产更新页的 INSTALLED 核对全部成立。外层随后验证同一活跃设备数据库记录、恰好一次匿名下载和至少三次发行复查。
+
+来源 app-op 恢复为原 `default`，本轮 adb reverse 已移除；可见 preview 与其 watcher 持续运行。软件模拟设备使用已准备的系统 / 应用缓存，测试前实际出现过 System UI ANR 并选择正常 Wait，因此本记录不证明冷启动性能。最低 API 26 的完整自升级、物理设备 / OEM、公网与生产签名发行仍需分别验证。

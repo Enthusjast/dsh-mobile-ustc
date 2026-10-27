@@ -67,3 +67,5 @@ API 36 测试机原先没有锁屏和指纹。为真实账号密钥夹具设置�
 API 36 首轮同样有 41/42 项通过，篡改包收到 `update.download_failed`，对应 `.local/app-update-product-api36-device.log`。HTTP 失败监听器未报告传输异常，因此进一步保留底层 cause，并在协调器提供默认关闭的诊断观察器供测试捕获；未将其改成成功或跳过验签。后续一次 8 项诊断批次有 7 项通过，另一项在登录恢复阶段失败；日志显示该用例横跨 04:50 到 07:31，记录为 `.local/app-update-download-root-api36-device.log` 和 `.local/app-update-root-time-api36.txt`。这批次不能作为完整通过证据，也不足以证明原始下载异常原因。上述完整 42 项与 20 次有界复测通过，间歇异常仍保留为未确定原因的限制。
 
 完整可执行 v2 的独立构建与验收边界见[升级夹具](android-app-upgrade-fixtures.md)。
+
+后续[两阶段真实自升级](android-self-upgrade-acceptance.md)已在 API 36 完成系统来源设置往返、完整应用替换和旧进程死亡后的账号 / 密钥 / SQLCipher 恢复。该记录保留了先前实际失败及修复后的独立成功批次；最低平台、OEM 和生产发行的结论分别记录。

@@ -13,4 +13,4 @@
 - API 36 的全部 10 项 CommandPersistenceTest 通过，记录 `.local/app-data-persistence-fixed-api36.log`，覆盖加密重开、并发请求、隔离、丢失密钥、撤权 / 清理和原始命令恢复。
 - 完整 Gradle check 和 app/test 构建通过，记录 `.local/app-data-concurrent-setup-fix-build.log`。
 
-这些结果证明并发建立回归已修复；原首次自升级的 Room 失败不能改记为通过。需要用修复后的基线与 v2 重新完成真实安装和数据恢复验收。
+这些结果证明并发建立回归已修复；原首次自升级的 Room 失败不能改记为通过。随后使用修复后基线与完整 v2 的新批次已通过 API 36 真实系统安装、进程替换和原加密数据恢复，具体摘要、命令与证据见[两阶段自升级验收](android-self-upgrade-acceptance.md)。这不恢复原批次已经丢失的数据库密钥，也不替代最低 API 26 或物理设备的验收。
