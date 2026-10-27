@@ -22,7 +22,15 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	operation := run
+	if len(os.Args) > 1 {
+		if os.Args[1] == "recovery" {
+			operation = func() error { return runRecoveryCommand(os.Args[2:], os.Stdout) }
+		} else {
+			operation = func() error { return errors.New("remote service arguments are invalid") }
+		}
+	}
+	if err := operation(); err != nil {
 		log.Print(err)
 		os.Exit(1)
 	}
@@ -43,6 +51,14 @@ func run() error {
 		return errors.New("remote service database is unavailable or insecurely configured")
 	}
 	defer database.Close()
+	recovery, err := database.NewRecoveryGuard(context.Background(), os.Getenv("REMOTE_DATABASE_EPOCH"))
+	if err != nil {
+		return errors.New("remote service database recovery is unavailable or deployment epoch does not match")
+	}
+	scope, err = auth.ProofScopeInEpoch(scope, recovery.Epoch())
+	if err != nil {
+		return errors.New("remote service proof epoch is invalid")
+	}
 	proofLimit := store.DefaultProofEntriesPerBucket
 	if configured := strings.TrimSpace(os.Getenv("REMOTE_DPOP_ENTRIES_PER_BUCKET")); configured != "" {
 		parsed, err := strconv.Atoi(configured)
@@ -64,6 +80,8 @@ func run() error {
 		PublicOrigin:     os.Getenv("REMOTE_PUBLIC_ORIGIN"),
 		MaxTokenLifetime: 15 * time.Minute,
 		Proofs:           proofs,
+		DatabaseEpoch:    recovery.Epoch(),
+		MinimumIssuedAt:  recovery.TokenNotBefore(),
 	})
 	if err != nil {
 		return fmt.Errorf("remote service identity configuration is invalid: %w", err)
@@ -138,7 +156,7 @@ func run() error {
 	if err := handler.ConfigureRouting(routingConfig); err != nil {
 		return errRelayConfiguration
 	}
-	privateEndpoint, err := startRelayEndpoint(relayConfig, handler.PrivateRelayHandler())
+	privateEndpoint, err := startRelayEndpoint(relayConfig, recovery.Middleware(handler.PrivateRelayHandler()))
 	if err != nil {
 		return err
 	}
@@ -156,7 +174,7 @@ func run() error {
 	defer metricsEndpoint.close()
 	server := &http.Server{
 		Addr:              envOr("REMOTE_LISTEN_ADDR", "127.0.0.1:8080"),
-		Handler:           handler,
+		Handler:           recovery.Middleware(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -168,6 +186,14 @@ func run() error {
 	controlCtx, stopControl := context.WithCancel(ctx)
 	controlDone := make(chan struct{})
 	controlFailure := make(chan error, 1)
+	recoveryDone := make(chan struct{})
+	recoveryFailure := make(chan error, 1)
+	go func() {
+		defer close(recoveryDone)
+		if err := recovery.Run(controlCtx); err != nil {
+			recoveryFailure <- err
+		}
+	}()
 	proofsDone := make(chan struct{})
 	go func() { defer close(proofsDone); proofs.Run(controlCtx) }()
 	go func() {
@@ -188,7 +214,14 @@ func run() error {
 	} else {
 		close(pushDone)
 	}
-	defer func() { stopControl(); <-controlDone; <-filesDone; <-pushDone; <-proofsDone }()
+	defer func() {
+		stopControl()
+		<-controlDone
+		<-filesDone
+		<-pushDone
+		<-proofsDone
+		<-recoveryDone
+	}()
 	result := make(chan error, 1)
 	go func() { result <- server.ListenAndServe() }()
 	select {
@@ -200,11 +233,7 @@ func run() error {
 		// open while waiting for a host that has not yet been drained.
 		drained := make(chan error, 1)
 		go func() {
-			var drainErr error
-			if drainer, ok := server.Handler.(interface{ Drain(context.Context) error }); ok {
-				drainErr = drainer.Drain(shutdown)
-			}
-			drained <- drainErr
+			drained <- handler.Drain(shutdown)
 		}()
 		shutdownErr := server.Shutdown(shutdown)
 		drainErr := <-drained
@@ -252,6 +281,14 @@ func run() error {
 			return fmt.Errorf("remote private relay failed and realtime drain failed: %w", err)
 		}
 		return errors.New("remote private relay listener failed")
+	case <-recoveryFailure:
+		_ = server.Close()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := handler.Drain(shutdown); err != nil {
+			return fmt.Errorf("remote recovery fence failed and realtime drain failed: %w", err)
+		}
+		return errors.New("remote service database recovery authority unavailable")
 	}
 }
 

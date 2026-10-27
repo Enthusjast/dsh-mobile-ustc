@@ -43,3 +43,8 @@ Nonce 与成功消费的 replay tombstone 采用数据库时钟的五分钟期�
 需要 owner 的 HTTP 在入口只作只读验签选路，原始 DPoP proof 在 owner 的正常 middleware
 原子消费一次；不会将调用方提供的 principal 视为认证，也不允许两次消费后绕过 replay 检查。
 集群容量与恢复仍有独立验收门槛。
+
+[数据库恢复隔离](database-recovery.md)现以迁移 021 和数据库代次区分 proof 命名空间。
+恢复时必须在备份外生成新 `REMOTE_DATABASE_EPOCH`、隔离旧授权并导入当前身份清单。
+旧 proof 记录保留，新资源不消费旧 nonce；生产部署需要相同外部代次和资源配置。
+本地有真实跨集群 dump/restore 证据，生产加密备份、学校身份和 RPO/RTO 仍未验收。

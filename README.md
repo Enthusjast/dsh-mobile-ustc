@@ -21,3 +21,6 @@ Android 工程使用 JDK 17 或 21。`npm run test:android` 运行 Kotlin 测试
 `python3 tools/integration/run_remote_dsh.py --cross-node` 验证真实 npm DSH Host
 进入 A、手机 HTTP/WSS 进入 B，包括聊天、问题、审批和撤权；文件另有双实例原生链路测试。
 学校身份、物理设备和目标集群容量仍需独立验收。
+
+[恢复隔离工具](docs/database-recovery.md)可在真实数据库恢复后吊销旧远控权限、隔离服务，
+导入当前身份清单后按新部署代次重新开放；已有跨 PostgreSQL 集群和生产入口的小型夹具验证。

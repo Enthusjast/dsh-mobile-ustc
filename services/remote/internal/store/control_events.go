@@ -26,7 +26,7 @@ func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) (
 	}
 	rows, err := postgres.DB.QueryContext(ctx, `
 		select id::text, topic, payload, created_at from control_outbox
-		where published_at is null and topic in ('device.revoked', 'runtime_grant.updated', 'runtime_grant.revoked',
+		where published_at is null and database_epoch=(select epoch from remote_recovery_state where slot=1 and phase='ready') and topic in ('device.revoked', 'runtime_grant.updated', 'runtime_grant.revoked',
 		    'approval.pending', 'approval.decided', 'approval.ended', 'approval.result', 'approval.authorization.prepared', 'approval.device.revoked')
 		order by created_at, id limit $1`, limit)
 	if err != nil {
@@ -85,7 +85,7 @@ func (postgres *Postgres) MarkControlEventPublished(ctx context.Context, id stri
 	if !grantUUIDPattern.MatchString(id) {
 		return ErrGrantInvalid
 	}
-	_, err := postgres.DB.ExecContext(ctx, `update control_outbox set published_at = clock_timestamp() where id = $1 and published_at is null`, id)
+	_, err := postgres.DB.ExecContext(ctx, `update control_outbox set published_at = clock_timestamp() where id = $1 and published_at is null and database_epoch=(select epoch from remote_recovery_state where slot=1 and phase='ready')`, id)
 	if err != nil {
 		return ErrDatabaseUnavailable
 	}

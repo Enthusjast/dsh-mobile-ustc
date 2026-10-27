@@ -14,6 +14,7 @@ type ControlConsumer struct {
 	postgres         *Postgres
 	node, generation string
 	durable          bool
+	databaseEpoch    string
 }
 
 func (consumer *ControlConsumer) NodeID() string { return consumer.node }
@@ -32,6 +33,10 @@ func (postgres *Postgres) NewControlConsumer(ctx context.Context, node string) (
 		return nil, ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
+	state, err := lockRecoveryReady(ctx, transaction, "")
+	if err != nil {
+		return nil, err
+	}
 	var generated, generation string
 	if err := transaction.QueryRowContext(ctx, `select gen_random_uuid()::text,gen_random_uuid()::text`).Scan(&generated, &generation); err != nil {
 		return nil, ErrDatabaseUnavailable
@@ -44,9 +49,10 @@ func (postgres *Postgres) NewControlConsumer(ctx context.Context, node string) (
 		return nil, ErrDatabaseUnavailable
 	}
 	var previous string
+	var previousEpoch string
 	var until, now time.Time
 	var previousDurable bool
-	if err := transaction.QueryRowContext(ctx, `select generation::text,lease_until,durable from control_consumers where node_id=$1 for update`, node).Scan(&previous, &until, &previousDurable); err != nil {
+	if err := transaction.QueryRowContext(ctx, `select generation::text,lease_until,durable,database_epoch::text from control_consumers where node_id=$1 for update`, node).Scan(&previous, &until, &previousDurable, &previousEpoch); err != nil {
 		return nil, ErrDatabaseUnavailable
 	}
 	if err := transaction.QueryRowContext(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
@@ -55,21 +61,28 @@ func (postgres *Postgres) NewControlConsumer(ctx context.Context, node string) (
 	if previousDurable != durable {
 		return nil, ErrDatabaseConfig
 	}
+	if previous == generation && previousEpoch != state.Epoch {
+		return nil, ErrRecoveryUnavailable
+	}
 	if previous != generation {
 		if until.After(now) {
 			return nil, ErrControlConsumerInUse
 		}
-		if _, err := transaction.ExecContext(ctx, `update control_consumers set generation=$2,lease_until=clock_timestamp()+interval '10 seconds',renewed_at=clock_timestamp(),relay_origin=null where node_id=$1`, node, generation); err != nil {
+		if _, err := transaction.ExecContext(ctx, `update control_consumers set generation=$2,lease_until=clock_timestamp()+interval '10 seconds',renewed_at=clock_timestamp(),relay_origin=null,
+            coverage=case when database_epoch<>$3::uuid then pg_current_snapshot() else coverage end,database_epoch=$3 where node_id=$1`, node, generation, state.Epoch); err != nil {
 			return nil, ErrDatabaseUnavailable
 		}
 	}
 	if err := transaction.Commit(); err != nil {
 		return nil, ErrDatabaseUnavailable
 	}
-	return &ControlConsumer{postgres, node, generation, durable}, nil
+	return &ControlConsumer{postgres: postgres, node: node, generation: generation, durable: durable, databaseEpoch: state.Epoch}, nil
 }
 
 func (consumer *ControlConsumer) lock(ctx context.Context, transaction *sql.Tx) (string, error) {
+	if _, err := lockRecoveryReady(ctx, transaction, consumer.databaseEpoch); err != nil {
+		return "", err
+	}
 	var generation, coverage string
 	var until, now time.Time
 	err := transaction.QueryRowContext(ctx, `select generation::text,coverage::text,lease_until from control_consumers where node_id=$1 for update`, consumer.node).Scan(&generation, &coverage, &until)
@@ -137,10 +150,10 @@ func (consumer *ControlConsumer) PendingControlEvents(ctx context.Context, limit
 		return nil, ErrDatabaseUnavailable
 	}
 	rows, err := transaction.QueryContext(ctx, `select event.id::text,event.topic,event.payload,event.created_at from control_outbox event
-        where event.producer_xid>=pg_snapshot_xmin($2::pg_snapshot) and not pg_visible_in_snapshot(event.producer_xid,$2::pg_snapshot)
+		where event.database_epoch=$4 and event.producer_xid>=pg_snapshot_xmin($2::pg_snapshot) and not pg_visible_in_snapshot(event.producer_xid,$2::pg_snapshot)
           and event.topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked','approval.pending','approval.decided','approval.ended','approval.result','approval.authorization.prepared','approval.device.revoked')
           and not exists(select 1 from control_event_acks ack where ack.node_id=$1 and ack.event_id=event.id)
-        order by event.created_at,event.id limit $3`, consumer.node, coverage, limit)
+		order by event.created_at,event.id limit $3`, consumer.node, coverage, limit, consumer.databaseEpoch)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
 	}
@@ -153,7 +166,7 @@ func (consumer *ControlConsumer) PendingControlEvents(ctx context.Context, limit
 			return nil, ErrDatabaseUnavailable
 		}
 		if _, err := transaction.ExecContext(ctx, `delete from control_event_acks where ctid in
-            (select ack.ctid from control_event_acks ack join control_outbox event on ack.event_id=event.id where ack.node_id=$1 and pg_visible_in_snapshot(event.producer_xid,$2::pg_snapshot) limit 512)`, consumer.node, next); err != nil {
+            (select ack.ctid from control_event_acks ack join control_outbox event on ack.event_id=event.id where ack.node_id=$1 and event.database_epoch=$3 and pg_visible_in_snapshot(event.producer_xid,$2::pg_snapshot) limit 512)`, consumer.node, next, consumer.databaseEpoch); err != nil {
 			return nil, ErrDatabaseUnavailable
 		}
 	}
@@ -177,7 +190,7 @@ func (consumer *ControlConsumer) MarkControlEventPublished(ctx context.Context, 
 		return err
 	}
 	var covered bool
-	if err := transaction.QueryRowContext(ctx, `select pg_visible_in_snapshot(producer_xid,$2::pg_snapshot) from control_outbox where id=$1`, id, coverage).Scan(&covered); errors.Is(err, sql.ErrNoRows) {
+	if err := transaction.QueryRowContext(ctx, `select pg_visible_in_snapshot(producer_xid,$2::pg_snapshot) from control_outbox where id=$1 and database_epoch=$3`, id, coverage, consumer.databaseEpoch).Scan(&covered); errors.Is(err, sql.ErrNoRows) {
 		return ErrGrantInvalid
 	} else if err != nil {
 		return ErrDatabaseUnavailable

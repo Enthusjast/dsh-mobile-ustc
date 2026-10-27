@@ -7,11 +7,30 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const ProofStateLifetime = 5 * time.Minute
+const OriginalDatabaseEpoch = "00000000-0000-4000-8000-000000000000"
+
+var databaseEpochPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func ProofScopeInEpoch(scope [32]byte, epoch string) ([32]byte, error) {
+	if scope == [32]byte{} {
+		return [32]byte{}, ErrProofStateUnavailable
+	}
+	if epoch == "" || epoch == OriginalDatabaseEpoch {
+		return scope, nil
+	}
+	if !databaseEpochPattern.MatchString(epoch) {
+		return [32]byte{}, ErrProofStateUnavailable
+	}
+	value := append([]byte("dsh-mobile-ustc/dpop-database-epoch/v1\x00"), scope[:]...)
+	value = append(value, []byte(epoch)...)
+	return sha256.Sum256(value), nil
+}
 
 var ErrProofStateUnavailable = errors.New("auth: proof state unavailable")
 

@@ -29,6 +29,8 @@ type Config struct {
 	HTTPClient       *http.Client
 	Clock            func() time.Time
 	Proofs           ProofRepository
+	DatabaseEpoch    string
+	MinimumIssuedAt  time.Time
 }
 
 type Principal struct {
@@ -49,16 +51,17 @@ type Principal struct {
 }
 
 type Authenticator struct {
-	issuer         string
-	audience       string
-	allowedClients map[string]struct{}
-	requiredScopes []string
-	publicOrigin   *url.URL
-	clockSkew      time.Duration
-	maxLifetime    time.Duration
-	clock          func() time.Time
-	keys           *keySet
-	proofs         ProofRepository
+	issuer          string
+	audience        string
+	allowedClients  map[string]struct{}
+	requiredScopes  []string
+	publicOrigin    *url.URL
+	clockSkew       time.Duration
+	maxLifetime     time.Duration
+	clock           func() time.Time
+	keys            *keySet
+	proofs          ProofRepository
+	minimumIssuedAt time.Time
 }
 
 func New(config Config) (*Authenticator, error) {
@@ -94,6 +97,10 @@ func New(config Config) (*Authenticator, error) {
 	if err != nil {
 		return nil, err
 	}
+	scope, err = ProofScopeInEpoch(scope, config.DatabaseEpoch)
+	if err != nil {
+		return nil, err
+	}
 	if config.Proofs == nil {
 		config.Proofs = NewProofStore(scope)
 	}
@@ -111,7 +118,7 @@ func New(config Config) (*Authenticator, error) {
 	return &Authenticator{
 		issuer: issuer.String(), audience: config.Audience, allowedClients: clients,
 		requiredScopes: append([]string(nil), config.RequiredScopes...), publicOrigin: publicOrigin,
-		clockSkew: skew, maxLifetime: config.MaxTokenLifetime, clock: clock, keys: keys, proofs: config.Proofs,
+		clockSkew: skew, maxLifetime: config.MaxTokenLifetime, clock: clock, keys: keys, proofs: config.Proofs, minimumIssuedAt: config.MinimumIssuedAt,
 	}, nil
 }
 
@@ -177,7 +184,7 @@ func (auth *Authenticator) validateClaims(claims map[string]any) (Principal, err
 	now := auth.clock()
 	issuedAt, okIssuedAt := numericDate(claims["iat"])
 	expiresAt, okExpiresAt := numericDate(claims["exp"])
-	if !okIssuedAt || !okExpiresAt || issuedAt.After(now.Add(auth.clockSkew)) || !expiresAt.After(now.Add(-auth.clockSkew)) ||
+	if !okIssuedAt || !okExpiresAt || issuedAt.Before(auth.minimumIssuedAt) || issuedAt.After(now.Add(auth.clockSkew)) || !expiresAt.After(now.Add(-auth.clockSkew)) ||
 		!expiresAt.After(issuedAt) || expiresAt.Sub(issuedAt) > auth.maxLifetime {
 		return Principal{}, errInvalidToken
 	}

@@ -66,6 +66,9 @@ func (consumer *ControlConsumer) NewRelayDirectory(ctx context.Context, origin s
 func (directory *RelayDirectory) RelayIdentity() RelayNode { return directory.identity }
 
 func (directory *RelayDirectory) lockOwner(ctx context.Context, tx *sql.Tx) error {
+	if _, err := lockRecoveryReady(ctx, tx, directory.consumer.databaseEpoch); err != nil {
+		return err
+	}
 	var generation string
 	var until, now time.Time
 	err := tx.QueryRowContext(ctx, `select generation::text,lease_until from control_consumers where node_id=$1 for share`, directory.identity.NodeID).Scan(&generation, &until)
@@ -109,6 +112,7 @@ func (directory *RelayDirectory) LookupRuntimeRoute(ctx context.Context, runtime
         route.runtime_id::text,route.runtime_epoch::text,route.connection_id::text
         from relay_runtime_routes route
         join control_consumers node on node.node_id=route.node_id and node.generation=route.generation and node.lease_until>clock_timestamp()
+            and node.database_epoch=(select epoch from remote_recovery_state where slot=1 and phase='ready')
         join runtimes r on r.id=route.runtime_id and r.epoch=route.runtime_epoch and r.connection_id=route.connection_id
             and r.revoked_at is null and r.last_seen_at>clock_timestamp()-interval '45 seconds'
         join installations i on i.id=r.installation_id and i.revoked_at is null and i.key_version=r.connection_key_version
@@ -133,7 +137,8 @@ func (directory *RelayDirectory) ValidateRelayNode(ctx context.Context, node, ge
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	var valid bool
-	if err := directory.DB.QueryRowContext(ctx, `select exists(select 1 from control_consumers where node_id=$1 and generation=$2 and relay_origin is not null and lease_until>clock_timestamp())`, node, generation).Scan(&valid); err != nil {
+	if err := directory.DB.QueryRowContext(ctx, `select exists(select 1 from control_consumers where node_id=$1 and generation=$2 and relay_origin is not null and lease_until>clock_timestamp()
+        and database_epoch=(select epoch from remote_recovery_state where slot=1 and phase='ready'))`, node, generation).Scan(&valid); err != nil {
 		return ErrDatabaseUnavailable
 	}
 	if !valid {

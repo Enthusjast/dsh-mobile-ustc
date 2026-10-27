@@ -41,3 +41,7 @@ outbox 250 ms 轮询与原一秒权威连接检查继续独立，128 条批上�
 后续[跨节点业务路由](relay-routing.md)已使用本 registry 的节点 UUID / generation
 发布共享 runtime 连接目录，并通过私有双向 TLS 转交手机连接及 owner HTTP。
 其双节点原生联调独立于本页的控制事件分发测试；本页历史容量仍是单节点结果。
+
+迁移 021 的[恢复隔离](database-recovery.md)为事件和 consumer 增加数据库代次。
+只有按离线恢复流程吊销旧权限、核对当前身份并释放后，稳定 consumer 才能在新历史建立覆盖快照。
+旧 outbox/ack 保留，不会用来源集群的 XID 快照确认新代次事件；这不替代生产备份设施验收。

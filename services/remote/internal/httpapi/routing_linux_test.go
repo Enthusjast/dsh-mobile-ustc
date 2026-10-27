@@ -31,14 +31,15 @@ type routingNodeFixture struct {
 	process                                                 *sharedProofProcess
 }
 type routingFixture struct {
-	t       *testing.T
-	ctx     context.Context
-	db      *sql.DB
-	origin  string
-	nodes   map[string]*routingNodeFixture
-	clients map[string]*http.Client
-	pairs   []*capacityPair
-	ca      *testsupport.RelayCA
+	t         *testing.T
+	ctx       context.Context
+	db        *sql.DB
+	origin    string
+	nodes     map[string]*routingNodeFixture
+	clients   map[string]*http.Client
+	pairs     []*capacityPair
+	ca        *testsupport.RelayCA
+	issuerKey capacityKey
 }
 
 func newRoutingFixture(t *testing.T, count, maxProxies int) *routingFixture {
@@ -69,6 +70,7 @@ func newRoutingFixture(t *testing.T, count, maxProxies int) *routingFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture.issuerKey = issuerKey
 	public, _ := json.Marshal(jose.JSONWebKey{Key: &issuerKey.private.PublicKey, KeyID: "routing-issuer", Algorithm: "ES256", Use: "sig"})
 	jwks := append(append([]byte(`{"keys":[`), public...), []byte(`]}`)...)
 	proxies := map[string]*httputil.ReverseProxy{}

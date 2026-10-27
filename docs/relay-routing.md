@@ -9,7 +9,7 @@ approval and file protocol handlers. The ingress does not invent a second
 business acknowledgement. Message bodies remain transient.
 
 Enable the private transport with a unique stable `REMOTE_RELAY_NODE_ID` and
-`REMOTE_RELAY_CONFIG_FILE`, after applying migrations through `020`:
+`REMOTE_RELAY_CONFIG_FILE`, after applying migrations through `021`:
 
 ```json
 {
@@ -133,3 +133,8 @@ device tests are deferred, and OEM push-channel configuration is skipped.
 Continue functional development with bounded local fixtures and simple emulator
 checks when Android changes require them. The unrun acceptance gates remain
 open rather than being treated as successful.
+
+Restoring the shared database requires the separate [recovery isolation
+procedure](database-recovery.md). Node generation alone cannot detect a database
+and deployment configuration both rolled back to an old backup. The current
+production entrypoint also fences its externally configured database epoch.
