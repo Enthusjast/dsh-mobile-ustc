@@ -44,4 +44,16 @@ python3 tools/integration/run_remote_dsh.py \
 
 外层 Go/PostgreSQL 用例 `TestAndroidAppSelfUpgradePreservesIdentityAndData` 在 229.18 秒内通过，日志 `.local/app-self-upgrade-fixed-api36-second.log`。原生两阶段证据为 `.local/app-self-upgrade/299c43fa-0ace-46cd-96b3-6554e5638c6a/`，安装后独立方法通过，耗时 48.919 秒。它证明系统来源设置往返、用户确认完整 APK 替换、旧进程实际死亡、精确安装字节、原账号 / 用户 / 设备 / 两把密钥指纹、SQLCipher 原请求 / 摘要 / 尝试次数 1 / RECONCILE 状态，以及生产更新页的 INSTALLED 核对全部成立。外层随后验证同一活跃设备数据库记录、恰好一次匿名下载和至少三次发行复查。
 
-来源 app-op 恢复为原 `default`，本轮 adb reverse 已移除；可见 preview 与其 watcher 持续运行。软件模拟设备使用已准备的系统 / 应用缓存，测试前实际出现过 System UI ANR 并选择正常 Wait，因此本记录不证明冷启动性能。最低 API 26 的完整自升级、物理设备 / OEM、公网与生产签名发行仍需分别验证。
+来源 app-op 恢复为原 `default`，本轮 adb reverse 已移除；可见 preview 与其 watcher 持续运行。软件模拟设备使用已准备的系统 / 应用缓存，测试前实际出现过 System UI ANR 并选择正常 Wait，因此本记录不证明冷启动性能。API 26 的独立记录见下节；物理设备 / OEM、公网与生产签名发行仍需分别验证。
+
+## 2026-10-27 API 26 完整通过
+
+专用 `dsh-remote-api26` / `emulator-5594` 保留原 FDE userdata，用既有测试 PIN 启动并解锁，原包仍为 versionCode 1。本轮由驱动以普通同版本替换装入上述固定基线，没有降级、卸载或清空数据。
+
+首轮停在来源设置，尚未下载或安装目标：该平台的 `android.widget.Switch` 是 enabled / checkable，但不可点击；实际 ACTION_CLICK 属于带「Allow from this source」文字的外层设置行。日志为 `.local/app-self-upgrade-fixed-api26-first.log`，失败证据为 `.local/app-self-upgrade/2357b53b-bb74-4d13-8828-29a96386c79b/`。测试选择器现在读取 Switch 状态，并在限定祖先层级内匹配该系统设置行；仍要求系统包和本应用标签。API 36 的直接 Compose toggle 点击路径保留，没有增加 shell 授权或坐标批准。
+
+第二轮命令仅将上例参数改为 `--android-upgrade emulator-5594 --android-avd dsh-remote-api26`，继续使用同一固定收据及完全相同的 v1 / v2 字节。外层 Go/PostgreSQL 用例在 249.96 秒内通过，日志 `.local/app-self-upgrade-fixed-api26-second.log`；独立安装后方法在 18.541 秒内通过。完整证据为 `.local/app-self-upgrade/7fb384a3-0521-40be-b432-94c56fdfd0ae/`，测试 APK / 测试源码摘要另记于 `.local/app-self-upgrade-fixed-api26-harness.json`，应用 APK 未因选择器修正而改变。
+
+本轮同样通过来源设置往返、系统明确确认、原进程死亡、目标 base APK 完整摘要、同一账号 / 用户 / 设备 / 两把密钥指纹、SQLCipher 原请求及摘要、尝试次数 1 / RECONCILE、生产更新页 INSTALLED、服务设备记录及下载 / 发行复查次数。结束后来源 app-op 恢复为原默认状态（API 26 查询显示 No operations），adb reverse 为空。两端保存的证据均复核为目录 0700、四个指定文件各 0600，结果与独立安装摘要一致。
+
+两端使用同一数据库 schema 的调试夹具。它们证明当前代码在真实包替换和进程死亡后的保留 / 恢复，不证明未来 schema 迁移、旧版回滚、生产身份、OEM 安装策略、物理密钥硬件或冷启动性能，也不代表 M3 / M4 完整出口通过。

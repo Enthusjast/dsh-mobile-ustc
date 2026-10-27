@@ -68,4 +68,4 @@ API 36 首轮同样有 41/42 项通过，篡改包收到 `update.download_failed
 
 完整可执行 v2 的独立构建与验收边界见[升级夹具](android-app-upgrade-fixtures.md)。
 
-后续[两阶段真实自升级](android-self-upgrade-acceptance.md)已在 API 36 完成系统来源设置往返、完整应用替换和旧进程死亡后的账号 / 密钥 / SQLCipher 恢复。该记录保留了先前实际失败及修复后的独立成功批次；最低平台、OEM 和生产发行的结论分别记录。
+后续[两阶段真实自升级](android-self-upgrade-acceptance.md)已分别在最低 API 26 和 API 36 完成系统来源设置往返、完整应用替换和旧进程死亡后的账号 / 密钥 / SQLCipher 恢复。该记录保留了先前实际失败及修复后的独立成功批次；OEM 和生产发行仍需各自验收。

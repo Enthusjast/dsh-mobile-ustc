@@ -175,8 +175,21 @@ class AppSelfUpgradeTest {
         it.text?.toString()?.contains(value) == true || it.contentDescription?.toString()?.contains(value) == true
     } != null
     private fun switchNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        if (node.isCheckable && node.isClickable && node.isEnabled) return node
+        if (node.isCheckable && node.isEnabled) return node
         for (index in 0 until node.childCount) node.getChild(index)?.let { switchNode(it)?.let { result -> return result } }
+        return null
+    }
+    private fun sourcePermissionClickTarget(toggle: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo? = toggle
+        repeat(4) {
+            val node = current ?: return null
+            if (node.packageName?.toString() != "com.android.settings") return null
+            // API 26 exposes the checked state on a nonclickable Switch; the
+            // containing labelled preference owns ACTION_CLICK. API 36 exposes
+            // both semantics on the Compose toggle itself.
+            if (node.isEnabled && node.isClickable && (node === toggle || containsText(node, "Allow from this source"))) return node
+            current = node.parent
+        }
         return null
     }
     @Test fun prepareAndWaitForRealSystemUpgrade(): Unit = runBlocking {
@@ -201,12 +214,15 @@ class AppSelfUpgradeTest {
         compose.onNodeWithText("允许本应用安装").performScrollTo().performClick()
         until("settings paused updater") { controller.state.value.appUpdates == null }
         var toggle: AccessibilityNodeInfo? = null
+        var toggleTarget: AccessibilityNodeInfo? = null
         until("system source-permission switch") {
             val root = systemRoot("com.android.settings") ?: return@until false
             if (!containsText(root,"DSH 远控")) return@until false
-            toggle = switchNode(root); toggle != null
+            toggle = switchNode(root)
+            toggleTarget = toggle?.let(::sourcePermissionClickTarget)
+            toggleTarget != null
         }
-        assertFalse(toggle!!.isChecked); assertTrue(toggle!!.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        assertFalse(toggle!!.isChecked); assertTrue(toggleTarget!!.performAction(AccessibilityNodeInfo.ACTION_CLICK))
         until("system source permission granted") { backend.canInstall() }
         assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
         until("settings returned with permission") { controller.state.value.appUpdates?.let { !it.busy && it.canInstall && it.phase == AppUpdatePhase.AVAILABLE } == true }

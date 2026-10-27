@@ -1,6 +1,6 @@
 # APK 安装会话与持久记录
 
-本阶段在[私有下载 / 平台验签](android-apk-preflight.md)之后增加独立公共更新配置、加密安装记录和本应用的 PackageInstaller 后端。后续的[应用更新页面](android-app-updates.md)接入账号 / 页面 / 前后台协调与发行复查；真实完整应用升级仍需独立验收。后端要求调用者在每次提交前提供新的授权检查；仅保存 APK 或取得旧的验签结果不能代替当前发行和账号权限。
+本阶段在[私有下载 / 平台验签](android-apk-preflight.md)之后增加独立公共更新配置、加密安装记录和本应用的 PackageInstaller 后端。后续的[应用更新页面](android-app-updates.md)接入账号 / 页面 / 前后台协调与发行复查；真实完整应用升级的 API 26 / 36 成功记录与限制见[两阶段验收](android-self-upgrade-acceptance.md)。后端要求调用者在每次提交前提供新的授权检查；仅保存 APK 或取得旧的验签结果不能代替当前发行和账号权限。
 
 ## 独立公共配置
 
