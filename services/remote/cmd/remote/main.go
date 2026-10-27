@@ -15,6 +15,7 @@ import (
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/control"
 	"dsh-mobile-ustc/services/remote/internal/httpapi"
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"dsh-mobile-ustc/services/remote/internal/store"
 )
 
@@ -57,7 +58,12 @@ func run() error {
 		return err
 	}
 
-	apiConfig := httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig}
+	metricsAddress := strings.TrimSpace(os.Getenv("REMOTE_METRICS_LISTEN_ADDR"))
+	var metrics *observability.Metrics
+	if metricsAddress != "" {
+		metrics = observability.New()
+	}
+	apiConfig := httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig, Metrics: metrics}
 	if fileRuntime != nil {
 		apiConfig.Files = fileRuntime.service
 		apiConfig.FileHandoffs = fileRuntime.handoffs
@@ -71,6 +77,11 @@ func run() error {
 		return err
 	}
 	handler := httpapi.New(database, verifier, apiConfig)
+	metricsEndpoint, err := startMetricsEndpoint(metricsAddress, metrics)
+	if err != nil {
+		return err
+	}
+	defer metricsEndpoint.close()
 	server := &http.Server{
 		Addr:              envOr("REMOTE_LISTEN_ADDR", "127.0.0.1:8080"),
 		Handler:           handler,
@@ -84,7 +95,7 @@ func run() error {
 	defer stop()
 	controlCtx, stopControl := context.WithCancel(ctx)
 	controlDone := make(chan struct{})
-	go func() { defer close(controlDone); control.Run(controlCtx, database, handler) }()
+	go func() { defer close(controlDone); control.Run(controlCtx, database, handler, metrics) }()
 	filesDone := make(chan struct{})
 	if fileRuntime != nil {
 		go func() { defer close(filesDone); fileRuntime.service.Run(controlCtx) }()
@@ -135,6 +146,16 @@ func run() error {
 			return nil
 		}
 		return fmt.Errorf("remote service listener failed: %w", err)
+	case <-metricsEndpoint.errors():
+		// An explicitly configured listener is part of the service lifecycle.
+		// Stop admission and drain upgraded peers before returning a failure.
+		_ = server.Close()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := handler.Drain(shutdown); err != nil {
+			return fmt.Errorf("remote metrics failed and realtime drain failed: %w", err)
+		}
+		return errors.New("remote metrics listener failed")
 	}
 }
 

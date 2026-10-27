@@ -717,6 +717,10 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}
 	seenDevice, seenUpdate, seenRevoke := false, false, false
 	for _, event := range pending {
+		var persisted time.Time
+		if err := testDB.QueryRowContext(ctx, `select created_at from control_outbox where id=$1`, event.ID).Scan(&persisted); err != nil || event.CreatedAt.IsZero() || !event.CreatedAt.Equal(persisted) {
+			t.Fatal("control event lost its authoritative creation timestamp", err)
+		}
 		switch event.Topic {
 		case "device.revoked":
 			seenDevice = event.DeviceID == deviceID

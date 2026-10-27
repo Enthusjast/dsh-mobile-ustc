@@ -149,6 +149,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(address && typeof address === 'object')
   await new Promise<void>(accept => reserved.close(() => accept()))
   const origin = `http://127.0.0.1:${address.port}`
+  const metricsReserved = createTCPServer()
+  await new Promise<void>(accept => metricsReserved.listen(0, '127.0.0.1', accept))
+  const metricsAddress = metricsReserved.address()
+  assert.ok(metricsAddress && typeof metricsAddress === 'object')
+  await new Promise<void>(accept => metricsReserved.close(() => accept()))
+  const metricsOrigin = `http://127.0.0.1:${metricsAddress.port}`
   const authority = { issuer: 'https://remote.example.edu', key_id: 'dsh-approval-authority/cli-integration', public_jwk: approvalAuthority.jwk, key_jkt: approvalAuthority.jkt, active: true,
     valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString() }
   const approvalSigningFile = join(root, 'approval-authority.pem'), approvalPolicyFile = join(root, 'approval-policy.json')
@@ -166,6 +172,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     REMOTE_PUBLIC_ORIGIN: origin, REMOTE_DATABASE_URL: database, REMOTE_LISTEN_ADDR: `127.0.0.1:${address.port}`,
     REMOTE_APPROVAL_POLICY_FILE: approvalPolicyFile,
     REMOTE_APP_RELEASES_FILE: releasesFile,
+    REMOTE_METRICS_LISTEN_ADDR: `127.0.0.1:${metricsAddress.port}`,
   })
   t.after(async () => { const [code] = await service.stop('SIGTERM'); assert.equal(code, 0, 'Go service did not drain cleanly') })
   await until(async () => {
@@ -173,6 +180,24 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     try { if ((await fetch(`${origin}/readyz`, { signal: AbortSignal.timeout(500) })).status === 204) return true } catch {}
     return undefined
   }, 'Go readiness')
+  assert.equal((await fetch(`${origin}/metrics`)).status, 404, 'operational metrics leaked onto the public API')
+  const readMetrics = async () => {
+    const response = await fetch(`${metricsOrigin}/metrics`, { signal: AbortSignal.timeout(1500), headers: { accept: 'text/plain;version=0.0.4' } })
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    const body = await response.text()
+    assert.ok(body.length < 512 * 1024, 'metric output grew with resource identities')
+    return body
+  }
+  const metricSample = (body: string, name: string, labels: Record<string, string> = {}) => {
+    for (const line of body.split('\n')) {
+      const [identity, value] = line.split(' ')
+      if (!identity || identity.split('{', 1)[0] !== `dsh_remote_${name}`) continue
+      const found = new Map([...identity.matchAll(/([a-z_][a-z0-9_]*)="([^"]*)"/g)].map(match => [match[1]!, match[2]!]))
+      if (found.size === Object.keys(labels).length && Object.entries(labels).every(([key, expected]) => found.get(key) === expected)) return Number(value)
+    }
+    return 0
+  }
 
   const client = (subject: string, clientId: string, proofKey: ReturnType<typeof key>) => {
     const token = jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
@@ -380,6 +405,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     return collector
   }
   const mobile = await connectPhone(phone, device.device_id, phoneKey, ticket)
+  const initialMetrics = await readMetrics()
+  assert.equal(metricSample(initialMetrics, 'relay_connections', { phase: 'active', role: 'installation' }), 1)
+  assert.equal(metricSample(initialMetrics, 'relay_connections', { phase: 'active', role: 'device' }), 1)
   const approvalWatchId = randomUUID()
   mobile.send({ v: 1, type: 'approval.subscribe', request_id: approvalWatchId, runtime_id: enrollment.runtime_id, payload: {} })
   await mobile.wait(frame => frame.type === 'approval.snapshot' && frame.request_id === approvalWatchId)
@@ -767,6 +795,18 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(mobile.frames.slice(revocationNotice+1).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false, 'revoked phone received content after its revocation marker')
   await until(async () => query(`select count(*) from control_outbox where published_at is null and topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked')`) === '0' ? true : undefined, 'control outbox acknowledgement')
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
+  const finalMetrics = await until(async () => {
+    const body = await readMetrics()
+    return metricSample(body, 'relay_revoked_connections_total', { reason: 'access_revoked', role: 'device' }) >= 2 &&
+      metricSample(body, 'control_event_age_seconds_count', { topic: 'runtime_grant.revoked' }) >= 1 ? body : undefined
+  }, 'measured revocation propagation')
+  assert.ok(metricSample(finalMetrics, 'relay_received_frames_total', { role: 'installation' }) > 20)
+  assert.ok(metricSample(finalMetrics, 'relay_written_frames_total', { role: 'device' }) > 20)
+  assert.ok(metricSample(finalMetrics, 'command_forward_duration_seconds_count', { result: 'forwarded' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'command_forward_duration_seconds_count', { result: 'duplicate' }) > 0)
+  for (const secret of [orgId, ownerId, phoneUserId, device.device_id, enrollment.runtime_id, sessionId, revokeMarker, revokeProof,
+    (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
+  t.diagnostic('Private Prometheus endpoint observed actual signed Host/phone connections, native traffic, command forwarding/retries and completed local revocation propagation without resource IDs, bodies or proofs.')
   t.diagnostic(`Device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic('A real Bash approved through the normal plugin was held after guard; scoped grant invalidation blocked its body before the three-second lease expired and durably reported the invalidated fact.')
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)

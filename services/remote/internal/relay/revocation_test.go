@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"dsh-mobile-ustc/services/remote/internal/store"
 	"github.com/coder/websocket"
 )
@@ -22,6 +23,8 @@ func TestControlEventsInvalidateOnlyTheirDeviceOrOlderRuntimeGrant(t *testing.T)
 				DeviceKeyVersion: 1, ProofPublicJWK: jwk, ProofKeyThumbprint: thumbprint, GrantVersion: 1, ExpiresAt: time.Now().Add(time.Minute)}
 			fake := &relayTestStore{}
 			relayServer := New(fake)
+			metrics := observability.New()
+			relayServer.ConfigureMetrics(metrics)
 			server := httptest.NewServer(relayServer)
 			t.Cleanup(server.Close)
 			add := func(ticket store.TicketRedemption) *websocket.Conn {
@@ -69,6 +72,9 @@ func TestControlEventsInvalidateOnlyTheirDeviceOrOlderRuntimeGrant(t *testing.T)
 			relayServer.mu.Unlock()
 			if remaining != 3 {
 				t.Fatalf("unrelated or fresh connections were invalidated: remaining=%d", remaining)
+			}
+			if metricValue(t, metricsSnapshot(t, metrics), "relay_revoked_connections_total", map[string]string{"role": "device", "reason": "access_revoked"}) != 2 {
+				t.Fatal("duplicate outbox delivery inflated revoked connection count")
 			}
 		})
 	}

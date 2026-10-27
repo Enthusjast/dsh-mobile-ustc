@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -69,10 +70,16 @@ func TestConfiguredFileServiceProcessRunsWorkersAndShutsDownCleanly(t *testing.T
 	address := listener.Addr().String()
 	_ = listener.Close()
 	origin := "http://" + address
+	metricsListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsAddress := metricsListener.Addr().String()
+	_ = metricsListener.Close()
 	command := exec.CommandContext(h.ctx, binary)
 	command.Env = []string{"PATH=" + os.Getenv("PATH"), "REMOTE_ISSUER=https://id.example.edu", "REMOTE_AUDIENCE=urn:dsh-files", "REMOTE_JWKS_URL=" + h.jwksURL,
 		"REMOTE_CLIENT_IDS=mobile,host-client", "REMOTE_HOST_CLIENT_IDS=host-client", "REMOTE_REQUIRED_SCOPES=remote.access", "REMOTE_PUBLIC_ORIGIN=" + origin,
-		"REMOTE_DATABASE_URL=" + childDSN, "REMOTE_LISTEN_ADDR=" + address, "REMOTE_FILES_CONFIG_FILE=" + config}
+		"REMOTE_DATABASE_URL=" + childDSN, "REMOTE_LISTEN_ADDR=" + address, "REMOTE_FILES_CONFIG_FILE=" + config, "REMOTE_METRICS_LISTEN_ADDR=" + metricsAddress}
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -126,6 +133,32 @@ func TestConfiguredFileServiceProcessRunsWorkersAndShutsDownCleanly(t *testing.T
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	metricsClient := &http.Client{Timeout: time.Second}
+	t.Cleanup(metricsClient.CloseIdleConnections)
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		response, err := metricsClient.Get("http://" + metricsAddress + "/metrics")
+		if err != nil {
+			t.Fatal("configured metrics listener unavailable", err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 512<<10))
+		_ = response.Body.Close()
+		if readErr != nil || response.StatusCode != 200 {
+			t.Fatal("metrics scrape failed", readErr)
+		}
+		for _, private := range []string{"process worker file bytes", "fixture-secret", childDSN, config} {
+			if strings.Contains(string(body), private) {
+				t.Fatal("operational metrics exposed private application input")
+			}
+		}
+		if strings.Contains(string(body), "dsh_remote_control_available{worker=\"outbox\"} 1") && strings.Contains(string(body), "dsh_remote_control_available{worker=\"leases\"} 1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("production control workers never reported success")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +170,10 @@ func TestConfiguredFileServiceProcessRunsWorkersAndShutsDownCleanly(t *testing.T
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("file workers delayed process shutdown")
+	}
+	if connection, err := net.DialTimeout("tcp", metricsAddress, time.Second); err == nil {
+		_ = connection.Close()
+		t.Fatal("metrics listener survived production service shutdown")
 	}
 	for _, private := range []string{"fixture-secret", prepared.Upload.URL, "PRIVATE_UPLOAD_"} {
 		if strings.Contains(output.String(), private) {

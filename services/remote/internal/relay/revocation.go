@@ -139,6 +139,9 @@ func (server *Server) closeRevokedConnections(parent context.Context, connection
 		live.closing = true
 	}
 	server.mu.Unlock()
+	for _, live := range connections {
+		server.countRevocation(live, code)
+	}
 	ctx, cancel := context.WithTimeout(parent, 250*time.Millisecond)
 	defer cancel()
 	var writes sync.WaitGroup
@@ -151,4 +154,15 @@ func (server *Server) closeRevokedConnections(parent context.Context, connection
 		}(live)
 	}
 	writes.Wait()
+}
+
+func (server *Server) countRevocation(live *liveConnection, code string) {
+	if live.revocationCounted.Swap(true) {
+		return
+	}
+	reason := "access_revoked"
+	if code == "internal" {
+		reason = "authority_unavailable"
+	}
+	server.metrics.Revoked(live.peer.role, reason)
 }

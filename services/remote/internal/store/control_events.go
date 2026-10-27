@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 // ControlEvent is the metadata required to invalidate local connection leases.
@@ -15,6 +16,7 @@ type ControlEvent struct {
 	UserID       string
 	GrantVersion int64
 	ApprovalID   string
+	CreatedAt    time.Time
 }
 
 func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) ([]ControlEvent, error) {
@@ -22,7 +24,7 @@ func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) (
 		return nil, ErrGrantInvalid
 	}
 	rows, err := postgres.DB.QueryContext(ctx, `
-		select id::text, topic, payload from control_outbox
+		select id::text, topic, payload, created_at from control_outbox
 		where published_at is null and topic in ('device.revoked', 'runtime_grant.updated', 'runtime_grant.revoked',
 		    'approval.pending', 'approval.decided', 'approval.ended', 'approval.result', 'approval.authorization.prepared', 'approval.device.revoked')
 		order by created_at, id limit $1`, limit)
@@ -34,7 +36,7 @@ func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) (
 	for rows.Next() {
 		var event ControlEvent
 		var raw []byte
-		if rows.Scan(&event.ID, &event.Topic, &raw) != nil {
+		if rows.Scan(&event.ID, &event.Topic, &raw, &event.CreatedAt) != nil {
 			return nil, ErrDatabaseUnavailable
 		}
 		var payload struct {

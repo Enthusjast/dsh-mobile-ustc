@@ -360,6 +360,9 @@ func (server *Server) dropSubscription(ctx context.Context, subscription *sessio
 	if !removed {
 		return
 	}
+	if code == "protocol.resync_required" {
+		server.metrics.Resync()
+	}
 	writeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	if notifyDevice {

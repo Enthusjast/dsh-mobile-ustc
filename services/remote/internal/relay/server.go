@@ -17,12 +17,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/files"
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"dsh-mobile-ustc/services/remote/internal/store"
 	"github.com/coder/websocket"
 )
@@ -81,6 +83,7 @@ type Server struct {
 	fileMessages         fileMessageRecorder
 	exports              *exportRouter
 	questionReferences   questionReferenceRepository
+	metrics              *observability.Metrics
 }
 
 type liveConnection struct {
@@ -94,6 +97,12 @@ type liveConnection struct {
 	sendQueue              chan outboundFrame
 	done                   chan struct{}
 	stopOnce               sync.Once
+	metrics                *observability.Metrics
+	queueMu                sync.Mutex
+	queuedMessages         int64
+	queuedBytes            int64
+	inflightBytes          int64
+	revocationCounted      atomic.Bool
 	lastHeartbeat          time.Time
 	lastQuestionReferences time.Time
 	commandWindowStart     time.Time
@@ -114,6 +123,7 @@ type outboundFrame struct {
 	body        []byte
 	result      chan error
 	beforeWrite func() error
+	queuedAt    time.Time
 }
 
 type peer struct {
@@ -276,6 +286,12 @@ func (live *liveConnection) writeLoop() {
 		case <-live.done:
 			return
 		case frame := <-live.sendQueue:
+			live.queueMu.Lock()
+			live.queuedMessages--
+			live.queuedBytes -= int64(len(frame.body))
+			live.inflightBytes = int64(len(frame.body))
+			live.queueMu.Unlock()
+			live.metrics.Dequeued(live.peer.role, time.Since(frame.queuedAt))
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			var err error
 			if frame.beforeWrite != nil {
@@ -285,6 +301,10 @@ func (live *liveConnection) writeLoop() {
 				err = live.conn.Write(ctx, websocket.MessageText, frame.body)
 			}
 			cancel()
+			live.queueMu.Lock()
+			live.inflightBytes = 0
+			live.queueMu.Unlock()
+			live.metrics.Written(live.peer.role, len(frame.body), time.Since(frame.queuedAt), err)
 			frame.result <- err
 			if err != nil {
 				_ = live.conn.CloseNow()
@@ -321,19 +341,33 @@ func (live *liveConnection) sendHello(ctx context.Context, value any, bind func(
 func (live *liveConnection) sendJSONBeforeWrite(ctx context.Context, value any, beforeWrite func() error) error {
 	data, err := json.Marshal(value)
 	if err != nil {
+		live.metrics.RejectedSend(live.peer.role, "serialization")
 		return err
 	}
 	if len(data) > maxFrameBytes {
+		live.metrics.RejectedSend(live.peer.role, "too_large")
 		return errors.New("relay: outgoing frame exceeds limit")
 	}
-	frame := outboundFrame{body: data, result: make(chan error, 1), beforeWrite: beforeWrite}
+	frame := outboundFrame{body: data, result: make(chan error, 1), beforeWrite: beforeWrite, queuedAt: time.Now()}
+	// Account admission before the writer can account its dequeue. This lock
+	// covers only a nonblocking channel operation, never socket I/O or binding.
+	live.queueMu.Lock()
 	select {
 	case <-live.done:
+		live.queueMu.Unlock()
+		live.metrics.RejectedSend(live.peer.role, "closed")
 		return net.ErrClosed
 	case <-ctx.Done():
+		live.queueMu.Unlock()
+		live.metrics.RejectedSend(live.peer.role, "cancelled")
 		return ctx.Err()
 	case live.sendQueue <- frame:
+		live.queuedMessages++
+		live.queuedBytes += int64(len(data))
+		live.queueMu.Unlock()
 	default:
+		live.queueMu.Unlock()
+		live.metrics.RejectedSend(live.peer.role, "full")
 		return errRelayQueueFull
 	}
 	select {
@@ -474,7 +508,7 @@ func (server *Server) registerConnection(connection *websocket.Conn, identity pe
 		server.mu.Unlock()
 		return nil, false
 	}
-	live := &liveConnection{conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, 16), done: make(chan struct{})}
+	live := &liveConnection{conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, 16), done: make(chan struct{}), metrics: server.metrics}
 	server.active.Add(1)
 	server.connections[connection] = live
 	server.mu.Unlock()
@@ -640,7 +674,7 @@ func (server *Server) runHandshake(parent context.Context, live *liveConnection)
 		server.closePolicy(live, "credential expired")
 		return
 	}
-	if writeJSON(parent, connection, map[string]any{
+	if live.sendJSON(parent, map[string]any{
 		"v": 1, "type": "challenge", "payload": map[string]any{
 			"connection_id": connectionID, "challenge_id": challengeID,
 			"nonce": nonce, "role": peer.role, "expires_at": challengeExpires,
@@ -651,6 +685,9 @@ func (server *Server) runHandshake(parent context.Context, live *liveConnection)
 	proofCtx, cancel := context.WithDeadline(parent, challengeExpires)
 	messageType, data, err := connection.Read(proofCtx)
 	cancel()
+	if err == nil {
+		server.metrics.Received(peer.role, len(data))
+	}
 	if err != nil || messageType != websocket.MessageText || int64(len(data)) > maxFrameBytes {
 		server.closePolicy(live, "handshake rejected")
 		return
@@ -870,6 +907,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 		if err != nil {
 			return
 		}
+		server.metrics.Received(live.peer.role, len(data))
 		if messageType != websocket.MessageText || int64(len(data)) > maxFrameBytes {
 			server.closePolicy(live, "invalid frame")
 			return
@@ -1263,6 +1301,8 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 }
 
 func (server *Server) forwardRecordedCommand(parent context.Context, live, host *liveConnection, envelope wireEnvelope, payload any, digest string, status store.CommandStatus) {
+	started, result := time.Now(), "denied"
+	defer func() { server.metrics.Forward(result, time.Since(started)) }()
 	if err := server.database.ValidateRealtimeLease(parent, live.peer.redemption); err != nil {
 		server.revokeDeviceConnection(parent, live, err)
 		return
@@ -1271,6 +1311,7 @@ func (server *Server) forwardRecordedCommand(parent context.Context, live, host 
 		kind := envelope.Type
 		if status.ReconcileFiles {
 			if kind != "message.submit" || !host.supports(files.ReconcileCapability) {
+				result = "reconcile_unavailable"
 				server.sendProtocolError(parent, live, "file.staging_required", &envelope)
 				return
 			}
@@ -1290,10 +1331,12 @@ func (server *Server) forwardRecordedCommand(parent context.Context, live, host 
 		cancel()
 		if err != nil {
 			if errors.Is(err, errRelayQueueFull) {
+				result = "queue_full"
 				server.sendProtocolError(parent, live, "rate.limited", &envelope)
 				return
 			}
 			unknown, markErr := server.database.MarkRealtimeCommandUnknown(parent, live.peer.redemption, envelope.RequestID, envelope.SessionID, digest)
+			result = "unknown"
 			if markErr == nil {
 				_ = server.sendCommandReceipt(parent, live, unknown, host.runtimeEpoch)
 			} else {
@@ -1301,6 +1344,9 @@ func (server *Server) forwardRecordedCommand(parent context.Context, live, host 
 			}
 			return
 		}
+		result = "forwarded"
+	} else {
+		result = "duplicate"
 	}
 	_ = server.sendCommandReceipt(parent, live, status, host.runtimeEpoch)
 }
@@ -1380,11 +1426,13 @@ func (server *Server) revokeDeviceConnection(ctx context.Context, live *liveConn
 	if errors.Is(cause, store.ErrDatabaseUnavailable) {
 		code = "internal"
 	}
+	server.countRevocation(live, code)
 	_ = live.sendJSON(ctx, map[string]any{"v": 1, "type": "access.revoked", "payload": map[string]string{"code": code}})
 	_ = live.conn.CloseNow()
 }
 
 func (server *Server) sendProtocolError(ctx context.Context, live *liveConnection, code string, request *wireEnvelope) {
+	server.metrics.ProtocolError(code)
 	frame := map[string]any{"v": 1, "type": "error", "payload": map[string]string{"code": code}}
 	if request != nil {
 		frame["request_id"] = request.RequestID
@@ -1633,25 +1681,6 @@ func decodePayload(data []byte, target any) error {
 		return errors.New("relay: invalid protocol payload")
 	}
 	return nil
-}
-
-func writeJSON(parent context.Context, connection *websocket.Conn, value any) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	if len(data) > maxFrameBytes {
-		return errors.New("relay: outgoing frame exceeds limit")
-	}
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
-	defer cancel()
-	return connection.Write(ctx, websocket.MessageText, data)
-}
-
-func writeErrorFrame(parent context.Context, connection *websocket.Conn, code string) {
-	_ = writeJSON(parent, connection, map[string]any{
-		"v": 1, "type": "error", "payload": map[string]string{"code": code},
-	})
 }
 
 func writeError(response http.ResponseWriter, status int, code string) {

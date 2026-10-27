@@ -17,6 +17,7 @@ import (
 	"dsh-mobile-ustc/services/remote/internal/approval"
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/files"
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"dsh-mobile-ustc/services/remote/internal/relay"
 	"dsh-mobile-ustc/services/remote/internal/releases"
 	"dsh-mobile-ustc/services/remote/internal/store"
@@ -112,6 +113,7 @@ type Config struct {
 	FileExports   *files.Exports
 	Push          *store.PushStore
 	Releases      *releases.Catalog
+	Metrics       *observability.Metrics
 }
 
 type deviceRequest struct {
@@ -186,6 +188,9 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 		approvalConfig = append(approvalConfig, *configs[0].Approvals)
 	}
 	realtime := relay.New(database, approvalConfig...)
+	if len(configs) > 0 {
+		realtime.ConfigureMetrics(configs[0].Metrics)
+	}
 	api.realtime = realtime
 	mux.Handle("GET /v1/realtime", realtime)
 	if len(approvalConfig) > 0 && approvalConfig[0].Control != nil && approvalConfig[0].Leases != nil {
