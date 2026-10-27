@@ -15,26 +15,31 @@ import (
 var durationBuckets = []float64{.001, .005, .01, .025, .05, .1, .25, .3, .5, 1, 2, 5, 10}
 
 type Metrics struct {
-	registry       *prometheus.Registry
-	receivedFrames *prometheus.CounterVec
-	receivedBytes  *prometheus.CounterVec
-	writtenFrames  *prometheus.CounterVec
-	writtenBytes   *prometheus.CounterVec
-	writeDuration  *prometheus.HistogramVec
-	queueDuration  *prometheus.HistogramVec
-	routeDuration  prometheus.Histogram
-	rejectedSends  *prometheus.CounterVec
-	protocolErrors *prometheus.CounterVec
-	resyncs        prometheus.Counter
-	forwards       *prometheus.HistogramVec
-	revocations    *prometheus.CounterVec
-	controlRuns    *prometheus.HistogramVec
-	controlReady   *prometheus.GaugeVec
-	controlSuccess *prometheus.GaugeVec
-	controlEvents  *prometheus.CounterVec
-	controlAge     *prometheus.HistogramVec
-	clockSkew      prometheus.Counter
-	tunnelDuration *prometheus.HistogramVec
+	registry           *prometheus.Registry
+	receivedFrames     *prometheus.CounterVec
+	receivedBytes      *prometheus.CounterVec
+	writtenFrames      *prometheus.CounterVec
+	writtenBytes       *prometheus.CounterVec
+	writeDuration      *prometheus.HistogramVec
+	queueDuration      *prometheus.HistogramVec
+	routeDuration      prometheus.Histogram
+	rejectedSends      *prometheus.CounterVec
+	protocolErrors     *prometheus.CounterVec
+	resyncs            prometheus.Counter
+	forwards           *prometheus.HistogramVec
+	revocations        *prometheus.CounterVec
+	controlRuns        *prometheus.HistogramVec
+	controlReady       *prometheus.GaugeVec
+	controlSuccess     *prometheus.GaugeVec
+	controlEvents      *prometheus.CounterVec
+	controlAge         *prometheus.HistogramVec
+	clockSkew          prometheus.Counter
+	tunnelDuration     *prometheus.HistogramVec
+	commandTransitions *prometheus.CounterVec
+	commandAge         *prometheus.HistogramVec
+	commandDwell       *prometheus.HistogramVec
+	commandStore       *prometheus.HistogramVec
+	commandClock       *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -70,11 +75,16 @@ func New() *Metrics {
 			Buckets: []float64{.01, .1, .25, .5, 1, 2, 5, 10, 30, 60, 300, 3600}}, []string{"topic"}),
 		clockSkew: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "dsh_remote", Name: "control_event_future_timestamps_total",
 			Help: "Published events with future database timestamps, excluded from the age histogram."}),
-		tunnelDuration: histogram("relay_tunnel_transit_duration_seconds", "One proxy leg from complete message read to completed destination write; excludes owner authorization and the other leg.", "direction", "result"),
+		tunnelDuration:     histogram("relay_tunnel_transit_duration_seconds", "One proxy leg from complete message read to completed destination write; excludes owner authorization and the other leg.", "direction", "result"),
+		commandTransitions: counter("command_transitions_total", "New command rows or state changes whose database commit this process confirmed; retries of unchanged state do not count.", "action", "from", "to", "origin"),
+		commandAge:         prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "command_state_entry_age_seconds", Help: "Database updated_at minus command created_at on each committed state change; includes native/network/wait time and later re-entries, not first-accept latency.", Buckets: commandTimeBuckets}, []string{"action", "state"}),
+		commandDwell:       prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "command_state_dwell_seconds", Help: "Database updated_at minus previous updated_at on a committed state change; not native execution duration.", Buckets: commandTimeBuckets}, []string{"action", "from", "to"}),
+		commandStore:       histogram("command_store_duration_seconds", "Monotonic command repository call duration including validation, authorization, lock waits and commit; all attempts, including unchanged retries.", "operation", "result"),
+		commandClock:       counter("command_timestamp_anomalies_total", "Missing or backward database timestamps excluded from command age/dwell histograms.", "interval"),
 	}
 	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
-		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, role := range []string{"installation", "device", "other"} {
 		m.receivedFrames.WithLabelValues(role)
 		m.receivedBytes.WithLabelValues(role)

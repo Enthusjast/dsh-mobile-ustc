@@ -34,6 +34,10 @@ REMOTE_METRICS_LISTEN_ADDR=127.0.0.1:9090 go run ./cmd/remote
 | `relay_send_duration_seconds{role,result}` | 入队尝试至 writer 完成，包含队列、提交前检查和目标网络写入；result 为 written / error |
 | `relay_rejected_sends_total{role,reason}` | 入队前因序列化、大小、关闭、取消或队列满而拒绝 |
 | `relay_protocol_errors_total{class}` / `relay_resyncs_total` | 固定类别的协议错误尝试，以及要求重同步的错误 / 订阅失效次数 |
+| `command_transitions_total{action,from,to,origin}` | 当前进程确认提交的命令创建/状态转换；未改变状态的重试不重复计数 |
+| `command_state_entry_age_seconds{action,state}` / `command_state_dwell_seconds{action,from,to}` | 数据库创建至状态进入的年龄，以及前一状态停留时间；可能含模型/人工等待 |
+| `command_store_duration_seconds{operation,result}` | 每次仓库调用的单调耗时，含重复调用和失败尝试 |
+| `command_timestamp_anomalies_total{interval}` | 缺失/倒退的数据库时间；不产生虚假的零延迟样本 |
 | `command_forward_duration_seconds{result}` | 已登记命令的当前租约复查、转发和回执处理；区分 forwarded / duplicate / denied / queue_full / unknown / reconcile_unavailable |
 | `relay_revoked_connections_total{role,reason}` | 选中进行授权失效处理的连接，每个连接最多累计一次；区分 access_revoked / authority_unavailable |
 | `control_run_duration_seconds{worker,result}` | outbox / leases / consumer 所有权 / consumer_cleanup 的独立尝试耗时，区分 ok / error / cancelled |
@@ -92,3 +96,9 @@ go test -run '^$' -bench 'Benchmark(FrameMetrics|RelayMetrics)' \
 HTTP 转发上限为 128。隧道时延只覆盖一个入口转发方向，已有 session route 只覆盖 owner
 处理路径；不能相加两个 p95 来宣称完整跨节点 SLO，需认证客户端端到端负载另测。
 共享 DPoP、控制逐节点分发和双节点业务链路已有分阶段证据，目标集群容量、备份恢复和更广故障窗口仍待验收。
+
+## 命令状态补充
+
+[命令指标口径](command-observability.md)详细说明提交后计数、重试/扇出去重、未知结果进入次数、
+状态年龄与停留时间、数据库时钟异常以及进程重启/提交确认丢失的边界。指标不替代持久对账，
+不是当前未知积压数量，也不把原生/人工等待混入路由 SLO。正常 dsh 链路的 dispatching 阶段保留。

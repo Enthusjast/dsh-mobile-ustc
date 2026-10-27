@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"time"
 
 	"dsh-mobile-ustc/services/remote/internal/files"
 )
@@ -28,7 +29,9 @@ func (repository *FileStore) FileMessageReference(ctx context.Context, id string
 
 // File references are reserved in the command transaction, before any Relay
 // forwarding. A terminal original only reconciles its existing references.
-func (postgres *Postgres) RecordRealtimeFileCommand(ctx context.Context, ticket TicketRedemption, host files.HostBinding, requestID, sessionID, digest, policy string, fileIDs []string, ready func() bool) (CommandStatus, error) {
+func (postgres *Postgres) RecordRealtimeFileCommand(ctx context.Context, ticket TicketRedemption, host files.HostBinding, requestID, sessionID, digest, policy string, fileIDs []string, ready func() bool) (status CommandStatus, err error) {
+	started := time.Now()
+	defer func() { postgres.observeCommandStore(ctx, "file_admit", started, err) }()
 	if len(fileIDs) < 1 || len(fileIDs) > 16 || !validSHA256Hex(policy) || ticket.RuntimeID != host.RuntimeID {
 		return CommandStatus{}, files.ErrInvalid
 	}
@@ -40,7 +43,7 @@ func (postgres *Postgres) RecordRealtimeFileCommand(ctx context.Context, ticket 
 		}
 	}
 	reconcile := false
-	status, err := postgres.recordRealtimeCommand(ctx, ticket, "message.submit", requestID, sessionID, digest, func(ctx context.Context, tx *sql.Tx, status CommandStatus) error {
+	status, err = postgres.recordRealtimeCommand(ctx, ticket, "message.submit", requestID, sessionID, digest, func(ctx context.Context, tx *sql.Tx, status CommandStatus) error {
 		known, err := existingMessageFiles(ctx, tx, ticket, status, ids)
 		if err != nil {
 			return err

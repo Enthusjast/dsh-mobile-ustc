@@ -31,12 +31,20 @@ func TestUnknownIdentityAndTextCannotCreateMetricLabels(t *testing.T) {
 		m.Revoked(untrusted, untrusted)
 		m.ControlRun(untrusted, untrusted, time.Millisecond)
 		m.ControlEvent(untrusted, untrusted, time.Now())
+		m.CommandTransition(untrusted, untrusted, untrusted, untrusted, time.Now().Add(-time.Second), time.Now().Add(-time.Second), time.Now())
+		m.CommandStore(untrusted, untrusted, time.Millisecond)
 	}
 	if got := testutil.CollectAndCount(m.rejectedSends); got != 1 {
 		t.Fatalf("untrusted inputs created %d rejection series", got)
 	}
 	if got := testutil.CollectAndCount(m.controlEvents); got != 1 {
 		t.Fatalf("untrusted inputs created %d event series", got)
+	}
+	if got := testutil.CollectAndCount(m.commandTransitions); got != 1 {
+		t.Fatalf("untrusted command fields created %d series", got)
+	}
+	if got := testutil.CollectAndCount(m.commandStore); got != 1 {
+		t.Fatalf("untrusted command outcomes created %d series", got)
 	}
 	response := httptest.NewRecorder()
 	m.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))

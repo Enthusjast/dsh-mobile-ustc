@@ -217,14 +217,15 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     assert.ok(body.length < 512 * 1024, 'metric output grew with resource identities')
     return body
   }
-  const metricSample = (body: string, name: string, labels: Record<string, string> = {}) => {
+  const metricSample = (body: string, name: string, labels: Record<string, string> = {}, subset = false) => {
+    let total = 0
     for (const line of body.split('\n')) {
       const [identity, value] = line.split(' ')
       if (!identity || identity.split('{', 1)[0] !== `dsh_remote_${name}`) continue
       const found = new Map([...identity.matchAll(/([a-z_][a-z0-9_]*)="([^"]*)"/g)].map(match => [match[1]!, match[2]!]))
-      if (found.size === Object.keys(labels).length && Object.entries(labels).every(([key, expected]) => found.get(key) === expected)) return Number(value)
+      if ((subset || found.size === Object.keys(labels).length) && Object.entries(labels).every(([key, expected]) => found.get(key) === expected)) total += Number(value)
     }
-    return 0
+    return total
   }
 
   const client = (subject: string, clientId: string, proofKey: ReturnType<typeof key>) => {
@@ -823,19 +824,28 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(mobile.frames.slice(revocationNotice+1).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false, 'revoked phone received content after its revocation marker')
   await until(async () => query(`select count(*) from control_outbox where published_at is null and topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked')`) === '0' ? true : undefined, 'control outbox acknowledgement')
   await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
+  const commandActions = ['message.submit', 'session.create', 'session.cancel', 'session.archive', 'question.answer']
   const finalMetrics = await until(async () => {
     const body = await readMetrics()
+    const commandsMatch = commandActions.every(action => metricSample(body, 'command_transitions_total', { action, from: 'none', to: 'received', origin: 'device' }) ===
+      Number(query(`select count(*) from commands where action='${action}'`)))
+    const receiptsMatch = metricSample(body, 'command_transitions_total', { origin: 'host' }, true) === Number(query(`select count(*) from audit_log where action='command.receipt'`))
     return metricSample(body, 'relay_revoked_connections_total', { reason: 'access_revoked', role: 'device' }) >= 2 &&
-      metricSample(body, 'control_event_age_seconds_count', { topic: 'runtime_grant.revoked' }) >= 1 ? body : undefined
+      metricSample(body, 'control_event_age_seconds_count', { topic: 'runtime_grant.revoked' }) >= 1 && commandsMatch && receiptsMatch ? body : undefined
   }, 'measured revocation propagation')
   assert.ok(metricSample(finalMetrics, 'relay_received_frames_total', { role: 'installation' }) > 20)
   assert.ok(metricSample(finalMetrics, 'relay_written_frames_total', { role: 'device' }) > 20)
   assert.ok(metricSample(finalMetrics, 'relay_session_route_duration_seconds_count') > 0)
   assert.ok(metricSample(finalMetrics, 'command_forward_duration_seconds_count', { result: 'forwarded' }) > 0)
   assert.ok(metricSample(finalMetrics, 'command_forward_duration_seconds_count', { result: 'duplicate' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'command_state_entry_age_seconds_count', { action: 'message.submit', state: 'host_accepted' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'command_state_dwell_seconds_count', { action: 'message.submit', from: 'host_accepted', to: 'dispatching' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'command_state_dwell_seconds_count', { action: 'message.submit', from: 'dispatching', to: 'agent_queued' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'command_store_duration_seconds_count', { operation: 'receipt', result: 'ok' }) > 0)
   for (const secret of [orgId, ownerId, phoneUserId, device.device_id, enrollment.runtime_id, sessionId, revokeMarker, revokeProof,
     (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
   t.diagnostic('Private Prometheus endpoint observed actual signed Host/phone connections, native traffic, command forwarding/retries and completed local revocation propagation without resource IDs, bodies or proofs.')
+  t.diagnostic('Committed command creation counters match PostgreSQL rows for every action; Host transition counters match durable receipt audits despite retries. Stage ages/dwell and repository attempts were observed at the owner node.')
   t.diagnostic(`Device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic('A real Bash approved through the normal plugin was held after guard; scoped grant invalidation blocked its body before the three-second lease expired and durably reported the invalidated fact.')
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)

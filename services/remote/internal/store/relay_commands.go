@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"slices"
+	"time"
 )
 
 var ErrCommandConflict = errors.New("store: command request conflicts")
@@ -43,7 +45,10 @@ var relayReceiptStates = map[string]struct{}{
 
 // RecordRealtimeCommand persists status and a digest; the request body remains transient.
 func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket TicketRedemption, commandType, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
-	return postgres.recordRealtimeCommand(ctx, ticket, commandType, requestID, sessionID, payloadSHA256, nil)
+	started := time.Now()
+	status, err := postgres.recordRealtimeCommand(ctx, ticket, commandType, requestID, sessionID, payloadSHA256, nil)
+	postgres.observeCommandStore(ctx, "admit", started, err)
+	return status, err
 }
 
 // admission runs under the same permission, command and resource locks as the
@@ -109,10 +114,10 @@ func (postgres *Postgres) recordRealtimeCommand(ctx context.Context, ticket Tick
 	if admission != nil {
 		check = func(status CommandStatus) error { return admission(ctx, transaction, status) }
 	}
-	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID, commandType, check)
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID, commandType, postgres.commands.metrics, check)
 }
 
-func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID, action string, admission ...func(CommandStatus) error) (CommandStatus, error) {
+func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID, action string, metrics *observability.Metrics, admission ...func(CommandStatus) error) (CommandStatus, error) {
 	var status CommandStatus
 	var existingUserID, existingRuntimeID string
 	var existingAction sql.NullString
@@ -178,12 +183,22 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 	if err := transaction.Commit(); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
+	if inserted {
+		metrics.CommandTransition(action, "none", status.State, "device", status.UpdatedAt, time.Time{}, status.UpdatedAt)
+	}
 	return status, nil
 }
 
 // RecordRealtimeCommandReceipt accepts a receipt only from the current
 // installation/runtime connection and enforces the command state machine.
 func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, receipt RelayCommandReceipt) (CommandStatus, error) {
+	started := time.Now()
+	status, err := postgres.recordRealtimeCommandReceipt(ctx, receipt)
+	postgres.observeCommandStore(ctx, "receipt", started, err)
+	return status, err
+}
+
+func (postgres *Postgres) recordRealtimeCommandReceipt(ctx context.Context, receipt RelayCommandReceipt) (CommandStatus, error) {
 	if !grantUUIDPattern.MatchString(receipt.InstallationID) || !grantUUIDPattern.MatchString(receipt.RuntimeID) ||
 		!grantUUIDPattern.MatchString(receipt.RuntimeEpoch) || !grantUUIDPattern.MatchString(receipt.ConnectionID) ||
 		!grantUUIDPattern.MatchString(receipt.DeviceID) || !grantUUIDPattern.MatchString(receipt.RequestID) ||
@@ -231,12 +246,14 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
 	var status CommandStatus
+	var action sql.NullString
+	var created time.Time
 	err = transaction.QueryRowContext(ctx, `
-		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at
 		from commands c
 		where c.device_id = $1 and c.request_id = $2 and c.runtime_id = $3
 		for update`, receipt.DeviceID, receipt.RequestID, receipt.RuntimeID).
-		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}
@@ -263,6 +280,7 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 		}
 		status.SessionID = receipt.SessionID
 	}
+	previousState, previousEntered := status.State, status.UpdatedAt
 	err = transaction.QueryRowContext(ctx, `
 		update commands set state = $1, session_id = nullif($4, '')::uuid, updated_at = clock_timestamp()
 		where device_id = $2 and request_id = $3
@@ -284,6 +302,7 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 	if err := transaction.Commit(); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
+	postgres.commands.metrics.CommandTransition(action.String, previousState, status.State, "host", created, previousEntered, status.UpdatedAt)
 	return status, nil
 }
 
@@ -291,6 +310,13 @@ func (postgres *Postgres) RecordRealtimeCommandReceipt(ctx context.Context, rece
 // fails after dispatch began. A later host receipt can still resolve it only
 // through an explicit recovery path, never by silently replaying the body.
 func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket TicketRedemption, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
+	started := time.Now()
+	status, err := postgres.markRealtimeCommandUnknown(ctx, ticket, requestID, sessionID, payloadSHA256)
+	postgres.observeCommandStore(ctx, "unknown", started, err)
+	return status, err
+}
+
+func (postgres *Postgres) markRealtimeCommandUnknown(ctx context.Context, ticket TicketRedemption, requestID, sessionID, payloadSHA256 string) (CommandStatus, error) {
 	if !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) ||
 		!grantUUIDPattern.MatchString(ticket.RuntimeID) || !grantUUIDPattern.MatchString(requestID) ||
 		(sessionID != "" && !grantUUIDPattern.MatchString(sessionID)) || !validSHA256Hex(payloadSHA256) {
@@ -302,12 +328,14 @@ func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket
 	}
 	defer transaction.Rollback()
 	var status CommandStatus
+	var action sql.NullString
+	var created time.Time
 	err = transaction.QueryRowContext(ctx, `
-		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at
 		from commands c
 		where c.device_id = $1 and c.user_id = $2 and c.request_id = $3 and c.runtime_id = $4
 		for update`, ticket.DeviceID, ticket.UserID, requestID, ticket.RuntimeID).
-		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}
@@ -323,6 +351,7 @@ func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket
 		}
 		return status, nil
 	}
+	previousEntered := status.UpdatedAt
 	err = transaction.QueryRowContext(ctx, `
 		update commands set state = 'outcome_unknown', updated_at = clock_timestamp()
 		where device_id = $1 and request_id = $2 returning updated_at`, ticket.DeviceID, requestID).Scan(&status.UpdatedAt)
@@ -340,6 +369,7 @@ func (postgres *Postgres) MarkRealtimeCommandUnknown(ctx context.Context, ticket
 	if err := transaction.Commit(); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
+	postgres.commands.metrics.CommandTransition(action.String, "received", status.State, "relay", created, previousEntered, status.UpdatedAt)
 	return status, nil
 }
 

@@ -6,11 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"time"
 )
 
 // RecordRealtimeSessionCreate authorizes the workspace before any session exists.
 // Preset names and other operation parameters remain transient, covered by the digest.
 func (postgres *Postgres) RecordRealtimeSessionCreate(ctx context.Context, ticket TicketRedemption, requestID, workspaceID, digest string) (CommandStatus, error) {
+	started := time.Now()
+	status, err := postgres.recordRealtimeSessionCreate(ctx, ticket, requestID, workspaceID, digest)
+	postgres.observeCommandStore(ctx, "create", started, err)
+	return status, err
+}
+
+func (postgres *Postgres) recordRealtimeSessionCreate(ctx context.Context, ticket TicketRedemption, requestID, workspaceID, digest string) (CommandStatus, error) {
 	if !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) ||
 		!grantUUIDPattern.MatchString(ticket.RuntimeID) || !grantUUIDPattern.MatchString(requestID) ||
 		!grantUUIDPattern.MatchString(workspaceID) || !validSHA256Hex(digest) {
@@ -52,7 +60,7 @@ func (postgres *Postgres) RecordRealtimeSessionCreate(ctx context.Context, ticke
 	if !grantScopeSubset(ticket.Scope, scope) || !slices.Contains(scope.Actions, "session.create") || !slices.Contains(scope.Workspaces, workspaceID) {
 		return CommandStatus{}, ErrAccessDenied
 	}
-	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, "", workspaceID, digest, orgID, "session.create")
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, "", workspaceID, digest, orgID, "session.create", postgres.commands.metrics)
 }
 
 func validateCreatedSession(receipt RelayCommandReceipt) error {

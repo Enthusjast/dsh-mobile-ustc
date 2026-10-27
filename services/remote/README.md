@@ -78,3 +78,10 @@ not authorize new delivery. The small fixture performs actual dump/restore into
 a separate PostgreSQL cluster and invokes the production CLI. It does not certify
 school identity, encrypted backup/WAL/object-storage facilities or production
 RPO/RTO. Further large-load/physical-device/OEM setup remains deferred.
+
+When private metrics are enabled, the command repository also reports committed
+state transitions, database state-entry ages/dwell, repository attempts and
+clock anomalies. Counters exclude unchanged retries, status reads, failed commits
+and receipt fanout. [Command observability](../../docs/command-observability.md)
+records exact semantics, process-local delivery limits and remaining native
+checkpoint/backlog metrics. No command body, resource ID or digest is a label.
