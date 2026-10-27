@@ -802,6 +802,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }, 'measured revocation propagation')
   assert.ok(metricSample(finalMetrics, 'relay_received_frames_total', { role: 'installation' }) > 20)
   assert.ok(metricSample(finalMetrics, 'relay_written_frames_total', { role: 'device' }) > 20)
+  assert.ok(metricSample(finalMetrics, 'relay_session_route_duration_seconds_count') > 0)
   assert.ok(metricSample(finalMetrics, 'command_forward_duration_seconds_count', { result: 'forwarded' }) > 0)
   assert.ok(metricSample(finalMetrics, 'command_forward_duration_seconds_count', { result: 'duplicate' }) > 0)
   for (const secret of [orgId, ownerId, phoneUserId, device.device_id, enrollment.runtime_id, sessionId, revokeMarker, revokeProof,

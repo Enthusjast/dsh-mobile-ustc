@@ -239,6 +239,9 @@ func (server *Server) routeSessionContent(ctx context.Context, live *liveConnect
 		_ = subscription.device.conn.CloseNow()
 		return
 	}
+	if !envelope.receivedAt.IsZero() {
+		server.metrics.RoutedSession(time.Since(envelope.receivedAt))
+	}
 	if (envelope.Type == "session.error" || envelope.Type == "session.closed") && envelope.RequestID == subscription.requestID {
 		server.dropSubscription(ctx, subscription, "", false)
 	}

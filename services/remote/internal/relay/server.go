@@ -135,6 +135,7 @@ type peer struct {
 }
 
 type wireEnvelope struct {
+	receivedAt     time.Time
 	V              int             `json:"v"`
 	Type           string          `json:"type"`
 	RequestID      string          `json:"request_id,omitempty"`
@@ -903,6 +904,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 	for {
 		readCtx, cancel := context.WithTimeout(parent, connectionIdleTime)
 		messageType, data, err := connection.Read(readCtx)
+		receivedAt := time.Now()
 		cancel()
 		if err != nil {
 			return
@@ -918,6 +920,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			server.closePolicy(live, "invalid frame")
 			return
 		}
+		envelope.receivedAt = receivedAt
 		switch envelope.Type {
 		case "question.references":
 			server.routeQuestionReferences(parent, live, host, envelope, data)

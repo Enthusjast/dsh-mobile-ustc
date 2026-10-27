@@ -12,7 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-var durationBuckets = []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5, 10}
+var durationBuckets = []float64{.001, .005, .01, .025, .05, .1, .25, .3, .5, 1, 2, 5, 10}
 
 type Metrics struct {
 	registry       *prometheus.Registry
@@ -22,6 +22,7 @@ type Metrics struct {
 	writtenBytes   *prometheus.CounterVec
 	writeDuration  *prometheus.HistogramVec
 	queueDuration  *prometheus.HistogramVec
+	routeDuration  prometheus.Histogram
 	rejectedSends  *prometheus.CounterVec
 	protocolErrors *prometheus.CounterVec
 	resyncs        prometheus.Counter
@@ -50,6 +51,7 @@ func New() *Metrics {
 		writtenBytes:   counter("relay_written_bytes_total", "Payload bytes of successfully written WebSocket data messages.", "role"),
 		writeDuration:  histogram("relay_send_duration_seconds", "Time from enqueue attempt to writer completion, including queue and recipient write time; excludes native execution.", "role", "result"),
 		queueDuration:  histogram("relay_queue_duration_seconds", "Time from enqueue attempt until the writer dequeues the message; excludes socket I/O.", "role"),
+		routeDuration:  prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "relay_session_route_duration_seconds", Help: "Successfully routed session data message: complete Go ingress read to destination write, including decoding, authorization and queuing; excludes TLS ingress and native execution.", Buckets: durationBuckets}),
 		rejectedSends:  counter("relay_rejected_sends_total", "Outgoing messages rejected before queue admission.", "role", "reason"),
 		protocolErrors: counter("relay_protocol_errors_total", "Protocol error responses attempted, grouped into fixed error classes.", "class"),
 		resyncs: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "dsh_remote", Name: "relay_resyncs_total",
@@ -68,7 +70,7 @@ func New() *Metrics {
 		clockSkew: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "dsh_remote", Name: "control_event_future_timestamps_total",
 			Help: "Published events with future database timestamps, excluded from the age histogram."}),
 	}
-	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.rejectedSends,
+	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
 		m.controlEvents, m.controlAge, m.clockSkew, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, role := range []string{"installation", "device", "other"} {
@@ -144,6 +146,12 @@ func (m *Metrics) Written(role string, bytes int, elapsed time.Duration, err err
 func (m *Metrics) Dequeued(role string, elapsed time.Duration) {
 	if m != nil {
 		m.queueDuration.WithLabelValues(Role(role)).Observe(elapsed.Seconds())
+	}
+}
+
+func (m *Metrics) RoutedSession(elapsed time.Duration) {
+	if m != nil {
+		m.routeDuration.Observe(elapsed.Seconds())
 	}
 }
 

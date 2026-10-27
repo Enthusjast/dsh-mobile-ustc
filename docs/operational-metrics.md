@@ -30,6 +30,7 @@ REMOTE_METRICS_LISTEN_ADDR=127.0.0.1:9090 go run ./cmd/remote
 | `relay_received_frames_total{role}` / `relay_received_bytes_total{role}` | 成功读取的完整 WebSocket data message 数与 payload 字节，包括随后被拒绝的消息 |
 | `relay_written_frames_total{role}` / `relay_written_bytes_total{role}` | 实际成功完成写入的 data message 数与 payload 字节 |
 | `relay_queue_duration_seconds{role}` | 入队尝试至 writer 取出消息，包含短时 admission 锁等待，不含 socket I/O |
+| `relay_session_route_duration_seconds` | 成功的 session 数据帧从 Go 入口完整读取后，到目标连接写出完成；包含解码、当前数据库授权、排队及写入，不含前置 TLS 入口与原生执行 |
 | `relay_send_duration_seconds{role,result}` | 入队尝试至 writer 完成，包含队列、提交前检查和目标网络写入；result 为 written / error |
 | `relay_rejected_sends_total{role,reason}` | 入队前因序列化、大小、关闭、取消或队列满而拒绝 |
 | `relay_protocol_errors_total{class}` / `relay_resyncs_total` | 固定类别的协议错误尝试，以及要求重同步的错误 / 订阅失效次数 |
@@ -47,6 +48,8 @@ REMOTE_METRICS_LISTEN_ADDR=127.0.0.1:9090 go run ./cmd/remote
 每条等待队列仍受 16 条 × 64 KiB 的既有限制，writer 另持有最多一条。队列统计不包含 TLS / TCP 缓冲或对端积压。取消一次已经入队的等待，不会从队列中移除或证明未发送：字节必须保持到实际 writer 取出，或连接退出后离开当前连接集合。这与原命令未知结果的处理一致。
 
 frame 指项目协议的完整 WebSocket message，不是底层线缆分片；包含握手、心跳与控制消息。installation 入站与 device 出站可分别观察主机输出和手机扇出，但不能推算 DSH 合并前的原始事件数或纯正文速率。`command_forward_duration_seconds` 不含命令最初的持久登记，也不含原生入队 / 执行或模型 / 人工等待；不把它写成完整命令耗时。
+
+session 路由时间由服务内部单调时钟记录，入口时间不接受远端字段且不写入协议。只观察成功写出的帧，失败 / 重同步需结合其他指标及负载的完整投递检查。300 ms 桶用于指定负载预算；详细条件和真实 TLS 客户端计时见[认证容量样本](authenticated-capacity.md)。
 
 控制事件年龄包含轮询积压、处理、通知 / 连接关闭及数据库确认。它只证明当前单进程处理窗口，不能代替手机实际收到通知、原生副作用停止或多节点传播的测量。未来时间单独计数；不把时钟偏差截成零延迟。控制 worker 与授权失败关闭行为保持独立，指标不延长任何租约。
 
