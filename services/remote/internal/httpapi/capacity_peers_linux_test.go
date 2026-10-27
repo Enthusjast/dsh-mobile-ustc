@@ -97,7 +97,8 @@ func (client *capacityAPI) once(ctx context.Context, method, path string, body a
 		return capacityResponse{}, errors.New("encode HTTP fixture")
 	}
 	ath := sha256.Sum256([]byte(client.token))
-	proof, err := capacitySign(key, "dpop+jwt", map[string]any{"htm": method, "htu": client.origin + path, "iat": time.Now().Unix(),
+	proofPath, _, _ := strings.Cut(path, "?")
+	proof, err := capacitySign(key, "dpop+jwt", map[string]any{"htm": method, "htu": client.origin + proofPath, "iat": time.Now().Unix(),
 		"ath": base64.RawURLEncoding.EncodeToString(ath[:]), "jti": capacityID(), "nonce": client.nonce}, map[jose.HeaderKey]any{"jwk": key.public})
 	if err != nil {
 		return capacityResponse{}, errors.New("sign HTTP fixture")
@@ -175,6 +176,8 @@ type capacityWire struct {
 	SessionID      string          `json:"session_id,omitempty"`
 	SubscriptionID string          `json:"subscription_id,omitempty"`
 	SyncID         string          `json:"sync_id,omitempty"`
+	DeviceID       string          `json:"device_id,omitempty"`
+	PayloadSHA256  string          `json:"payload_sha256,omitempty"`
 	Payload        json.RawMessage `json:"payload"`
 }
 
@@ -216,7 +219,7 @@ type capacityPair struct {
 	delays                                                               []time.Duration
 }
 
-func capacityConnect(ctx context.Context, client *http.Client, origin, role, credential string, key capacityKey, pair *capacityPair) (*websocket.Conn, error) {
+func capacityConnect(ctx context.Context, client *http.Client, origin, role, credential string, key capacityKey, pair *capacityPair, extraCapabilities ...string) (*websocket.Conn, error) {
 	connection, _, err := websocket.Dial(ctx, origin+"/v1/realtime", &websocket.DialOptions{HTTPClient: client, Subprotocols: []string{"dsh.remote.v1"},
 		HTTPHeader: http.Header{"Authorization": []string{credential}}, CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
@@ -242,6 +245,7 @@ func capacityConnect(ctx context.Context, client *http.Client, origin, role, cre
 		return nil, errors.New("WebSocket challenge invalid")
 	}
 	caps := []string{"connection.heartbeat.v1", "session.catalog.v1", "session.read.v1"}
+	caps = append(caps, extraCapabilities...)
 	slices.Sort(caps)
 	subject, digest := pair.device, auth.RelayHelloDigest("device", pair.device, "1", strings.Join(caps, "\n"))
 	hello := map[string]any{"device_id": pair.device, "protocols": []int{1}, "capabilities": caps}

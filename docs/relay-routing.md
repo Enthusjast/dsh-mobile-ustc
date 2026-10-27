@@ -110,3 +110,26 @@ race/private-PostgreSQL suite and the cross-node production/native composition
 the focused native-file/read/revoke scenarios. `go vet ./...` and TypeScript
 check passed. These fixtures do not establish physical Android, school SSO,
 OEM push, 12000 connections or 2000 active sessions × 20 Hz capacity.
+
+The bounded owner-crash scenario uses two production children, one Host
+protocol fixture and one phone. It kills only the owned Relay child with
+SIGKILL, preserves its stale database route, and verifies that admission through
+the survivor fails until the Host explicitly reconnects there. The failed
+transport does not consume the phone ticket. Recovery rejects the old sync and
+requires new subscription/sync/epoch identities. A command remains `received`
+until an explicit retry and a Host receipt; neither reconnect nor an accepted
+retry replays its body. The Host receipt is a protocol fixture in this test;
+native durable acceptance has separate DSH evidence above. The focused record
+is `.local/relay-routing-owner-crash-second.log`.
+
+Before the subsequent test-scope change, clean revision `dcb4c83` also passed
+the existing single-node 3000-connection profile: 200 active streams × 20 Hz for
+30 seconds, 120000/120000 deliveries, admission 7.009 seconds, end-to-end p95
+37.630 ms / p99 78.216 ms and revoke sample 189.571 ms. Evidence is
+`.local/relay-capacity/relay-routing-3000/`. It remains a single-node result.
+
+Per the October 27 development instruction, further large-load and physical
+device tests are deferred, and OEM push-channel configuration is skipped.
+Continue functional development with bounded local fixtures and simple emulator
+checks when Android changes require them. The unrun acceptance gates remain
+open rather than being treated as successful.

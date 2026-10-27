@@ -174,7 +174,7 @@ func newRoutingFixture(t *testing.T, count, maxProxies int) *routingFixture {
 	return fixture
 }
 
-func (f *routingFixture) host(pair *capacityPair, node string) *websocket.Conn {
+func (f *routingFixture) host(pair *capacityPair, node string, capabilities ...string) *websocket.Conn {
 	f.t.Helper()
 	var challenge store.HostCredentialChallenge
 	if err := pair.hostAPI.call(f.ctx, "POST", "/v1/host-credentials/challenges", map[string]any{}, &challenge, 201); err != nil {
@@ -188,7 +188,7 @@ func (f *routingFixture) host(pair *capacityPair, node string) *websocket.Conn {
 	if err := pair.hostAPI.call(f.ctx, "POST", "/v1/host-credentials", map[string]any{"challenge_id": challenge.ChallengeID, "proof": proof}, &credential, 201); err != nil {
 		f.t.Fatal(err)
 	}
-	connection, err := capacityConnect(f.ctx, f.clients[node], f.origin, "installation", "DSH-Host "+credential.Credential, pair.hostKey, pair)
+	connection, err := capacityConnect(f.ctx, f.clients[node], f.origin, "installation", "DSH-Host "+credential.Credential, pair.hostKey, pair, capabilities...)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -200,10 +200,10 @@ func (f *routingFixture) host(pair *capacityPair, node string) *websocket.Conn {
 	return connection
 }
 
-func (f *routingFixture) ticket(pair *capacityPair) store.RealtimeTicket {
+func (f *routingFixture) ticket(pair *capacityPair, extraActions ...string) store.RealtimeTicket {
 	f.t.Helper()
 	var ticket store.RealtimeTicket
-	if err := pair.phoneAPI.call(f.ctx, "POST", "/v1/realtime/tickets", map[string]any{"runtime_id": pair.runtime, "scope": store.GrantScope{Actions: []string{"session.read"}, Workspaces: []string{pair.workspace}, Sessions: []string{pair.session}}}, &ticket, 201); err != nil {
+	if err := pair.phoneAPI.call(f.ctx, "POST", "/v1/realtime/tickets", map[string]any{"runtime_id": pair.runtime, "scope": store.GrantScope{Actions: append([]string{"session.read"}, extraActions...), Workspaces: []string{pair.workspace}, Sessions: []string{pair.session}}}, &ticket, 201); err != nil {
 		f.t.Fatal(err)
 	}
 	return ticket
@@ -255,7 +255,7 @@ func (f *routingFixture) closed(connection *websocket.Conn) {
 	}
 	f.t.Fatal("stale transport kept delivering frames")
 }
-func (f *routingFixture) snapshot(pair *capacityPair, host, phone *websocket.Conn) {
+func (f *routingFixture) snapshot(pair *capacityPair, host, phone *websocket.Conn) capacityWire {
 	f.t.Helper()
 	request := capacityID()
 	approvalWrite(f.t, f.ctx, phone, capacityWire{V: 1, Type: "session.subscribe", RequestID: request, RuntimeID: pair.runtime, SessionID: pair.session, Payload: capacityPayload(map[string]any{"max_messages": 10})})
@@ -284,6 +284,7 @@ func (f *routingFixture) snapshot(pair *capacityPair, host, phone *websocket.Con
 	if result, err := capacityRead(f.ctx, phone); err != nil || result.Type != "assistant.chunk" || string(result.Payload) != string(frame.Payload) {
 		f.t.Fatal("stream body changed across nodes", result.Type, err)
 	}
+	return frame
 }
 
 func TestProductionRoutingCrossesNodesRevokesAndFencesHostMigration(t *testing.T) {
