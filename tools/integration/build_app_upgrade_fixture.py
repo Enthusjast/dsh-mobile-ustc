@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import zipfile
 
@@ -79,10 +80,19 @@ def main():
             result = subprocess.run(command, cwd=repo / "android", env=environment, stdout=stream, stderr=subprocess.STDOUT)
         if result.returncode != 0:
             raise RuntimeError("fixture build failed; inspect " + str(log))
-        candidate = output / "builds/app/outputs/apk/debug/app-debug.apk"
-        after = inspect_apk(candidate, sdk, 2, "0.2.0-upgrade-fixture")
+        built = output / "builds/app/outputs/apk/debug/app-debug.apk"
+        after = inspect_apk(built, sdk, 2, "0.2.0-upgrade-fixture")
         if before["signing_cert_sha256"] != after["signing_cert_sha256"]:
             raise RuntimeError("candidate signer differs from the installed-fixture baseline")
+        # Switching the same Gradle project back to its normal build directory
+        # can delete previous task outputs as stale. Retain the verified artifact
+        # outside all Gradle-owned output paths before any later normal build.
+        artifacts = output / "artifacts"
+        artifacts.mkdir(exist_ok=True)
+        candidate = artifacts / "app-full-v2.apk"
+        shutil.copyfile(built, candidate)
+        if digest(candidate) != after["sha256"]:
+            raise RuntimeError("retained candidate differs from verified build output")
         revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
         dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, check=True, capture_output=True, text=True).stdout.splitlines()
         receipt = {"v": 1, "kind": "full-executable-app-upgrade-fixture", "source_revision": revision,
