@@ -89,3 +89,6 @@ histogram_quantile(0.95, sum by (le, operation, result) (rate(dsh_remote_command
 
 后续[Host 原生观测](host-native-observations.md)另有实际方法和 checkpoint 失败的可选自报链路。
 不要从命令缺失某阶段推断原生失败，也不要将 Host 自报转换为已提交命令计数或新的持久确认。
+
+后续[当前数据库未知积压](unknown-results-metrics.md)通过有期限后台快照提供可下降的数量，
+包含保留的历史/恢复未知行。失败保留旧值并报告新鲜度；它不从转换计数相减，不代替逐项对账。

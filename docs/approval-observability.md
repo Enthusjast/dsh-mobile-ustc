@@ -44,6 +44,9 @@ runtime 重新接入/断开引起的 invalidated 或 outcome_unknown，只有整
 不是当前未知积压或唯一审批终态集合。恢复 CLI 的批量隔离另见[恢复记录](database-recovery.md)，
 不经普通网络仓库计数路径。
 
+另有[当前未知积压快照](unknown-results-metrics.md)，从数据库读取仍处于 unknown 的行数，
+包含保留的恢复/旧版行，并明确显示采样失败与年龄；不把状态进入次数当作 gauge。
+
 ## 租约准备与可用性
 
 | 指标 | 含义 |

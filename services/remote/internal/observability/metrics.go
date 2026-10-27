@@ -62,6 +62,8 @@ type Metrics struct {
 	pushDeliveryAge           *prometheus.HistogramVec
 	pushReceiptAge            *prometheus.HistogramVec
 	pushClock                 *prometheus.CounterVec
+	unknown                   *unknownCollector
+	unknownSnapshots          *prometheus.HistogramVec
 }
 
 func New() *Metrics {
@@ -72,6 +74,8 @@ func New() *Metrics {
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: name, Help: help, Buckets: durationBuckets}, labels)
 	}
 	m := &Metrics{
+		unknown:                   newUnknownCollector(),
+		unknownSnapshots:          histogram("unknown_snapshot_duration_seconds", "Background current-unknown snapshot attempts; scrapes never access the database.", "result"),
 		pushSends:                 histogram("push_provider_send_duration_seconds", "FCM sender attempt duration including OAuth, authority recheck and response handling; result is not database commit or phone display.", "kind", "result"),
 		pushOperations:            histogram("push_operation_duration_seconds", "Push completion or client-receipt repository attempt duration including authorization, audit and commit; includes retries and failures.", "operation", "result"),
 		pushDeliveries:            counter("push_delivery_results_total", "Delivery completion results with confirmed commit, including distinct retry attempts; not phone display.", "kind", "state", "code"),
@@ -128,6 +132,7 @@ func New() *Metrics {
 	}
 	m.Register(m.fileScans, m.fileHandoffOperations, m.fileHandoffEvents, m.fileHandoffAge, m.fileHandoffStage, m.fileClock)
 	m.Register(m.pushSends, m.pushOperations, m.pushDeliveries, m.pushReceipts, m.pushDeliveryAge, m.pushReceiptAge, m.pushClock)
+	m.Register(m.unknown, m.unknownSnapshots)
 	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
 		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, m.native, m.nativeReports, m.approvalStates, m.approvalHosts, m.approvalOps, m.approvalLeasePrepared, m.approvalLeaseLifetime, m.approvalLeaseRemaining, m.approvalLeaseAvailability, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))

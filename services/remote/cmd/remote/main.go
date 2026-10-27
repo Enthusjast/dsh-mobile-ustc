@@ -214,6 +214,8 @@ func run() error {
 	}()
 	proofsDone := make(chan struct{})
 	go func() { defer close(proofsDone); proofs.Run(controlCtx) }()
+	unknownDone := make(chan struct{})
+	go func() { defer close(unknownDone); observability.RunUnknownResults(controlCtx, metrics, database) }()
 	go func() {
 		defer close(controlDone)
 		if err := control.RunConsumer(controlCtx, consumer, handler, metrics); err != nil {
@@ -238,6 +240,7 @@ func run() error {
 		<-filesDone
 		<-pushDone
 		<-proofsDone
+		<-unknownDone
 		<-recoveryDone
 	}()
 	result := make(chan error, 1)

@@ -115,3 +115,10 @@ posted/opened/blocked receipts. Retries retain their notification identity and
 distinct lease attempts; repeated client states count once. Provider acceptance
 does not imply display, and no result grants interaction authority. Fixed-label
 durations/ages contain no endpoint, project, credential or resource identities.
+
+[Current unknown-result gauges](../../docs/unknown-results-metrics.md) use a
+bounded background database snapshot, with cached counts, availability and age.
+Scrapes do no source I/O, failures retain the last counts, and disabled metrics
+perform no query. Retained historical/recovery unknown rows remain included;
+reconciliation can reduce counts. Multiple nodes sharing a database report the
+same global scope, so these gauges must not be summed across those nodes.

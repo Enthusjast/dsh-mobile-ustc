@@ -166,6 +166,9 @@ func TestConfiguredFileServiceProcessRunsWorkersAndShutsDownCleanly(t *testing.T
 			}
 		}
 		if strings.Contains(string(body), "dsh_remote_control_available{worker=\"outbox\"} 1") && strings.Contains(string(body), "dsh_remote_control_available{worker=\"leases\"} 1") &&
+			strings.Contains(string(body), "dsh_remote_unknown_snapshot_available 1\n") &&
+			strings.Contains(string(body), "dsh_remote_unknown_results{kind=\"command\"} 0\n") &&
+			strings.Contains(string(body), "dsh_remote_unknown_results{kind=\"approval\"} 0\n") &&
 			strings.Contains(string(body), "dsh_remote_file_scan_attempt_duration_seconds_count{direction=\"to_host\",result=\"clean\"} 1\n") &&
 			strings.Contains(string(body), "dsh_remote_file_scan_attempt_duration_seconds_count{direction=\"to_host\",result=\"rejected\"} 1\n") {
 			break
