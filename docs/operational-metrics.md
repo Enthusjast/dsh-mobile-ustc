@@ -120,3 +120,11 @@ checkpoint/cold checkpoint 的固定结果及耗时。只有启用私有指标�
 租约的 `approval_lease_preparations_total`、lifetime、availability_checks 和 remaining
 分别描述提交后的准备、裁剪期限及检查点，不能解释成已投递或已消费。
 所有转换在整个事务确认 commit 后采样，失败/相同结果重试不增加转换次数。
+
+## 文件扫描与交接补充
+
+[文件指标口径](file-observability.md)将领取后的扫描尝试与提交后的交接里程碑分开。
+`file_scan_attempt_duration_seconds` 包括校验、扫描、对象写入及仓库完成/失败处理；
+`file_handoff_age_seconds` 和 `file_handoff_read_to_stage_seconds` 使用数据库区间，
+只有新里程碑的整个 commit 得到确认后才采样。staged 仍是 Host 暂存回报，不等于原生准入。
+固定标签的仓库尝试耗时保留失败与重试，负时间差单独计数；这些指标不是当前积压或路由 SLO。

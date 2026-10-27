@@ -22,6 +22,7 @@ import (
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/files"
 	"dsh-mobile-ustc/services/remote/internal/httpapi"
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"dsh-mobile-ustc/services/remote/internal/store"
 	"dsh-mobile-ustc/services/remote/internal/testsupport"
 	jose "github.com/go-jose/go-jose/v4"
@@ -86,6 +87,7 @@ func (caller *fileHTTPCaller) call(token, method, path string, body any) (int, j
 }
 
 type fileHTTPFixture struct {
+	metrics                                *observability.Metrics
 	exports                                *files.Exports
 	ctx                                    context.Context
 	database                               *sql.DB
@@ -103,6 +105,10 @@ func newFileHTTPFixture(t *testing.T, crossNode ...bool) *fileHTTPFixture {
 	t.Helper()
 	ctx, database := testsupport.PostgresDatabase(t)
 	postgres := &store.Postgres{DB: database}
+	metrics := observability.New()
+	if err := postgres.ConfigureFileMetrics(metrics); err != nil {
+		t.Fatal(err)
+	}
 	proof, approval, secondProof, issuer := approvalKey(t), approvalKey(t), approvalKey(t), approvalKey(t)
 	proofJWK, proofJKT := approvalPublic(t, proof)
 	approvalJWK, approvalJKT := approvalPublic(t, approval)
@@ -159,6 +165,9 @@ func newFileHTTPFixture(t *testing.T, crossNode ...bool) *fileHTTPFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := service.ConfigureMetrics(metrics); err != nil {
+		t.Fatal(err)
+	}
 	exports, err := files.NewExports(repository, storage, service)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +184,7 @@ func newFileHTTPFixture(t *testing.T, crossNode ...bool) *fileHTTPFixture {
 	}
 	caller := &fileHTTPCaller{t: t, ctx: ctx, client: server.Client(), base: server.URL, key: proof, jwk: proofJWK}
 	second := &fileHTTPCaller{t: t, ctx: ctx, client: server.Client(), base: server.URL, key: secondProof, jwk: secondJWK}
-	return &fileHTTPFixture{ctx: ctx, database: database, service: service, exports: exports, peer: peer, objects: objects, server: server, caller: caller, second: second, token: token("mobile", proofJKT), secondToken: token("mobile", secondJKT), hostToken: token("host-client", proofJKT), session: session, scannerAddress: scannerAddress, jwksURL: keys.URL}
+	return &fileHTTPFixture{metrics: metrics, ctx: ctx, database: database, service: service, exports: exports, peer: peer, objects: objects, server: server, caller: caller, second: second, token: token("mobile", proofJKT), secondToken: token("mobile", secondJKT), hostToken: token("host-client", proofJKT), session: session, scannerAddress: scannerAddress, jwksURL: keys.URL}
 }
 func (fixture *fileHTTPFixture) register(t *testing.T, data []byte) (files.UploadPrepared, map[string]any) {
 	t.Helper()

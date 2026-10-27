@@ -133,6 +133,20 @@ func TestConfiguredFileServiceProcessRunsWorkersAndShutsDownCleanly(t *testing.T
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// A real worker rejection must remain distinct from a confirmed clean scan.
+	rejectedData := []byte("REJECT process worker private file bytes")
+	rejected, _ := h.register(t, rejectedData)
+	h.upload(t, rejected, rejectedData)
+	if code, _ := h.caller.call(h.token, "POST", "/v1/files/"+rejected.File.ID+"/commit", map[string]any{}); code != 202 {
+		t.Fatalf("process rejected-file commit=%d", code)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for h.status(t, rejected.File.ID).State != "rejected" {
+		if time.Now().After(deadline) {
+			t.Fatal("process did not persist scan rejection")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	metricsClient := &http.Client{Timeout: time.Second}
 	t.Cleanup(metricsClient.CloseIdleConnections)
 	deadline = time.Now().Add(3 * time.Second)
@@ -146,16 +160,18 @@ func TestConfiguredFileServiceProcessRunsWorkersAndShutsDownCleanly(t *testing.T
 		if readErr != nil || response.StatusCode != 200 {
 			t.Fatal("metrics scrape failed", readErr)
 		}
-		for _, private := range []string{"process worker file bytes", "fixture-secret", childDSN, config} {
+		for _, private := range []string{"process worker file bytes", string(rejectedData), "PRIVATE_UPLOAD_", "fixture-secret", childDSN, config, prepared.File.ID, rejected.File.ID, prepared.Upload.URL, prepared.File.SHA256} {
 			if strings.Contains(string(body), private) {
 				t.Fatal("operational metrics exposed private application input")
 			}
 		}
-		if strings.Contains(string(body), "dsh_remote_control_available{worker=\"outbox\"} 1") && strings.Contains(string(body), "dsh_remote_control_available{worker=\"leases\"} 1") {
+		if strings.Contains(string(body), "dsh_remote_control_available{worker=\"outbox\"} 1") && strings.Contains(string(body), "dsh_remote_control_available{worker=\"leases\"} 1") &&
+			strings.Contains(string(body), "dsh_remote_file_scan_attempt_duration_seconds_count{direction=\"to_host\",result=\"clean\"} 1\n") &&
+			strings.Contains(string(body), "dsh_remote_file_scan_attempt_duration_seconds_count{direction=\"to_host\",result=\"rejected\"} 1\n") {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("production control workers never reported success")
+			t.Fatal("production control workers or file scan outcomes were not observed")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

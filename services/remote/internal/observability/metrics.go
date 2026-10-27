@@ -49,6 +49,12 @@ type Metrics struct {
 	approvalLeaseLifetime     *prometheus.HistogramVec
 	approvalLeaseRemaining    *prometheus.HistogramVec
 	approvalLeaseAvailability *prometheus.CounterVec
+	fileScans                 *prometheus.HistogramVec
+	fileHandoffOperations     *prometheus.HistogramVec
+	fileHandoffEvents         *prometheus.CounterVec
+	fileHandoffAge            *prometheus.HistogramVec
+	fileHandoffStage          prometheus.Histogram
+	fileClock                 *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -59,6 +65,12 @@ func New() *Metrics {
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: name, Help: help, Buckets: durationBuckets}, labels)
 	}
 	m := &Metrics{
+		fileScans:                 prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "file_scan_attempt_duration_seconds", Help: "Claimed worker scan attempt duration, including object verification, scanning, copy and repository completion/failure handling; not queue or upload time.", Buckets: []float64{.001, .01, .1, .5, 1, 2, 5, 10, 30, 60, 120, 300, 900}}, []string{"direction", "result"}),
+		fileHandoffOperations:     histogram("file_handoff_operation_duration_seconds", "Handoff repository attempt duration including authorization, locks and commit; includes no-op retries and failures.", "operation", "result"),
+		fileHandoffEvents:         counter("file_handoff_events_total", "Selected handoff milestones with confirmed commit; staged is a Host report, not native admission or execution.", "stage"),
+		fileHandoffAge:            prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "file_handoff_age_seconds", Help: "Database time from offer creation to committed read-start or staged update; excludes later commit confirmation and native admission.", Buckets: []float64{.001, .01, .1, .5, 1, 2, 5, 10, 30, 60, 120, 300}}, []string{"stage"}),
+		fileHandoffStage:          prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "file_handoff_read_to_stage_seconds", Help: "Database time from read-ticket consumption to first committed Host staged acknowledgement; not independently verified Host durability or native admission.", Buckets: []float64{.001, .01, .1, .5, 1, 2, 5, 10, 30, 60, 120, 300}}),
+		fileClock:                 counter("file_clock_anomalies_total", "Committed handoff timestamps with negative database intervals, excluded from duration observations.", "stage"),
 		approvalStates:            counter("approval_state_transitions_total", "Approval control state changes whose commit this process confirmed; allowed alone is not execution completion.", "from", "to", "cause"),
 		approvalHosts:             counter("approval_host_transitions_total", "Committed Host journal fact changes; consumption and settled execution outcome remain distinct.", "from", "to", "outcome"),
 		approvalOps:               histogram("approval_operation_duration_seconds", "Approval repository/provider attempt duration including validation, authorization, locks, signing and commit; includes retries.", "operation", "result"),
@@ -100,6 +112,7 @@ func New() *Metrics {
 		commandStore:       histogram("command_store_duration_seconds", "Monotonic command repository call duration including validation, authorization, lock waits and commit; all attempts, including unchanged retries.", "operation", "result"),
 		commandClock:       counter("command_timestamp_anomalies_total", "Missing or backward database timestamps excluded from command age/dwell histograms.", "interval"),
 	}
+	m.Register(m.fileScans, m.fileHandoffOperations, m.fileHandoffEvents, m.fileHandoffAge, m.fileHandoffStage, m.fileClock)
 	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
 		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, m.native, m.nativeReports, m.approvalStates, m.approvalHosts, m.approvalOps, m.approvalLeasePrepared, m.approvalLeaseLifetime, m.approvalLeaseRemaining, m.approvalLeaseAvailability, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))

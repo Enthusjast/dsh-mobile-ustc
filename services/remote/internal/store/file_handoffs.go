@@ -145,6 +145,13 @@ func validHandoff(ctx context.Context, transaction *sql.Tx, handoff files.Handof
 }
 
 func (repository *FileStore) IssueHandoff(ctx context.Context, host files.HostBinding, id, policy string) (*files.FileOffer, error) {
+	started := time.Now()
+	offer, err := repository.issueHandoff(ctx, host, id, policy)
+	repository.observeHandoffOperation(ctx, "offer", started, err)
+	return offer, err
+}
+
+func (repository *FileStore) issueHandoff(ctx context.Context, host files.HostBinding, id, policy string) (*files.FileOffer, error) {
 	if !grantUUIDPattern.MatchString(id) || !validSHA256Hex(policy) {
 		return nil, files.ErrInvalid
 	}
@@ -231,6 +238,7 @@ func (repository *FileStore) IssueHandoff(ctx context.Context, host files.HostBi
 	if err := transaction.Commit(); err != nil {
 		return nil, files.ErrUnavailable
 	}
+	repository.database.files.metrics.FileHandoffMilestone("offered", time.Time{}, time.Time{}, time.Time{})
 	return &files.FileOffer{SessionID: record.SessionID, HandoffID: handoffID, FileID: id, Name: record.Name, SizeBytes: record.SizeBytes, SHA256: record.SHA256, UserID: record.UploaderID, DeviceID: record.DeviceID, KeyVersion: record.KeyVersion, GrantVersion: record.GrantVersion, DownloadToken: token, LeaseUntil: until, ExpiresAt: expires}, nil
 }
 
@@ -277,6 +285,13 @@ func (repository *FileStore) PendingHandoffFiles(ctx context.Context, host files
 }
 
 func (repository *FileStore) RenewHandoff(ctx context.Context, host files.HostBinding, id, policy string) (files.Handoff, error) {
+	started := time.Now()
+	handoff, err := repository.renewHandoff(ctx, host, id, policy)
+	repository.observeHandoffOperation(ctx, "renew", started, err)
+	return handoff, err
+}
+
+func (repository *FileStore) renewHandoff(ctx context.Context, host files.HostBinding, id, policy string) (files.Handoff, error) {
 	transaction, err := repository.database.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return files.Handoff{}, files.ErrUnavailable
@@ -307,6 +322,13 @@ func (repository *FileStore) RenewHandoff(ctx context.Context, host files.HostBi
 }
 
 func (repository *FileStore) RedeemFileRead(ctx context.Context, id, token, policy string, verify func(files.ReadPermit) error) (files.ReadPermit, error) {
+	started := time.Now()
+	permit, err := repository.redeemFileRead(ctx, id, token, policy, verify)
+	repository.observeHandoffOperation(ctx, "read", started, err)
+	return permit, err
+}
+
+func (repository *FileStore) redeemFileRead(ctx context.Context, id, token, policy string, verify func(files.ReadPermit) error) (files.ReadPermit, error) {
 	if len(token) != 43 || verify == nil {
 		return files.ReadPermit{}, files.ErrAccess
 	}
@@ -347,7 +369,8 @@ func (repository *FileStore) RedeemFileRead(ctx context.Context, id, token, poli
 	if _, err := validHandoff(ctx, transaction, handoff, handoff.Host, policy); err != nil {
 		return files.ReadPermit{}, err
 	}
-	if _, err := transaction.ExecContext(ctx, `update file_handoffs set state='downloading',read_started_at=clock_timestamp() where id=$1`, id); err != nil {
+	var createdAt, readStartedAt time.Time
+	if err := transaction.QueryRowContext(ctx, `update file_handoffs set state='downloading',read_started_at=clock_timestamp() where id=$1 returning created_at,read_started_at`, id).Scan(&createdAt, &readStartedAt); err != nil {
 		return files.ReadPermit{}, files.ErrUnavailable
 	}
 	if err := fileHostAudit(ctx, transaction, handoff, "file.host_read"); err != nil {
@@ -357,6 +380,7 @@ func (repository *FileStore) RedeemFileRead(ctx context.Context, id, token, poli
 		return files.ReadPermit{}, files.ErrUnavailable
 	}
 	permit.Handoff.State = "downloading"
+	repository.database.files.metrics.FileHandoffMilestone("read_started", createdAt, time.Time{}, readStartedAt)
 	return permit, nil
 }
 
@@ -383,6 +407,13 @@ func (repository *FileStore) CheckFileRead(ctx context.Context, host files.HostB
 }
 
 func (repository *FileStore) StageHandoff(ctx context.Context, host files.HostBinding, id, sha string, size int64, name, policy string) error {
+	started := time.Now()
+	err := repository.stageHandoff(ctx, host, id, sha, size, name, policy)
+	repository.observeHandoffOperation(ctx, "stage", started, err)
+	return err
+}
+
+func (repository *FileStore) stageHandoff(ctx context.Context, host files.HostBinding, id, sha string, size int64, name, policy string) error {
 	if len(name) > 512 || strings.TrimSpace(name) == "" {
 		return files.ErrInvalid
 	}
@@ -405,6 +436,8 @@ func (repository *FileStore) StageHandoff(ctx context.Context, host files.HostBi
 	if err != nil {
 		return files.ErrInvalid
 	}
+	var createdAt, stagedAt time.Time
+	var readStartedAt sql.NullTime
 	if handoff.State == "staged" {
 		var previous string
 		if err := transaction.QueryRowContext(ctx, `select staged_name from file_handoffs where id=$1`, id).Scan(&previous); err != nil {
@@ -417,7 +450,7 @@ func (repository *FileStore) StageHandoff(ctx context.Context, host files.HostBi
 		if handoff.State != "downloading" {
 			return files.ErrStale
 		}
-		if _, err := transaction.ExecContext(ctx, `update file_handoffs set state='staged',staged_name=$2 where id=$1`, id, name); err != nil {
+		if err := transaction.QueryRowContext(ctx, `update file_handoffs set state='staged',staged_name=$2 where id=$1 returning created_at,read_started_at,clock_timestamp()`, id, name).Scan(&createdAt, &readStartedAt, &stagedAt); err != nil {
 			return files.ErrUnavailable
 		}
 		if err := fileHostAudit(ctx, transaction, handoff, "file.host_staged"); err != nil {
@@ -430,10 +463,20 @@ func (repository *FileStore) StageHandoff(ctx context.Context, host files.HostBi
 	if err := transaction.Commit(); err != nil {
 		return files.ErrUnavailable
 	}
+	if handoff.State != "staged" {
+		repository.database.files.metrics.FileHandoffMilestone("staged", createdAt, readStartedAt.Time, stagedAt)
+	}
 	return nil
 }
 
 func (repository *FileStore) EndHandoff(ctx context.Context, host files.HostBinding, id string) error {
+	started := time.Now()
+	err := repository.endHandoff(ctx, host, id)
+	repository.observeHandoffOperation(ctx, "end", started, err)
+	return err
+}
+
+func (repository *FileStore) endHandoff(ctx context.Context, host files.HostBinding, id string) error {
 	transaction, err := repository.database.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return files.ErrUnavailable

@@ -101,3 +101,10 @@ Signed lease preparation/availability and bounded lifetime metrics distinguish
 commit from return/delivery/execution. Unchanged retries and failed commits do
 not add transitions; per-attempt repository/provider durations remain visible.
 These process-local statistics do not change approval permission or durability.
+
+[File observability](../../docs/file-observability.md) measures claimed scan
+attempts and confirmed offer/read/staged milestones with fixed labels. Failed
+commits and duplicate acknowledgements cannot add milestones; database intervals
+separate offer age from read-to-stage time. A staged Host report remains distinct
+from native file admission or message execution. Worker attempts include failures,
+timeouts and cancellation without exposing file metadata or signed capabilities.

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -266,5 +267,56 @@ func testProtectedFileHandoffNative(t *testing.T, scenario string) {
 	case <-ctx.Done():
 		t.Fatal("native peer did not stop")
 	}
+	if scenario != "kotlin" {
+		assertNativeHandoffMetrics(t, h)
+	}
 	t.Log("TLS Go/PostgreSQL file offer and signed HTTP read reached real npm DSH Loader; current scenario verified revocation or file-ID message admission, consumption and retry. Object/scanner/identity/model are local fixtures.")
+}
+
+func assertNativeHandoffMetrics(t *testing.T, h *fileHTTPFixture) {
+	t.Helper()
+	families, err := h.metrics.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := map[string]float64{}
+	var cleanScans, ages, intervals uint64
+	for _, family := range families {
+		for _, metric := range family.Metric {
+			switch family.GetName() {
+			case "dsh_remote_file_handoff_events_total":
+				for _, label := range metric.Label {
+					if label.GetName() == "stage" {
+						events[label.GetValue()] = metric.GetCounter().GetValue()
+					}
+				}
+			case "dsh_remote_file_scan_attempt_duration_seconds":
+				if len(metric.Label) != 2 || metric.Label[0].GetValue() != "to_host" || metric.Label[1].GetValue() != "clean" {
+					t.Fatal("native handoff scan did not finish cleanly")
+				}
+				cleanScans += metric.GetHistogram().GetSampleCount()
+			case "dsh_remote_file_handoff_age_seconds":
+				ages += metric.GetHistogram().GetSampleCount()
+			case "dsh_remote_file_handoff_read_to_stage_seconds":
+				intervals += metric.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	var offers, reads, stages int
+	if err := h.database.QueryRowContext(h.ctx, `select (select count(*) from file_handoffs),count(*) filter(where action='file.host_read'),count(*) filter(where action='file.host_staged') from audit_log`).Scan(&offers, &reads, &stages); err != nil {
+		t.Fatal(err)
+	}
+	if cleanScans != 1 || events["offered"] != float64(offers) || events["read_started"] != float64(reads) || events["staged"] != float64(stages) || stages < 1 || ages != uint64(reads+stages) || intervals != uint64(stages) {
+		t.Fatal("native milestones or intervals differ from committed rows/audits", events, cleanScans, ages, intervals, offers, reads, stages)
+	}
+	// Gathered metadata must remain private even after real DSH byte transfer.
+	for _, family := range families {
+		text := family.String()
+		for _, private := range []string{fileRuntimeID, h.session, "real-native protected handoff", "PRIVATE_UPLOAD_"} {
+			if strings.Contains(text, private) {
+				t.Fatal("native file metrics exposed resource or body")
+			}
+		}
+	}
+	t.Log("Private file scan/milestone metrics match durable handoff rows and read/staged audits; staged remains separate from native message admission.")
 }

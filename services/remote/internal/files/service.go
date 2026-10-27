@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"dsh-mobile-ustc/services/remote/internal/observability"
 )
 
 type Repository interface {
@@ -40,14 +42,16 @@ type ServiceConfig struct {
 	TaskTimeout  time.Duration
 }
 type Service struct {
-	repository Repository
-	storage    BlobStore
-	scanner    Scanner
-	config     ServiceConfig
-	healthy    atomic.Bool
-	probedAt   atomic.Int64
-	running    atomic.Bool
-	renewEvery time.Duration
+	repository  Repository
+	storage     BlobStore
+	scanner     Scanner
+	config      ServiceConfig
+	healthy     atomic.Bool
+	probedAt    atomic.Int64
+	running     atomic.Bool
+	renewEvery  time.Duration
+	metricsOnce sync.Once
+	metrics     *observability.Metrics
 }
 
 func NewService(repository Repository, storage BlobStore, scanner Scanner, config ServiceConfig) (*Service, error) {
@@ -226,11 +230,23 @@ func (service *Service) ScanNext(ctx context.Context) (bool, error) {
 	return true, service.scan(ctx, *claim)
 }
 
-func (service *Service) scan(parent context.Context, claim ScanClaim) error {
+func (service *Service) scan(parent context.Context, claim ScanClaim) (result error) {
+	started := time.Now()
 	bounded, stop := context.WithTimeout(parent, service.config.TaskTimeout)
 	defer stop()
 	ctx, cancel := context.WithCancelCause(bounded)
 	defer cancel(nil)
+	defer func() {
+		err := result
+		if err != nil && context.Cause(ctx) != nil {
+			err = context.Cause(ctx)
+		}
+		outcome := FileOperationResult(err)
+		if err == nil {
+			outcome = "clean"
+		}
+		service.metrics.FileScanAttempt(claim.File.Direction, outcome, time.Since(started))
+	}()
 	leaseTimer := time.AfterFunc(max(0, time.Until(claim.LeaseUntil)-100*time.Millisecond), func() { cancel(ErrStale) })
 	defer leaseTimer.Stop()
 	stopRenew, renewDone := make(chan struct{}), make(chan struct{})

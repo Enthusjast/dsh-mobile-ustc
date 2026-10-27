@@ -37,6 +37,9 @@ func TestUnknownIdentityAndTextCannotCreateMetricLabels(t *testing.T) {
 		m.ApprovalOperation(untrusted, untrusted, time.Millisecond)
 		m.ApprovalLeasePrepared(untrusted, time.Second)
 		m.ApprovalLeaseAvailability(untrusted, time.Second)
+		m.FileScanAttempt(untrusted, untrusted, time.Millisecond)
+		m.FileHandoffOperation(untrusted, untrusted, time.Millisecond)
+		m.FileHandoffMilestone(untrusted, time.Time{}, time.Time{}, time.Time{})
 	}
 	if got := testutil.CollectAndCount(m.rejectedSends); got != 1 {
 		t.Fatalf("untrusted inputs created %d rejection series", got)
@@ -58,6 +61,15 @@ func TestUnknownIdentityAndTextCannotCreateMetricLabels(t *testing.T) {
 	}
 	if got := testutil.CollectAndCount(m.approvalOps); got != 1 {
 		t.Fatalf("untrusted approval errors created %d series", got)
+	}
+	if got := testutil.CollectAndCount(m.fileScans); got != 1 {
+		t.Fatalf("untrusted file scan labels created %d series", got)
+	}
+	if got := testutil.CollectAndCount(m.fileHandoffOperations); got != 1 {
+		t.Fatalf("untrusted handoff labels created %d series", got)
+	}
+	if got := testutil.CollectAndCount(m.fileHandoffEvents); got != 1 {
+		t.Fatalf("untrusted handoff stages created %d series", got)
 	}
 	response := httptest.NewRecorder()
 	m.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))

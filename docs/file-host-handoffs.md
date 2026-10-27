@@ -4,6 +4,9 @@
 
 ## 配置与迁移
 
+可选[扫描与交接指标](file-observability.md)分别记录提交后的 offer/read/staged 里程碑、
+数据库区间与仓库尝试耗时。重复 staged 回报及失败 commit 不增加里程碑；staged 不表示原生消息准入。
+
 按顺序应用 `deploy/sql/010_file_handoffs.up.sql`，然后更新 Go 服务和 Host 插件。使用已有 `REMOTE_FILES_CONFIG_FILE` 的同一对象服务、scanner policy 与事务账本；未配置时服务端不注册 Host 文件路由，也不协商该能力。没有新增身份服务或通用对象下载入口。
 
 Host 启用远控 Relay 后提供 `file.handoff.v1`，只有服务端也提供该能力时才构造文件 peer。该扩展依赖 `session.catalog.v1`。不支持文件的旧服务仍可连接，手机不能使用 Host 文件帧取得读取权限。Schema 和样例位于 `contracts/ws/v1/file-handoff.schema.json` 与 `contracts/ws/v1/golden/file.*.json`。

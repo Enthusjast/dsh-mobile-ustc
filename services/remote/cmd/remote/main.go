@@ -122,8 +122,14 @@ func run() error {
 	if err := database.ConfigureApprovalMetrics(metrics); err != nil {
 		return errors.New("remote approval observability configuration is invalid")
 	}
+	if err := database.ConfigureFileMetrics(metrics); err != nil {
+		return errors.New("remote file observability configuration is invalid")
+	}
 	apiConfig := httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig, Metrics: metrics}
 	if fileRuntime != nil {
+		if err := fileRuntime.service.ConfigureMetrics(metrics); err != nil {
+			return errors.New("remote file worker observability configuration is invalid")
+		}
 		apiConfig.Files = fileRuntime.service
 		apiConfig.FileHandoffs = fileRuntime.handoffs
 		apiConfig.FileExports = fileRuntime.exports
