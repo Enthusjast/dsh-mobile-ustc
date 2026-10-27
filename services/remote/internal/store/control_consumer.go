@@ -59,7 +59,7 @@ func (postgres *Postgres) NewControlConsumer(ctx context.Context, node string) (
 		if until.After(now) {
 			return nil, ErrControlConsumerInUse
 		}
-		if _, err := transaction.ExecContext(ctx, `update control_consumers set generation=$2,lease_until=clock_timestamp()+interval '10 seconds',renewed_at=clock_timestamp() where node_id=$1`, node, generation); err != nil {
+		if _, err := transaction.ExecContext(ctx, `update control_consumers set generation=$2,lease_until=clock_timestamp()+interval '10 seconds',renewed_at=clock_timestamp(),relay_origin=null where node_id=$1`, node, generation); err != nil {
 			return nil, ErrDatabaseUnavailable
 		}
 	}

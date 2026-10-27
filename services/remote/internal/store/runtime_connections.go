@@ -37,6 +37,10 @@ func (postgres *Postgres) AttachRuntimeConnection(ctx context.Context, input Run
 }
 
 func (postgres *Postgres) attachRuntimeConnectionOnce(ctx context.Context, input RuntimeConnectionInput) (RuntimeConnection, error) {
+	return postgres.attachRuntimeConnectionOwned(ctx, input, nil)
+}
+
+func (postgres *Postgres) attachRuntimeConnectionOwned(ctx context.Context, input RuntimeConnectionInput, directory *RelayDirectory) (RuntimeConnection, error) {
 	input.DSHVersion = strings.TrimSpace(input.DSHVersion)
 	input.ApplicationVersion = strings.TrimSpace(input.ApplicationVersion)
 	input.PluginVersion = strings.TrimSpace(input.PluginVersion)
@@ -55,6 +59,11 @@ func (postgres *Postgres) attachRuntimeConnectionOnce(ctx context.Context, input
 		return RuntimeConnection{}, transactionFailure(err)
 	}
 	defer transaction.Rollback()
+	if directory != nil {
+		if err := directory.lockOwner(ctx, transaction); err != nil {
+			return RuntimeConnection{}, err
+		}
+	}
 	var protocolVersion int
 	var orgID string
 	err = transaction.QueryRowContext(ctx, `
@@ -87,6 +96,14 @@ func (postgres *Postgres) attachRuntimeConnectionOnce(ctx context.Context, input
 		where runtime_id = $1`, input.RuntimeID); err != nil {
 		return RuntimeConnection{}, transactionFailure(err)
 	}
+	if directory != nil {
+		if _, err := transaction.ExecContext(ctx, `insert into relay_runtime_routes(runtime_id,node_id,generation,runtime_epoch,connection_id)
+            values($1,$2,$3,$4,$5) on conflict(runtime_id) do update set node_id=excluded.node_id,generation=excluded.generation,
+                runtime_epoch=excluded.runtime_epoch,connection_id=excluded.connection_id`, input.RuntimeID, directory.identity.NodeID,
+			directory.identity.Generation, input.RuntimeEpoch, input.ConnectionID); err != nil {
+			return RuntimeConnection{}, transactionFailure(err)
+		}
+	}
 	if err := endRuntimeApprovals(ctx, transaction, orgID, input.RuntimeID, "", false); err != nil {
 		return RuntimeConnection{}, err
 	}
@@ -111,13 +128,18 @@ func (postgres *Postgres) attachRuntimeConnectionOnce(ctx context.Context, input
 }
 
 func (postgres *Postgres) TouchRuntimeConnection(ctx context.Context, installationID, runtimeID, runtimeEpoch, connectionID string) error {
+	return postgres.touchRuntimeConnectionOwned(ctx, installationID, runtimeID, runtimeEpoch, connectionID, nil)
+}
+
+func (postgres *Postgres) touchRuntimeConnectionOwned(ctx context.Context, installationID, runtimeID, runtimeEpoch, connectionID string, directory *RelayDirectory) error {
+	condition, arguments := routeOwnerCondition(directory, true)
+	arguments = append([]any{runtimeID, installationID, runtimeEpoch, connectionID}, arguments...)
 	result, err := postgres.DB.ExecContext(ctx, `
 		update runtimes r set last_seen_at = clock_timestamp()
 		from installations i, hosts h
 		where r.id = $1 and r.installation_id = $2 and r.epoch = $3 and r.connection_id = $4
 		  and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+` and i.id = r.installation_id and i.revoked_at is null
-		  and r.connection_key_version = i.key_version and h.id = i.host_id and h.state = 'active'`,
-		runtimeID, installationID, runtimeEpoch, connectionID)
+		  and r.connection_key_version = i.key_version and h.id = i.host_id and h.state = 'active'`+condition, arguments...)
 	if err != nil {
 		return ErrDatabaseUnavailable
 	}
@@ -132,15 +154,20 @@ func (postgres *Postgres) TouchRuntimeConnection(ctx context.Context, installati
 }
 
 func (postgres *Postgres) DetachRuntimeConnection(ctx context.Context, installationID, runtimeID, runtimeEpoch, connectionID string) error {
+	return postgres.detachRuntimeConnectionOwned(ctx, installationID, runtimeID, runtimeEpoch, connectionID, nil)
+}
+
+func (postgres *Postgres) detachRuntimeConnectionOwned(ctx context.Context, installationID, runtimeID, runtimeEpoch, connectionID string, directory *RelayDirectory) error {
 	transaction, err := postgres.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
+	condition, arguments := routeOwnerCondition(directory, false)
+	arguments = append([]any{runtimeID, installationID, runtimeEpoch, connectionID}, arguments...)
 	result, err := transaction.ExecContext(ctx, `
 		update runtimes r set connection_id = null, connection_key_version = null, last_seen_at = null
-		where r.id = $1 and r.installation_id = $2 and r.epoch = $3 and r.connection_id = $4`,
-		runtimeID, installationID, runtimeEpoch, connectionID)
+		where r.id = $1 and r.installation_id = $2 and r.epoch = $3 and r.connection_id = $4`+condition, arguments...)
 	if err != nil {
 		return ErrDatabaseUnavailable
 	}
@@ -149,6 +176,12 @@ func (postgres *Postgres) DetachRuntimeConnection(ctx context.Context, installat
 		return ErrDatabaseUnavailable
 	}
 	if rows == 1 {
+		if directory != nil {
+			if _, err := transaction.ExecContext(ctx, `delete from relay_runtime_routes where runtime_id=$1 and runtime_epoch=$2 and connection_id=$3 and node_id=$4 and generation=$5`,
+				runtimeID, runtimeEpoch, connectionID, directory.identity.NodeID, directory.identity.Generation); err != nil {
+				return ErrDatabaseUnavailable
+			}
+		}
 		if _, err := transaction.ExecContext(ctx, `
 			update sessions set state = 'unavailable', updated_at = clock_timestamp()
 			where runtime_id = $1`, runtimeID); err != nil {
