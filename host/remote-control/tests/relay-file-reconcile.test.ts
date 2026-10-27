@@ -31,7 +31,7 @@ test('Relay file reconciliation uses only the dedicated read-only runtime entry'
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: { role: 'host', connection_id: connection,
             installation_id: installation, runtime_id: frame.runtime_id, runtime_epoch: frame.runtime_epoch,
             protocol_version: 1, protocols: [1], capabilities: incoming.payload.capabilities, server_time: new Date().toISOString(),
-            heartbeat_seconds: 20, max_frame_bytes: 65536, lease_expires_at: new Date(Date.now() + 300_000).toISOString() } }))
+            heartbeat_seconds: 20, max_frame_bytes: 65536, lease_expires_at: new Date(Date.now() + 299_000).toISOString() } }))
           socket.send(JSON.stringify(frame))
         } else if (incoming.type === 'session.catalog' && incoming.payload.complete) {
           socket.send(JSON.stringify({ v: 1, type: 'session.catalog.ack', request_id: incoming.request_id,

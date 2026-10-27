@@ -113,7 +113,7 @@ test('Relay host client proves the installation key and routes only digest-match
             role: 'host', connection_id: connectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: runtimeEpoch, protocol_version: 1, protocols: [1],
             capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
-            heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
+            heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 299_000).toISOString(),
           } }))
           resolve()
         }

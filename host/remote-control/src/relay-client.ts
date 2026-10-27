@@ -18,6 +18,8 @@ import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
 import type { HostExportPeer } from './relay-exports.js'
 import { EXPORT_CAPABILITY } from './export-protocol.js'
 import { bindNativeObservations, HOST_OBSERVATIONS_CAPABILITY, type NativeObservations } from './native-observations.js'
+import { HostConnectionLease } from './connection-lease.js'
+import { HostReconnectBackoff } from './relay-backoff.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
@@ -50,11 +52,11 @@ const helloOkSchema = z.strictObject({
     runtime_id: uuid,
     runtime_epoch: uuid,
     protocol_version: z.number().int().min(1),
-    protocols: z.array(z.number().int()).min(1),
-    capabilities: z.array(z.string()),
+    protocols: z.array(z.number().int().positive()).min(1).max(16).refine(values => new Set(values).size === values.length),
+    capabilities: z.array(z.string().min(1).max(128)).max(64).refine(values => new Set(values).size === values.length),
     server_time: z.string().datetime({ offset: true }),
-    heartbeat_seconds: z.number().int().positive(),
-    max_frame_bytes: z.number().int().positive(),
+    heartbeat_seconds: z.literal(20),
+    max_frame_bytes: z.literal(MAX_FRAME_BYTES),
     lease_expires_at: z.string().datetime({ offset: true }),
   }),
 })
@@ -427,7 +429,7 @@ async function receiveFrame(queue: IncomingFrames, timeoutMs: number): Promise<u
   return parseFrame(await queue.next(timeoutMs))
 }
 
-async function connectOnce(options: HostRelayOptions, url: string, credential: HostConnectionCredential, signal: AbortSignal): Promise<void> {
+async function connectOnce(options: HostRelayOptions, url: string, credential: HostConnectionCredential, signal: AbortSignal, connected: () => void): Promise<void> {
   validateCredential(credential)
   const socket = new WebSocketClient(url, [PROTOCOL], {
     headers: { Authorization: `DSH-Host ${credential.credential}` },
@@ -439,6 +441,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   let stopWatchingCatalog = () => {}
   let catalogRetryTimer: NodeJS.Timeout | undefined
   let creationOptionsTimer: NodeJS.Timeout | undefined
+  let leaseTimer: NodeJS.Timeout | undefined
   let sessions: RelaySessions | undefined
   let approvals: HostApprovalPeer | undefined
   let questionReferences: HostQuestionReferences | undefined
@@ -493,13 +496,24 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       || ack.data.payload.runtime_epoch !== options.runtime.epoch
       || ack.data.payload.protocol_version !== 1 || !ack.data.payload.protocols.includes(1)
       || ack.data.payload.max_frame_bytes > MAX_FRAME_BYTES || Date.parse(ack.data.payload.lease_expires_at) <= Date.now()
+      || !ack.data.payload.capabilities.every(capability => offered.includes(capability))
       || !requiredCapabilities.every(capability => ack.data.payload.capabilities.includes(capability))) {
       throw new ProbeError('protocol.unsupported')
     }
 
+    const lease = new HostConnectionLease(ack.data.payload.server_time, ack.data.payload.lease_expires_at)
+    const checkCurrent = () => {
+      if (lease.remaining() <= 0) abortConnection()
+      connection.signal.throwIfAborted()
+    }
+    const sendCurrent = async (frame: unknown): Promise<void> => { checkCurrent(); await sendFrame(socket, frame) }
+    leaseTimer = setTimeout(abortConnection, Math.ceil(lease.remaining()))
+    leaseTimer.unref()
+
     if (options.approvals && (![SIGNED_APPROVAL_CAPABILITY,APPROVAL_INVALIDATION_CAPABILITY,'session.catalog.v1'].every(capability=>ack.data.payload.capabilities.includes(capability)))) throw new ProbeError('protocol.unsupported')
     if (options.runtime.client.observations && ack.data.payload.capabilities.includes(HOST_OBSERVATIONS_CAPABILITY)) {
       observations = bindNativeObservations(options.runtime.client.observations, { connectionId: challenge.connection_id, runtimeId: options.runtime.client.runtimeId, epoch: options.runtime.epoch }, frame => {
+        if (lease.remaining() <= 0 || connection.signal.aborted) { abortConnection(); return false }
         const encoded = JSON.stringify(frame)
         if (socket.readyState !== 1 || socket.bufferedAmount > MAX_BUFFERED_BYTES / 4 || Buffer.byteLength(encoded) > 16 * 1024) return false
         try { socket.send(encoded, () => {}); return true } catch { return false }
@@ -511,12 +525,12 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       origin.protocol = origin.protocol === 'wss:' ? 'https:' : 'http:'
       files = options.files({ installationId: credential.installationId, connectionId: challenge.connection_id,
         origin: origin.origin, signer: credential.signer, signal: connection.signal,
-        send: frame => sendFrame(socket, frame), fail: abortConnection })
+        send: sendCurrent, fail: abortConnection })
     }
     if(options.exports&&ack.data.payload.capabilities.includes(EXPORT_CAPABILITY)){
       if(!ack.data.payload.capabilities.includes('session.catalog.v1'))throw new ProbeError('protocol.unsupported')
       const origin=new URL(url);origin.protocol=origin.protocol==='wss:'?'https:':'http:'
-      exports=options.exports({installationId:credential.installationId,connectionId:challenge.connection_id,origin:origin.origin,signer:credential.signer,signal:connection.signal,send:frame=>sendFrame(socket,frame),fail:abortConnection})
+      exports=options.exports({installationId:credential.installationId,connectionId:challenge.connection_id,origin:origin.origin,signer:credential.signer,signal:connection.signal,send:sendCurrent,fail:abortConnection})
     }
 
     const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
@@ -525,7 +539,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       follow: (command, signal) => options.runtime.follow(command, signal),
       dispatch: (command, signal) => options.runtime.dispatch(command, signal, { userId: 'relay-read', deviceId: 'relay-read' }),
       ...(options.runtime.claimQuestion ? { claimQuestion: (sessionId: string, questionId: string, signal: AbortSignal) => options.runtime.claimQuestion!(sessionId, questionId, signal) } : {}),
-    }, frame => sendFrame(socket, frame), ack.data.payload.capabilities.includes('question.timed.v1'))
+    }, sendCurrent, ack.data.payload.capabilities.includes('question.timed.v1'))
     const pendingCatalogAcks = new Map<string, { count: number; resolve(): void; reject(error: Error): void }>()
     let catalogRefresh: Promise<void> | undefined
     let catalogDirty = false
@@ -569,7 +583,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
           void acknowledged.catch(() => {})
           try {
             for (let index = 0; index < chunks.length; index++) {
-              await sendFrame(socket, {
+              await sendCurrent({
                 v: 1,
                 type: 'session.catalog',
                 request_id: snapshotId,
@@ -627,7 +641,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       creationRequest = randomUUID()
       creationOptionsTimer = setTimeout(publishCreationOptions, 30_000 + Math.floor(Math.random() * 15_000))
       creationOptionsTimer.unref()
-      void sendFrame(socket, { v: 1, type: 'session.create.options', request_id: creationRequest,
+      void sendCurrent({ v: 1, type: 'session.create.options', request_id: creationRequest,
         runtime_id: options.runtime.client.runtimeId, runtime_epoch: options.runtime.epoch, payload: sourceOptions }).catch(abortConnection)
     }
     publishCreationOptions()
@@ -643,14 +657,15 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       })
     if (options.approvals) approvals = options.approvals({
       installationId: credential.installationId, connectionId: ack.data.payload.connection_id, signal: connection.signal,
-      send: frame => sendFrame(socket, frame), fail: abortConnection, publishCatalog,
+      send: sendCurrent, fail: abortConnection, publishCatalog,
     })
     if (options.questionReferences && ack.data.payload.capabilities.includes(QUESTION_REFERENCES_CAPABILITY)) questionReferences = options.questionReferences({
       runtimeId: options.runtime.client.runtimeId, epoch: options.runtime.epoch, signal: connection.signal,
-      send: frame => sendFrame(socket, frame), fail: abortConnection, publishCatalog,
+      send: sendCurrent, fail: abortConnection, publishCatalog,
     })
 
     const handleFrame = async (value: unknown) => {
+      checkCurrent()
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const frame = value as Record<string, unknown>
         if (questionReferences && await questionReferences.handle(value)) return
@@ -687,8 +702,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
           abortConnection()
           return
         }
+        checkCurrent()
         if (sessions?.handle(value)) return
-        connection.signal.throwIfAborted()
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
         if (forwarded.type === 'message.files.reconcile' && (!files || !options.runtime.reconcileFileMessage
           || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY) || !ack.data.payload.capabilities.includes(FILE_RECONCILE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
@@ -710,7 +725,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
             if (!parsed.success || parsed.data.workspace_id !== forwarded.payload.workspace_id || parsed.data.state === 'unavailable') throw new ProbeError('journal.integrity_failed')
             item = parsed.data
           }
-          await sendFrame(socket, {
+          await sendCurrent({
             v: 1,
             type: 'command.receipt',
             request_id: forwarded.request_id,
@@ -741,20 +756,23 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       throw new ProbeError('protocol.invalid')
     }
 
+    checkCurrent()
+    connected()
     const reader = (async () => {
       while (!connection.signal.aborted) {
         const value = await receiveFrame(queue, 40_000)
-        connection.signal.throwIfAborted()
+        checkCurrent()
         await withAbort(handleFrame(value), connection.signal)
       }
     })()
     const heartbeat = setInterval(() => {
-      void sendFrame(socket, { v: 1, type: 'ping', payload: {} }).catch(() => socket.close(1011, 'send failed'))
+      void sendCurrent({ v: 1, type: 'ping', payload: {} }).catch(abortConnection)
     }, ack.data.payload.heartbeat_seconds * 1000)
     heartbeat.unref()
     try { await reader }
     finally { clearInterval(heartbeat) }
   } finally {
+    if (leaseTimer) clearTimeout(leaseTimer)
     observations?.close()
     await exports?.close()
     files?.close()
@@ -773,20 +791,17 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
 }
 
 async function run(options: HostRelayOptions, url: string, signal: AbortSignal): Promise<void> {
-  let backoffMs = 1_000
+  const backoff = new HostReconnectBackoff()
   while (!signal.aborted) {
     try {
       const credential = await withAbort(options.credentials.acquire(signal), signal)
-      await connectOnce(options, url, credential, signal)
-      backoffMs = 1_000
+      await connectOnce(options, url, credential, signal, () => backoff.connected())
     } catch {
       if (signal.aborted) return
     }
     if (signal.aborted) return
-    const spread = Math.floor(Math.random() * Math.max(1, backoffMs / 4))
-    try { await delay(backoffMs + spread, undefined, { signal }) }
+    try { await delay(backoff.retryDelay(), undefined, { signal }) }
     catch { return }
-    backoffMs = Math.min(backoffMs * 2, 60_000)
   }
 }
 

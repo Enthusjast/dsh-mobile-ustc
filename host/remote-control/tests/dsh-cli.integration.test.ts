@@ -178,7 +178,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
             capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.references.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1'], server_time: new Date().toISOString(),
-            heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 300_000).toISOString(),
+            heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 299_000).toISOString(),
           } }))
           resolveRelayConnected()
         } else if(frame.type === 'question.references') {

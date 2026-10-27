@@ -21,7 +21,7 @@ async function until(predicate: () => boolean, timeout = 2000): Promise<void> {
   }
 }
 
-async function fixture(t: test.TestContext, dispatch: HostRelayOptions['runtime']['dispatch'], options: { signer?: HostHandshakeSigner; waitReady?: boolean } = {}) {
+async function fixture(t: test.TestContext, dispatch: HostRelayOptions['runtime']['dispatch'], options: { signer?: HostHandshakeSigner; waitReady?: boolean; firstLeaseMs?: number; helloPatch?: Record<string, unknown> } = {}) {
   const http = createServer()
   const server = new ws.WebSocketServer({ server: http })
   const sockets: any[] = []
@@ -40,11 +40,13 @@ async function fixture(t: test.TestContext, dispatch: HostRelayOptions['runtime'
       if (frame.type === 'command.receipt') received.push(frame)
       if (frame.type !== 'hello.proof') return
       hellos.push(connectionId)
+      const acceptedAt = Date.now()
       socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
         role: 'host', connection_id: connectionId, installation_id: installationId,
         runtime_id: runtimeId, runtime_epoch: epoch, protocol_version: 1, protocols: [1],
-        capabilities: ['command.relay.v1', 'connection.heartbeat.v1'], server_time: new Date().toISOString(),
-        heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+        capabilities: ['command.relay.v1', 'connection.heartbeat.v1'], server_time: new Date(acceptedAt).toISOString(),
+        heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(acceptedAt + (hellos.length === 1 ? options.firstLeaseMs ?? 60_000 : 60_000)).toISOString(),
+        ...options.helloPatch,
       } }))
     })
     socket.send(JSON.stringify({ v: 1, type: 'challenge', payload: {
@@ -134,7 +136,7 @@ test('server draining retires the old queue before any trailing command', async 
   assert.deepEqual(routed, [])
 })
 
-for (const scenario of ['transport-close', 'frame-limit', 'byte-limit'] as const) {
+for (const scenario of ['transport-close', 'frame-limit', 'byte-limit', 'lease-expiry'] as const) {
   test(`Host retires a blocked dispatch and queued commands on ${scenario}`, async t => {
     const routed: string[] = []
     let activeSignal: AbortSignal | undefined
@@ -147,7 +149,7 @@ for (const scenario of ['transport-close', 'frame-limit', 'byte-limit'] as const
         if (signal.aborted) resolve()
       })
       signal.throwIfAborted()
-    })
+    }, scenario === 'lease-expiry' ? { firstLeaseMs: 200 } : {})
     const original = peer.command()
     peer.sockets[0].send(JSON.stringify(original))
     await until(() => routed.length === 1)
@@ -155,6 +157,7 @@ for (const scenario of ['transport-close', 'frame-limit', 'byte-limit'] as const
       peer.command(scenario === 'byte-limit' ? '界'.repeat(20_000) : 'queued on retired transport'))
     for (const frame of queued) peer.sockets[0].send(JSON.stringify(frame))
     if (scenario === 'transport-close') peer.sockets[0].close(1012, 'bounded reconnect fixture')
+    if (scenario === 'lease-expiry') peer.sockets[0].send(JSON.stringify({ v: 1, type: 'pong', payload: { connection_id: peer.hellos[0], server_time: new Date().toISOString() } }))
     await until(() => activeSignal?.aborted === true, 750)
     await until(() => peer.sockets[0].readyState === 3)
     assert.deepEqual(routed, [original.request_id], 'retired transport dispatched its buffered commands')
@@ -168,5 +171,21 @@ for (const scenario of ['transport-close', 'frame-limit', 'byte-limit'] as const
     peer.sockets[1].send(JSON.stringify(fresh))
     await until(() => routed.length === 2)
     assert.deepEqual(routed, [original.request_id, fresh.request_id])
+  })
+}
+
+for (const helloPatch of [
+  { heartbeat_seconds: 1 }, { max_frame_bytes: 1024 },
+  { capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'unoffered.extension.v1'] },
+  { capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'command.relay.v1'] },
+  { protocols: [1, 1] }, { lease_expires_at: new Date(Date.now() + 3_600_000).toISOString() },
+  { server_time: new Date(Date.now() - 60_000).toISOString() },
+]) {
+  test(`Host rejects incompatible hello metadata: ${Object.keys(helloPatch)[0]} ${JSON.stringify(helloPatch).length}`, async t => {
+    const routed: string[] = []
+    const peer = await fixture(t, async command => { routed.push(command.request_id) }, { helloPatch })
+    if (peer.sockets[0].readyState === 1) peer.sockets[0].send(JSON.stringify(peer.command()))
+    await until(() => peer.sockets[0].readyState === 3, 750)
+    assert.deepEqual(routed, [], 'invalid hello admitted a native operation')
   })
 }

@@ -109,3 +109,9 @@ the old queue and cancel its owner immediately. Pending signatures and native
 handler waits cannot block a fresh handshake; late results stay on the retired
 socket. Original-ID retries still reconcile the durable journal and never infer
 that disconnection undid an external effect.
+
+The Host independently expires its negotiated connection using bounded server
+time and a monotonic lifetime. Pongs cannot extend the original credential;
+expiry triggers a new provider acquisition and proof. Stable authenticated
+transports reset accumulated failure backoff, while short flaps keep exponential
+delay. The same lifecycle record documents timing/skew limits and fixture scope.
