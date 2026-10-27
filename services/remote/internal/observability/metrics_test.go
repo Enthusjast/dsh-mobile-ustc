@@ -33,6 +33,10 @@ func TestUnknownIdentityAndTextCannotCreateMetricLabels(t *testing.T) {
 		m.ControlEvent(untrusted, untrusted, time.Now())
 		m.CommandTransition(untrusted, untrusted, untrusted, untrusted, time.Now().Add(-time.Second), time.Now().Add(-time.Second), time.Now())
 		m.CommandStore(untrusted, untrusted, time.Millisecond)
+		m.ApprovalTransition(untrusted, "pending", untrusted, "none", untrusted, untrusted)
+		m.ApprovalOperation(untrusted, untrusted, time.Millisecond)
+		m.ApprovalLeasePrepared(untrusted, time.Second)
+		m.ApprovalLeaseAvailability(untrusted, time.Second)
 	}
 	if got := testutil.CollectAndCount(m.rejectedSends); got != 1 {
 		t.Fatalf("untrusted inputs created %d rejection series", got)
@@ -45,6 +49,15 @@ func TestUnknownIdentityAndTextCannotCreateMetricLabels(t *testing.T) {
 	}
 	if got := testutil.CollectAndCount(m.commandStore); got != 1 {
 		t.Fatalf("untrusted command outcomes created %d series", got)
+	}
+	if got := testutil.CollectAndCount(m.approvalStates); got != 1 {
+		t.Fatalf("untrusted approval states created %d series", got)
+	}
+	if got := testutil.CollectAndCount(m.approvalHosts); got != 1 {
+		t.Fatalf("untrusted Host outcomes created %d series", got)
+	}
+	if got := testutil.CollectAndCount(m.approvalOps); got != 1 {
+		t.Fatalf("untrusted approval errors created %d series", got)
 	}
 	response := httptest.NewRecorder()
 	m.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))

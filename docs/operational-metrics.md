@@ -111,3 +111,12 @@ checkpoint/cold checkpoint 的固定结果及耗时。只有启用私有指标�
 是 Host 自报，不能替代 command ledger 或路由 SLO；`host_observation_reports_total` 和
 `host_native_dropped_samples_total` 显示验证/限速及部分 source 丢弃。当前有实际 CLI flush 故障夹具，
 不代表生产磁盘与完整原生阶段验收。
+
+## 审批与租约补充
+
+[审批指标](approval-observability.md)把控制状态和 Host journal 事实分别计数，
+`approval_state_transitions_total` 的 allowed 不表示执行完成；执行结果使用
+`approval_host_transitions_total{to="settled"}` 的 outcome。
+租约的 `approval_lease_preparations_total`、lifetime、availability_checks 和 remaining
+分别描述提交后的准备、裁剪期限及检查点，不能解释成已投递或已消费。
+所有转换在整个事务确认 commit 后采样，失败/相同结果重试不增加转换次数。

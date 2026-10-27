@@ -15,33 +15,40 @@ import (
 var durationBuckets = []float64{.001, .005, .01, .025, .05, .1, .25, .3, .5, 1, 2, 5, 10}
 
 type Metrics struct {
-	registry           *prometheus.Registry
-	receivedFrames     *prometheus.CounterVec
-	receivedBytes      *prometheus.CounterVec
-	writtenFrames      *prometheus.CounterVec
-	writtenBytes       *prometheus.CounterVec
-	writeDuration      *prometheus.HistogramVec
-	queueDuration      *prometheus.HistogramVec
-	routeDuration      prometheus.Histogram
-	rejectedSends      *prometheus.CounterVec
-	protocolErrors     *prometheus.CounterVec
-	resyncs            prometheus.Counter
-	forwards           *prometheus.HistogramVec
-	revocations        *prometheus.CounterVec
-	controlRuns        *prometheus.HistogramVec
-	controlReady       *prometheus.GaugeVec
-	controlSuccess     *prometheus.GaugeVec
-	controlEvents      *prometheus.CounterVec
-	controlAge         *prometheus.HistogramVec
-	clockSkew          prometheus.Counter
-	tunnelDuration     *prometheus.HistogramVec
-	commandTransitions *prometheus.CounterVec
-	commandAge         *prometheus.HistogramVec
-	commandDwell       *prometheus.HistogramVec
-	commandStore       *prometheus.HistogramVec
-	commandClock       *prometheus.CounterVec
-	native             *nativeCollector
-	nativeReports      *prometheus.CounterVec
+	registry                  *prometheus.Registry
+	receivedFrames            *prometheus.CounterVec
+	receivedBytes             *prometheus.CounterVec
+	writtenFrames             *prometheus.CounterVec
+	writtenBytes              *prometheus.CounterVec
+	writeDuration             *prometheus.HistogramVec
+	queueDuration             *prometheus.HistogramVec
+	routeDuration             prometheus.Histogram
+	rejectedSends             *prometheus.CounterVec
+	protocolErrors            *prometheus.CounterVec
+	resyncs                   prometheus.Counter
+	forwards                  *prometheus.HistogramVec
+	revocations               *prometheus.CounterVec
+	controlRuns               *prometheus.HistogramVec
+	controlReady              *prometheus.GaugeVec
+	controlSuccess            *prometheus.GaugeVec
+	controlEvents             *prometheus.CounterVec
+	controlAge                *prometheus.HistogramVec
+	clockSkew                 prometheus.Counter
+	tunnelDuration            *prometheus.HistogramVec
+	commandTransitions        *prometheus.CounterVec
+	commandAge                *prometheus.HistogramVec
+	commandDwell              *prometheus.HistogramVec
+	commandStore              *prometheus.HistogramVec
+	commandClock              *prometheus.CounterVec
+	native                    *nativeCollector
+	nativeReports             *prometheus.CounterVec
+	approvalStates            *prometheus.CounterVec
+	approvalHosts             *prometheus.CounterVec
+	approvalOps               *prometheus.HistogramVec
+	approvalLeasePrepared     *prometheus.CounterVec
+	approvalLeaseLifetime     *prometheus.HistogramVec
+	approvalLeaseRemaining    *prometheus.HistogramVec
+	approvalLeaseAvailability *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -52,18 +59,25 @@ func New() *Metrics {
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: name, Help: help, Buckets: durationBuckets}, labels)
 	}
 	m := &Metrics{
-		native:         newNativeCollector(),
-		nativeReports:  counter("host_observation_reports_total", "Connection-scoped Host observation report validation outcomes.", "result"),
-		registry:       prometheus.NewRegistry(),
-		receivedFrames: counter("relay_received_frames_total", "Complete received WebSocket data messages, including rejected messages.", "role"),
-		receivedBytes:  counter("relay_received_bytes_total", "Payload bytes of complete received WebSocket data messages.", "role"),
-		writtenFrames:  counter("relay_written_frames_total", "WebSocket data messages whose write completed successfully.", "role"),
-		writtenBytes:   counter("relay_written_bytes_total", "Payload bytes of successfully written WebSocket data messages.", "role"),
-		writeDuration:  histogram("relay_send_duration_seconds", "Time from enqueue attempt to writer completion, including queue and recipient write time; excludes native execution.", "role", "result"),
-		queueDuration:  histogram("relay_queue_duration_seconds", "Time from enqueue attempt until the writer dequeues the message; excludes socket I/O.", "role"),
-		routeDuration:  prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "relay_session_route_duration_seconds", Help: "Successfully routed session data message: complete Go ingress read to destination write, including decoding, authorization and queuing; excludes TLS ingress and native execution.", Buckets: durationBuckets}),
-		rejectedSends:  counter("relay_rejected_sends_total", "Outgoing messages rejected before queue admission.", "role", "reason"),
-		protocolErrors: counter("relay_protocol_errors_total", "Protocol error responses attempted, grouped into fixed error classes.", "class"),
+		approvalStates:            counter("approval_state_transitions_total", "Approval control state changes whose commit this process confirmed; allowed alone is not execution completion.", "from", "to", "cause"),
+		approvalHosts:             counter("approval_host_transitions_total", "Committed Host journal fact changes; consumption and settled execution outcome remain distinct.", "from", "to", "outcome"),
+		approvalOps:               histogram("approval_operation_duration_seconds", "Approval repository/provider attempt duration including validation, authorization, locks, signing and commit; includes retries.", "operation", "result"),
+		approvalLeasePrepared:     counter("approval_lease_preparations_total", "Signed authorization preparations with confirmed audit/outbox commit; not delivery or execution.", "decision"),
+		approvalLeaseLifetime:     prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "approval_lease_lifetime_seconds", Help: "Committed signed lease expires_at minus issued_at, clipped to original authority deadlines.", Buckets: []float64{.001, .01, .05, .1, .25, .5, 1, 2, 3}}, []string{"decision"}),
+		approvalLeaseRemaining:    prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "approval_lease_remaining_seconds", Help: "Positive signed expiry minus process wall clock at the post-commit availability check; not a delivery guarantee.", Buckets: []float64{.001, .01, .05, .1, .25, .5, 1, 2, 3}}, []string{"decision"}),
+		approvalLeaseAvailability: counter("approval_lease_availability_checks_total", "Post-commit signed lease availability checks; a proof can still expire before return or delivery.", "decision", "result"),
+		native:                    newNativeCollector(),
+		nativeReports:             counter("host_observation_reports_total", "Connection-scoped Host observation report validation outcomes.", "result"),
+		registry:                  prometheus.NewRegistry(),
+		receivedFrames:            counter("relay_received_frames_total", "Complete received WebSocket data messages, including rejected messages.", "role"),
+		receivedBytes:             counter("relay_received_bytes_total", "Payload bytes of complete received WebSocket data messages.", "role"),
+		writtenFrames:             counter("relay_written_frames_total", "WebSocket data messages whose write completed successfully.", "role"),
+		writtenBytes:              counter("relay_written_bytes_total", "Payload bytes of successfully written WebSocket data messages.", "role"),
+		writeDuration:             histogram("relay_send_duration_seconds", "Time from enqueue attempt to writer completion, including queue and recipient write time; excludes native execution.", "role", "result"),
+		queueDuration:             histogram("relay_queue_duration_seconds", "Time from enqueue attempt until the writer dequeues the message; excludes socket I/O.", "role"),
+		routeDuration:             prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "relay_session_route_duration_seconds", Help: "Successfully routed session data message: complete Go ingress read to destination write, including decoding, authorization and queuing; excludes TLS ingress and native execution.", Buckets: durationBuckets}),
+		rejectedSends:             counter("relay_rejected_sends_total", "Outgoing messages rejected before queue admission.", "role", "reason"),
+		protocolErrors:            counter("relay_protocol_errors_total", "Protocol error responses attempted, grouped into fixed error classes.", "class"),
 		resyncs: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "dsh_remote", Name: "relay_resyncs_total",
 			Help: "Resync-required errors or subscription invalidations; not unique sessions."}),
 		forwards:    histogram("command_forward_duration_seconds", "Recorded-command forwarding and receipt handling time; excludes initial persistence and native execution.", "result"),
@@ -88,7 +102,7 @@ func New() *Metrics {
 	}
 	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
-		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, m.native, m.nativeReports, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, m.native, m.nativeReports, m.approvalStates, m.approvalHosts, m.approvalOps, m.approvalLeasePrepared, m.approvalLeaseLifetime, m.approvalLeaseRemaining, m.approvalLeaseAvailability, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, role := range []string{"installation", "device", "other"} {
 		m.receivedFrames.WithLabelValues(role)
 		m.receivedBytes.WithLabelValues(role)

@@ -11,3 +11,8 @@ Connection loss turns an unobserved accepted decision or consumed permit into se
 Active-limit accounting includes consumed permits until settlement, deadline or disconnection. A long-running tool whose result has not been observed can therefore become unknown and later reconcile a trustworthy result. No result is automatically replayed. Downgrading migration 007 retains audit/outbox facts and maps spent but unsettled work to unknown; re-upgrade cannot revive execution.
 
 `npm run test:remote-dsh` runs these PostgreSQL tests with race detection in disposable databases: narrowed sockets and operator denial, offline metadata/full-detail distinction, exact result bindings, retries and out-of-order receipts, incompatible final outcomes, takeover with historical settlement, revocation, storage failures and rollback/re-upgrade. The existing real npm DSH chain runs afterward. The [server HTTPS/WSS transport](approval-protocol.md) now exposes these operations and consumes durable metadata references. The [normal plugin sender](approval-native.md) now delivers durable host facts with fingerprinted acknowledgements; production identity and the remaining platform/capability gates remain open.
+
+Private [approval transition metrics](approval-observability.md) count confirmed
+commits, separating control state from Host journal state/outcome. In particular,
+allowed/consumed is not settled execution, duplicate result reports do not count
+again, and a historical correction cannot issue a new execution lease.

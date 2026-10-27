@@ -847,8 +847,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const commandsMatch = commandActions.every(action => metricSample(body, 'command_transitions_total', { action, from: 'none', to: 'received', origin: 'device' }) ===
       Number(query(`select count(*) from commands where action='${action}'`)))
     const receiptsMatch = metricSample(body, 'command_transitions_total', { origin: 'host' }, true) === Number(query(`select count(*) from audit_log where action='command.receipt'`))
+    const approvalsMatch = metricSample(body, 'approval_state_transitions_total', { cause: 'registration' }, true) === Number(query(`select count(*) from audit_log where action='approval.pending'`)) &&
+      metricSample(body, 'approval_state_transitions_total', { cause: 'decision' }, true) === Number(query(`select count(*) from audit_log where action='approval.decided'`)) &&
+      metricSample(body, 'approval_host_transitions_total', {}, true) === Number(query(`select count(*) from audit_log where action='approval.result'`))
+    const leasesMatch = metricSample(body, 'approval_lease_preparations_total', {}, true) === Number(query(`select count(*) from audit_log where action='approval.authorization.prepare'`))
     return metricSample(body, 'relay_revoked_connections_total', { reason: 'access_revoked', role: 'device' }) >= 2 &&
-      metricSample(body, 'control_event_age_seconds_count', { topic: 'runtime_grant.revoked' }) >= 1 && commandsMatch && receiptsMatch ? body : undefined
+      metricSample(body, 'control_event_age_seconds_count', { topic: 'runtime_grant.revoked' }) >= 1 && commandsMatch && receiptsMatch && approvalsMatch && leasesMatch ? body : undefined
   }, 'measured revocation propagation')
   assert.ok(metricSample(finalMetrics, 'relay_received_frames_total', { role: 'installation' }) > 20)
   assert.ok(metricSample(finalMetrics, 'relay_written_frames_total', { role: 'device' }) > 20)
@@ -862,10 +866,14 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(metricSample(finalMetrics, 'host_observation_reports_total', { result: 'accepted' }) > 0)
   assert.ok(metricSample(finalMetrics, 'host_native_operations_total', { operation: 'checkpoint', result: 'persisted' }) > 0)
   assert.ok(metricSample(finalMetrics, 'host_native_operation_duration_seconds_count', { operation: 'prompt', result: 'ok' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'approval_host_transitions_total', { to: 'settled', outcome: 'succeeded' }, true) > 0)
+  assert.ok(metricSample(finalMetrics, 'approval_host_transitions_total', { to: 'denied' }, true) > 0)
+  assert.ok(metricSample(finalMetrics, 'approval_lease_lifetime_seconds_count', { decision: 'allow_once' }) > 0)
   for (const secret of [orgId, ownerId, phoneUserId, device.device_id, enrollment.runtime_id, sessionId, revokeMarker, revokeProof,
     checkpointFailureSecret, checkpointFailureFile, (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
   t.diagnostic('Private Prometheus endpoint observed actual signed Host/phone connections, native traffic, command forwarding/retries and completed local revocation propagation without resource IDs, bodies or proofs.')
   t.diagnostic('Committed command creation counters match PostgreSQL rows for every action; Host transition counters match durable receipt audits despite retries. Stage ages/dwell and repository attempts were observed at the owner node.')
+  t.diagnostic('Approval registration/decision and Host fact counters match durable audits; signed lease preparation counts match committed authorization audits, without counting approval as execution completion.')
   t.diagnostic('The normal Host negotiated connection-scoped native observations; actual native prompt and persisted checkpoint aggregates reached the private owner metrics without resource IDs or body data.')
   t.diagnostic('An actual CLI profile flush exception produced a failed checkpoint and the corresponding private native failure counter; neither the private error nor local path entered metrics. Ordinary history and later commands continued after removal of the fixture fault.')
   t.diagnostic(`Device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)

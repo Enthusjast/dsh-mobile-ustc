@@ -23,3 +23,8 @@ Negotiated `approval.invalidation.v1` adds actor-scoped negative authority facts
 The shared schema now includes leases. `contracts/security/approval-leases.json` contains public-only Go/Node interoperability vectors, including valid allow/reject and malformed/boundary cases. Regenerate explicitly with `tsx tools/generate-approval-leases.ts` (`REMOTE_TEST_GO` overrides the Go binary). Fresh private keys exist only in generator process memory, so regeneration intentionally changes public keys/signatures. Both language suites verify all vectors. Go tests must use `-count=1` because shared fixtures live outside the Go module.
 
 `npm run verify` includes host cache/journal tests and real npm DSH 0.2.1-rc.2 final-guard tests: a valid signed lease executes the protected fixture once; revoked/altered/expired leases do not. The native adapter uses a synthetic local authority, not a production school identity or mobile network flow. `npm run test:remote-dsh` also runs PostgreSQL provider coverage with race detection before the production Go + DSH session/question regression: exact original authority, expiry clipping, failed audit/outbox, changed connection/context and expired-token nonrenewal are tested in disposable databases. The server transport is implemented and separately tested with signed fixture peers; normal plugin wiring now has real Bash/CLI evidence; Android and production identity/provisioning still need acceptance.
+
+The private [approval metrics](approval-observability.md) distinguish committed
+preparation, declared bounded lifetime and the post-commit availability check.
+A preparation that expires during commit remains a preparation fact and returns
+no proof. No metric is a lease-consumption receipt or refreshes authentication.

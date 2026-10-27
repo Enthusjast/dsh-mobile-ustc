@@ -94,3 +94,10 @@ checks precede ingestion; phones cannot negotiate or forge this capability.
 [Host observation semantics](../../docs/host-native-observations.md) distinguish
 self-reported best-effort data from durable command acknowledgements and record
 actual local CLI flush-failure evidence. Older peers continue without the extension.
+
+[Approval observability](../../docs/approval-observability.md) separates committed
+control-state transitions from Host journal fact transitions and final outcomes.
+Signed lease preparation/availability and bounded lifetime metrics distinguish
+commit from return/delivery/execution. Unchanged retries and failed commits do
+not add transitions; per-attempt repository/provider durations remain visible.
+These process-local statistics do not change approval permission or durability.

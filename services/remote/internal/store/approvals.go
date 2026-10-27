@@ -79,6 +79,13 @@ func (control *ApprovalControl) context(raw []byte) (approval.Binding, error) {
 // persisting only metadata. Full context, arguments and native call IDs stay
 // transient. The binding and nonce/execution tombstones survive retries.
 func (control *ApprovalControl) Register(ctx context.Context, connection RuntimeConnection, keyVersion int64, rawContext []byte) (ApprovalStatus, error) {
+	started := time.Now()
+	status, err := control.register(ctx, connection, keyVersion, rawContext)
+	control.database.observeApprovalOperation(ctx, "register", started, err)
+	return status, err
+}
+
+func (control *ApprovalControl) register(ctx context.Context, connection RuntimeConnection, keyVersion int64, rawContext []byte) (ApprovalStatus, error) {
 	binding, err := control.context(rawContext)
 	if err != nil {
 		return ApprovalStatus{}, err
@@ -116,7 +123,8 @@ func (control *ApprovalControl) Register(ctx context.Context, connection Runtime
 	if err := approvalRequestTime(request, now); err != nil {
 		return ApprovalStatus{}, err
 	}
-	if err := endRuntimeApprovals(ctx, transaction, orgID, request.RuntimeID, "", true); err != nil {
+	ended, err := endRuntimeApprovals(ctx, transaction, orgID, request.RuntimeID, "", true)
+	if err != nil {
 		return ApprovalStatus{}, err
 	}
 	var active int
@@ -134,6 +142,7 @@ func (control *ApprovalControl) Register(ctx context.Context, connection Runtime
 		if err := transaction.Commit(); err != nil {
 			return ApprovalStatus{}, ErrDatabaseUnavailable
 		}
+		control.database.observeEndedApprovals("expiry", ended)
 		return existing, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -167,6 +176,8 @@ func (control *ApprovalControl) Register(ctx context.Context, connection Runtime
 	if err := transaction.Commit(); err != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
 	}
+	control.database.observeEndedApprovals("expiry", ended)
+	control.database.observeApproval("registration", ApprovalStatus{}, status)
 	return status, nil
 }
 
@@ -174,6 +185,13 @@ func (control *ApprovalControl) Register(ctx context.Context, connection Runtime
 // socket's exact ticket scope. Neither can be reconstructed from phone JSON.
 // A received allow decision is not a claim that the host executed the tool.
 func (control *ApprovalControl) Decide(ctx context.Context, principal auth.Principal, ticket TicketRedemption, rawContext []byte, compact string) (ApprovalStatus, error) {
+	started := time.Now()
+	status, err := control.decide(ctx, principal, ticket, rawContext, compact)
+	control.database.observeApprovalOperation(ctx, "decide", started, err)
+	return status, err
+}
+
+func (control *ApprovalControl) decide(ctx context.Context, principal auth.Principal, ticket TicketRedemption, rawContext []byte, compact string) (ApprovalStatus, error) {
 	binding, err := control.context(rawContext)
 	if err != nil {
 		return ApprovalStatus{}, err
@@ -245,6 +263,7 @@ func (control *ApprovalControl) Decide(ctx context.Context, principal auth.Princ
 	if status.State != "pending" {
 		return ApprovalStatus{}, ErrApprovalConflict
 	}
+	previous := status
 	decisionExpires, _ := time.Parse(time.RFC3339Nano, verified.Claims.ExpiresAt)
 	state := "decision_received"
 	if verified.Claims.Decision == "reject" {
@@ -283,6 +302,7 @@ func (control *ApprovalControl) Decide(ctx context.Context, principal auth.Princ
 	if err := transaction.Commit(); err != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
 	}
+	control.database.observeApproval("decision", previous, status)
 	return status, nil
 }
 
@@ -422,39 +442,44 @@ func approvalChange(ctx context.Context, transaction *sql.Tx, orgID, actorType, 
 
 // The caller holds the runtime lock. Accepted decisions become unknown when a
 // connection disappears: the service cannot assert whether execution occurred.
-func endRuntimeApprovals(ctx context.Context, transaction *sql.Tx, orgID, runtimeID, connectionID string, expiredOnly bool) error {
+func endRuntimeApprovals(ctx context.Context, transaction *sql.Tx, orgID, runtimeID, connectionID string, expiredOnly bool) ([]endedApprovalObservation, error) {
 	rows, err := transaction.QueryContext(ctx, `
-		update approvals set state = case when state = 'decision_received' or host_state = 'consumed' then 'outcome_unknown'
+		with previous as materialized (
+		select a.id,a.state as old_state from approvals a
+		where a.runtime_id = $1 and a.metadata_version = 1 and (a.state in ('pending', 'decision_received') or (a.state = 'allowed' and a.host_state = 'consumed'))
+		  and ($2 = '' or a.connection_id = nullif($2, '')::uuid)
+		  and (not $3 or least(a.expires_at, coalesce(a.decision_expires_at, a.expires_at)) <= clock_timestamp()) for update
+		)
+		update approvals a set state = case when a.state = 'decision_received' or a.host_state = 'consumed' then 'outcome_unknown'
 		    when $3 then 'expired' else 'invalidated' end
-		where runtime_id = $1 and metadata_version = 1 and (state in ('pending', 'decision_received') or (state = 'allowed' and host_state = 'consumed'))
-		  and ($2 = '' or connection_id = nullif($2, '')::uuid)
-		  and (not $3 or least(expires_at, coalesce(decision_expires_at, expires_at)) <= clock_timestamp())
-		returning id::text, runtime_epoch::text, session_id::text, execution_id::text,
-		    binding_sha256, state, coalesce(decision, ''), coalesce(decision_payload_sha256, ''), expires_at,
-		    coalesce(host_state, ''), coalesce(execution_outcome, '')`,
+		from previous where a.id=previous.id
+		returning a.id::text, a.runtime_epoch::text, a.session_id::text, a.execution_id::text,
+		    a.binding_sha256, a.state, coalesce(a.decision, ''), coalesce(a.decision_payload_sha256, ''), a.expires_at,
+		    coalesce(a.host_state, ''), coalesce(a.execution_outcome, ''),previous.old_state`,
 		runtimeID, connectionID, expiredOnly)
 	if err != nil {
-		return transactionFailure(err)
+		return nil, transactionFailure(err)
 	}
-	statuses := []ApprovalStatus{}
+	statuses := []endedApprovalObservation{}
 	for rows.Next() {
 		status := ApprovalStatus{RuntimeID: runtimeID}
+		var before string
 		if err := rows.Scan(&status.ApprovalID, &status.RuntimeEpoch, &status.SessionID, &status.ExecutionID,
-			&status.BindingSHA256, &status.State, &status.Decision, &status.PayloadSHA256, &status.ExpiresAt, &status.HostState, &status.Outcome); err != nil {
+			&status.BindingSHA256, &status.State, &status.Decision, &status.PayloadSHA256, &status.ExpiresAt, &status.HostState, &status.Outcome, &before); err != nil {
 			_ = rows.Close()
-			return transactionFailure(err)
+			return nil, transactionFailure(err)
 		}
-		statuses = append(statuses, status)
+		statuses = append(statuses, endedApprovalObservation{before, status})
 	}
 	readErr := rows.Err()
 	closeErr := rows.Close()
 	if readErr != nil || closeErr != nil {
-		return transactionFailure(errors.Join(readErr, closeErr))
+		return nil, transactionFailure(errors.Join(readErr, closeErr))
 	}
-	for _, status := range statuses {
-		if err := approvalChange(ctx, transaction, orgID, "system", "approval-lifecycle", "", "approval.ended", status); err != nil {
-			return err
+	for _, item := range statuses {
+		if err := approvalChange(ctx, transaction, orgID, "system", "approval-lifecycle", "", "approval.ended", item.status); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return statuses, nil
 }

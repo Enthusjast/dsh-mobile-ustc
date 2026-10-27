@@ -104,7 +104,8 @@ func (postgres *Postgres) attachRuntimeConnectionOwned(ctx context.Context, inpu
 			return RuntimeConnection{}, transactionFailure(err)
 		}
 	}
-	if err := endRuntimeApprovals(ctx, transaction, orgID, input.RuntimeID, "", false); err != nil {
+	ended, err := endRuntimeApprovals(ctx, transaction, orgID, input.RuntimeID, "", false)
+	if err != nil {
 		return RuntimeConnection{}, err
 	}
 	metadata, _ := json.Marshal(map[string]any{
@@ -120,6 +121,7 @@ func (postgres *Postgres) attachRuntimeConnectionOwned(ctx context.Context, inpu
 	if err := transaction.Commit(); err != nil {
 		return RuntimeConnection{}, transactionFailure(err)
 	}
+	postgres.observeEndedApprovals("connection", ended)
 	return RuntimeConnection{
 		InstallationID: input.InstallationID, RuntimeID: input.RuntimeID,
 		RuntimeEpoch: input.RuntimeEpoch, ConnectionID: input.ConnectionID,
@@ -158,6 +160,7 @@ func (postgres *Postgres) DetachRuntimeConnection(ctx context.Context, installat
 }
 
 func (postgres *Postgres) detachRuntimeConnectionOwned(ctx context.Context, installationID, runtimeID, runtimeEpoch, connectionID string, directory *RelayDirectory) error {
+	var ended []endedApprovalObservation
 	transaction, err := postgres.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return ErrDatabaseUnavailable
@@ -193,12 +196,14 @@ func (postgres *Postgres) detachRuntimeConnectionOwned(ctx context.Context, inst
 			join hosts h on h.id = i.host_id where r.id = $1`, runtimeID).Scan(&orgID); err != nil {
 			return ErrDatabaseUnavailable
 		}
-		if err := endRuntimeApprovals(ctx, transaction, orgID, runtimeID, connectionID, false); err != nil {
+		ended, err = endRuntimeApprovals(ctx, transaction, orgID, runtimeID, connectionID, false)
+		if err != nil {
 			return err
 		}
 	}
 	if err := transaction.Commit(); err != nil {
 		return ErrDatabaseUnavailable
 	}
+	postgres.observeEndedApprovals("connection", ended)
 	return nil
 }

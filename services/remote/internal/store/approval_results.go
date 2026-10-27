@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 )
 
 // ApprovalHostResult is an authenticated host journal fact. It cannot request
@@ -40,6 +41,13 @@ func (result ApprovalHostResult) valid() bool {
 // RecordResult also accepts settled historical facts from a replacement
 // connection of the same installation/runtime. Such reports never issue leases.
 func (control *ApprovalControl) RecordResult(ctx context.Context, connection RuntimeConnection, keyVersion int64, result ApprovalHostResult) (ApprovalStatus, error) {
+	started := time.Now()
+	status, err := control.recordResult(ctx, connection, keyVersion, result)
+	control.database.observeApprovalOperation(ctx, "host_result", started, err)
+	return status, err
+}
+
+func (control *ApprovalControl) recordResult(ctx context.Context, connection RuntimeConnection, keyVersion int64, result ApprovalHostResult) (ApprovalStatus, error) {
 	if !validApprovalConnection(connection, keyVersion) || !result.valid() {
 		return ApprovalStatus{}, ErrApprovalInvalid
 	}
@@ -94,6 +102,7 @@ func (control *ApprovalControl) RecordResult(ctx context.Context, connection Run
 		}
 		return status, nil
 	}
+	previous := status
 	updated, err := transaction.ExecContext(ctx, `
 		update approvals set state = $2, host_state = $3, execution_outcome = nullif($4, ''), host_updated_at = clock_timestamp()
 		where id = $1 and state = $5 and coalesce(host_state, '') = $6 and coalesce(execution_outcome, '') = $7`,
@@ -111,6 +120,7 @@ func (control *ApprovalControl) RecordResult(ctx context.Context, connection Run
 	if err := transaction.Commit(); err != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
 	}
+	control.database.observeApproval("host_result", previous, status)
 	return status, nil
 }
 

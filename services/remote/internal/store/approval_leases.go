@@ -28,6 +28,13 @@ func NewApprovalLeaseProvider(control *ApprovalControl, signer *approval.Authori
 // Issue returns a signed lease only after the current-authority checks, audit
 // and outbox commit. Full execution context remains transient.
 func (provider *ApprovalLeaseProvider) Issue(ctx context.Context, connection RuntimeConnection, keyVersion int64, rawContext []byte) (string, error) {
+	started := time.Now()
+	compact, err := provider.issue(ctx, connection, keyVersion, rawContext)
+	provider.control.database.observeApprovalOperation(ctx, "lease", started, err)
+	return compact, err
+}
+
+func (provider *ApprovalLeaseProvider) issue(ctx context.Context, connection RuntimeConnection, keyVersion int64, rawContext []byte) (string, error) {
 	binding, err := provider.control.context(rawContext)
 	if err != nil {
 		return "", err
@@ -185,6 +192,8 @@ func (provider *ApprovalLeaseProvider) Issue(ctx context.Context, connection Run
 	if err := transaction.Commit(); err != nil {
 		return "", ErrDatabaseUnavailable
 	}
+	provider.control.database.approvals.metrics.ApprovalLeasePrepared(decision.Claims.Decision, expires.Sub(issued))
+	provider.control.database.approvals.metrics.ApprovalLeaseAvailability(decision.Claims.Decision, expires.Sub(time.Now()))
 	if !expires.After(time.Now()) {
 		return "", ErrApprovalExpired
 	}

@@ -28,6 +28,7 @@ type Postgres struct {
 	admissionOnce sync.Once
 	admission     chan struct{}
 	commands      commandObservation
+	approvals     approvalObservation
 }
 
 const DefaultSerializableAdmissions = 4
