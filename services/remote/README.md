@@ -85,3 +85,12 @@ clock anomalies. Counters exclude unchanged retries, status reads, failed commit
 and receipt fanout. [Command observability](../../docs/command-observability.md)
 records exact semantics, process-local delivery limits and remaining native
 checkpoint/backlog metrics. No command body, resource ID or digest is a label.
+
+With private metrics enabled, optional installation-only `host.observations.v1`
+accepts bounded, connection-scoped native operation histograms. The normal Host
+samples actual DSH calls/checkpoint outcomes, without IDs or exception text in
+metric labels. Current ownership, rate, histogram arithmetic and monotone delta
+checks precede ingestion; phones cannot negotiate or forge this capability.
+[Host observation semantics](../../docs/host-native-observations.md) distinguish
+self-reported best-effort data from durable command acknowledgements and record
+actual local CLI flush-failure evidence. Older peers continue without the extension.

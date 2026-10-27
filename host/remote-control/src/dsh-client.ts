@@ -14,6 +14,7 @@ import { sessionAttachmentSource,sessionAttachmentManifest } from './session-fil
 import { ExportDirectory } from './export-directory.js'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
+import { NativeObservations } from './native-observations.js'
 
 export type DshPromptPart = Extract<PromptContentPart, { type: 'text' | 'file' }>
 
@@ -48,6 +49,7 @@ export class DshClient {
     readonly runtimeId: string,
     private readonly workspaces: readonly Workspace[],
     private readonly presets: readonly string[],
+    readonly observations = new NativeObservations(),
   ) {
     for (const workspace of workspaces) {
       const roots = workspace.exportRoots ?? []
@@ -280,7 +282,7 @@ export class DshClient {
   async create(workspace: string, preset: string) {
     const allowed = this.workspaces.find(item => item.id === workspace)
     if (allowed === undefined || !this.presets.includes(preset)) throw new ProbeError('access.denied')
-    const result = await this.controller.create({ cwd: allowed.cwd, agentPreset: preset })
+    const result = await this.observations.measure('create', () => this.controller.create({ cwd: allowed.cwd, agentPreset: preset }))
     const id = SessionId(result.sessionId)
     const mobile = mobileSessionId(this.runtimeId, result.sessionId)
     this.ids.set(mobile, String(id))
@@ -338,13 +340,17 @@ export class DshClient {
     this.requireUnarchived(id)
     // Native requestId is namespaced away from other desktop/remote input channels.
     const blocks = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : content
-    await this.controller.prompt({ sessionId: id, requestId: `m0:${requestId}` as never, mode, content: [...blocks] }, signal)
+    await this.observations.measure('prompt', () => this.controller.prompt({ sessionId: id, requestId: `m0:${requestId}` as never, mode, content: [...blocks] }, signal), undefined, signal)
     const checkpoint = await this.checkpoint(id)
     return { native_accepted: true, checkpoint }
   }
 
   /** Inspect native request evidence and flush its existing state; never admit a prompt. */
   async reconcilePrompt(id: SessionId, requestId: string, signal: AbortSignal) {
+    return this.observations.measure('prompt_reconcile', () => this.reconcilePromptObserved(id, requestId, signal), undefined, signal)
+  }
+
+  private async reconcilePromptObserved(id: SessionId, requestId: string, signal: AbortSignal) {
     signal.throwIfAborted()
     const resolved = await this.controller.resolveAgent(id)
     signal.throwIfAborted()
@@ -411,6 +417,10 @@ export class DshClient {
   }
 
   async checkpoint(id: SessionId): Promise<{ state: 'persisted'; through_seq: number } | { state: 'unavailable' | 'failed' }> {
+    return this.observations.measure('checkpoint', () => this.checkpointObserved(id), value => value.state)
+  }
+
+  private async checkpointObserved(id: SessionId): Promise<{ state: 'persisted'; through_seq: number } | { state: 'unavailable' | 'failed' }> {
     const session = this.ctx.sessions.get(id)
     if (session === undefined) return { state: 'unavailable' }
     const through = session.seq - 1
@@ -420,6 +430,10 @@ export class DshClient {
   }
 
   private async readColdCursor(id: SessionId, signal: AbortSignal): Promise<{ state: 'persisted'; through_seq: number } | { state: 'unavailable' | 'failed' }> {
+    return this.observations.measure('cold_checkpoint', () => this.readColdCursorObserved(id, signal), value => value.state)
+  }
+
+  private async readColdCursorObserved(id: SessionId, signal: AbortSignal): Promise<{ state: 'persisted'; through_seq: number } | { state: 'unavailable' | 'failed' }> {
     try {
       for await (const frame of this.controller.follow({ address: { kind: 'session', sessionId: id }, maxMessages: 1 }, signal)) {
         if (frame.type === 'snapshot') {

@@ -24,6 +24,7 @@ import (
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/files"
+	"dsh-mobile-ustc/services/remote/internal/hostmetrics"
 	"dsh-mobile-ustc/services/remote/internal/observability"
 	"dsh-mobile-ustc/services/remote/internal/store"
 	"github.com/coder/websocket"
@@ -121,6 +122,8 @@ type liveConnection struct {
 	closing                bool // Protected by Server.mu; prevents admission during unregister.
 	filePeer               *filePeer
 	expectedRoute          *store.RuntimeRoute
+	nativeReport           *hostmetrics.Report
+	lastNativeReport       time.Time
 }
 
 type outboundFrame struct {
@@ -267,6 +270,9 @@ func New(database Repository, approvalConfigs ...ApprovalConfig) *Server {
 
 func (server *Server) capabilities() []string {
 	capabilities := append([]string{}, supportedCapabilities...)
+	if server.metrics != nil {
+		capabilities = append(capabilities, hostmetrics.Capability)
+	}
 	if server.questionReferences != nil {
 		capabilities = append(capabilities, questionReferencesCapability)
 	}
@@ -777,7 +783,7 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 	defer cancel()
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
 	accepted = slices.DeleteFunc(accepted, func(capability string) bool {
-		return capability == files.HandoffCapability || capability == files.ReconcileCapability
+		return capability == files.HandoffCapability || capability == files.ReconcileCapability || capability == hostmetrics.Capability
 	})
 	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{
@@ -949,6 +955,8 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 		}
 		envelope.receivedAt = receivedAt
 		switch envelope.Type {
+		case "host.observations":
+			server.routeHostObservations(parent, live, envelope)
 		case "question.references":
 			server.routeQuestionReferences(parent, live, host, envelope, data)
 		case "file.exports.list", "file.export.request", "file.export.cancel":

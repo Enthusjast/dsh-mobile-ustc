@@ -4,6 +4,7 @@
   "title": "DSH Mobile Relay v1 frames",
   "description": "Strict challenge, heartbeat, commands, scoped session reads, and blocking/timed question frames. File message parts require message.files.v1 on both peers, current Host file.handoff.v1, and atomic database authorization of every reference. Runtime validators reject duplicate file IDs. Archive settlement confirms registry durability, not activity settlement. Fragmented projected payloads are at most 2 MiB.",
   "oneOf": [
+    {"$ref":"#/$defs/hostObservations"},
     {"$ref":"#/$defs/questionReferencesAck"},
     {"$ref":"#/$defs/questionReferences"},
     { "$ref": "#/$defs/challenge" },
@@ -65,6 +66,159 @@
     {"$ref": "#/$defs/sessionClosed"}
   ],
   "$defs": {
+    "hostObservations": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "type": {
+          "type": "string",
+          "const": "host.observations"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "runtime_epoch": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "connection_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000000
+            },
+            "dropped": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "series": {
+              "maxItems": 15,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "enum": [
+                      "checkpoint",
+                      "cold_checkpoint",
+                      "prompt",
+                      "create",
+                      "prompt_reconcile"
+                    ]
+                  },
+                  "result": {
+                    "type": "string",
+                    "enum": [
+                      "persisted",
+                      "failed",
+                      "unavailable",
+                      "ok",
+                      "error",
+                      "cancelled"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000000
+                  },
+                  "sum_micros": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "buckets": {
+                    "minItems": 12,
+                    "maxItems": 12,
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000000
+                    }
+                  }
+                },
+                "required": [
+                  "operation",
+                  "result",
+                  "count",
+                  "sum_micros",
+                  "buckets"
+                ],
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "required": [
+                        "operation"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "enum": [
+                            "checkpoint",
+                            "cold_checkpoint"
+                          ]
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "result": {
+                          "enum": [
+                            "persisted",
+                            "failed",
+                            "unavailable"
+                          ]
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "result": {
+                          "enum": [
+                            "ok",
+                            "error",
+                            "cancelled"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "connection_id",
+            "sequence",
+            "dropped",
+            "series"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "runtime_id",
+        "runtime_epoch",
+        "payload"
+      ],
+      "additionalProperties": false,
+      "description": "Optional host.observations.v1, installation-only, current connection/epoch. Self-reported fixed native operations; never authority or command acceptance. Runtime validators also check unique cells, histogram arithmetic and monotone counter deltas."
+    },
     "questionReferencesAck": {
       "type": "object",
       "properties": {

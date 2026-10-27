@@ -156,6 +156,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           relayRuntimeEpoch = proof.runtime_epoch
           const expectedCapabilities=['command.relay.v1', 'connection.heartbeat.v1', 'file.handoff.v1', 'message.files.reconcile.v1', 'message.files.v1', 'question.blocking.v1', 'question.references.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1']
           if(exportSupported)expectedCapabilities.push('file.export.v1')
+          expectedCapabilities.push('host.observations.v1')
           expectedCapabilities.sort()
           assert.deepEqual([...frame.payload.capabilities].sort(),expectedCapabilities)
           const helloDigest = hostHelloDigest([
@@ -170,6 +171,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
             && verify('sha256', signingInput, { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
           if (!valid) throw new Error('DSH plugin hello proof did not bind its runtime and challenge')
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
+            // This older peer deliberately omits the new optional observation capability.
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: relayRuntimeEpoch, protocol_version: 1, protocols: [1],
             capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.references.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.read.v1'], server_time: new Date().toISOString(),

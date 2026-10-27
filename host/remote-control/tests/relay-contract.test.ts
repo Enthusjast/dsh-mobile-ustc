@@ -12,6 +12,8 @@ const validate = ajv.compile(schema)
 
 test('WSS relay schema accepts command, catalog and scoped session-read goldens', async () => {
   for (const path of [
+    '../../../contracts/ws/v1/golden/host-observations.json',
+    '../../../contracts/ws/v1/golden/host-observations-next.json',
     '../../../contracts/ws/v1/golden/message-submit.json',
     '../../../contracts/ws/v1/golden/message-submit.forwarded.json',
     '../../../contracts/ws/v1/golden/message-file-submit.json',

@@ -17,6 +17,7 @@ import { FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY, FILE_RECONCILE_CAPABI
 import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
 import type { HostExportPeer } from './relay-exports.js'
 import { EXPORT_CAPABILITY } from './export-protocol.js'
+import { bindNativeObservations, HOST_OBSERVATIONS_CAPABILITY, type NativeObservations } from './native-observations.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
@@ -131,6 +132,7 @@ export interface HostRelayOptions {
       sessionCatalog(signal: AbortSignal, sessionIds?: readonly string[]): Promise<SessionCatalogItem[]>
       watchSessionCatalog(onChange: (change: SessionCatalogChange) => void): () => void
       creationOptions?(): SessionCreationOptions
+      observations?: NativeObservations
     }
     dispatch(command: Command, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
     reconcileFileMessage?(command: Extract<Command, { type: 'message.submit' }>, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
@@ -431,6 +433,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
   let questionReferences: HostQuestionReferences | undefined
   let files: HostFilePeer | undefined
   let exports: HostExportPeer | undefined
+  let observations: ReturnType<typeof bindNativeObservations> | undefined
   const abortConnection = () => {
     connection.abort()
     socket.terminate()
@@ -454,6 +457,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     if (options.files) offered.push(FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY)
     if (options.files && options.runtime.reconcileFileMessage) offered.push(FILE_RECONCILE_CAPABILITY)
     if(options.exports)offered.push(EXPORT_CAPABILITY)
+    if (options.runtime.client.observations) offered.push(HOST_OBSERVATIONS_CAPABILITY)
     const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
     await sendFrame(socket, {
       v: 1,
@@ -481,6 +485,13 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     }
 
     if (options.approvals && (![SIGNED_APPROVAL_CAPABILITY,APPROVAL_INVALIDATION_CAPABILITY,'session.catalog.v1'].every(capability=>ack.data.payload.capabilities.includes(capability)))) throw new ProbeError('protocol.unsupported')
+    if (options.runtime.client.observations && ack.data.payload.capabilities.includes(HOST_OBSERVATIONS_CAPABILITY)) {
+      observations = bindNativeObservations(options.runtime.client.observations, { connectionId: challenge.connection_id, runtimeId: options.runtime.client.runtimeId, epoch: options.runtime.epoch }, frame => {
+        const encoded = JSON.stringify(frame)
+        if (socket.readyState !== 1 || socket.bufferedAmount > MAX_BUFFERED_BYTES / 4 || Buffer.byteLength(encoded) > 16 * 1024) return false
+        try { socket.send(encoded, () => {}); return true } catch { return false }
+      })
+    }
     if (options.files && ack.data.payload.capabilities.includes(FILE_HANDOFF_CAPABILITY)) {
       if (!ack.data.payload.capabilities.includes('session.catalog.v1')) throw new ProbeError('protocol.unsupported')
       const origin = new URL(url)
@@ -728,6 +739,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     try { await reader }
     finally { clearInterval(heartbeat) }
   } finally {
+    observations?.close()
     await exports?.close()
     files?.close()
     approvals?.close()

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, unlink } from 'node:fs/promises'
 import { createServer, request } from 'node:http'
 import { createServer as createTCPServer } from 'node:net'
 import { createRequire } from 'node:module'
@@ -349,14 +349,16 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await mkdir(workspace)
   const plugin = pathToFileURL(resolve('host/remote-control/lib/index.js')).href
   const wrapper = join(root, 'plugin.mjs')
+  const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
+  const checkpointFailureSecret = `PRIVATE_CHECKPOINT_FAILURE_${randomUUID()}`
   await writeFile(wrapper, [
     "import { createPrivateKey, sign } from 'node:crypto'",
-    "import { writeFile } from 'node:fs/promises'",
+    "import { writeFile, readFile } from 'node:fs/promises'",
     `import { createRemoteControlPlugin } from ${JSON.stringify(plugin)}`,
     `const privateKey = createPrivateKey({format:'jwk',key:${JSON.stringify(installationKey.privateKey.export({ format: 'jwk' }))}})`,
     `const plugin = createRemoteControlPlugin({async acquire(){return {installationId:${JSON.stringify(enrollment.installation_id)},credential:${JSON.stringify(credential.credential)},signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}}}}}, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -520,6 +522,21 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const history = await mobile.wait(frame => frame.type === 'session.page.result' && frame.request_id === pageRequest)
   assert.ok(JSON.stringify(history.payload.records).includes(marker))
   assert.equal(history.payload.through_seq, replacement.payload.cursor)
+  // Inject only in this owned profile while the model is idle. The normal
+  // DshClient checkpoint catches the actual flush exception and reports it.
+  const failureFrom = mobile.frames.length
+  await writeFile(checkpointFailureFile, 'fixture', { mode: 0o600 })
+  const failedReadId = subscribe()
+  let failedSnapshot: any
+  try {
+    failedSnapshot = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === failedReadId, failureFrom)
+    await mobile.wait(frame => frame.type === 'session.checkpoint' && frame.request_id === failedReadId && frame.payload.state === 'failed', failureFrom)
+  } finally { await unlink(checkpointFailureFile) }
+  mobile.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+    session_id: sessionId, subscription_id: failedSnapshot.subscription_id, payload: {} })
+  await mobile.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === failedSnapshot.subscription_id, failureFrom)
+  await until(async () => metricSample(await readMetrics(), 'host_native_operations_total', { operation: 'checkpoint', result: 'failed' }) >= 1 ? true : undefined,
+    'actual native checkpoint failure observation')
   const badPageId = randomUUID()
   mobile.send({ ...page, request_id: badPageId, payload: { ...page.payload, through_seq: replacement.payload.cursor - 1, before_seq: replacement.payload.cursor } })
   await mobile.wait(frame => frame.type === 'session.error' && frame.request_id === badPageId && frame.payload.code === 'protocol.resync_required')
@@ -842,10 +859,15 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(metricSample(finalMetrics, 'command_state_dwell_seconds_count', { action: 'message.submit', from: 'host_accepted', to: 'dispatching' }) > 0)
   assert.ok(metricSample(finalMetrics, 'command_state_dwell_seconds_count', { action: 'message.submit', from: 'dispatching', to: 'agent_queued' }) > 0)
   assert.ok(metricSample(finalMetrics, 'command_store_duration_seconds_count', { operation: 'receipt', result: 'ok' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'host_observation_reports_total', { result: 'accepted' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'host_native_operations_total', { operation: 'checkpoint', result: 'persisted' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'host_native_operation_duration_seconds_count', { operation: 'prompt', result: 'ok' }) > 0)
   for (const secret of [orgId, ownerId, phoneUserId, device.device_id, enrollment.runtime_id, sessionId, revokeMarker, revokeProof,
-    (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
+    checkpointFailureSecret, checkpointFailureFile, (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
   t.diagnostic('Private Prometheus endpoint observed actual signed Host/phone connections, native traffic, command forwarding/retries and completed local revocation propagation without resource IDs, bodies or proofs.')
   t.diagnostic('Committed command creation counters match PostgreSQL rows for every action; Host transition counters match durable receipt audits despite retries. Stage ages/dwell and repository attempts were observed at the owner node.')
+  t.diagnostic('The normal Host negotiated connection-scoped native observations; actual native prompt and persisted checkpoint aggregates reached the private owner metrics without resource IDs or body data.')
+  t.diagnostic('An actual CLI profile flush exception produced a failed checkpoint and the corresponding private native failure counter; neither the private error nor local path entered metrics. Ordinary history and later commands continued after removal of the fixture fault.')
   t.diagnostic(`Device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic('A real Bash approved through the normal plugin was held after guard; scoped grant invalidation blocked its body before the three-second lease expired and durably reported the invalidated fact.')
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)

@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "type": "host.observations",
+  "runtime_id": "33333333-3333-4333-8333-333333333333",
+  "runtime_epoch": "44444444-4444-4444-8444-444444444444",
+  "payload": {
+    "connection_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "sequence": 1,
+    "dropped": 0,
+    "series": [
+      {
+        "operation": "checkpoint",
+        "result": "persisted",
+        "count": 1,
+        "sum_micros": 1500,
+        "buckets": [
+          0,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    ]
+  }
+}

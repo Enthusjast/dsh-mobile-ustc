@@ -94,3 +94,11 @@ Relay 双方协商 `session.read.v1` 后，可打开按连接隔离的会话订�
 Host 另协商 `message.files.reconcile.v1`，使已登记原命令在对象到期或暂存失效后仍可核对已有结果。服务端专用对账帧只查询原生请求记录和持久化检查点，不走普通消息提交；缺少本地证据时保留未知结果。该能力不提供新的下载、receipt 或消息准入权限。
 
 受限导出的 [Host 来源层](../../docs/file-export-sources.md) 已提供会话持久附件 / 图片、显式 exportRoots 下的工作区交付物、不透明来源 ID 和运行时清理，并通过 [file.export.v1](../../docs/file-export-relay.md) 接入服务端登记、扫描与鉴权下载。Linux 读取固定文件描述符并核对版本 / 摘要；未知执行世界和缺少安全文件适配的平台拒绝读取。工作区目录还要求 ticket 与当前 grant 的字面 workspace 范围，不能仅靠会话权限进入。Android 保存链路仍需接入。
+
+The optional [native observations extension](../../docs/host-native-observations.md)
+is negotiated only when the Relay exposes private operational metrics. Native
+prompt/create/reconciliation and checkpoint outcomes use bounded aggregate
+windows, without command IDs, paths, bodies or exception text. Observation
+failure/backpressure never changes command results or replays work; old peers
+can omit the capability. These are self-reported runtime statistics, not execution
+permission or durable receipts.

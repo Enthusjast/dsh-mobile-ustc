@@ -40,6 +40,8 @@ type Metrics struct {
 	commandDwell       *prometheus.HistogramVec
 	commandStore       *prometheus.HistogramVec
 	commandClock       *prometheus.CounterVec
+	native             *nativeCollector
+	nativeReports      *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -50,6 +52,8 @@ func New() *Metrics {
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: name, Help: help, Buckets: durationBuckets}, labels)
 	}
 	m := &Metrics{
+		native:         newNativeCollector(),
+		nativeReports:  counter("host_observation_reports_total", "Connection-scoped Host observation report validation outcomes.", "result"),
 		registry:       prometheus.NewRegistry(),
 		receivedFrames: counter("relay_received_frames_total", "Complete received WebSocket data messages, including rejected messages.", "role"),
 		receivedBytes:  counter("relay_received_bytes_total", "Payload bytes of complete received WebSocket data messages.", "role"),
@@ -84,7 +88,7 @@ func New() *Metrics {
 	}
 	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
-		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, m.native, m.nativeReports, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, role := range []string{"installation", "device", "other"} {
 		m.receivedFrames.WithLabelValues(role)
 		m.receivedBytes.WithLabelValues(role)
@@ -94,6 +98,9 @@ func New() *Metrics {
 	for _, worker := range []string{"outbox", "leases", "consumer", "consumer_cleanup"} {
 		m.controlReady.WithLabelValues(worker).Set(0)
 		m.controlSuccess.WithLabelValues(worker).Set(0)
+	}
+	for _, result := range []string{"accepted", "duplicate", "rejected", "throttled", "denied"} {
+		m.nativeReports.WithLabelValues(result)
 	}
 	return m
 }

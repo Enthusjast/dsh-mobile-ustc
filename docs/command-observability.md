@@ -86,3 +86,6 @@ histogram_quantile(0.95, sum by (le, operation, result) (rate(dsh_remote_command
 （完整 Go race/私有 PostgreSQL 与实际 npm DSH 0.2.1-rc.2 组合，原生部分约 11.823 秒）。
 首次完整运行的 Go 回归通过，但原生断言错误地期待跳过 dispatching；修正断言后完整组合通过，
 失败记录仍保留在 `.local/command-metrics-full-first.log`。TypeScript check 与 `go vet ./...` 均通过。
+
+后续[Host 原生观测](host-native-observations.md)另有实际方法和 checkpoint 失败的可选自报链路。
+不要从命令缺失某阶段推断原生失败，也不要将 Host 自报转换为已提交命令计数或新的持久确认。

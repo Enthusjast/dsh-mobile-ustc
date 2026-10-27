@@ -102,3 +102,12 @@ HTTP 转发上限为 128。隧道时延只覆盖一个入口转发方向，已�
 [命令指标口径](command-observability.md)详细说明提交后计数、重试/扇出去重、未知结果进入次数、
 状态年龄与停留时间、数据库时钟异常以及进程重启/提交确认丢失的边界。指标不替代持久对账，
 不是当前未知积压数量，也不把原生/人工等待混入路由 SLO。正常 dsh 链路的 dispatching 阶段保留。
+
+## Host 原生观测补充
+
+[可选 Host 观测扩展](host-native-observations.md)记录真实 native prompt/create/reconcile、
+checkpoint/cold checkpoint 的固定结果及耗时。只有启用私有指标时才协商，按连接累计求增量，
+不保存操作正文或资源标签。`host_native_operations_total` 与 `host_native_operation_duration_seconds`
+是 Host 自报，不能替代 command ledger 或路由 SLO；`host_observation_reports_total` 和
+`host_native_dropped_samples_total` 显示验证/限速及部分 source 丢弃。当前有实际 CLI flush 故障夹具，
+不代表生产磁盘与完整原生阶段验收。
