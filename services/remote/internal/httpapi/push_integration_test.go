@@ -22,6 +22,7 @@ import (
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
 	"dsh-mobile-ustc/services/remote/internal/httpapi"
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"dsh-mobile-ustc/services/remote/internal/push"
 	"dsh-mobile-ustc/services/remote/internal/store"
 	"dsh-mobile-ustc/services/remote/internal/testsupport"
@@ -136,6 +137,13 @@ func TestPushHTTPSDPoPOwnershipChallengeThroughRealOAuthAndFCMTransport(t *testi
 	}
 	fingerprint := sha256.Sum256(lookup)
 	postgres := &store.Postgres{DB: database}
+	metrics := observability.New()
+	if err := postgres.ConfigurePushMetrics(metrics); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.ConfigureMetrics(metrics); err != nil {
+		t.Fatal(err)
+	}
 	repository, err := store.NewPushStore(ctx, postgres, cipher, "https://id.example.edu", "fixture-project", "cn.edu.ustc.dsh.mobile", hex.EncodeToString(fingerprint[:]), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +201,29 @@ func TestPushHTTPSDPoPOwnershipChallengeThroughRealOAuthAndFCMTransport(t *testi
 	}
 	if packet["binding_id"] != id || packet["kind"] != "registration_challenge" || !push.Secret(packet["challenge"]) {
 		t.Fatal("ownership packet lost binding")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		// Wait for worker commit observation before racing channel confirmation.
+		response := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+		body := response.Body.String()
+		for _, private := range []string{id, registration.Address, packet["challenge"], revoke, "PRIVATE_ACCESS_TOKEN", string(serviceAccount)} {
+			if strings.Contains(body, private) {
+				t.Fatal("composed push metrics exposed endpoint, challenge or credentials")
+			}
+		}
+		if strings.Contains(body, "dsh_remote_push_client_receipts_total{") {
+			t.Fatal("challenge/provider acceptance invented client display")
+		}
+		if strings.Contains(body, "dsh_remote_push_provider_send_duration_seconds_count{kind=\"challenge\",result=\"provider_accepted\"} 1\n") &&
+			strings.Contains(body, "dsh_remote_push_delivery_results_total{code=\"none\",kind=\"challenge\",state=\"provider_accepted\"} 1\n") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("FCM sender result and committed worker completion were not observed")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	code, _ = otherCaller.call(token(otherJKT), "POST", "/v1/push-bindings/"+id+"/confirm", map[string]string{"challenge": packet["challenge"]})
 	if code != 403 {

@@ -128,3 +128,11 @@ checkpoint/cold checkpoint 的固定结果及耗时。只有启用私有指标�
 `file_handoff_age_seconds` 和 `file_handoff_read_to_stage_seconds` 使用数据库区间，
 只有新里程碑的整个 commit 得到确认后才采样。staged 仍是 Host 暂存回报，不等于原生准入。
 固定标签的仓库尝试耗时保留失败与重试，负时间差单独计数；这些指标不是当前积压或路由 SLO。
+
+## 推送结果补充
+
+[推送指标口径](push-observability.md)将 sender 返回、完成事务 commit 和客户端
+posted/opened/blocked 去重回执分开。`push_delivery_results_total` 使用实际提交后的结果，
+包括失效 endpoint 与重试期限裁剪；`push_client_receipts_total` 不表示人已经看见。
+两个数据库年龄指标分别截止于完成更新/回执插入，单独报告负时间差；不能用接受数减去回执数
+宣称未展示率。未配置推送时不建立通道或访问 provider。

@@ -219,6 +219,13 @@ func (store *PushStore) Inbox(ctx context.Context, actor push.Actor, binding, af
 	return page, nil
 }
 func (store *PushStore) Receipt(ctx context.Context, actor push.Actor, id, state string) error {
+	started := time.Now()
+	err := store.receipt(ctx, actor, id, state)
+	store.observePushOperation(ctx, "receipt", started, err)
+	return err
+}
+
+func (store *PushStore) receipt(ctx context.Context, actor push.Actor, id, state string) error {
 	if state != "posted" && state != "opened" && state != "blocked" {
 		return push.ErrInvalid
 	}
@@ -240,16 +247,22 @@ func (store *PushStore) Receipt(ctx context.Context, actor push.Actor, id, state
 	if b.State != "active" || !b.Expiry.After(time.Now()) {
 		return push.ErrAccess
 	}
-	result, err := tx.ExecContext(ctx, `insert into push_receipts(notification_id,state) values($1,$2) on conflict do nothing`, id, state)
-	if err != nil {
+	var createdAt, receivedAt time.Time
+	err = tx.QueryRowContext(ctx, `with inserted as (
+	 insert into push_receipts(notification_id,state) values($1,$2) on conflict do nothing returning notification_id,received_at)
+	 select d.created_at,i.received_at from inserted i join push_deliveries d on d.id=i.notification_id`, id, state).Scan(&createdAt, &receivedAt)
+	inserted := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return push.ErrUnavailable
 	}
-	count, _ := result.RowsAffected()
-	if count > 0 && pushAudit(ctx, tx, b, "push.client_receipt", state, map[string]string{"notification_id": id}) != nil {
+	if inserted && pushAudit(ctx, tx, b, "push.client_receipt", state, map[string]string{"notification_id": id}) != nil {
 		return push.ErrUnavailable
 	}
 	if tx.Commit() != nil {
 		return push.ErrUnavailable
+	}
+	if inserted {
+		store.database.push.metrics.PushReceipt(ref.Kind, state, createdAt, receivedAt)
 	}
 	return nil
 }

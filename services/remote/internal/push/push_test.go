@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"dsh-mobile-ustc/services/remote/internal/observability"
 	"github.com/go-jose/go-jose/v4"
 )
 
@@ -175,6 +177,13 @@ func TestFCMDataOnlyFIDTransportPreservesReferencesAndRechecksAfterAuthenticatio
 		t.Fatal(err)
 	}
 	sender.endpoint = peer.URL
+	metrics := observability.New()
+	if err := sender.ConfigureMetrics(metrics); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.ConfigureMetrics(observability.New()); !errors.Is(err, ErrInvalid) {
+		t.Fatal("live sender observer was replaced")
+	}
 	base := Outbound{Provider: "fcm", Address: "c" + strings.Repeat("A", 21), BindingID: "11111111-1111-4111-8111-111111111111", NotificationID: "22222222-2222-4222-8222-222222222222", Kind: "approval", ExpiresAt: time.Now().Add(time.Minute)}
 	checks := 0
 	result := sender.Send(context.Background(), base, func(context.Context) error {
@@ -198,6 +207,9 @@ func TestFCMDataOnlyFIDTransportPreservesReferencesAndRechecksAfterAuthenticatio
 	if sender.Send(context.Background(), base, func(context.Context) error { return ErrAccess }).State != Expired || calls.Load() != 2 {
 		t.Fatal("revoked authority reached provider")
 	}
+	assertSenderSamples(t, metrics, "approval", Accepted, 1)
+	assertSenderSamples(t, metrics, "challenge", Accepted, 1)
+	assertSenderSamples(t, metrics, "challenge", Expired, 1)
 }
 func TestFCMFailureClassificationIsBoundedAndSecretFree(t *testing.T) {
 	status := 503
@@ -217,6 +229,10 @@ func TestFCMFailureClassificationIsBoundedAndSecretFree(t *testing.T) {
 	defer peer.Close()
 	sender, _ := NewFCM("fixture-project", "cn.edu.ustc.dsh.mobile", &fixedTokens{}, peer.Client())
 	sender.endpoint = peer.URL
+	metrics := observability.New()
+	if err := sender.ConfigureMetrics(metrics); err != nil {
+		t.Fatal(err)
+	}
 	out := Outbound{Provider: "fcm", Address: "c" + strings.Repeat("B", 21), BindingID: "11111111-1111-4111-8111-111111111111", NotificationID: "22222222-2222-4222-8222-222222222222", Kind: "approval", ExpiresAt: time.Now().Add(time.Minute)}
 	check := func(context.Context) error { return nil }
 	result := sender.Send(context.Background(), out, check)
@@ -237,4 +253,7 @@ func TestFCMFailureClassificationIsBoundedAndSecretFree(t *testing.T) {
 	if sender.Send(context.Background(), out, check).State == Accepted {
 		t.Fatal("redirect accepted")
 	}
+	assertSenderSamples(t, metrics, "approval", Retry, 1)
+	assertSenderSamples(t, metrics, "approval", InvalidEndpoint, 1)
+	assertSenderSamples(t, metrics, "approval", Failed, 2)
 }

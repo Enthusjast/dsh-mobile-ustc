@@ -246,6 +246,13 @@ func (store *PushStore) Recheck(ctx context.Context, claim push.Claim) error {
 	return err
 }
 func (store *PushStore) Complete(ctx context.Context, claim push.Claim, result push.Result) error {
+	started := time.Now()
+	err := store.complete(ctx, claim, result)
+	store.observePushOperation(ctx, "complete", started, err)
+	return err
+}
+
+func (store *PushStore) complete(ctx context.Context, claim push.Claim, result push.Result) error {
 	if !push.UUID(claim.ID) || !push.UUID(claim.BindingID) || !push.UUID(claim.LeaseID) {
 		return push.ErrLease
 	}
@@ -264,10 +271,10 @@ func (store *PushStore) Complete(ctx context.Context, claim push.Claim, result p
 	if err != nil {
 		return push.ErrUnavailable
 	}
-	var state, lease string
+	var state, lease, kind string
 	var attempts int
-	var expires time.Time
-	err = tx.QueryRowContext(ctx, `select state,coalesce(lease_id::text,''),attempts,expires_at from push_deliveries where id=$1 and binding_id=$2 for update`, claim.ID, claim.BindingID).Scan(&state, &lease, &attempts, &expires)
+	var expires, createdAt time.Time
+	err = tx.QueryRowContext(ctx, `select state,coalesce(lease_id::text,''),attempts,expires_at,created_at,kind from push_deliveries where id=$1 and binding_id=$2 for update`, claim.ID, claim.BindingID).Scan(&state, &lease, &attempts, &expires, &createdAt, &kind)
 	if err != nil {
 		return push.ErrUnavailable
 	}
@@ -293,11 +300,13 @@ func (store *PushStore) Complete(ctx context.Context, claim push.Claim, result p
 			return push.ErrUnavailable
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `update push_deliveries set state=$2,next_attempt_at=$3,provider_message_sha256=nullif($4,''),error_code=nullif($5,''),nonce_ciphertext=case when $2='retry' or (kind='challenge' and $2='provider_accepted') then nonce_ciphertext else null end,updated_at=clock_timestamp() where id=$1`, claim.ID, result.State, next, result.ProviderID, result.Code); err != nil {
+	var updatedAt time.Time
+	if err = tx.QueryRowContext(ctx, `update push_deliveries set state=$2,next_attempt_at=$3,provider_message_sha256=nullif($4,''),error_code=nullif($5,''),nonce_ciphertext=case when $2='retry' or (kind='challenge' and $2='provider_accepted') then nonce_ciphertext else null end,updated_at=clock_timestamp() where id=$1 returning updated_at`, claim.ID, result.State, next, result.ProviderID, result.Code).Scan(&updatedAt); err != nil {
 		return push.ErrUnavailable
 	}
 	if pushAudit(ctx, tx, b, "push.delivery", result.State, map[string]any{"notification_id": claim.ID, "kind": claim.Kind, "attempt": attempts, "code": result.Code}) != nil || tx.Commit() != nil {
 		return push.ErrUnavailable
 	}
+	store.database.push.metrics.PushDelivery(kind, result.State, result.Code, createdAt, updatedAt)
 	return nil
 }

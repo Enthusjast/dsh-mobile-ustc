@@ -12,9 +12,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
+	"dsh-mobile-ustc/services/remote/internal/observability"
 )
 
 var projectID = regexp.MustCompile(`^([a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{6,20})$`)
@@ -24,10 +26,22 @@ type FCM struct {
 	project, packageName, endpoint string
 	tokens                         AccessTokens
 	client                         *http.Client
+	metricsOnce                    sync.Once
+	metrics                        *observability.Metrics
 }
 
 func (*FCM) String() string   { return "FCMSender" }
 func (*FCM) GoString() string { return "FCMSender" }
+
+// ConfigureMetrics is startup-only, before this sender can be shared by workers.
+func (sender *FCM) ConfigureMetrics(metrics *observability.Metrics) error {
+	configured := false
+	sender.metricsOnce.Do(func() { sender.metrics = metrics; configured = true })
+	if !configured {
+		return ErrInvalid
+	}
+	return nil
+}
 func NewFCM(project, application string, tokens AccessTokens, client *http.Client) (*FCM, error) {
 	if !projectID.MatchString(project) || !packageID.MatchString(application) || len(application) > 255 || tokens == nil {
 		return nil, ErrInvalid
@@ -47,6 +61,13 @@ func retryAfter(header string, now time.Time, minimum time.Duration) time.Durati
 	return minimum
 }
 func (sender *FCM) Send(ctx context.Context, out Outbound, current func(context.Context) error) Result {
+	started := time.Now()
+	result := sender.send(ctx, out, current)
+	sender.metrics.PushSend(out.Kind, result.State, time.Since(started))
+	return result
+}
+
+func (sender *FCM) send(ctx context.Context, out Outbound, current func(context.Context) error) Result {
 	ctx, cancel := context.WithDeadline(ctx, out.ExpiresAt)
 	defer cancel()
 	if out.Provider != "fcm" || !FID(out.Address) || !UUID(out.BindingID) || current == nil {

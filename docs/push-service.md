@@ -29,6 +29,9 @@ FCM 结果丢失只能按原 UUID 至少一次重试，不能承诺外部 exactl
 
 ## 状态与点击
 
+私有[推送指标](push-observability.md)分别观察 sender 结果、提交后的完成记录和去重客户端回执。
+provider_accepted 不产生展示计数；posted/opened/blocked 各自计首次 commit，不能代替人的可见性或执行许可。
+
 `queued/retry/leased`、`provider_accepted` 和客户端报告的 `posted/opened/blocked` 分开保存。FCM 接受、OS posting 尝试和人实际看见不是同一个事实；客户端回执不改变任何审批状态。
 
 `GET /v1/notifications/{id}` 和分页 inbox 重新核对当前设备 / key / 组织与源权限，只返回 runtime / epoch / session / source UUID、状态和 availability。主机离线、代次变化和源结束分别有状态；没有完整工具参数或执行许可。点击提醒后的手机流程必须重新取原生详情、核对当前 epoch 和期限，并沿原有人工核对 / 生物识别 / 签名接口行动。此处没有“通知中直接允许”的 API。

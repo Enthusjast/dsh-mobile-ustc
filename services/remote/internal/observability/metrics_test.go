@@ -40,6 +40,10 @@ func TestUnknownIdentityAndTextCannotCreateMetricLabels(t *testing.T) {
 		m.FileScanAttempt(untrusted, untrusted, time.Millisecond)
 		m.FileHandoffOperation(untrusted, untrusted, time.Millisecond)
 		m.FileHandoffMilestone(untrusted, time.Time{}, time.Time{}, time.Time{})
+		m.PushSend(untrusted, untrusted, time.Millisecond)
+		m.PushOperation(untrusted, untrusted, time.Millisecond)
+		m.PushDelivery(untrusted, untrusted, untrusted, time.Now().Add(-time.Second), time.Now())
+		m.PushReceipt(untrusted, untrusted, time.Now().Add(-time.Second), time.Now())
 	}
 	if got := testutil.CollectAndCount(m.rejectedSends); got != 1 {
 		t.Fatalf("untrusted inputs created %d rejection series", got)
@@ -70,6 +74,11 @@ func TestUnknownIdentityAndTextCannotCreateMetricLabels(t *testing.T) {
 	}
 	if got := testutil.CollectAndCount(m.fileHandoffEvents); got != 1 {
 		t.Fatalf("untrusted handoff stages created %d series", got)
+	}
+	for _, collector := range []prometheus.Collector{m.pushSends, m.pushOperations, m.pushDeliveries, m.pushReceipts} {
+		if got := testutil.CollectAndCount(collector); got != 1 {
+			t.Fatalf("untrusted push input created %d series", got)
+		}
 	}
 	response := httptest.NewRecorder()
 	m.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))

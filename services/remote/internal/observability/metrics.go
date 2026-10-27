@@ -55,6 +55,13 @@ type Metrics struct {
 	fileHandoffAge            *prometheus.HistogramVec
 	fileHandoffStage          prometheus.Histogram
 	fileClock                 *prometheus.CounterVec
+	pushSends                 *prometheus.HistogramVec
+	pushOperations            *prometheus.HistogramVec
+	pushDeliveries            *prometheus.CounterVec
+	pushReceipts              *prometheus.CounterVec
+	pushDeliveryAge           *prometheus.HistogramVec
+	pushReceiptAge            *prometheus.HistogramVec
+	pushClock                 *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -65,6 +72,13 @@ func New() *Metrics {
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: name, Help: help, Buckets: durationBuckets}, labels)
 	}
 	m := &Metrics{
+		pushSends:                 histogram("push_provider_send_duration_seconds", "FCM sender attempt duration including OAuth, authority recheck and response handling; result is not database commit or phone display.", "kind", "result"),
+		pushOperations:            histogram("push_operation_duration_seconds", "Push completion or client-receipt repository attempt duration including authorization, audit and commit; includes retries and failures.", "operation", "result"),
+		pushDeliveries:            counter("push_delivery_results_total", "Delivery completion results with confirmed commit, including distinct retry attempts; not phone display.", "kind", "state", "code"),
+		pushReceipts:              counter("push_client_receipts_total", "New committed authenticated client posted/opened/blocked reports, once per notification/state; not proof a human saw a notification.", "kind", "state"),
+		pushDeliveryAge:           prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "push_delivery_age_seconds", Help: "Database time from delivery creation to committed completion update; includes queue/retry time and excludes later commit wait.", Buckets: []float64{.01, .1, 1, 5, 10, 30, 60, 120, 300, 600, 3600}}, []string{"kind", "state"}),
+		pushReceiptAge:            prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "push_client_receipt_age_seconds", Help: "Database time from delivery creation to newly committed client-receipt insertion; not provider-to-display latency.", Buckets: []float64{.01, .1, 1, 5, 10, 30, 60, 120, 300, 600, 3600, 86400}}, []string{"kind", "state"}),
+		pushClock:                 counter("push_clock_anomalies_total", "Negative database age intervals excluded from push duration observations.", "source"),
 		fileScans:                 prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "dsh_remote", Name: "file_scan_attempt_duration_seconds", Help: "Claimed worker scan attempt duration, including object verification, scanning, copy and repository completion/failure handling; not queue or upload time.", Buckets: []float64{.001, .01, .1, .5, 1, 2, 5, 10, 30, 60, 120, 300, 900}}, []string{"direction", "result"}),
 		fileHandoffOperations:     histogram("file_handoff_operation_duration_seconds", "Handoff repository attempt duration including authorization, locks and commit; includes no-op retries and failures.", "operation", "result"),
 		fileHandoffEvents:         counter("file_handoff_events_total", "Selected handoff milestones with confirmed commit; staged is a Host report, not native admission or execution.", "stage"),
@@ -113,6 +127,7 @@ func New() *Metrics {
 		commandClock:       counter("command_timestamp_anomalies_total", "Missing or backward database timestamps excluded from command age/dwell histograms.", "interval"),
 	}
 	m.Register(m.fileScans, m.fileHandoffOperations, m.fileHandoffEvents, m.fileHandoffAge, m.fileHandoffStage, m.fileClock)
+	m.Register(m.pushSends, m.pushOperations, m.pushDeliveries, m.pushReceipts, m.pushDeliveryAge, m.pushReceiptAge, m.pushClock)
 	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
 		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, m.commandTransitions, m.commandAge, m.commandDwell, m.commandStore, m.commandClock, m.native, m.nativeReports, m.approvalStates, m.approvalHosts, m.approvalOps, m.approvalLeasePrepared, m.approvalLeaseLifetime, m.approvalLeaseRemaining, m.approvalLeaseAvailability, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))

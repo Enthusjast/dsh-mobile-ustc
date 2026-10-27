@@ -30,6 +30,7 @@ type Postgres struct {
 	commands      commandObservation
 	approvals     approvalObservation
 	files         fileObservation
+	push          pushObservation
 }
 
 const DefaultSerializableAdmissions = 4

@@ -108,3 +108,10 @@ commits and duplicate acknowledgements cannot add milestones; database intervals
 separate offer age from read-to-stage time. A staged Host report remains distinct
 from native file admission or message execution. Worker attempts include failures,
 timeouts and cancellation without exposing file metadata or signed capabilities.
+
+[Push observability](../../docs/push-observability.md) separates FCM sender
+results, committed worker completion results and new authenticated client
+posted/opened/blocked receipts. Retries retain their notification identity and
+distinct lease attempts; repeated client states count once. Provider acceptance
+does not imply display, and no result grants interaction authority. Fixed-label
+durations/ages contain no endpoint, project, credential or resource identities.

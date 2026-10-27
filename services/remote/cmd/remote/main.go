@@ -125,6 +125,9 @@ func run() error {
 	if err := database.ConfigureFileMetrics(metrics); err != nil {
 		return errors.New("remote file observability configuration is invalid")
 	}
+	if err := database.ConfigurePushMetrics(metrics); err != nil {
+		return errors.New("remote push observability configuration is invalid")
+	}
 	apiConfig := httpapi.Config{HostClientIDs: csv(os.Getenv("REMOTE_HOST_CLIENT_IDS")), Approvals: approvalConfig, Metrics: metrics}
 	if fileRuntime != nil {
 		if err := fileRuntime.service.ConfigureMetrics(metrics); err != nil {
@@ -135,6 +138,9 @@ func run() error {
 		apiConfig.FileExports = fileRuntime.exports
 	}
 	if pushRuntime != nil {
+		if err := pushRuntime.sender.ConfigureMetrics(metrics); err != nil {
+			return errors.New("remote push sender observability configuration is invalid")
+		}
 		apiConfig.Push = pushRuntime.repository
 	}
 	apiConfig.Releases, err = loadAppReleases(os.Getenv("REMOTE_APP_RELEASES_FILE"))
