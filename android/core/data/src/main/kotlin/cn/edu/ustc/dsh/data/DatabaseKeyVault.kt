@@ -96,4 +96,4 @@ internal class DatabaseKeyVault(private val context: Context, private val owner:
 internal inline fun <T> checked(action: () -> T): T = try { action() }
 catch (error: kotlinx.coroutines.CancellationException) { throw error }
 catch (error: CommandDataException) { throw error }
-catch (_: Exception) { throw CommandDataException("data.unavailable") }
+catch (error: Exception) { throw CommandDataException("data.unavailable").also { it.initCause(error) } }

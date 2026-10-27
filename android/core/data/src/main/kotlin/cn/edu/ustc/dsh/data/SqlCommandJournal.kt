@@ -198,6 +198,10 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         synchronized(lock) { try { database.close() } finally { password.fill(0) } }
     }
     companion object {
+        // Key-envelope creation and the first SQLite open are one local setup
+        // transaction. Different journal instances must not publish different
+        // wrapping envelopes while another caller creates the same database.
+        private val setupLock = Any()
         private val migration5To6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE TABLE IF NOT EXISTS file_exports (requestId TEXT NOT NULL, runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, workspaceId TEXT, origin TEXT NOT NULL, intent BLOB NOT NULL, digest TEXT NOT NULL, fileId TEXT, manifest BLOB, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(requestId))")
@@ -241,7 +245,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_approval_decisions_runtimeId_sessionId_createdAt ON approval_decisions(runtimeId,sessionId,createdAt)")
             }
         }
-        fun open(context: Context, owner: CommandOwner): SqlCommandJournal = checked {
+        fun open(context: Context, owner: CommandOwner): SqlCommandJournal = synchronized(setupLock) { checked {
             System.loadLibrary("sqlcipher")
             val directory = directory(context, owner.accountId, owner.organizationId).resolve(owner.fingerprint)
             check(directory.isDirectory || directory.mkdirs())
@@ -263,13 +267,13 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
                 }
                 SqlCommandJournal(owner, database, password, vault)
             } catch (error: Exception) { database?.close(); password.fill(0); throw error }
-        }
-        fun eraseAccount(context: Context, account: String, organization: String) = checked {
+        } }
+        fun eraseAccount(context: Context, account: String, organization: String) = synchronized(setupLock) { checked {
             DatabaseKeyVault.eraseScope(account, organization)
             val directory = directory(context, account, organization)
             if (directory.exists()) check(directory.deleteRecursively())
             check(!directory.exists())
-        }
+        } }
         private fun directory(context: Context, account: String, organization: String) =
             File(context.noBackupFilesDir, "mobile-data/${CommandOwner.scopeHash(account, organization)}")
     }

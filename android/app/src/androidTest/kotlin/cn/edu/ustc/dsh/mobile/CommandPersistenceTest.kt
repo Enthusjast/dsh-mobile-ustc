@@ -57,6 +57,20 @@ class CommandPersistenceTest {
         assertThrows(CommandDataException::class.java) { runBlocking { journal.create(intent("changed", command.requestId)) } }
         assertEquals(command.digest, journal.list(runtime, session).single().intent.digest)
     }
+    @Test fun concurrentFirstOpensPreserveOneDurableWrappedDatabaseKey(): Unit = runBlocking {
+        val command = intent(); val start = java.util.concurrent.CountDownLatch(1)
+        coroutineScope {
+            val jobs = List(4) { async(Dispatchers.IO) {
+                start.await()
+                SqlCommandJournal.open(context, owner).use { it.create(command) }
+            } }
+            start.countDown(); jobs.awaitAll()
+        }
+        SqlCommandJournal.open(context, owner).use { journal ->
+            val restored = journal.list(runtime, session).single()
+            assertEquals(command.digest, restored.intent.digest); assertEquals(command.text(), restored.intent.text())
+        }
+    }
     @Test fun deploymentDeviceAndSessionScopesDoNotReadEachOthersBodies(): Unit = runBlocking {
         val journal = open(); journal.create(intent())
         val otherDevice = CommandOwner(account, org, owner.deploymentHash, user, UUID.randomUUID().toString())
