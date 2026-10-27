@@ -36,7 +36,7 @@ class UploadsPanelTest {
     }
     @Test fun aCleanWaitingFileCannotBeSelectedOrClaimedAsAgentAdmission() {
         val state = base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.WAITING))))
-        rule.setContent { DshTheme { SessionsScreen(state, {}, {}, {}, {}, {}, {}) } }
+        rule.setContent { DshTheme { SessionsScreen(state, {}, {}, {}, {}, {}) } }
         rule.onNodeWithText("检查通过，等待电脑接收。").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("加入下一条消息").assertDoesNotExist()
         rule.onNodeWithText("发送").assertIsNotEnabled()
@@ -45,7 +45,7 @@ class UploadsPanelTest {
     @Test fun readyFileOnlyMessagesUseTheExistingComposerWithoutInventingText() {
         var sent: Triple<String, String, Boolean>? = null
         rule.setContent { DshTheme {
-            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, {}, {}, { mode, text, online -> sent = Triple(mode, text, online) })
+            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, {}, { mode, text, online -> sent = Triple(mode, text, online) })
         } }
         rule.onNodeWithText("已选择 1 个附件，发送时仍需电脑确认。").assertExists()
         rule.onNodeWithText("发送").assertIsEnabled().performClick()

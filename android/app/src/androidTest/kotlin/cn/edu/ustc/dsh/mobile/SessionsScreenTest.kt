@@ -28,7 +28,7 @@ class SessionsScreenTest {
 
     @Test fun historyActionAndReasoningDisclosureKeepTheTranscriptReadable() {
         var pages = 0
-        rule.setContent { DshTheme { SessionsScreen(initial().copy(reader = SessionReadState(SessionReadPhase.READY, transcript())), {}, {}, {}, { pages++ }, {}, {}) } }
+        rule.setContent { DshTheme { SessionsScreen(initial().copy(reader = SessionReadState(SessionReadPhase.READY, transcript())), {}, {}, { pages++ }, {}, {}) } }
         rule.onNodeWithText("读取更早消息").performScrollTo().performClick()
         rule.runOnIdle { assertEquals(1, pages) }
         rule.onNodeWithText("合成思考内容").assertDoesNotExist()
@@ -39,27 +39,16 @@ class SessionsScreenTest {
     }
     @Test fun offlineAndCachedStatesUseDifferentContentAndRetryRemainsReachable() {
         var retries = 0
-        rule.setContent { DshTheme { SessionsScreen(initial().copy(reader = SessionReadState(SessionReadPhase.OFFLINE)), {}, {}, {}, {}, { retries++ }, {}) } }
+        rule.setContent { DshTheme { SessionsScreen(initial().copy(reader = SessionReadState(SessionReadPhase.OFFLINE)), {}, {}, {}, { retries++ }, {}) } }
         rule.onNodeWithText("电脑离线").assertIsDisplayed()
         rule.onNodeWithText("需要电脑上线后才能读取内容。").assertIsDisplayed()
         rule.onNodeWithText("重新读取").performScrollTo().performClick()
         rule.runOnIdle { assertEquals(1, retries) }
         rule.onNodeWithText("会话还没有消息。").assertDoesNotExist()
     }
-    @Test fun listOnlyGrantDisablesBodyReadAndNavigationRemainsAvailable() {
-        val grant = RuntimeDirectoryEntry.parse(jsonObject("id" to id.json(), "host_id" to id.json(), "organization_id" to id.json(), "protocol_version" to 1L.json(),
-            "access" to jsonObject("role" to "viewer".json(), "grant_version" to 1L.json(), "scope" to RelayScope(listOf("session.list"), emptyList(), listOf(id)).json())))
-        val session = SessionDirectoryEntry.parse(jsonObject("session_id" to id.json(), "workspace_id" to JsonNull, "state" to "available".json(), "last_persisted_seq" to 0L.json(), "updated_at" to "2026-10-25T00:00:00Z".json()))
-        var back = 0
-        rule.setContent { DshTheme { SessionsScreen(initial().copy(selectedSessionId = null, runtimes = listOf(RuntimeRow(id, id, "0.2.1-rc.2", "夹具电脑", grant)), sessions = listOf(session)), {}, { back++ }, {}, {}, {}, {}) } }
-        rule.onNodeWithText("读取会话").performScrollTo().assertIsNotEnabled()
-        rule.onNodeWithText("当前授权仅可查看目录。").performScrollTo().assertIsDisplayed()
-        rule.onNodeWithText("返回电脑列表").performScrollTo().performClick()
-        rule.runOnIdle { assertEquals(1, back) }
-    }
     @Test fun offlineHistoryIsLabeledAsCachedAndNeverClaimsTheCurrentTaskIsRunning() {
         val history = CachedTranscript(id, 1000, transcript().records).transcript
-        rule.setContent { DshTheme { SessionsScreen(initial().copy(reader = SessionReadState(SessionReadPhase.OFFLINE, history)), {}, {}, {}, {}, {}, {}) } }
+        rule.setContent { DshTheme { SessionsScreen(initial().copy(reader = SessionReadState(SessionReadPhase.OFFLINE, history)), {}, {}, {}, {}, {}) } }
         rule.onNodeWithText("显示本机已确认保存的历史缓存。当前任务状态需重新连接确认。").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("合成回复").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("电脑上的任务仍在进行。").assertDoesNotExist()
@@ -74,8 +63,7 @@ class SessionsScreenTest {
             accept(SessionContent("question.timed.snapshot", request, id, jsonObject("revision" to 1L.json(), "items" to JsonArray(listOf(batch)))))
         }
         var claims = 0; var answers = 0
-        rule.setContent { DshTheme { SessionsScreen(initial().copy(notificationQuestion = model.state(true).items.single().handle, notificationNote = "已核对当前提问", reader = SessionReadState(SessionReadPhase.READY, questions = model.state(true))),
-            {}, {}, {}, {}, {}, {}, onClaim = { claims++ }, onAnswer = { _, _ -> answers++ }) } }
+        rule.setContent { DshTheme { SessionsScreen(initial().copy(notificationQuestion = model.state(true).items.single().handle, notificationNote = "已核对当前提问", reader = SessionReadState(SessionReadPhase.READY, questions = model.state(true))), {}, {}, {}, {}, {}, onClaim = { claims++ }, onAnswer = { _, _ -> answers++ }) } }
         rule.onNodeWithText("来自通知的当前提问").performScrollTo().assertIsDisplayed()
         rule.onAllNodesWithText("来自通知的当前提问").assertCountEquals(1)
         rule.runOnIdle { assertEquals(0, claims); assertEquals(0, answers) }

@@ -51,6 +51,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
     val hostRequests = AtomicInteger()
     val sessionRequests = AtomicInteger()
     val ticketRequests = AtomicInteger()
+    val ticketScopes = java.util.concurrent.CopyOnWriteArrayList<RelayScope>()
     val subscriptions = AtomicInteger()
     val relayClosures = AtomicInteger()
     val bindingPreviews = AtomicInteger()
@@ -744,6 +745,7 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
             if ("approval.decide" in relayScope!!.actions) require(approvalMode && approvalRole == "owner")
             relayProofKey = JWSObject.parse(request.getHeader("DPoP")).header.jwk as ECKey
             relayAccessExpiresAt = claims.integer("exp") * 1000
+            ticketScopes.add(relayScope!!)
             ticketRequests.incrementAndGet()
             return resourceResponse(data(jsonObject("ticket" to relayToken.json(), "runtime_id" to body.string("runtime_id").json(), "grant_version" to 7L.json(), "scope" to relayScope!!.json(),
                 "expires_at" to java.time.Instant.ofEpochMilli(System.currentTimeMillis() + 30_000).toString().json())), 201)

@@ -12,6 +12,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -23,8 +25,66 @@ import androidx.activity.compose.BackHandler
 @Composable
 fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
     val state by model.state.collectAsStateWithLifecycle()
+    if (state.phase == HomePhase.READY) {
+        key(model, state.issuer, state.subject, state.deviceId) {
+            ReadyHomeRoute(state, model, onCancel)
+        }
+    } else {
+        HomeScreen(state, model::login, model::register, onSecuritySettings, onCancel)
+    }
+}
+
+@Composable
+private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () -> Unit) {
+    // Only presentation state survives child pages. Leaving READY disposes this scope.
+    val navigation = remember { HomeNavigation() }
     val bindingState = state.binding
-    if (state.phase == HomePhase.READY && state.appUpdateSettings) {
+    val shellVisible = !state.appUpdateSettings && !state.notificationSettings &&
+        state.reviewingApprovalId == null && bindingState == null && state.creation == null && state.selectedSessionId == null
+    val keyboard = LocalSoftwareKeyboardController.current
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val back: () -> Unit = { if (imeVisible) keyboard?.hide() else model.back() }
+
+    // Controller-driven entries (including creation results) share the same directory position.
+    // A known-session notification remains on its exact-resource path, outside this shell.
+    LaunchedEffect(state.selectedRuntimeId, state.creation, state.notificationSettings, state.appUpdateSettings) {
+        if (state.notificationSettings || state.appUpdateSettings) {
+            navigation.destination = HomeDestination.SETTINGS
+        } else if (state.creation == null && state.knownTarget == null) {
+            state.runtimes.firstOrNull { it.id == state.selectedRuntimeId }?.let {
+                navigation.selectRuntime(it.id)
+                navigation.destination = HomeDestination.SESSIONS
+            }
+        }
+    }
+    LaunchedEffect(shellVisible, navigation.destination, navigation.directoryRuntimeId, state.runtimes,
+        state.selectedRuntimeId, state.refreshing, state.sessionError) {
+        if (shellVisible && navigation.destination == HomeDestination.SESSIONS && state.selectedRuntimeId == null &&
+            !state.refreshing && state.sessionError == null) {
+            val eligible = state.runtimes.filter { it.access?.organizationId != null && it.access.canList() }
+            val initial = if (navigation.directoryRuntimeId == null) eligible.firstOrNull()
+                else eligible.firstOrNull { it.id == navigation.directoryRuntimeId }
+            initial?.let {
+                navigation.selectRuntime(it.id)
+                model.openRuntime(it.id)
+            }
+        }
+    }
+    val selectDestination: (HomeDestination) -> Unit = { destination ->
+        if (destination != navigation.destination) {
+            // This handler exists only on main pages; back retires the current directory context.
+            if (state.selectedRuntimeId != null) model.back()
+            navigation.directoryFromComputer = false
+            navigation.destination = destination
+        }
+    }
+    val backToComputers: () -> Unit = {
+        model.back()
+        navigation.directoryFromComputer = false
+        navigation.destination = HomeDestination.COMPUTERS
+    }
+
+    if (state.appUpdateSettings) {
         BackHandler { model.closeAppUpdates() }
         val update = state.appUpdates ?: AppUpdateUiState()
         AppUpdatesScreen(update, { model.checkAppUpdates(update.viewId) },
@@ -32,34 +92,58 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
             { model.installAppUpdate(update.viewId, update.attemptId, update.release?.document?.sha256()) },
             { model.requestAppInstallPermission(update.viewId) }, { token -> model.cleanupAppUpdate(update.viewId, token) },
             { model.cancelAppUpdateDownload(update.viewId) }, model::closeAppUpdates)
-    } else if (state.phase == HomePhase.READY && state.notificationSettings) {
+    } else if (state.notificationSettings) {
         BackHandler { model.closeNotificationSettings() }
         val notifications = state.notifications ?: NotificationUiState()
         NotificationsScreen(notifications.copy(note = state.notificationNote ?: notifications.note), model::refreshNotifications, model::enableNotifications, model::disableNotifications, model::renewNotifications,
             { model.notificationInbox(false) }, { model.notificationInbox(true) }, model::openNotification, model::closeNotificationSettings)
-    } else if (state.phase == HomePhase.READY && state.reviewingApprovalId != null) {
+    } else if (state.reviewingApprovalId != null) {
         BackHandler { model.closeApprovalReview() }
         ApprovalReviewScreen(state, model::closeApprovalReview, model::reviewApproval, model::decideApproval, model::sendOriginalApproval,
             model::queryApprovals, model::discardUnsentApproval, model::refreshApprovals, model::reauthenticateApproval)
-    } else if (state.phase == HomePhase.READY && bindingState != null) {
-        BackHandler { model.closeBinding() }
-        HostBindingScreen(bindingState, state.subject, model::previewBinding, model::queryBinding, model::confirmBinding, model::refreshBinding, model::enterAnotherBinding, model::closeBinding, onCancel)
-    } else if(state.phase==HomePhase.READY && state.creation!=null) {
-        BackHandler { model.back() }
-        SessionCreationScreen(state,model::createSession,model::refreshCreationOptions,model::queryCreation,model::sendPendingCreation,model::openCreatedSession,model::back,onCancel)
-    } else if (state.phase == HomePhase.READY && state.selectedRuntimeId != null) {
-        BackHandler { model.back() }
-        SessionsScreen(state, model::openSession, model::back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
-            model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, {state.selectedRuntimeId?.let(model::openCreation)},model::answerQuestion,model::claimQuestion,model::releaseQuestion,model::refreshQuestions,
-            model::reviewApproval, model::queryApprovals, model::archiveSession,
-            model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload,
-            model::browseExports, model::requestExport, model::queryExports, model::cancelExport, model::removeExport,
-            model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave)
-    } else HomeScreen(state, model::login, model::register, model::refresh, onSecuritySettings, onCancel, model::openRuntime, model::openBinding,model::openCreation,model::openNotificationSettings,model::openAppUpdates)
+    } else if (bindingState != null) {
+        BackHandler(onBack = { if (imeVisible) keyboard?.hide() else model.closeBinding() })
+        HostBindingScreen(bindingState, state.subject, model::previewBinding, model::queryBinding, model::confirmBinding, model::refreshBinding, model::enterAnotherBinding,
+            { if (imeVisible) keyboard?.hide() else model.closeBinding() }, onCancel)
+    } else if (state.creation != null) {
+        BackHandler(onBack = back)
+        SessionCreationScreen(state, model::createSession, model::refreshCreationOptions, model::queryCreation, model::sendPendingCreation, model::openCreatedSession, back, onCancel)
+    } else if (state.selectedSessionId != null) {
+        BackHandler(onBack = back)
+        key(state.selectedRuntimeId, state.selectedSessionId) {
+            SessionsScreen(state, back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
+                model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, model::answerQuestion, model::claimQuestion, model::releaseQuestion, model::refreshQuestions,
+                model::reviewApproval, model::queryApprovals, model::archiveSession,
+                model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload,
+                model::browseExports, model::requestExport, model::queryExports, model::cancelExport, model::removeExport,
+                model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave)
+        }
+    } else {
+        BackHandler(enabled = navigation.destination != HomeDestination.SESSIONS || navigation.directoryFromComputer) {
+            if (navigation.directoryFromComputer) backToComputers() else selectDestination(HomeDestination.SESSIONS)
+        }
+        DshAppShell(state, navigation, selectDestination,
+            onRuntime = { id ->
+                navigation.directoryFromComputer = navigation.destination == HomeDestination.COMPUTERS
+                navigation.destination = HomeDestination.SESSIONS
+                navigation.selectRuntime(id)
+                model.openRuntime(id)
+            },
+            onSession = model::openSession,
+            onRefresh = model::refresh,
+            onRefreshSessions = model::refreshSessions,
+            onCreate = model::openCreation,
+            onBinding = model::openBinding,
+            onNotifications = model::openNotificationSettings,
+            onAppUpdates = model::openAppUpdates,
+            onExit = onCancel,
+            onBackToComputers = backToComputers,
+        )
+    }
 }
 
 @Composable
-fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onRefresh: () -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit, onRuntime: (String) -> Unit = {}, onBinding: () -> Unit = {}, onCreate: (String)->Unit={}, onNotifications: () -> Unit = {}, onAppUpdates: () -> Unit = {}) {
+fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Unit, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("${Build.MANUFACTURER} ${Build.MODEL}".trim()) }
     val displayName = state.deviceName ?: name
     val nameValid = displayName.trim().isNotEmpty() && displayName.trim().toByteArray(Charsets.UTF_8).size <= 160 && displayName.none { it < ' ' || it == '\u007f' }
@@ -78,11 +162,11 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                         val title = when (state.phase) {
                             HomePhase.UNCONFIGURED, HomePhase.INVALID_CONFIGURATION -> "学校登录尚未配置"
                             HomePhase.ENROLL, HomePhase.PREPARING, HomePhase.AUTHENTICATING, HomePhase.REGISTERING, HomePhase.RECONCILING, HomePhase.REGISTRATION_UNKNOWN -> "登记这部手机"
-                            HomePhase.READY -> "本机已登记"
                             else -> "连接学校账号"
                         }
                         Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
                         when (state.phase) {
+                            HomePhase.READY -> error("READY requires task-focused navigation")
                             HomePhase.UNCONFIGURED, HomePhase.INVALID_CONFIGURATION -> {
                                 Text("请联系管理员获取配置了学校登录的安装包。", style = MaterialTheme.typography.bodyLarge)
                                 Button({}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("等待学校配置") }
@@ -109,14 +193,6 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                                     enabled = state.deviceName == null, isError = !nameValid, singleLine = true, modifier = Modifier.fillMaxWidth())
                                 Button({ onRegister(displayName) }, enabled = nameValid, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认并登记设备") }
                                 if (state.securitySetupRequired) OutlinedButton(onSecuritySettings, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("前往安全设置") }
-                            }
-                            HomePhase.READY -> {
-                                Text("可以查看当前账号获授权的运行实例。", style = MaterialTheme.typography.bodyLarge)
-                                Text(state.subject, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                OutlinedButton(onRefresh, enabled = !state.refreshing, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.refreshing) "正在刷新…" else "刷新运行实例") }
-                                OutlinedButton(onNotifications, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("通知与待核对提醒") }
-                                OutlinedButton(onAppUpdates, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用更新") }
-                                Button(onBinding, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.pendingBindingId == null) "绑定电脑" else "核对待确认的电脑绑定") }
                             }
                             HomePhase.REGISTRATION_UNKNOWN -> {
                                 Text("尚未核对设备登记结果。请保持本机登录并检查网络，再查询登记状态。", style = MaterialTheme.typography.bodyLarge)
@@ -150,22 +226,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                         }
                         if (state.phase !in setOf(HomePhase.LOADING, HomePhase.CLEARING, HomePhase.UNCONFIGURED, HomePhase.INVALID_CONFIGURATION, HomePhase.SIGNED_OUT)) {
                             TextButton(onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                Text(if (state.phase in setOf(HomePhase.READY, HomePhase.REAUTHENTICATE)) "退出本机登录" else if (state.phase == HomePhase.RECOVERY_ERROR) "清除本机登录" else "取消并退出登录")
-                            }
-                        }
-                    }
-                }
-                if (state.phase == HomePhase.READY) {
-                    Text("授权的运行实例", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
-                    if (state.runtimes.isEmpty() && !state.refreshing) Text("还没有可访问的电脑。需要先完成主机绑定和授权。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    state.runtimes.forEach { runtime ->
-                        OutlinedCard(Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(runtime.hostAlias, style = MaterialTheme.typography.titleMedium)
-                                Text("运行环境 ${runtime.id.take(8)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                if (runtime.version.isNotEmpty()) Text("DSH ${runtime.version}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                OutlinedButton({ onRuntime(runtime.id) }, enabled = runtime.access?.organizationId != null && runtime.access.canList(), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看会话") }
-                                if(runtime.access?.creationScope()!=null) OutlinedButton({onCreate(runtime.id)},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text("创建新会话") }
+                                Text(if (state.phase == HomePhase.REAUTHENTICATE) "退出本机登录" else if (state.phase == HomePhase.RECOVERY_ERROR) "清除本机登录" else "取消并退出登录")
                             }
                         }
                     }
@@ -176,7 +237,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
     }
 }
 
-private fun errorText(code: String): String = when (code) {
+internal fun errorText(code: String): String = when (code) {
     "login.browser_unavailable" -> "没有找到可用的浏览器，请安装浏览器后重试。"
     "login.invalid_callback" -> "没有接受此登录返回，请继续原来的登录或重新开始。"
     "login.expired", "auth.expired", "login.identity" -> "登录信息已失效或未通过验证，请重新登录。"

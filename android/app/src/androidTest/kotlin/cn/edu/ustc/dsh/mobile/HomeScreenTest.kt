@@ -35,7 +35,7 @@ class HomeScreenTest {
             val density = LocalDensity.current.density
             CompositionLocalProvider(LocalDensity provides Density(density, 2f)) {
                 DshTheme(darkTheme = false) {
-                    Box(Modifier.width(375.dp)) { HomeScreen(HomeState(HomePhase.UNCONFIGURED), {}, {}, {}, {}, {}) }
+                    Box(Modifier.width(375.dp)) { HomeScreen(HomeState(HomePhase.UNCONFIGURED), {}, {}, {}, {}) }
                 }
             }
         }
@@ -48,7 +48,7 @@ class HomeScreenTest {
         var requests = 0
         rule.setContent {
             DshTheme(darkTheme = true) {
-                HomeScreen(HomeState(HomePhase.SIGNED_OUT, "https://id.example.edu"), { requests++ }, {}, {}, {}, {})
+                HomeScreen(HomeState(HomePhase.SIGNED_OUT, "https://id.example.edu"), { requests++ }, {}, {}, {})
             }
         }
         rule.onNodeWithText("https://id.example.edu").assertIsDisplayed()
@@ -63,7 +63,7 @@ class HomeScreenTest {
         var submitted: String? = null
         rule.setContent {
             DshTheme(darkTheme = false) {
-                HomeScreen(HomeState(HomePhase.ENROLL, "https://id.example.edu", subject = "verified-school-user"), {}, { submitted = it }, {}, {}, {})
+                HomeScreen(HomeState(HomePhase.ENROLL, "https://id.example.edu", subject = "verified-school-user"), {}, { submitted = it }, {}, {})
             }
         }
         rule.onNodeWithText("设备名称").performScrollTo().performTextClearance()
@@ -77,7 +77,7 @@ class HomeScreenTest {
         var requests = 0
         rule.setContent {
             DshTheme {
-                HomeScreen(HomeState(HomePhase.REGISTRATION_UNKNOWN, "https://id.example.edu", error = "device.registration_unknown"), {}, { requests++ }, {}, {}, {})
+                HomeScreen(HomeState(HomePhase.REGISTRATION_UNKNOWN, "https://id.example.edu", error = "device.registration_unknown"), {}, { requests++ }, {}, {})
             }
         }
         rule.onNodeWithText("核对设备登记").performScrollTo().assertIsEnabled().performClick()
@@ -88,7 +88,7 @@ class HomeScreenTest {
     @Test fun retainedAccountOffersExplicitReauthenticationAndExit() {
         var logins = 0; var exits = 0
         rule.setContent {
-            DshTheme { HomeScreen(HomeState(HomePhase.REAUTHENTICATE, "https://id.example.edu", subject = "verified-school-user"), { logins++ }, {}, {}, {}, { exits++ }) }
+            DshTheme { HomeScreen(HomeState(HomePhase.REAUTHENTICATE, "https://id.example.edu", subject = "verified-school-user"), { logins++ }, {}, {}, { exits++ }) }
         }
         rule.onNodeWithText("重新登录此账号").performScrollTo().performClick()
         rule.onNodeWithText("退出本机登录").performScrollTo().performClick()
@@ -98,7 +98,7 @@ class HomeScreenTest {
     @Test fun recoveryErrorExposesADistinctRetryAction() {
         var retries = 0
         rule.setContent {
-            DshTheme { HomeScreen(HomeState(HomePhase.RECOVERY_ERROR, "https://id.example.edu", "vault.locked"), { retries++ }, {}, {}, {}, {}) }
+            DshTheme { HomeScreen(HomeState(HomePhase.RECOVERY_ERROR, "https://id.example.edu", "vault.locked"), { retries++ }, {}, {}, {}) }
         }
         rule.onNodeWithText("重试恢复").performScrollTo().performClick()
         rule.runOnIdle { assertEquals(1, retries) }
@@ -108,7 +108,7 @@ class HomeScreenTest {
     @Test fun uncertainEnrollmentKeepsTheOriginalNameForAnExactRetry() {
         var submitted: String? = null
         rule.setContent {
-            DshTheme { HomeScreen(HomeState(HomePhase.ENROLL, "https://id.example.edu", deviceName = "原登记手机"), {}, { submitted = it }, {}, {}, {}) }
+            DshTheme { HomeScreen(HomeState(HomePhase.ENROLL, "https://id.example.edu", deviceName = "原登记手机"), {}, { submitted = it }, {}, {}) }
         }
         rule.onNodeWithText("原登记手机").assertIsNotEnabled()
         rule.onNodeWithText("确认并登记设备").performScrollTo().performClick()

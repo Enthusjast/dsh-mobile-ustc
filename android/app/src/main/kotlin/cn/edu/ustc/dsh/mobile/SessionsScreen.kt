@@ -20,8 +20,8 @@ import cn.edu.ustc.dsh.command.*
 import cn.edu.ustc.dsh.protocol.*
 
 @Composable
-fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
-    onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {}, onCreate: ()->Unit={},
+fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
+    onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {},
     onAnswer: (QuestionHandle,QuestionAnswers)->Unit={_,_->},onClaim: (QuestionHandle)->Unit={},onRelease: (QuestionHandle)->Unit={},onRefreshQuestions: ()->Unit={},
     onApproval: (String) -> Unit = {}, onApprovalQuery: () -> Unit = {}, onArchive: (String, Boolean, Boolean) -> Unit = { _, _, _ -> },
     onPickFile: (String?, String, String) -> Unit = { _, _, _ -> }, onPickedFile: (String, Uri?) -> Unit = { _, _ -> }, onToggleFile: (String) -> Unit = {},
@@ -29,9 +29,9 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
     onBrowseExports: (ExportSource?, Boolean) -> Unit = { _, _ -> }, onExport: (ExportSource) -> Unit = {}, onQueryExports: () -> Unit = {},
     onCancelExport: (String) -> Unit = {}, onRemoveExport: (String) -> Unit = {}, onSaveExport: (String) -> Unit = {}, onExportDestination: (String, Uri?) -> Unit = { _, _ -> }, onCancelExportSave: () -> Unit = {}) {
     val runtime = state.runtimeRow(state.selectedRuntimeId)
-    val opened = state.selectedSessionId
+    val opened = state.selectedSessionId ?: return
     val archived = state.sessions.firstOrNull { it.id == opened }?.state == "archived"
-    val canCompose = opened != null && !archived && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
+    val canCompose = !archived && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
     var text by remember(opened, state.composerRevision) { mutableStateOf(state.composerRestore?.text ?: "") }
     var mode by remember(opened) { mutableStateOf(state.composerRestore?.mode ?: "queue") }
     LaunchedEffect(state.composerRevision) { state.composerRestore?.let { mode = it.mode } }
@@ -54,29 +54,12 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
             LazyColumn(Modifier.widthIn(max = 800.dp).fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 item("navigation") {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onBack, Modifier.heightIn(min = 48.dp)) { Text(if (state.knownTarget != null) "返回提醒" else if (opened == null) "返回电脑列表" else "返回会话列表") }
+                        TextButton(onBack, Modifier.heightIn(min = 48.dp)) { Text(if (state.knownTarget != null) "返回提醒" else "返回会话列表") }
                         TextButton(onExit, Modifier.heightIn(min = 48.dp)) { Text("退出本机登录") }
                     }
                     Text(runtime?.hostAlias ?: "已授权的电脑", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
-                    Text(if (opened == null) "授权范围内的会话" else "会话 ${opened.take(8)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("会话 ${opened.take(8)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (opened == null) {
-                    item("refresh") { OutlinedButton(onRefresh, enabled = !state.loadingSessions, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("刷新会话") } }
-                    if(runtime?.access?.creationScope()!=null) item("create") { Button(onCreate,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) {Text("创建新会话")} }
-                    if (state.loadingSessions) item("loading") { ProgressText("正在读取会话目录") }
-                    state.sessionError?.let { error -> item("error") { Text(if (error == "access.denied") "当前授权无法读取会话目录。" else "暂时无法读取会话目录，请检查网络后刷新。", color = MaterialTheme.colorScheme.error) } }
-                    if (!state.loadingSessions && state.sessionError == null && state.sessions.isEmpty()) item("empty") { Text("当前授权范围内没有会话。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    items(state.sessions, key = { it.id }) { session ->
-                        OutlinedCard(Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Text("会话 ${session.id.take(8)}", style = MaterialTheme.typography.titleMedium)
-                                Text(when (session.state) { "running" -> "任务进行中"; "archived" -> "已归档"; "unavailable" -> "电脑离线或会话不可用"; else -> "可继续查看" }, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Button({ onSession(session.id) }, enabled = runtime?.access?.let(session::viewScope) != null, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (session.state == "unavailable") "查看会话与待发送记录" else "读取会话") }
-                                if (runtime?.access?.let(session::viewScope) == null) Text("当前授权仅可查看目录。", style = MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                    }
-                } else {
                     val read = state.reader ?: SessionReadState(SessionReadPhase.CONNECTING)
                     item("connection") {
                         Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
@@ -214,18 +197,11 @@ fun SessionsScreen(state: HomeState, onSession: (String) -> Unit, onBack: () -> 
                         items(transcript.items, key = { it.id }) { entry -> ConversationBubble(entry) }
                         if (transcript.taskRunning && read.phase == SessionReadPhase.READY) item("running") { Text("电脑上的任务仍在进行。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
-                }
             }
         }
     }
 }
 
-@Composable
-private fun ProgressText(label: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp); Text(label)
-    }
-}
 @Composable
 private fun ConversationBubble(item: ConversationItem) {
     val user = item.role == ConversationRole.USER

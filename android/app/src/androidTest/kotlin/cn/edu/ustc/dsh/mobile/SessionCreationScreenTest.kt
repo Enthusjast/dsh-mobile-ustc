@@ -28,6 +28,7 @@ class SessionCreationScreenTest {
             creation=SessionCreationState(SessionCreationPhase.READY,choices,CommandOutboxState(records,connected=true)))
     }
     private fun select() {
+        rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("选择工作区"))
         rule.onNodeWithText("选择工作区").performScrollTo().performClick()
         rule.onNodeWithText("研究项目 · 88888888").performClick()
         rule.onNodeWithText("选择助手配置").performScrollTo().performClick()
@@ -52,6 +53,7 @@ class SessionCreationScreenTest {
         val unknown=CommandEvolution.receipt(CommandEvolution.begin(CommandEvolution.created(intent,0),1),CommandReceipt(id,null,intent.digest,RemoteCommandState.OUTCOME_UNKNOWN,"2026-10-25T00:00:00Z",workspaceId=workspace))
         var submitted=0
         rule.setContent {DshTheme {SessionCreationScreen(state(listOf(unknown)),{_,_,_->submitted++},{},{},{},{},{},{})}}
+        rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("创建结果待确认"))
         rule.onNodeWithText("创建结果待确认").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("重新转交同一请求").assertDoesNotExist();rule.onNodeWithText("会话已创建").assertDoesNotExist()
         select();rule.onNodeWithText("创建新会话").performScrollTo().performClick()
@@ -64,6 +66,7 @@ class SessionCreationScreenTest {
         val settled=CommandEvolution.receipt(CommandEvolution.begin(CommandEvolution.created(intent,0),1),CommandReceipt(id,workspace,intent.digest,RemoteCommandState.SETTLED,"2026-10-25T00:00:00Z",workspaceId=workspace))
         var opened: String?=null
         rule.setContent {DshTheme {SessionCreationScreen(state(listOf(settled)),{_,_,_->},{},{},{},{opened=it},{},{})}}
+        rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("会话已创建"))
         rule.onNodeWithText("会话已创建").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("读取已创建的会话").performScrollTo().performClick()
         rule.runOnIdle {assertEquals(id,opened)}

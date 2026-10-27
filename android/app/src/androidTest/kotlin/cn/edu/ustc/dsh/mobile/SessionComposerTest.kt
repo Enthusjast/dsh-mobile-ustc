@@ -26,7 +26,7 @@ class SessionComposerTest {
     }
     @Test fun queueAndSteerAreExplicitAndOfflineActionOnlySavesToThisDevice() {
         var submitted: Triple<String, String, Boolean>? = null
-        rule.setContent { DshTheme { SessionsScreen(state(false), {}, {}, {}, {}, {}, {}, { mode, text, send -> submitted = Triple(mode, text, send) }) } }
+        rule.setContent { DshTheme { SessionsScreen(state(false), {}, {}, {}, {}, {}, { mode, text, send -> submitted = Triple(mode, text, send) }) } }
         rule.onNodeWithText("保存待发送").assertIsNotEnabled()
         rule.onNodeWithText("消息内容").performTextInput("离线草稿🙂")
         rule.onNodeWithText("插入当前任务").performClick()
@@ -35,7 +35,7 @@ class SessionComposerTest {
     }
     @Test fun unsubmittedTextDoesNotEnterSavedInstanceState() {
         val restore = StateRestorationTester(rule)
-        restore.setContent { DshTheme { SessionsScreen(state(), {}, {}, {}, {}, {}, {}, { _, _, _ -> }) } }
+        restore.setContent { DshTheme { SessionsScreen(state(), {}, {}, {}, {}, {}, { _, _, _ -> }) } }
         rule.onNodeWithText("消息内容").performTextInput("UNSAVED_SENSITIVE_INPUT")
         rule.onNodeWithText("发送").assertIsEnabled()
         restore.emulateSavedInstanceStateRestore()
@@ -44,8 +44,9 @@ class SessionComposerTest {
     @Test fun uncertainDeliveryNeverClaimsAgentQueueOrTaskCompletion() {
         val command = CommandIntent.message(id, id, id, "queue", "待核对正文")
         val record = CommandEvolution.begin(CommandEvolution.created(command, 1), 2)
-        rule.setContent { DshTheme { SessionsScreen(state().copy(outbox = CommandOutboxState(listOf(record), true, error = "command.delivery_unconfirmed")), {}, {}, {}, {}, {}, {}) } }
+        rule.setContent { DshTheme { SessionsScreen(state().copy(outbox = CommandOutboxState(listOf(record), true, error = "command.delivery_unconfirmed")), {}, {}, {}, {}, {}) } }
         rule.onNodeWithText("尚未核对发送结果，请查询原请求状态；不会自动重复发送。").performScrollTo().assertIsDisplayed()
+        rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("结果待确认"))
         rule.onNodeWithText("结果待确认").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("Agent 已入队").assertDoesNotExist()
         rule.onNodeWithText("命令已完成").assertDoesNotExist()
