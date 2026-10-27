@@ -84,6 +84,8 @@ type Server struct {
 	exports              *exportRouter
 	questionReferences   questionReferenceRepository
 	metrics              *observability.Metrics
+	routing              *nodeRouting
+	tunnels              map[*relayTunnel]struct{}
 }
 
 type liveConnection struct {
@@ -117,6 +119,7 @@ type liveConnection struct {
 	subscriptions          map[string]*sessionSubscription
 	closing                bool // Protected by Server.mu; prevents admission during unregister.
 	filePeer               *filePeer
+	expectedRoute          *store.RuntimeRoute
 }
 
 type outboundFrame struct {
@@ -478,6 +481,14 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		server.writeAuthenticationError(response, err)
 		return
 	}
+	expected, handled := server.resolveDevice(response, request, peer)
+	if handled {
+		return
+	}
+	server.serveConnection(response, request, peer, expected)
+}
+
+func (server *Server) serveConnection(response http.ResponseWriter, request *http.Request, peer peer, expected *store.RuntimeRoute) {
 	upgraded := &upgradeWriter{ResponseWriter: response}
 	connection, err := websocket.Accept(upgraded, request, &websocket.AcceptOptions{
 		Subprotocols:    []string{protocolName},
@@ -495,6 +506,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	defer server.unregisterConnection(live)
+	live.expectedRoute = expected
 	defer connection.Close(websocket.StatusNormalClosure, "connection closed")
 	if connection.Subprotocol() != protocolName {
 		server.closePolicy(live, "protocol required")
@@ -568,7 +580,14 @@ func (server *Server) Drain(ctx context.Context) error {
 	for _, connection := range server.connections {
 		connections = append(connections, connection)
 	}
+	tunnels := make([]*relayTunnel, 0, len(server.tunnels))
+	for tunnel := range server.tunnels {
+		tunnels = append(tunnels, tunnel)
+	}
 	server.mu.Unlock()
+	for _, tunnel := range tunnels {
+		tunnel.close()
+	}
 	for _, connection := range connections {
 		go func(connection *liveConnection) {
 			writeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -729,6 +748,10 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 	}
 	if auth.VerifyRelayHandshakeProof(payload.Proof, peer.redemption.ProofPublicJWK, expected) != nil {
 		server.closePolicy(live, "handshake rejected")
+		return
+	}
+	if live.expectedRoute != nil && !server.currentDeviceRoute(parent, *live.expectedRoute) {
+		server.closePolicy(live, "runtime changed")
 		return
 	}
 	redemption, err := server.database.ConsumeRealtimeTicket(parent, peer.ticket)

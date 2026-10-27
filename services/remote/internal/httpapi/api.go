@@ -103,6 +103,14 @@ func (handler *Handler) RevalidateConnections(ctx context.Context) error {
 	return handler.realtime.RevalidateConnections(ctx)
 }
 
+func (handler *Handler) ConfigureRouting(config relay.RoutingConfig) error {
+	return handler.realtime.ConfigureRouting(config)
+}
+
+func (handler *Handler) PrivateRelayHandler() http.Handler {
+	return handler.realtime.PrivateRelayHandler()
+}
+
 type deviceContextKey struct{}
 
 type Config struct {

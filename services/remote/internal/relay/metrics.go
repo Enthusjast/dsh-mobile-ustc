@@ -24,6 +24,8 @@ var relayMetricDescriptions = []*prometheus.Desc{
 	relayDesc("catalog_assembly_bytes", "Current session catalog assembly payload bytes."),
 	relayDesc("creation_options_bytes", "Current connection-local session creation options bytes."),
 	relayDesc("draining", "One after the relay begins draining."),
+	relayDesc("proxy_tunnels", "Current ingress proxy tunnels, including pending owner admission; distinct from owner sockets."),
+	relayDesc("proxy_inflight_bytes", "Proxy payload bytes held between read and write; no user-space backlog.", "direction"),
 }
 
 // ConfigureMetrics is called once before serving; the registry and collector
@@ -86,6 +88,13 @@ func (server *Server) Collect(out chan<- prometheus.Metric) {
 		}
 	}
 	subscriptions, catalog, options := len(server.subscriptions), server.catalogBytes, server.creationOptionsBytes
+	tunnels := len(server.tunnels)
+	var inflight [2]int64
+	for tunnel := range server.tunnels {
+		for i := range inflight {
+			inflight[i] += tunnel.inflight[i].Load()
+		}
+	}
 	draining := float64(0)
 	if server.draining {
 		draining = 1
@@ -107,5 +116,9 @@ func (server *Server) Collect(out chan<- prometheus.Metric) {
 	}
 	for i, value := range []float64{float64(subscriptions), float64(catalog), float64(options), draining} {
 		out <- prometheus.MustNewConstMetric(relayMetricDescriptions[i+6], prometheus.GaugeValue, value)
+	}
+	out <- prometheus.MustNewConstMetric(relayMetricDescriptions[10], prometheus.GaugeValue, float64(tunnels))
+	for i, label := range []string{"phone_to_owner", "owner_to_phone"} {
+		out <- prometheus.MustNewConstMetric(relayMetricDescriptions[11], prometheus.GaugeValue, float64(inflight[i]), label)
 	}
 }

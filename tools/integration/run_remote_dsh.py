@@ -20,6 +20,7 @@ def main():
     arguments.add_argument("--upgrade-receipt", type=Path, help="Verified full-executable version-2 fixture receipt")
     arguments.add_argument("--android-avd", default="dsh-remote-api26", help="Exact owned AVD identity for the Android composition")
     arguments.add_argument("--go-run", metavar="REGEX", help="Run matching Go cases in the isolated cluster, without the separate Node composition")
+    arguments.add_argument("--cross-node", action="store_true", help="Run the real npm DSH composition with Host and phone entering separate mutually authenticated relay processes")
     arguments.add_argument("--relay-load", type=int, metavar="CONNECTIONS", help="Opt-in authenticated TLS capacity probe with an equal Host/phone split")
     arguments.add_argument("--load-output", type=Path, help="Fresh evidence directory strictly inside repository .local")
     arguments.add_argument("--load-workers", type=int)
@@ -29,6 +30,8 @@ def main():
     arguments.add_argument("--load-payload-bytes", type=int)
     arguments.add_argument("--load-race", action="store_true", help="Race-instrument both service and probe; use only for protocol smoke, not capacity measurements")
     options = arguments.parse_args()
+    if options.cross_node and (options.go_run or options.relay_load or options.android_relay or options.android_upgrade or options.kotlin_relay):
+        arguments.error("--cross-node requires its own native DSH composition invocation")
     load_fields = (options.load_output, options.load_workers, options.load_hold_seconds, options.load_active_pairs, options.load_events_per_second, options.load_payload_bytes)
     if options.relay_load is None and (any(value is not None for value in load_fields) or options.load_race):
         arguments.error("load options require --relay-load")
@@ -110,8 +113,10 @@ def main():
             env = dict(os.environ, REMOTE_TEST_CLUSTER_ROOT=root, REMOTE_TEST_DATABASE_URL=dsn,
                        REMOTE_TEST_PSQL=str(pg_bin / "psql"), REMOTE_TEST_PG_DUMP=str(pg_bin / "pg_dump"), REMOTE_TEST_SERVICE_BIN=str(binary))
             # Activation is explicit per invocation, never inherited from a prior run.
-            for field in ("REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC", "REMOTE_TEST_ANDROID_UPGRADE_SERIAL", "REMOTE_TEST_ANDROID_UPGRADE_RECEIPT", "REMOTE_TEST_RELAY_CAPACITY_CONFIG", "REMOTE_TEST_RELAY_CAPACITY_OUTPUT"):
+            for field in ("REMOTE_TEST_CROSS_NODE", "REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC", "REMOTE_TEST_ANDROID_UPGRADE_SERIAL", "REMOTE_TEST_ANDROID_UPGRADE_RECEIPT", "REMOTE_TEST_RELAY_CAPACITY_CONFIG", "REMOTE_TEST_RELAY_CAPACITY_OUTPUT"):
                 env.pop(field, None)
+            if options.cross_node:
+                env["REMOTE_TEST_CROSS_NODE"] = "1"
             if options.relay_load is not None:
                 env.update(REMOTE_TEST_RELAY_CAPACITY_CONFIG=json.dumps(load), REMOTE_TEST_RELAY_CAPACITY_OUTPUT=str(options.load_output))
                 completed = subprocess.run([go, "test"] + (["-race"] if options.load_race else []) + ["-count=1", "-v", "-timeout=9m", "-run", "^TestAuthenticatedRelayCapacity$", "./internal/httpapi"], cwd=repo / "services/remote", env=env)

@@ -17,6 +17,7 @@ import (
 	"dsh-mobile-ustc/services/remote/internal/control"
 	"dsh-mobile-ustc/services/remote/internal/httpapi"
 	"dsh-mobile-ustc/services/remote/internal/observability"
+	"dsh-mobile-ustc/services/remote/internal/relay"
 	"dsh-mobile-ustc/services/remote/internal/store"
 )
 
@@ -28,6 +29,11 @@ func main() {
 }
 
 func run() error {
+	nodeID := strings.TrimSpace(os.Getenv("REMOTE_RELAY_NODE_ID"))
+	relayConfig, err := loadRelayDeployment(os.Getenv("REMOTE_RELAY_CONFIG_FILE"), nodeID)
+	if err != nil {
+		return err
+	}
 	scope, err := auth.ProofScope(os.Getenv("REMOTE_ISSUER"), os.Getenv("REMOTE_AUDIENCE"), os.Getenv("REMOTE_PUBLIC_ORIGIN"))
 	if err != nil {
 		return fmt.Errorf("remote service identity configuration is invalid: %w", err)
@@ -105,8 +111,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	handler := httpapi.New(database, verifier, apiConfig)
-	consumer, err := database.NewControlConsumer(context.Background(), strings.TrimSpace(os.Getenv("REMOTE_RELAY_NODE_ID")))
+	consumer, err := database.NewControlConsumer(context.Background(), nodeID)
 	if err != nil {
 		return errors.New("remote control consumer is unavailable or already active")
 	}
@@ -116,6 +121,33 @@ func run() error {
 		if err := consumer.Release(release); err != nil {
 			log.Print("remote control consumer release unavailable=true")
 		}
+	}()
+	origin := ""
+	if relayConfig != nil {
+		origin = relayConfig.Origin
+	}
+	directory, err := consumer.NewRelayDirectory(context.Background(), origin)
+	if err != nil {
+		return errors.New("remote relay directory is unavailable")
+	}
+	handler := httpapi.New(directory, verifier, apiConfig)
+	routingConfig := relay.RoutingConfig{Directory: directory}
+	if relayConfig != nil {
+		routingConfig.ClientTLS, routingConfig.MaxProxyConnections = relayConfig.clientTLS, relayConfig.MaxProxyConnections
+	}
+	if err := handler.ConfigureRouting(routingConfig); err != nil {
+		return errRelayConfiguration
+	}
+	privateEndpoint, err := startRelayEndpoint(relayConfig, handler.PrivateRelayHandler())
+	if err != nil {
+		return err
+	}
+	defer privateEndpoint.close()
+	// Also fence upgraded transports if any listener exits unexpectedly.
+	defer func() {
+		drain, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = handler.Drain(drain)
 	}()
 	metricsEndpoint, err := startMetricsEndpoint(metricsAddress, metrics)
 	if err != nil {
@@ -212,6 +244,14 @@ func run() error {
 			return fmt.Errorf("remote control consumer failed and realtime drain failed: %w", err)
 		}
 		return errors.New("remote control consumer authority unavailable")
+	case <-privateEndpoint.errors():
+		_ = server.Close()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := handler.Drain(shutdown); err != nil {
+			return fmt.Errorf("remote private relay failed and realtime drain failed: %w", err)
+		}
+		return errors.New("remote private relay listener failed")
 	}
 }
 

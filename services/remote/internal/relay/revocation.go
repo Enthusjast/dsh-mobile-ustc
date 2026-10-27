@@ -112,6 +112,10 @@ func (server *Server) RevalidateConnections(ctx context.Context) error {
 				ticket := &live.peer.redemption
 				lease.UserID, lease.DeviceID, lease.DeviceKeyVersion = &ticket.UserID, &ticket.DeviceID, ticket.DeviceKeyVersion
 				lease.GrantVersion, lease.ProofKeyThumbprint, lease.Scope = ticket.GrantVersion, ticket.ProofKeyThumbprint, ticket.Scope
+				if route := live.expectedRoute; route != nil {
+					lease.RoutedNodeID, lease.RoutedGeneration = &route.NodeID, &route.Generation
+					lease.RoutedEpoch, lease.RoutedConnectionID = &route.RuntimeEpoch, &route.ConnectionID
+				}
 			}
 			leases = append(leases, lease)
 			byID[live.connectionID] = live

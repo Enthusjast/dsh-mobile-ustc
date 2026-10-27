@@ -14,6 +14,7 @@ import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDig
 import { CompactSign } from 'jose'
 import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext, type ApprovalDecision } from '../../host/remote-control/src/approval-contract.js'
 import { canonicalObject } from '../../host/remote-control/src/canonical.js'
+import { relayNodeFixtures } from './relay-node-fixture.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -149,6 +150,21 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(address && typeof address === 'object')
   await new Promise<void>(accept => reserved.close(() => accept()))
   const origin = `http://127.0.0.1:${address.port}`
+  let phoneOrigin = origin
+  const crossNode = process.env.REMOTE_TEST_CROSS_NODE === '1'
+  const reserveAddress = async () => {
+    const listener = createTCPServer()
+    await new Promise<void>(accept => listener.listen(0, '127.0.0.1', accept))
+    const address = listener.address()
+    assert.ok(address && typeof address === 'object')
+    await new Promise<void>(accept => listener.close(() => accept()))
+    return `127.0.0.1:${address.port}`
+  }
+  const nodeIDs = crossNode ? [randomUUID(), randomUUID()] : []
+  const privateAddresses = crossNode ? [await reserveAddress(), await reserveAddress()] : []
+  const relayConfigs = crossNode ? await relayNodeFixtures(root, nodeIDs.map((id, i) => ({ id, address: privateAddresses[i]! }))) : []
+  const phoneAddress = crossNode ? await reserveAddress() : undefined
+  if (phoneAddress) phoneOrigin = `http://${phoneAddress}`
   const metricsReserved = createTCPServer()
   await new Promise<void>(accept => metricsReserved.listen(0, '127.0.0.1', accept))
   const metricsAddress = metricsReserved.address()
@@ -166,15 +182,27 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const releases = JSON.parse(await readFile(resolve('deploy/android/releases.example.json'), 'utf8'))
   releases.publications[0].organization_ids = [orgId]
   await writeFile(releasesFile, JSON.stringify(releases), { mode: 0o600 })
-  const service = await startProcess(serviceBin, [], {
+  const serviceEnv = {
     PATH: process.env.PATH ?? '', REMOTE_ISSUER: issuer, REMOTE_JWKS_URL: `${issuer}/jwks`, REMOTE_AUDIENCE: 'urn:dsh-e2e',
     REMOTE_CLIENT_IDS: 'fixture-host,fixture-phone', REMOTE_HOST_CLIENT_IDS: 'fixture-host', REMOTE_REQUIRED_SCOPES: 'remote.access',
     REMOTE_PUBLIC_ORIGIN: origin, REMOTE_DATABASE_URL: database, REMOTE_LISTEN_ADDR: `127.0.0.1:${address.port}`,
     REMOTE_APPROVAL_POLICY_FILE: approvalPolicyFile,
     REMOTE_APP_RELEASES_FILE: releasesFile,
     REMOTE_METRICS_LISTEN_ADDR: `127.0.0.1:${metricsAddress.port}`,
-  })
+    ...(crossNode ? { REMOTE_RELAY_NODE_ID: nodeIDs[0], REMOTE_RELAY_CONFIG_FILE: relayConfigs[0] } : {}),
+  }
+  const service = await startProcess(serviceBin, [], serviceEnv)
   t.after(async () => { const [code] = await service.stop('SIGTERM'); assert.equal(code, 0, 'Go service did not drain cleanly') })
+  if (crossNode) {
+    const phoneService = await startProcess(serviceBin, [], { ...serviceEnv, REMOTE_LISTEN_ADDR: phoneAddress!, REMOTE_RELAY_NODE_ID: nodeIDs[1], REMOTE_RELAY_CONFIG_FILE: relayConfigs[1], REMOTE_METRICS_LISTEN_ADDR: '' })
+    t.after(async () => { const [code] = await phoneService.stop('SIGTERM'); assert.equal(code, 0, 'Phone ingress service did not drain cleanly') })
+    await until(async () => {
+      phoneService.check()
+      try { if ((await fetch(`${phoneOrigin}/readyz`, { signal: AbortSignal.timeout(500) })).status === 204) return true } catch {}
+      return undefined
+    }, 'phone ingress readiness')
+    t.diagnostic('Native Host enters node A; all phone WebSockets enter node B and traverse the private mutual-TLS relay tunnel.')
+  }
   await until(async () => {
     service.check()
     try { if ((await fetch(`${origin}/readyz`, { signal: AbortSignal.timeout(500) })).status === 204) return true } catch {}
@@ -389,7 +417,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const validateApproval = ajv.compile(JSON.parse(await readFile('contracts/ws/v1/approval.schema.json', 'utf8')))
   const connectPhone = async (api: typeof phone, deviceId: string, proofKey: ReturnType<typeof key>, issued?: typeof ticket) => {
     const connectionTicket = issued ?? await api('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
-    const socket = new WebSocket(origin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', { headers: { authorization: `DSH-Ticket ${connectionTicket.ticket}` }, perMessageDeflate: false, maxPayload: 65_536 })
+    const socket = new WebSocket(phoneOrigin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', { headers: { authorization: `DSH-Ticket ${connectionTicket.ticket}` }, perMessageDeflate: false, maxPayload: 65_536 })
     const collector = new FrameCollector(socket, value => validate(value) || validateApproval(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')

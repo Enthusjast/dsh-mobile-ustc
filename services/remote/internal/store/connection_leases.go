@@ -18,6 +18,10 @@ type RealtimeConnectionLease struct {
 	ProofKeyThumbprint string     `json:"proof_key_thumbprint"`
 	GrantVersion       int64      `json:"grant_version"`
 	Scope              GrantScope `json:"scope"`
+	RoutedNodeID       *string    `json:"routed_node_id"`
+	RoutedGeneration   *string    `json:"routed_generation"`
+	RoutedEpoch        *string    `json:"routed_epoch"`
+	RoutedConnectionID *string    `json:"routed_connection_id"`
 }
 
 // InvalidRealtimeConnectionLeases checks at most 128 connections in one query.
@@ -45,7 +49,8 @@ func (postgres *Postgres) InvalidRealtimeConnectionLeases(ctx context.Context, l
 		with leases as materialized (select * from jsonb_to_recordset($1::jsonb) as item(
 			role text, connection_id text, runtime_id uuid, runtime_epoch uuid, installation_id uuid,
 			key_version bigint, user_id uuid, device_id uuid, device_key_version bigint,
-			proof_key_thumbprint text, grant_version bigint, scope jsonb
+			proof_key_thumbprint text, grant_version bigint, scope jsonb,
+			routed_node_id uuid, routed_generation uuid, routed_epoch uuid, routed_connection_id uuid
 		))
 		select lease.connection_id from leases lease
 		left join runtimes r on r.id=lease.runtime_id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
@@ -58,8 +63,13 @@ func (postgres *Postgres) InvalidRealtimeConnectionLeases(ctx context.Context, l
 		left join runtime_grants g on g.runtime_id=r.id and g.user_id=u.id and g.grant_version=lease.grant_version
 		    and g.revoked_at is null and (g.expires_at is null or g.expires_at>clock_timestamp()) and g.scope@>lease.scope
 		    and jsonb_typeof(lease.scope->'actions')='array' and jsonb_typeof(lease.scope->'workspaces')='array' and jsonb_typeof(lease.scope->'sessions')='array'
+		left join relay_runtime_routes route on route.runtime_id=r.id and route.node_id=lease.routed_node_id
+		    and route.generation=lease.routed_generation and route.runtime_epoch=lease.routed_epoch and route.connection_id=lease.routed_connection_id
+		    and route.runtime_epoch=r.epoch and route.connection_id=r.connection_id
+		left join control_consumers node on node.node_id=route.node_id and node.generation=route.generation and node.lease_until>clock_timestamp()
 		where lease.role='device' and (
 		    r.id is null or i.id is null or h.id is null or u.id is null or d.id is null or m.user_id is null or g.runtime_id is null
+		    or (lease.routed_connection_id is not null and (route.runtime_id is null or node.node_id is null))
 		    or exists (
 		        select 1 from jsonb_array_elements_text(case when jsonb_typeof(lease.scope->'workspaces')='array' then lease.scope->'workspaces' else '[]'::jsonb end) requested(id)
 		        where not exists (select 1 from workspaces w where w.runtime_id=r.id and w.id::text=requested.id)

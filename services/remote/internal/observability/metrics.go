@@ -34,6 +34,7 @@ type Metrics struct {
 	controlEvents  *prometheus.CounterVec
 	controlAge     *prometheus.HistogramVec
 	clockSkew      prometheus.Counter
+	tunnelDuration *prometheus.HistogramVec
 }
 
 func New() *Metrics {
@@ -69,10 +70,11 @@ func New() *Metrics {
 			Buckets: []float64{.01, .1, .25, .5, 1, 2, 5, 10, 30, 60, 300, 3600}}, []string{"topic"}),
 		clockSkew: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "dsh_remote", Name: "control_event_future_timestamps_total",
 			Help: "Published events with future database timestamps, excluded from the age histogram."}),
+		tunnelDuration: histogram("relay_tunnel_transit_duration_seconds", "One proxy leg from complete message read to completed destination write; excludes owner authorization and the other leg.", "direction", "result"),
 	}
 	m.Register(m.receivedFrames, m.receivedBytes, m.writtenFrames, m.writtenBytes, m.writeDuration, m.queueDuration, m.routeDuration, m.rejectedSends,
 		m.protocolErrors, m.resyncs, m.forwards, m.revocations, m.controlRuns, m.controlReady, m.controlSuccess,
-		m.controlEvents, m.controlAge, m.clockSkew, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		m.controlEvents, m.controlAge, m.clockSkew, m.tunnelDuration, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, role := range []string{"installation", "device", "other"} {
 		m.receivedFrames.WithLabelValues(role)
 		m.receivedBytes.WithLabelValues(role)
@@ -153,6 +155,20 @@ func (m *Metrics) RoutedSession(elapsed time.Duration) {
 	if m != nil {
 		m.routeDuration.Observe(elapsed.Seconds())
 	}
+}
+
+func (m *Metrics) TunnelTransit(direction int, elapsed time.Duration, err error) {
+	if m == nil {
+		return
+	}
+	label, result := "phone_to_owner", "written"
+	if direction == 1 {
+		label = "owner_to_phone"
+	}
+	if err != nil {
+		result = "error"
+	}
+	m.tunnelDuration.WithLabelValues(label, result).Observe(elapsed.Seconds())
 }
 
 func (m *Metrics) RejectedSend(role, reason string) {
