@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
@@ -110,7 +111,7 @@ func TestDPoPRejectsPrivateJWKAndConcurrentReplay(t *testing.T) {
 		t.Fatalf("proof with private JWK member was accepted: status=%d", privateResponse.Code)
 	}
 
-	nonce, err := keys.verifier.proofs.IssueNonce(keys.proofJKT)
+	nonce, err := keys.verifier.proofs.Challenge(context.Background(), keys.proofJKT)
 	if err != nil {
 		t.Fatal(err)
 	}

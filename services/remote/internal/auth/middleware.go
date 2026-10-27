@@ -42,23 +42,18 @@ func (auth *Authenticator) Middleware(next http.Handler) http.Handler {
 			auth.writeError(response, http.StatusUnauthorized, "auth.proof_invalid")
 			return
 		}
-		if !auth.proofs.Use(proof.JKT, proof.JTI, proof.Nonce, proof.Expires) {
-			nonce, issueErr := auth.proofs.IssueNonce(proof.JKT)
-			if issueErr != nil {
-				auth.writeError(response, http.StatusServiceUnavailable, "internal")
-				return
-			}
-			response.Header().Set("DPoP-Nonce", nonce)
+		checked, storeErr := auth.proofs.ConsumeAndRotate(request.Context(), proof.JKT, proof.JTI, proof.Nonce, proof.Expires)
+		if storeErr != nil || !ValidProofThumbprint(checked.Nonce) {
+			auth.writeError(response, http.StatusServiceUnavailable, "internal")
+			return
+		}
+		if !checked.Accepted {
+			response.Header().Set("DPoP-Nonce", checked.Nonce)
 			response.Header().Set("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
 			auth.writeError(response, http.StatusUnauthorized, "auth.proof_invalid")
 			return
 		}
-		nonce, err := auth.proofs.IssueNonce(proof.JKT)
-		if err != nil {
-			auth.writeError(response, http.StatusServiceUnavailable, "internal")
-			return
-		}
-		response.Header().Set("DPoP-Nonce", nonce)
+		response.Header().Set("DPoP-Nonce", checked.Nonce)
 		response.Header().Set("Cache-Control", "no-store")
 		principal.ProofJTI = proof.JTI
 		next.ServeHTTP(response, request.WithContext(context.WithValue(request.Context(), contextKey{}, principal)))

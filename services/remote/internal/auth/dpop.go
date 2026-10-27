@@ -1,7 +1,7 @@
 package auth
 
 import (
-	"crypto/rand"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -105,6 +105,7 @@ func sameDPoPURI(candidate, expected string) bool {
 }
 
 type ProofStore struct {
+	scope   [32]byte
 	mu      sync.Mutex
 	nonces  map[string]time.Time
 	used    map[string]time.Time
@@ -112,45 +113,62 @@ type ProofStore struct {
 	maxKeys int
 }
 
-func NewProofStore() *ProofStore {
-	return &ProofStore{nonces: make(map[string]time.Time), used: make(map[string]time.Time), clock: time.Now, maxKeys: 100_000}
+func NewProofStore(scope [32]byte) *ProofStore {
+	return &ProofStore{scope: scope, nonces: make(map[string]time.Time), used: make(map[string]time.Time), clock: time.Now, maxKeys: 100_000}
 }
 
-func (store *ProofStore) IssueNonce(jkt string) (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
+func (store *ProofStore) Scope() [32]byte { return store.scope }
+
+func (store *ProofStore) Challenge(ctx context.Context, jkt string) (string, error) {
+	if ctx.Err() != nil || !ValidProofThumbprint(jkt) {
+		return "", ErrProofStateUnavailable
+	}
+	nonce, err := NewProofNonce()
+	if err != nil {
 		return "", err
 	}
-	nonce := base64.RawURLEncoding.EncodeToString(bytes)
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if ctx.Err() != nil {
+		return "", ErrProofStateUnavailable
+	}
 	store.prune()
 	if len(store.nonces)+len(store.used) >= store.maxKeys {
-		return "", errors.New("auth: proof cache at capacity")
+		return "", ErrProofStateUnavailable
 	}
 	store.nonces[jkt+"\x00"+nonce] = store.clock().Add(5 * time.Minute)
 	return nonce, nil
 }
 
-func (store *ProofStore) Use(jkt, jti, nonce string, expires time.Time) bool {
+func (store *ProofStore) ConsumeAndRotate(ctx context.Context, jkt, jti, nonce string, expires time.Time) (ProofResult, error) {
+	if ctx.Err() != nil || !ValidProofThumbprint(jkt) || len(jti) < 16 || len(jti) > 256 || len(nonce) > 256 {
+		return ProofResult{}, ErrProofStateUnavailable
+	}
+	next, err := NewProofNonce()
+	if err != nil {
+		return ProofResult{}, err
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if ctx.Err() != nil {
+		return ProofResult{}, ErrProofStateUnavailable
+	}
 	store.prune()
 	nonceKey := jkt + "\x00" + nonce
 	proofKey := jkt + "\x00" + jti
+	now := store.clock()
 	nonceExpiry, ok := store.nonces[nonceKey]
-	if !ok || store.clock().After(nonceExpiry) || expires.Before(store.clock()) {
-		return false
-	}
-	if _, replayed := store.used[proofKey]; replayed {
-		return false
-	}
+	_, replayed := store.used[proofKey]
+	accepted := ok && now.Before(nonceExpiry) && expires.After(now) && !replayed
 	if len(store.nonces)+len(store.used) >= store.maxKeys {
-		return false
+		return ProofResult{}, ErrProofStateUnavailable
 	}
-	delete(store.nonces, nonceKey)
-	store.used[proofKey] = expires
-	return true
+	if accepted {
+		delete(store.nonces, nonceKey)
+		store.used[proofKey] = expires
+	}
+	store.nonces[jkt+"\x00"+next] = now.Add(ProofStateLifetime)
+	return ProofResult{Accepted: accepted, Nonce: next}, nil
 }
 
 func (store *ProofStore) prune() {

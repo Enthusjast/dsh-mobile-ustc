@@ -55,3 +55,5 @@ Linux amd64、Go 1.26.10、16 GiB 宿主，保留可见 API 36 preview，关闭�
 本轮准入 5.508 秒，120000 帧和 124178000 字节 JSON 协议内容全部交付，客户端 p95 33.326 ms / p99 97.249 ms / max 327.595 ms，Go route 的 300 ms 桶比例为 1，撤权样本 230.36 ms。每个 peer 至少三次心跳；唯一 challenge / 凭据、各准入 audit、关闭后的连接 / 订阅 / runtime connection 归零和正常退出均由该批次严格断言。787 个 `40001` 在服务内部处理。
 
 这些是独立重复样本，时间差异保留而不取最好值。最终 race smoke 记录为 `.local/capacity-race-smoke-final.log`；完整 PostgreSQL race suite 与真实 npm DSH 0.2.1-rc.2 组合记录为 `.local/capacity-full-regression.log`。TypeScript check、Go vet、CLI 互斥 / 边界 / 不覆盖证据及小样本 nearest-rank 分位回归均通过。指标和报告的字节数不包含 TLS / TCP 包头与 framing。
+
+后续[共享 DPoP 状态](shared-dpop-state.md)批次将生产 nonce / replay 后端改为 PostgreSQL，容量报告显式记录后端与 bucket 配置。同一 3000 / 200 × 20 Hz / 30 秒样本也通过，记录 `.local/shared-proof-3000.log`。它不能与早期内存后端样本混写为一次运行，也不表示跨节点路由已完成。

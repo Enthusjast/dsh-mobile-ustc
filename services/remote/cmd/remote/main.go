@@ -28,15 +28,7 @@ func main() {
 }
 
 func run() error {
-	verifier, err := auth.New(auth.Config{
-		Issuer:           os.Getenv("REMOTE_ISSUER"),
-		Audience:         os.Getenv("REMOTE_AUDIENCE"),
-		JWKSURL:          os.Getenv("REMOTE_JWKS_URL"),
-		AllowedClients:   csv(os.Getenv("REMOTE_CLIENT_IDS")),
-		RequiredScopes:   csv(os.Getenv("REMOTE_REQUIRED_SCOPES")),
-		PublicOrigin:     os.Getenv("REMOTE_PUBLIC_ORIGIN"),
-		MaxTokenLifetime: 15 * time.Minute,
-	})
+	scope, err := auth.ProofScope(os.Getenv("REMOTE_ISSUER"), os.Getenv("REMOTE_AUDIENCE"), os.Getenv("REMOTE_PUBLIC_ORIGIN"))
 	if err != nil {
 		return fmt.Errorf("remote service identity configuration is invalid: %w", err)
 	}
@@ -45,6 +37,31 @@ func run() error {
 		return errors.New("remote service database is unavailable or insecurely configured")
 	}
 	defer database.Close()
+	proofLimit := store.DefaultProofEntriesPerBucket
+	if configured := strings.TrimSpace(os.Getenv("REMOTE_DPOP_ENTRIES_PER_BUCKET")); configured != "" {
+		parsed, err := strconv.Atoi(configured)
+		if err != nil {
+			return errors.New("remote proof-state capacity is invalid")
+		}
+		proofLimit = parsed
+	}
+	proofs, err := store.NewPostgresProofStore(context.Background(), database.DB, scope, proofLimit)
+	if err != nil {
+		return errors.New("remote shared proof state is unavailable or inconsistently configured")
+	}
+	verifier, err := auth.New(auth.Config{
+		Issuer:           os.Getenv("REMOTE_ISSUER"),
+		Audience:         os.Getenv("REMOTE_AUDIENCE"),
+		JWKSURL:          os.Getenv("REMOTE_JWKS_URL"),
+		AllowedClients:   csv(os.Getenv("REMOTE_CLIENT_IDS")),
+		RequiredScopes:   csv(os.Getenv("REMOTE_REQUIRED_SCOPES")),
+		PublicOrigin:     os.Getenv("REMOTE_PUBLIC_ORIGIN"),
+		MaxTokenLifetime: 15 * time.Minute,
+		Proofs:           proofs,
+	})
+	if err != nil {
+		return fmt.Errorf("remote service identity configuration is invalid: %w", err)
+	}
 	admissions := store.DefaultSerializableAdmissions
 	if configured := strings.TrimSpace(os.Getenv("REMOTE_SERIALIZABLE_ADMISSIONS")); configured != "" {
 		parsed, parseErr := strconv.Atoi(configured)
@@ -107,6 +124,8 @@ func run() error {
 	defer stop()
 	controlCtx, stopControl := context.WithCancel(ctx)
 	controlDone := make(chan struct{})
+	proofsDone := make(chan struct{})
+	go func() { defer close(proofsDone); proofs.Run(controlCtx) }()
 	go func() { defer close(controlDone); control.Run(controlCtx, database, handler, metrics) }()
 	filesDone := make(chan struct{})
 	if fileRuntime != nil {
@@ -120,7 +139,7 @@ func run() error {
 	} else {
 		close(pushDone)
 	}
-	defer func() { stopControl(); <-controlDone; <-filesDone; <-pushDone }()
+	defer func() { stopControl(); <-controlDone; <-filesDone; <-pushDone; <-proofsDone }()
 	result := make(chan error, 1)
 	go func() { result <- server.ListenAndServe() }()
 	select {

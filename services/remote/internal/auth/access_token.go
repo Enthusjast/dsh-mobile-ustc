@@ -28,7 +28,7 @@ type Config struct {
 	MaxTokenLifetime time.Duration
 	HTTPClient       *http.Client
 	Clock            func() time.Time
-	Proofs           *ProofStore
+	Proofs           ProofRepository
 }
 
 type Principal struct {
@@ -58,7 +58,7 @@ type Authenticator struct {
 	maxLifetime    time.Duration
 	clock          func() time.Time
 	keys           *keySet
-	proofs         *ProofStore
+	proofs         ProofRepository
 }
 
 func New(config Config) (*Authenticator, error) {
@@ -90,8 +90,15 @@ func New(config Config) (*Authenticator, error) {
 		}
 		clients[id] = struct{}{}
 	}
+	scope, err := ProofScope(config.Issuer, config.Audience, config.PublicOrigin)
+	if err != nil {
+		return nil, err
+	}
 	if config.Proofs == nil {
-		config.Proofs = NewProofStore()
+		config.Proofs = NewProofStore(scope)
+	}
+	if config.Proofs.Scope() != scope {
+		return nil, errors.New("auth: proof repository belongs to another resource")
 	}
 	clock := config.Clock
 	if clock == nil {
