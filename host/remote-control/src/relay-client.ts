@@ -168,9 +168,11 @@ const WebSocketClient = createRequire(import.meta.url)('ws') as new (
 
 class IncomingFrames {
   private readonly frames: Buffer[] = []
+  private bytes = 0
   private waiter: { resolve(frame: Buffer): void; reject(error: Error): void; timer: NodeJS.Timeout } | undefined
   private ended: Error | undefined
   private readonly onMessage = (data: unknown, binary: boolean) => {
+    if (this.ended) return
     if (binary) return this.end(new Error('Relay sent a binary frame'))
     let frame: Buffer
     try { frame = rawData(data) } catch (error) { return this.end(asError(error)) }
@@ -181,29 +183,35 @@ class IncomingFrames {
       clearTimeout(waiter.timer)
       waiter.resolve(frame)
     } else {
+      if (this.frames.length >= 32 || this.bytes + frame.length > MAX_BUFFERED_BYTES) {
+        return this.end(new Error('Relay frame queue exceeded the limit'))
+      }
       this.frames.push(frame)
-      if (this.frames.length > 32) this.end(new Error('Relay frame queue exceeded the limit'))
+      this.bytes += frame.length
     }
   }
   private readonly onClose = () => this.end(new Error('Relay connection closed'))
   private readonly onError = (error: unknown) => this.end(asError(error))
 
-  constructor(private readonly socket: RelaySocket, private readonly signal: AbortSignal) {
+  constructor(private readonly socket: RelaySocket, private readonly signal: AbortSignal, private readonly failed: () => void) {
     socket.on('message', this.onMessage)
     socket.on('close', this.onClose)
     socket.on('error', this.onError)
     signal.addEventListener('abort', this.onClose, { once: true })
+    if (signal.aborted) this.onClose()
   }
 
   next(timeoutMs: number): Promise<Buffer> {
-    const buffered = this.frames.shift()
-    if (buffered) return Promise.resolve(buffered)
     if (this.ended) return Promise.reject(this.ended)
+    const buffered = this.frames.shift()
+    if (buffered) {
+      this.bytes -= buffered.length
+      return Promise.resolve(buffered)
+    }
     return new Promise((resolve, reject) => {
       if (this.waiter) return reject(new Error('Concurrent Relay frame reads are not supported'))
       const timer = setTimeout(() => {
-        this.waiter = undefined
-        reject(new Error('Relay frame timed out'))
+        this.end(new Error('Relay frame timed out'))
       }, timeoutMs)
       timer.unref()
       this.waiter = { resolve, reject, timer }
@@ -221,11 +229,14 @@ class IncomingFrames {
   private end(error: Error): void {
     if (this.ended) return
     this.ended = error
+    this.frames.length = 0
+    this.bytes = 0
     if (this.waiter) {
       clearTimeout(this.waiter.timer)
       this.waiter.reject(error)
       this.waiter = undefined
     }
+    this.failed()
   }
 }
 
@@ -439,7 +450,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     socket.terminate()
   }
   signal.addEventListener('abort', abortConnection, { once: true })
-  const queue = new IncomingFrames(socket, connection.signal)
+  const queue = new IncomingFrames(socket, connection.signal, abortConnection)
+  if (signal.aborted) abortConnection()
   try {
     await waitForOpen(socket, connection.signal)
     const challengeEnvelope = challengeSchema.safeParse(await receiveFrame(queue, 15_000))
@@ -458,7 +470,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     if (options.files && options.runtime.reconcileFileMessage) offered.push(FILE_RECONCILE_CAPABILITY)
     if(options.exports)offered.push(EXPORT_CAPABILITY)
     if (options.runtime.client.observations) offered.push(HOST_OBSERVATIONS_CAPABILITY)
-    const proof = await proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered)
+    connection.signal.throwIfAborted()
+    const proof = await withAbort(proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered), connection.signal)
     await sendFrame(socket, {
       v: 1,
       type: 'hello.proof',
@@ -671,9 +684,11 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         }
         if (frame.v === 1 && frame.type === 'server.draining') {
           socket.close(1012, 'server draining')
+          abortConnection()
           return
         }
         if (sessions?.handle(value)) return
+        connection.signal.throwIfAborted()
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
         if (forwarded.type === 'message.files.reconcile' && (!files || !options.runtime.reconcileFileMessage
           || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY) || !ack.data.payload.capabilities.includes(FILE_RECONCILE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
@@ -729,7 +744,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     const reader = (async () => {
       while (!connection.signal.aborted) {
         const value = await receiveFrame(queue, 40_000)
-        await handleFrame(value)
+        connection.signal.throwIfAborted()
+        await withAbort(handleFrame(value), connection.signal)
       }
     })()
     const heartbeat = setInterval(() => {

@@ -102,3 +102,10 @@ windows, without command IDs, paths, bodies or exception text. Observation
 failure/backpressure never changes command results or replays work; old peers
 can omit the capability. These are self-reported runtime statistics, not execution
 permission or durable receipts.
+
+[Host connection retirement](../../docs/host-relay-lifecycle.md) bounds incoming
+frames by count and bytes. Transport loss, queue overflow and draining discard
+the old queue and cancel its owner immediately. Pending signatures and native
+handler waits cannot block a fresh handshake; late results stay on the retired
+socket. Original-ID retries still reconcile the durable journal and never infer
+that disconnection undid an external effect.

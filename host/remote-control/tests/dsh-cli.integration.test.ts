@@ -4,7 +4,7 @@ import { PinnedExportSource } from '../src/file-export-source.js'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
-import { createPrivateKey, generateKeyPairSync, randomUUID, sign, verify } from 'node:crypto'
+import { createPrivateKey, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto'
 import { access, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { dirname, join, resolve } from 'node:path'
@@ -117,10 +117,9 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
   const relayAddress = relayHttp.address()
   assert.ok(relayAddress && typeof relayAddress === 'object')
   const relayUrl = `http://127.0.0.1:${relayAddress.port}`
-  const relayConnectionId = randomUUID()
-  const relayChallengeId = randomUUID()
-  const relayNonce = Buffer.alloc(32, 11).toString('base64url')
   let relaySocket: any
+  const relayConnectionIds: string[] = []
+  let catalogGeneration = 0
   let relayFailure: Error | undefined
   const relayReceipts: any[] = []
   const relaySessionFrames: any[] = []
@@ -135,6 +134,9 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     rejectRelayConnected = reject
   })
   relayWss.on('connection', (socket: any, incoming: any) => {
+    const relayConnectionId = randomUUID()
+    const relayChallengeId = randomUUID()
+    const relayNonce = randomBytes(32).toString('base64url')
     relaySocket = socket
     if (incoming.headers.authorization !== `DSH-Host ${hostCredential}`) {
       relayFailure = new Error('DSH plugin did not use the host Authorization scheme')
@@ -170,6 +172,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
             && proof.hello_sha256 === helloDigest
             && verify('sha256', signingInput, { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signaturePart, 'base64url'))
           if (!valid) throw new Error('DSH plugin hello proof did not bind its runtime and challenge')
+          relayConnectionIds.push(relayConnectionId)
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             // This older peer deliberately omits the new optional observation capability.
             role: 'host', connection_id: relayConnectionId, installation_id: installationId,
@@ -194,7 +197,7 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           items.push(...frame.payload.items)
           relayCatalogSnapshots.set(frame.request_id, items)
           if (frame.payload.complete) {
-            if (frame.payload.mode === 'snapshot') relayCatalog = items
+            if (frame.payload.mode === 'snapshot') { relayCatalog = items; catalogGeneration = relayConnectionIds.length }
             else {
               const merged = new Map(relayCatalog.map(item => [item.session_id, item]))
               for (const item of items) merged.set(item.session_id, item)
@@ -424,6 +427,36 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
     assert.notEqual(relayReplacement.sync_id, relaySnapshot.sync_id)
     assert.ok(relayReplacement.payload.records.some((record: any) => record.type === 'assistant/message' && JSON.stringify(record.data).includes(RESPONSE)))
     relaySocket.send(JSON.stringify({ ...nextRemoteSubscribe, type: 'session.unsubscribe', payload: {} }))
+
+    // Retire the real plugin's transport, leaving its native session and command
+    // journal alive. Reconnect is a fresh proof/catalog, never an automatic send.
+    const receiptsBeforeReconnect = relayReceipts.length
+    const oldRuntimeEpoch = relayRuntimeEpoch
+    relaySocket.terminate()
+    const reconnectDeadline = Date.now() + 5000
+    while (catalogGeneration < 2 && Date.now() < reconnectDeadline) {
+      if (relayFailure) throw relayFailure
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(catalogGeneration, 2, 'real npm DSH Host did not republish after reconnect')
+    assert.notEqual(relayConnectionIds[0], relayConnectionIds[1])
+    assert.equal(relayRuntimeEpoch, oldRuntimeEpoch, 'transport reconnect replaced the native runtime epoch')
+    assert.equal(relayReceipts.length, receiptsBeforeReconnect, 'reconnect automatically replayed the old command')
+    relaySocket.send(JSON.stringify(relayFrame))
+    const retryDeadline = Date.now() + 5000
+    while (!relayReceipts.slice(receiptsBeforeReconnect).some(receipt => receipt.request_id === remoteRequestId && receipt.payload.state === 'agent_queued') && Date.now() < retryDeadline) {
+      if (relayFailure) throw relayFailure
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(relayReceipts.slice(receiptsBeforeReconnect).some(receipt => receipt.request_id === remoteRequestId && receipt.payload.state === 'agent_queued'), 'explicit original-ID retry did not recover its native admission fact')
+    const recoveredSubscribe = { ...remoteSubscribe, request_id: randomUUID(), subscription_id: randomUUID() }
+    relaySocket.send(JSON.stringify(recoveredSubscribe))
+    const recoveredSnapshot = await waitForRelaySessionFrame(frame => frame.type === 'session.snapshot' && frame.subscription_id === recoveredSubscribe.subscription_id)
+    assert.notEqual(recoveredSnapshot.sync_id, relayReplacement.sync_id)
+    assert.equal(recoveredSnapshot.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(relayPayload.content[0]!.text)).length, 1,
+      'reconnect/original-ID retry duplicated the real native user message')
+    relaySocket.send(JSON.stringify({ ...recoveredSubscribe, type: 'session.unsubscribe', payload: {} }))
+    t.diagnostic('Real npm DSH republished a fresh connection/catalog after transport loss; explicit original-ID retry recovered agent_queued with exactly one native user message and a new snapshot sync.')
 
     firstSubscription.reader.close()
     firstSubscription.response.destroy()
