@@ -405,13 +405,27 @@ func TestControlArchiveMigrationRollbackOnlyBeforeUseOrRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	newerDown, err := os.ReadFile("../../../../deploy/sql/023_control_cold_exports.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerUp, err := os.ReadFile("../../../../deploy/sql/023_control_cold_exports.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Run("unused", func(t *testing.T) {
 		ctx, db := newPostgresIntegrationDatabase(t)
+		if _, err := db.DB.ExecContext(ctx, string(newerDown)); err != nil {
+			t.Fatal("unused export migration could not roll back", err)
+		}
 		if _, err := db.DB.ExecContext(ctx, string(down)); err != nil {
 			t.Fatal("unused migration could not roll back", err)
 		}
 		if _, err := db.DB.ExecContext(ctx, string(up)); err != nil {
 			t.Fatal("migration could not be reapplied", err)
+		}
+		if _, err := db.DB.ExecContext(ctx, string(newerUp)); err != nil {
+			t.Fatal("export migration could not be reapplied", err)
 		}
 		var exists bool
 		if err := db.DB.QueryRowContext(ctx, `select to_regclass('control_event_ack_archive') is not null`).Scan(&exists); err != nil || !exists {
