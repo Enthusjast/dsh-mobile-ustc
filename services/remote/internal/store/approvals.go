@@ -212,6 +212,11 @@ func (control *ApprovalControl) decide(ctx context.Context, principal auth.Princ
 		return ApprovalStatus{}, ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
+	// Evidence capture takes the recovery lock too. Acquire it before runtime,
+	// device and approval rows, matching quarantine's lock order.
+	if _, err := lockRecoveryReady(ctx, transaction, ""); err != nil {
+		return ApprovalStatus{}, err
+	}
 	orgID, connectionID, err := lockApprovalRuntime(ctx, transaction, request, false)
 	if err != nil {
 		return ApprovalStatus{}, err

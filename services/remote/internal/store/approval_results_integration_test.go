@@ -263,11 +263,18 @@ func TestPostgresApprovalResultAuditAndCASFailuresRollbackTheNativeFact(t *testi
 
 func TestPostgresApprovalResultMigrationKeepsSpentExecutionClosed(t *testing.T) {
 	fixture := newApprovalFixture(t)
+	_, file, _, _ := runtime.Caller(0)
+	evidenceDown, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/025_approval_decision_evidence.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(evidenceDown)); err != nil {
+		t.Fatal(err)
+	}
 	status := acceptResultFixture(t, fixture, "allow_once")
 	if _, err := fixture.control.RecordResult(fixture.ctx, fixture.connection, 1, resultFor(status, "consumed", "")); err != nil {
 		t.Fatal(err)
 	}
-	_, file, _, _ := runtime.Caller(0)
 	for _, direction := range []string{"down", "up"} {
 		raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/007_approval_host_results."+direction+".sql"))
 		if err != nil {
@@ -276,6 +283,13 @@ func TestPostgresApprovalResultMigrationKeepsSpentExecutionClosed(t *testing.T) 
 		if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(raw)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	evidenceUp, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/025_approval_decision_evidence.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(evidenceUp)); err != nil {
+		t.Fatal(err)
 	}
 	provider, _ := newTestLeaseProvider(t, fixture, time.Now().Add(time.Hour))
 	if proof, err := provider.Issue(fixture.ctx, fixture.connection, 1, approvalRaw(t, fixture.request)); err == nil || proof != "" {

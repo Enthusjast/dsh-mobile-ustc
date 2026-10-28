@@ -705,10 +705,6 @@ func TestPostgresApprovalAdmissionTimeoutDoesNotConsumePendingRow(t *testing.T) 
 
 func TestPostgresApprovalMigrationInvalidatesLegacyPendingAndPreservesAudit(t *testing.T) {
 	fixture := newApprovalFixture(t)
-	fixture.register(t, fixture.request)
-	if _, err := fixture.control.Decide(fixture.ctx, fixture.principal, fixture.ticket, approvalRaw(t, fixture.request), fixture.signed(t, fixture.request, "allow_once")); err != nil {
-		t.Fatal(err)
-	}
 	_, file, _, _ := runtime.Caller(0)
 	apply := func(name, direction string) {
 		t.Helper()
@@ -719,6 +715,12 @@ func TestPostgresApprovalMigrationInvalidatesLegacyPendingAndPreservesAudit(t *t
 		if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(raw)); err != nil {
 			t.Fatalf("approval migration %s: %v", direction, err)
 		}
+	}
+	// Exercise the historical migration with newer dependencies removed first.
+	apply("025_approval_decision_evidence", "down")
+	fixture.register(t, fixture.request)
+	if _, err := fixture.control.Decide(fixture.ctx, fixture.principal, fixture.ticket, approvalRaw(t, fixture.request), fixture.signed(t, fixture.request, "allow_once")); err != nil {
+		t.Fatal(err)
 	}
 	apply("007_approval_host_results", "down")
 	apply("006_approval_control", "down")
@@ -737,6 +739,7 @@ func TestPostgresApprovalMigrationInvalidatesLegacyPendingAndPreservesAudit(t *t
 	}
 	apply("006_approval_control", "up")
 	apply("007_approval_host_results", "up")
+	apply("025_approval_decision_evidence", "up")
 	var invalidated int
 	if err := fixture.database.DB.QueryRowContext(fixture.ctx, `select count(*) from approvals where metadata_version = 0 and state = 'invalidated'`).Scan(&invalidated); err != nil || invalidated != 2 {
 		t.Fatalf("migration revived legacy approvals: count=%d error=%v", invalidated, err)
