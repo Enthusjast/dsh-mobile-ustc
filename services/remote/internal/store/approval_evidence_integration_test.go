@@ -390,6 +390,8 @@ func TestApprovalEvidenceCaptureWorksWithoutMaterialReadPrivilege(t *testing.T) 
 		"revoke all on approval_decision_evidence,approval_decision_evidence_material from " + role,
 		"grant select,insert on approval_decision_evidence to " + role,
 		"grant insert on approval_decision_evidence_material to " + role,
+		"revoke update on remote_recovery_state from " + role,
+		"grant update(slot) on remote_recovery_state to " + role,
 	}
 	for _, statement := range statements {
 		if _, err := f.database.DB.ExecContext(f.ctx, statement); err != nil {
@@ -406,5 +408,8 @@ func TestApprovalEvidenceCaptureWorksWithoutMaterialReadPrivilege(t *testing.T) 
 	}
 	if _, err := f.database.DB.ExecContext(f.ctx, `select public_jwk from approval_decision_evidence_material`); err == nil {
 		t.Fatal("writer unexpectedly read protected evidence material")
+	}
+	if _, err := f.database.DB.ExecContext(f.ctx, `update remote_recovery_state set epoch='ffffffff-ffff-4fff-8fff-ffffffffffff'`); err == nil {
+		t.Fatal("decision writer unexpectedly changed the recovery epoch")
 	}
 }

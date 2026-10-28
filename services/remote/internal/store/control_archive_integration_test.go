@@ -429,8 +429,19 @@ func TestControlArchiveMigrationRollbackOnlyBeforeUseOrRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	auditDown, err := os.ReadFile("../../../../deploy/sql/026_audit_history.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditUp, err := os.ReadFile("../../../../deploy/sql/026_audit_history.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Run("unused", func(t *testing.T) {
 		ctx, db := newPostgresIntegrationDatabase(t)
+		if _, err := db.DB.ExecContext(ctx, string(auditDown)); err != nil {
+			t.Fatal("unused audit history migration could not roll back", err)
+		}
 		if _, err := db.DB.ExecContext(ctx, string(evidenceDown)); err != nil {
 			t.Fatal("unused evidence migration could not roll back", err)
 		}
@@ -454,6 +465,9 @@ func TestControlArchiveMigrationRollbackOnlyBeforeUseOrRecovery(t *testing.T) {
 		}
 		if _, err := db.DB.ExecContext(ctx, string(evidenceUp)); err != nil {
 			t.Fatal("evidence migration could not be reapplied", err)
+		}
+		if _, err := db.DB.ExecContext(ctx, string(auditUp)); err != nil {
+			t.Fatal("audit history migration could not be reapplied", err)
 		}
 		var exists bool
 		if err := db.DB.QueryRowContext(ctx, `select to_regclass('control_event_ack_archive') is not null`).Scan(&exists); err != nil || !exists {
