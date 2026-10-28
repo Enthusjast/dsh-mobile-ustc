@@ -15,7 +15,10 @@ import (
 // Administrative local CLI only; no listener or caller-selected source SQL.
 func runArchiveCommand(arguments []string, output io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("remote archive requires control, export, verify, verify-offline or abort-export")
+		return errors.New("remote archive requires control, export, verify, verify-offline, abort-export or import")
+	}
+	if arguments[0] == "import" {
+		return runColdImportCommand(arguments[1:], output)
 	}
 	if arguments[0] != "control" {
 		return runColdArchiveCommand(arguments[0], arguments[1:], output)
