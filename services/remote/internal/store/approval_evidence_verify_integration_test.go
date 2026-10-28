@@ -51,12 +51,8 @@ func TestApprovalEvidenceVerificationAuditsAndDoesNotExposeSignature(t *testing.
 	}
 }
 
-func TestApprovalEvidenceProductionBinaryVerifiesWithoutExposingMaterial(t *testing.T) {
-	binary := os.Getenv("REMOTE_TEST_SERVICE_BIN")
-	if binary == "" {
-		t.Skip("explicit disposable production service binary required")
-	}
-	f, compact := evidenceVerifyFixture(t)
+func evidenceFixtureDSN(t *testing.T, f *approvalFixture) string {
+	t.Helper()
 	config, err := pgx.ParseConfig(os.Getenv("REMOTE_TEST_DATABASE_URL"))
 	if err != nil {
 		t.Fatal("invalid disposable database configuration")
@@ -68,7 +64,16 @@ func TestApprovalEvidenceProductionBinaryVerifiesWithoutExposingMaterial(t *test
 	quote := func(value string) string {
 		return "'" + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), `'`, `\'`) + "'"
 	}
-	dsn := "host=" + quote(config.Host) + " port=" + strconv.Itoa(int(config.Port)) + " user=" + quote(config.User) + " password=" + quote(config.Password) + " dbname=" + quote(database) + " sslmode=disable"
+	return "host=" + quote(config.Host) + " port=" + strconv.Itoa(int(config.Port)) + " user=" + quote(config.User) + " password=" + quote(config.Password) + " dbname=" + quote(database) + " sslmode=disable"
+}
+
+func TestApprovalEvidenceProductionBinaryVerifiesWithoutExposingMaterial(t *testing.T) {
+	binary := os.Getenv("REMOTE_TEST_SERVICE_BIN")
+	if binary == "" {
+		t.Skip("explicit disposable production service binary required")
+	}
+	f, compact := evidenceVerifyFixture(t)
+	dsn := evidenceFixtureDSN(t, f)
 	command := exec.CommandContext(f.ctx, binary, "archive", "verify-approval", "--approval-id", f.request.ApprovalID, "--expected-epoch", OriginalDatabaseEpoch)
 	command.Env = []string{"PATH=" + os.Getenv("PATH"), "REMOTE_DATABASE_URL=" + dsn, "REMOTE_DATABASE_EPOCH=" + OriginalDatabaseEpoch}
 	raw, err := command.CombinedOutput()
@@ -207,6 +212,7 @@ func TestApprovalEvidenceVerificationFailsClosedWhenAuditUnavailable(t *testing.
 
 func TestApprovalEvidenceFingerprintBackfillsOnlyMatchingOriginals(t *testing.T) {
 	f := newApprovalFixture(t)
+	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "down")
 	down, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +252,7 @@ func TestApprovalEvidenceFingerprintBackfillsOnlyMatchingOriginals(t *testing.T)
 	if _, err := f.database.DB.ExecContext(f.ctx, string(up)); err != nil {
 		t.Fatal(err)
 	}
+	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "up")
 	result, err := f.database.VerifyApprovalEvidence(f.ctx, first.ApprovalID, OriginalDatabaseEpoch)
 	if err != nil || result.FingerprintSource != "backfilled" {
 		t.Fatal("matching prior snapshot was not safely backfilled", err)
@@ -261,6 +268,7 @@ func TestApprovalEvidenceFingerprintBackfillsOnlyMatchingOriginals(t *testing.T)
 
 func TestApprovalEvidenceFingerprintMigrationWaitsForInflightDecision(t *testing.T) {
 	f := newApprovalFixture(t)
+	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "down")
 	down, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -326,6 +334,7 @@ func TestApprovalEvidenceFingerprintMigrationWaitsForInflightDecision(t *testing
 	if err := <-migrated; err != nil {
 		t.Fatal("fingerprint migration did not complete", err)
 	}
+	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "up")
 	result, err := f.database.VerifyApprovalEvidence(f.ctx, f.request.ApprovalID, OriginalDatabaseEpoch)
 	if err != nil || result.FingerprintSource != "backfilled" {
 		t.Fatal("migration missed an in-flight decision", err)

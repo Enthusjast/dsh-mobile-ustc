@@ -20,6 +20,9 @@ func runArchiveCommand(arguments []string, output io.Writer) error {
 	if arguments[0] == "verify-approval" {
 		return runApprovalEvidenceCommand(arguments[1:], output)
 	}
+	if arguments[0] == "export-approval" || arguments[0] == "verify-approval-export" || arguments[0] == "verify-approval-offline" || arguments[0] == "abort-approval-export" {
+		return runEvidenceExportCommand(arguments[0], arguments[1:], output)
+	}
 	if arguments[0] == "audit" {
 		return runAuditArchiveCommand(arguments[1:], output)
 	}

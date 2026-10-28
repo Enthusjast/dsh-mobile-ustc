@@ -146,21 +146,35 @@ func SealEncoded(key *Key, plain []byte, salt [32]byte, nonce [12]byte) ([]byte,
 	return result, nil
 }
 
-func Open(key *Key, artifact []byte, domainID, exportID string) (Payload, error) {
-	if key == nil || !UUID(domainID) || !UUID(exportID) || len(artifact) < HeaderSize+16 || len(artifact) > MaxArtifact || string(artifact[:8]) != magic {
-		return Payload{}, ErrInvalid
+// OpenEncoded authenticates the container only. The caller must validate the
+// decoded format, key ID, domain and export identity before using its content.
+// The returned plaintext is owned by the caller and should be cleared.
+func OpenEncoded(key *Key, artifact []byte) ([]byte, error) {
+	if key == nil || len(artifact) < HeaderSize+16 || len(artifact) > MaxArtifact || string(artifact[:8]) != magic {
+		return nil, ErrInvalid
 	}
 	length := binary.BigEndian.Uint64(artifact[52:60])
 	if length < 16 || length > MaxPlaintext+16 || length != uint64(len(artifact)-HeaderSize) {
-		return Payload{}, ErrInvalid
+		return nil, ErrInvalid
 	}
 	value, err := aead(key, artifact[8:40])
 	if err != nil {
-		return Payload{}, err
+		return nil, err
 	}
 	plain, err := value.Open(nil, artifact[40:52], artifact[HeaderSize:], artifact[:HeaderSize])
 	if err != nil {
+		return nil, ErrInvalid
+	}
+	return plain, nil
+}
+
+func Open(key *Key, artifact []byte, domainID, exportID string) (Payload, error) {
+	if key == nil || !UUID(domainID) || !UUID(exportID) {
 		return Payload{}, ErrInvalid
+	}
+	plain, err := OpenEncoded(key, artifact)
+	if err != nil {
+		return Payload{}, err
 	}
 	defer clear(plain)
 	payload, err := Decode(plain)

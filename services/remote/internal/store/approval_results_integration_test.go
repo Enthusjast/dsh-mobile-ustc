@@ -264,6 +264,7 @@ func TestPostgresApprovalResultAuditAndCASFailuresRollbackTheNativeFact(t *testi
 func TestPostgresApprovalResultMigrationKeepsSpentExecutionClosed(t *testing.T) {
 	fixture := newApprovalFixture(t)
 	_, file, _, _ := runtime.Caller(0)
+	applyEvidenceExportFixtureMigration(t, fixture.ctx, fixture.database, "down")
 	fingerprintDown, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql"))
 	if err != nil {
 		t.Fatal(err)
@@ -305,6 +306,7 @@ func TestPostgresApprovalResultMigrationKeepsSpentExecutionClosed(t *testing.T) 
 	if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(fingerprintUp)); err != nil {
 		t.Fatal(err)
 	}
+	applyEvidenceExportFixtureMigration(t, fixture.ctx, fixture.database, "up")
 	provider, _ := newTestLeaseProvider(t, fixture, time.Now().Add(time.Hour))
 	if proof, err := provider.Issue(fixture.ctx, fixture.connection, 1, approvalRaw(t, fixture.request)); err == nil || proof != "" {
 		t.Fatal("migration revived spent execution")
