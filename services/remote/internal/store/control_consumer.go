@@ -33,6 +33,9 @@ func (postgres *Postgres) NewControlConsumer(ctx context.Context, node string) (
 		return nil, ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
+	if err := lockControlArchive(ctx, transaction, false); err != nil {
+		return nil, err
+	}
 	state, err := lockRecoveryReady(ctx, transaction, "")
 	if err != nil {
 		return nil, err
@@ -120,11 +123,33 @@ func (consumer *ControlConsumer) Renew(ctx context.Context) error {
 }
 
 func (consumer *ControlConsumer) Release(ctx context.Context) error {
+	tx, err := consumer.postgres.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	defer tx.Rollback()
+	if err := lockControlArchive(ctx, tx, false); err != nil {
+		return err
+	}
+	state, err := recoveryState(ctx, tx, " for share")
+	if err != nil {
+		return err
+	}
+	// A quarantine already retired the generation; do not delete its history.
+	if state.Phase != "ready" || state.Epoch != consumer.databaseEpoch {
+		if tx.Commit() != nil {
+			return ErrDatabaseUnavailable
+		}
+		return nil
+	}
 	query := `update control_consumers set lease_until=clock_timestamp() where node_id=$1 and generation=$2`
 	if !consumer.durable {
 		query = `delete from control_consumers where node_id=$1 and generation=$2`
 	}
-	if _, err := consumer.postgres.DB.ExecContext(ctx, query, consumer.node, consumer.generation); err != nil {
+	if _, err := tx.ExecContext(ctx, query, consumer.node, consumer.generation); err != nil {
+		return ErrDatabaseUnavailable
+	}
+	if tx.Commit() != nil {
 		return ErrDatabaseUnavailable
 	}
 	return nil
@@ -185,13 +210,26 @@ func (consumer *ControlConsumer) MarkControlEventPublished(ctx context.Context, 
 		return ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
+	if err := lockControlArchive(ctx, transaction, false); err != nil {
+		return err
+	}
 	coverage, err := consumer.lock(ctx, transaction)
 	if err != nil {
 		return err
 	}
 	var covered bool
 	if err := transaction.QueryRowContext(ctx, `select pg_visible_in_snapshot(producer_xid,$2::pg_snapshot) from control_outbox where id=$1 and database_epoch=$3`, id, coverage, consumer.databaseEpoch).Scan(&covered); errors.Is(err, sql.ErrNoRows) {
-		return ErrGrantInvalid
+		var archived bool
+		if err := transaction.QueryRowContext(ctx, `select exists(select 1 from control_outbox_archive where event_id=$1 and database_epoch=$2 and batch_epoch=$2 and reason='covered')`, id, consumer.databaseEpoch).Scan(&archived); err != nil {
+			return ErrDatabaseUnavailable
+		}
+		if !archived {
+			return ErrGrantInvalid
+		}
+		if transaction.Commit() != nil {
+			return ErrDatabaseUnavailable
+		}
+		return nil
 	} else if err != nil {
 		return ErrDatabaseUnavailable
 	}
@@ -212,9 +250,28 @@ func (consumer *ControlConsumer) MarkControlEventPublished(ctx context.Context, 
 }
 
 func (consumer *ControlConsumer) PruneEphemeral(ctx context.Context) error {
-	_, err := consumer.postgres.DB.ExecContext(ctx, `delete from control_consumers where node_id in
-        (select node_id from control_consumers where not durable and lease_until<clock_timestamp()-interval '10 minutes' order by lease_until limit 128)`)
+	tx, err := consumer.postgres.DB.BeginTx(ctx, nil)
 	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	defer tx.Rollback()
+	if err := lockControlArchive(ctx, tx, false); err != nil {
+		return err
+	}
+	if _, err := lockRecoveryReady(ctx, tx, consumer.databaseEpoch); err != nil {
+		return err
+	}
+	// A recovered old-epoch ack must be copied to history before deleting its
+	// ephemeral consumer would cascade it away. Current-epoch ephemeral cleanup
+	// retains the existing bounded behavior.
+	if _, err := tx.ExecContext(ctx, `delete from control_consumers where node_id in
+	 (select c.node_id from control_consumers c where not c.durable and c.lease_until<clock_timestamp()-interval '10 minutes'
+	 and not exists(select 1 from control_event_acks a join control_outbox e on e.id=a.event_id
+	   where a.node_id=c.node_id and e.database_epoch<>$1::uuid)
+	 order by c.lease_until limit 128)`, consumer.databaseEpoch); err != nil {
+		return ErrDatabaseUnavailable
+	}
+	if tx.Commit() != nil {
 		return ErrDatabaseUnavailable
 	}
 	return nil
