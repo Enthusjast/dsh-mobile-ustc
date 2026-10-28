@@ -274,6 +274,14 @@ func TestAuditArchiveBatchCannotForgeRetentionClock(t *testing.T) {
 
 func TestAuditArchiveLegacyEpochIsUnknownAndRecoveryPreservesIt(t *testing.T) {
 	ctx, source := newPostgresIntegrationDatabase(t)
+	fingerprintDown, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprintUp, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	down, err := os.ReadFile("../../../../deploy/sql/026_audit_history.down.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -282,11 +290,17 @@ func TestAuditArchiveLegacyEpochIsUnknownAndRecoveryPreservesIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := source.DB.ExecContext(ctx, string(fingerprintDown)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := source.DB.ExecContext(ctx, string(down)); err != nil {
 		t.Fatal(err)
 	}
 	legacy := auditFixtureEntry(t, ctx, source.DB, "2000-01-01T00:00:00Z", "legacy")
 	if _, err := source.DB.ExecContext(ctx, string(up)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.DB.ExecContext(ctx, string(fingerprintUp)); err != nil {
 		t.Fatal(err)
 	}
 	enableAuditFixtureTime(t, ctx, source.DB)

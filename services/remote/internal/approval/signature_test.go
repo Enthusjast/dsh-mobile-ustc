@@ -170,6 +170,60 @@ func TestApprovalSignatureRejectsChangedContextKeysAndTime(t *testing.T) {
 	}
 }
 
+func TestHistoricalDecisionVerifiesRetainedRecordWithoutCreatingAuthority(t *testing.T) {
+	data, key, now := loadFixture(t)
+	compact := data.Vectors[0].Compact
+	verified, err := VerifyDecision(compact, key, data.Context, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := verified.Claims
+	record := HistoricalDecisionEvidence{ApprovalID: claims.ApprovalID, RuntimeID: claims.RuntimeID, RuntimeEpoch: claims.RuntimeEpoch,
+		SessionID: claims.SessionID, ExecutionID: claims.ExecutionID, UserID: key.UserID, DeviceID: key.DeviceID, KeyVersion: key.KeyVersion,
+		ApprovalKeyJKT: key.ApprovalKeyJKT, PublicJWK: key.PublicJWK, Decision: claims.Decision, BindingSHA256: claims.BindingSHA256, PayloadSHA256: verified.PayloadSHA256}
+	if err := VerifyHistoricalDecision(compact, record); err != nil {
+		t.Fatal("valid historical evidence failed", err)
+	}
+	if _, err := VerifyDecision(compact, key, data.Context, now.Add(time.Hour)); err == nil {
+		t.Fatal("historical evidence extended live authorization")
+	}
+	for _, field := range []string{"approval", "runtime", "epoch", "session", "execution", "user", "device", "key-version", "key-thumbprint", "decision", "binding", "payload"} {
+		changed := record
+		switch field {
+		case "approval":
+			changed.ApprovalID = claims.SessionID
+		case "runtime":
+			changed.RuntimeID = claims.SessionID
+		case "epoch":
+			changed.RuntimeEpoch = claims.SessionID
+		case "session":
+			changed.SessionID = claims.RuntimeID
+		case "execution":
+			changed.ExecutionID = claims.SessionID
+		case "user":
+			changed.UserID = claims.SessionID
+		case "device":
+			changed.DeviceID = claims.SessionID
+		case "key-version":
+			changed.KeyVersion++
+		case "key-thumbprint":
+			changed.ApprovalKeyJKT = "other"
+		case "decision":
+			changed.Decision = "reject"
+		case "binding":
+			changed.BindingSHA256 = strings.Repeat("a", 64)
+		case "payload":
+			changed.PayloadSHA256 = strings.Repeat("b", 64)
+		}
+		if err := VerifyHistoricalDecision(compact, changed); err == nil {
+			t.Fatalf("historical record accepted changed %s", field)
+		}
+	}
+	if err := VerifyHistoricalDecision(compact+"x", record); err == nil {
+		t.Fatal("tampered historical signature accepted")
+	}
+}
+
 func TestApprovalContextRejectsCaseInsensitiveFieldAliases(t *testing.T) {
 	data, _, _ := loadFixture(t)
 	for _, field := range []string{"domain", "runtime_id", "root_sha256", "kind", "profile", "max_auth_age_seconds"} {

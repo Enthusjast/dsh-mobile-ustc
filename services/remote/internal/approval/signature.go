@@ -37,10 +37,7 @@ func KeyID(deviceID string, keyVersion int64) string {
 	return "dsh-approval/" + deviceID + "/" + strconv.FormatInt(keyVersion, 10)
 }
 
-// VerifyDecision is pure verification: current grant/assurance checks and atomic
-// one-use consumption must still precede any approved execution.
-func VerifyDecision(compact string, registered RegisteredKey, expectedContext []byte, now time.Time) (VerifiedDecision, error) {
-	now = now.UTC().Truncate(time.Millisecond)
+func verifyDecisionSignature(compact string, registered RegisteredKey) (VerifiedDecision, error) {
 	if !registered.Active || !uuid.MatchString(registered.UserID) || !uuid.MatchString(registered.DeviceID) || !version(registered.KeyVersion) || len(compact) == 0 || len(compact) > 16*1024 {
 		return VerifiedDecision{}, ErrDecision
 	}
@@ -108,9 +105,24 @@ func VerifyDecision(compact string, registered RegisteredKey, expectedContext []
 	if decodeStrict(payload, &decision) != nil || !decision.valid() {
 		return VerifiedDecision{}, ErrDecision
 	}
+	if decision.UserID != registered.UserID || decision.DeviceID != registered.DeviceID || decision.KeyVersion != registered.KeyVersion {
+		return VerifiedDecision{}, ErrDecision
+	}
+	digest := sha256.Sum256(canonicalPayload)
+	return VerifiedDecision{Claims: decision, CanonicalPayload: canonicalPayload, PayloadSHA256: hex.EncodeToString(digest[:])}, nil
+}
+
+// VerifyDecision is pure verification: current grant/assurance checks and atomic
+// one-use consumption must still precede any approved execution.
+func VerifyDecision(compact string, registered RegisteredKey, expectedContext []byte, now time.Time) (VerifiedDecision, error) {
+	now = now.UTC().Truncate(time.Millisecond)
+	verified, err := verifyDecisionSignature(compact, registered)
+	if err != nil {
+		return VerifiedDecision{}, err
+	}
+	decision := verified.Claims
 	binding, err := ContextBinding(expectedContext)
 	if err != nil || decision.Identity != binding.Context.Identity || decision.PolicyVersion != binding.Context.PolicyVersion || decision.Nonce != binding.Context.Nonce ||
-		decision.UserID != registered.UserID || decision.DeviceID != registered.DeviceID || decision.KeyVersion != registered.KeyVersion ||
 		subtle.ConstantTimeCompare([]byte(decision.BindingSHA256), []byte(binding.SHA256)) != 1 {
 		return VerifiedDecision{}, ErrDecision
 	}
@@ -122,6 +134,34 @@ func VerifyDecision(compact string, registered RegisteredKey, expectedContext []
 		issued.Before(created.Add(-5*time.Second)) || !expires.After(now) || !expires.After(issued) || expires.After(deadline) {
 		return VerifiedDecision{}, ErrDecision
 	}
-	digest := sha256.Sum256(canonicalPayload)
-	return VerifiedDecision{Claims: decision, CanonicalPayload: canonicalPayload, PayloadSHA256: hex.EncodeToString(digest[:])}, nil
+	return verified, nil
+}
+
+// HistoricalDecisionEvidence binds a retained signature to the immutable
+// record captured at admission. It intentionally carries no live authority.
+type HistoricalDecisionEvidence struct {
+	ApprovalID, RuntimeID, RuntimeEpoch, SessionID, ExecutionID string
+	UserID, DeviceID                                            string
+	KeyVersion                                                  int64
+	ApprovalKeyJKT                                              string
+	PublicJWK                                                   []byte
+	Decision, BindingSHA256, PayloadSHA256                      string
+}
+
+// VerifyHistoricalDecision checks only signature and retained record integrity.
+// It does not establish current authorization, original arguments, assurance,
+// or whether the decision may be executed; it must never be used to admit work.
+func VerifyHistoricalDecision(compact string, record HistoricalDecisionEvidence) error {
+	registered := RegisteredKey{UserID: record.UserID, DeviceID: record.DeviceID, KeyVersion: record.KeyVersion, ApprovalKeyJKT: record.ApprovalKeyJKT, PublicJWK: record.PublicJWK, Active: true}
+	verified, err := verifyDecisionSignature(compact, registered)
+	if err != nil {
+		return ErrDecision
+	}
+	claims := verified.Claims
+	if claims.ApprovalID != record.ApprovalID || claims.RuntimeID != record.RuntimeID || claims.RuntimeEpoch != record.RuntimeEpoch || claims.SessionID != record.SessionID || claims.ExecutionID != record.ExecutionID ||
+		claims.Decision != record.Decision || subtle.ConstantTimeCompare([]byte(claims.BindingSHA256), []byte(record.BindingSHA256)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(verified.PayloadSHA256), []byte(record.PayloadSHA256)) != 1 {
+		return ErrDecision
+	}
+	return nil
 }

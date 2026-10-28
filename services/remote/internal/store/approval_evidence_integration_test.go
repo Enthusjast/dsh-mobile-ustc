@@ -99,11 +99,15 @@ func TestApprovalEvidenceAndDecisionRollbackTogetherOnFailure(t *testing.T) {
 	f := newApprovalFixture(t)
 	f.register(t, f.request)
 	compact := f.signed(t, f.request, "reject")
-	for _, target := range []string{"material", "audit"} {
+	for _, target := range []string{"material", "fingerprint", "audit"} {
 		var sqlText string
-		if target == "material" {
+		if target == "material" || target == "fingerprint" {
+			table := "approval_decision_evidence_material"
+			if target == "fingerprint" {
+				table = "approval_evidence_fingerprints"
+			}
 			sqlText = `create function test_fail_evidence() returns trigger language plpgsql as $$ begin raise exception 'fixture failure'; end $$;
-			 create trigger test_fail_evidence before insert on approval_decision_evidence_material for each row execute function test_fail_evidence()`
+			 create trigger test_fail_evidence before insert on ` + table + ` for each row execute function test_fail_evidence()`
 		} else {
 			sqlText = `create function test_fail_evidence() returns trigger language plpgsql as $$ begin if new.action='approval.decided' then raise exception 'fixture failure'; end if; return new; end $$;
 			 create trigger test_fail_evidence before insert on audit_log for each row execute function test_fail_evidence()`
@@ -115,12 +119,16 @@ func TestApprovalEvidenceAndDecisionRollbackTogetherOnFailure(t *testing.T) {
 			t.Fatal("decision ignored evidence or audit failure", err)
 		}
 		assertApprovalPending(t, f, f.request)
-		var evidence, materials, decisions int
+		var evidence, materials, fingerprints, decisions int
 		if err := f.database.DB.QueryRowContext(f.ctx, `select (select count(*) from approval_decision_evidence),
-		 (select count(*) from approval_decision_evidence_material),(select count(*) from audit_log where action='approval.decided')`).Scan(&evidence, &materials, &decisions); err != nil || evidence != 0 || materials != 0 || decisions != 0 {
-			t.Fatal("failed decision left partial evidence", evidence, materials, decisions, err)
+		 (select count(*) from approval_decision_evidence_material),(select count(*) from approval_evidence_fingerprints),
+		 (select count(*) from audit_log where action='approval.decided')`).Scan(&evidence, &materials, &fingerprints, &decisions); err != nil || evidence != 0 || materials != 0 || fingerprints != 0 || decisions != 0 {
+			t.Fatal("failed decision left partial evidence", evidence, materials, fingerprints, decisions, err)
 		}
 		table := "approval_decision_evidence_material"
+		if target == "fingerprint" {
+			table = "approval_evidence_fingerprints"
+		}
 		if target == "audit" {
 			table = "audit_log"
 		}
@@ -135,12 +143,23 @@ func TestApprovalEvidenceAndDecisionRollbackTogetherOnFailure(t *testing.T) {
 
 func TestApprovalEvidenceDoesNotInventHistoricalKeySnapshots(t *testing.T) {
 	f := newApprovalFixture(t)
+	fingerprintDown, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprintUp, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	down, err := os.ReadFile("../../../../deploy/sql/025_approval_decision_evidence.down.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	up, err := os.ReadFile("../../../../deploy/sql/025_approval_decision_evidence.up.sql")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.database.DB.ExecContext(f.ctx, string(fingerprintDown)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.database.DB.ExecContext(f.ctx, string(down)); err != nil {
@@ -152,6 +171,9 @@ func TestApprovalEvidenceDoesNotInventHistoricalKeySnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := f.database.DB.ExecContext(f.ctx, string(up)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.database.DB.ExecContext(f.ctx, string(fingerprintUp)); err != nil {
 		t.Fatal(err)
 	}
 	var captured sql.NullString
@@ -193,6 +215,16 @@ func TestApprovalEvidencePreventsOutOfOrderMigrationRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	fingerprintDown, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(f.ctx, string(fingerprintDown)); err == nil {
+		t.Fatal("fingerprint migration dropped a captured anchor")
+	}
+	if _, err := conn.ExecContext(f.ctx, `rollback`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := conn.ExecContext(f.ctx, string(down)); err == nil {
 		t.Fatal("evidence migration dropped captured identity")
 	}
@@ -255,10 +287,11 @@ func TestApprovalEvidenceExpiredMaterialDeletionPreservesIdentity(t *testing.T) 
 	if _, err := f.database.DB.ExecContext(f.ctx, `insert into approval_decision_evidence_material(approval_id,decision_jws,public_jwk) values($1,$2,$3::jsonb)`, f.request.ApprovalID, compact, key); err == nil {
 		t.Fatal("expired evidence was silently recreated")
 	}
-	var headers, materials, audits int
+	var headers, materials, fingerprints, audits int
 	if err := f.database.DB.QueryRowContext(f.ctx, `select (select count(*) from approval_decision_evidence), (select count(*) from approval_decision_evidence_material),
-	 (select count(*) from audit_log where action='approval.evidence.material.delete')`).Scan(&headers, &materials, &audits); err != nil || headers != 1 || materials != 0 || audits != 1 {
-		t.Fatal("expiry lost its identity or audit", headers, materials, audits, err)
+	 (select count(*) from approval_evidence_fingerprints),(select count(*) from audit_log where action='approval.evidence.material.delete')`).
+		Scan(&headers, &materials, &fingerprints, &audits); err != nil || headers != 1 || materials != 0 || fingerprints != 1 || audits != 1 {
+		t.Fatal("expiry lost its identity, fingerprint or audit", headers, materials, fingerprints, audits, err)
 	}
 }
 
@@ -390,6 +423,8 @@ func TestApprovalEvidenceCaptureWorksWithoutMaterialReadPrivilege(t *testing.T) 
 		"revoke all on approval_decision_evidence,approval_decision_evidence_material from " + role,
 		"grant select,insert on approval_decision_evidence to " + role,
 		"grant insert on approval_decision_evidence_material to " + role,
+		"revoke all on approval_evidence_fingerprints from " + role,
+		"grant insert on approval_evidence_fingerprints to " + role,
 		"revoke update on remote_recovery_state from " + role,
 		"grant update(slot) on remote_recovery_state to " + role,
 	}

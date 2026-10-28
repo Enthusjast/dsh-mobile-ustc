@@ -264,6 +264,13 @@ func TestPostgresApprovalResultAuditAndCASFailuresRollbackTheNativeFact(t *testi
 func TestPostgresApprovalResultMigrationKeepsSpentExecutionClosed(t *testing.T) {
 	fixture := newApprovalFixture(t)
 	_, file, _, _ := runtime.Caller(0)
+	fingerprintDown, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(fingerprintDown)); err != nil {
+		t.Fatal(err)
+	}
 	evidenceDown, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/025_approval_decision_evidence.down.sql"))
 	if err != nil {
 		t.Fatal(err)
@@ -289,6 +296,13 @@ func TestPostgresApprovalResultMigrationKeepsSpentExecutionClosed(t *testing.T) 
 		t.Fatal(err)
 	}
 	if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(evidenceUp)); err != nil {
+		t.Fatal(err)
+	}
+	fingerprintUp, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../deploy/sql/027_approval_evidence_fingerprints.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.database.DB.ExecContext(fixture.ctx, string(fingerprintUp)); err != nil {
 		t.Fatal(err)
 	}
 	provider, _ := newTestLeaseProvider(t, fixture, time.Now().Add(time.Hour))
