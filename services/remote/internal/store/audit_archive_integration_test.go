@@ -274,6 +274,7 @@ func TestAuditArchiveBatchCannotForgeRetentionClock(t *testing.T) {
 
 func TestAuditArchiveLegacyEpochIsUnknownAndRecoveryPreservesIt(t *testing.T) {
 	ctx, source := newPostgresIntegrationDatabase(t)
+	applyAuditColdExportFixtureMigration(t, ctx, source, "down")
 	applyEvidenceExportFixtureMigration(t, ctx, source, "down")
 	fingerprintDown, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
 	if err != nil {
@@ -305,6 +306,7 @@ func TestAuditArchiveLegacyEpochIsUnknownAndRecoveryPreservesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	applyEvidenceExportFixtureMigration(t, ctx, source, "up")
+	applyAuditColdExportFixtureMigration(t, ctx, source, "up")
 	enableAuditFixtureTime(t, ctx, source.DB)
 	old := auditFixtureEntry(t, ctx, source.DB, "2000-01-02T00:00:00Z", "original-epoch")
 	request := auditArchiveFixtureRequest(t)

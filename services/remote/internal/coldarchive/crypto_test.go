@@ -145,3 +145,35 @@ func TestClosedKeyFailsWithoutLeaking(t *testing.T) {
 		t.Fatal("closed key remained usable", err)
 	}
 }
+
+func TestExplicitContainerLimitKeepsCallersIndependentlyBounded(t *testing.T) {
+	key := testKey(t, 23)
+	plain := bytes.Repeat([]byte("a"), 100)
+	salt, nonce, err := Material()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SealEncodedWithLimit(key, plain, salt, nonce, 99); err == nil {
+		t.Fatal("plaintext exceeded its explicit limit")
+	}
+	artifact, err := SealEncodedWithLimit(key, plain, salt, nonce, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenEncodedWithLimit(key, artifact, 99); err == nil {
+		t.Fatal("ciphertext exceeded the reader's limit")
+	}
+	decoded, err := OpenEncodedWithLimit(key, artifact, 100)
+	if err != nil || !bytes.Equal(decoded, plain) {
+		t.Fatal("bounded ciphertext could not be read", err)
+	}
+	clear(decoded)
+	for _, limit := range []int{0, MaxExtendedPlaintext + 1} {
+		if _, err := SealEncodedWithLimit(key, plain, salt, nonce, limit); err == nil {
+			t.Fatal("invalid plaintext bound accepted")
+		}
+		if _, err := OpenEncodedWithLimit(key, artifact, limit); err == nil {
+			t.Fatal("invalid reader bound accepted")
+		}
+	}
+}

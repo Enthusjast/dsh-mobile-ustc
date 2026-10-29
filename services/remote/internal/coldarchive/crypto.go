@@ -16,6 +16,8 @@ import (
 const magic = "DSHCA001"
 const HeaderSize = 8 + 32 + 12 + 8
 const MaxArtifact = HeaderSize + MaxPlaintext + 16
+const MaxExtendedPlaintext = 64 << 20
+const MaxExtendedArtifact = HeaderSize + MaxExtendedPlaintext + 16
 
 type Key struct {
 	mu     sync.RWMutex
@@ -129,7 +131,13 @@ func Seal(key *Key, payload Payload, salt [32]byte, nonce [12]byte) ([]byte, str
 // SealEncoded accepts previously validated bytes, allowing a retry to check
 // their persisted hash before any reuse of a salt/nonce pair.
 func SealEncoded(key *Key, plain []byte, salt [32]byte, nonce [12]byte) ([]byte, error) {
-	if key == nil || len(plain) == 0 || len(plain) > MaxPlaintext {
+	return SealEncodedWithLimit(key, plain, salt, nonce, MaxPlaintext)
+}
+
+// SealEncodedWithLimit permits a caller-specific bounded format. Callers must
+// validate their complete plaintext before sealing and before any nonce reuse.
+func SealEncodedWithLimit(key *Key, plain []byte, salt [32]byte, nonce [12]byte, limit int) ([]byte, error) {
+	if key == nil || limit < 1 || limit > MaxExtendedPlaintext || len(plain) == 0 || len(plain) > limit {
 		return nil, ErrInvalid
 	}
 	value, err := aead(key, salt[:])
@@ -150,11 +158,17 @@ func SealEncoded(key *Key, plain []byte, salt [32]byte, nonce [12]byte) ([]byte,
 // decoded format, key ID, domain and export identity before using its content.
 // The returned plaintext is owned by the caller and should be cleared.
 func OpenEncoded(key *Key, artifact []byte) ([]byte, error) {
-	if key == nil || len(artifact) < HeaderSize+16 || len(artifact) > MaxArtifact || string(artifact[:8]) != magic {
+	return OpenEncodedWithLimit(key, artifact, MaxPlaintext)
+}
+
+// OpenEncodedWithLimit authenticates a container with an explicit bounded
+// plaintext size; the caller must still validate its decoded identity and type.
+func OpenEncodedWithLimit(key *Key, artifact []byte, limit int) ([]byte, error) {
+	if key == nil || limit < 1 || limit > MaxExtendedPlaintext || len(artifact) < HeaderSize+16 || len(artifact) > HeaderSize+limit+16 || string(artifact[:8]) != magic {
 		return nil, ErrInvalid
 	}
 	length := binary.BigEndian.Uint64(artifact[52:60])
-	if length < 16 || length > MaxPlaintext+16 || length != uint64(len(artifact)-HeaderSize) {
+	if length < 16 || length > uint64(limit)+16 || length != uint64(len(artifact)-HeaderSize) {
 		return nil, ErrInvalid
 	}
 	value, err := aead(key, artifact[8:40])

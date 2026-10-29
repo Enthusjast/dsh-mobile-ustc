@@ -495,6 +495,7 @@ func TestApprovalEvidenceVerificationUsesLimitedRole(t *testing.T) {
 
 func TestApprovalEvidenceVerifierPreventsOlderAuditSchemaRollback(t *testing.T) {
 	ctx, db := newPostgresIntegrationDatabase(t)
+	applyAuditColdExportFixtureMigration(t, ctx, db, "down")
 	down, err := os.ReadFile("../../../../deploy/sql/026_audit_history.down.sql")
 	if err != nil {
 		t.Fatal(err)

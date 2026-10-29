@@ -151,3 +151,39 @@ func TestKeyFileRequiresOwnedPrivateRegularFileWithoutSymlinks(t *testing.T) {
 		t.Fatal("incorrect key length accepted")
 	}
 }
+
+func TestDirectoryEnforcesExplicitArtifactLimit(t *testing.T) {
+	path := t.TempDir()
+	if err := os.Chmod(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(t, 24)
+	plain := bytes.Repeat([]byte("x"), 100)
+	salt, nonce, err := Material()
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := SealEncodedWithLimit(key, plain, salt, nonce, len(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	small, err := OpenDirectoryWithLimit(path, len(artifact)-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := small.Publish(testExport, artifact, func([]byte) error { return nil }); !errors.Is(err, ErrInvalid) {
+		t.Fatal("oversized artifact was published", err)
+	}
+	_ = small.Close()
+	bounded, err := OpenDirectoryWithLimit(path, len(artifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bounded.Close()
+	if err := bounded.Publish(testExport, artifact, func([]byte) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenDirectoryWithLimit(path, MaxExtendedArtifact+1); err == nil {
+		t.Fatal("unbounded directory accepted")
+	}
+}

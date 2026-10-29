@@ -15,11 +15,21 @@ type Directory struct {
 	root          *os.Root
 	path          string
 	device, inode uint64
+	maxArtifact   int
 }
 
 // OpenDirectory anchors operations to an already-existing owner-only directory.
 // The resolved path cannot contain symlinks; no caller-controlled file names are used.
 func OpenDirectory(path string) (*Directory, error) {
+	return OpenDirectoryWithLimit(path, MaxArtifact)
+}
+
+// OpenDirectoryWithLimit keeps the same protected publication semantics with
+// an explicit file bound, never exceeding MaxExtendedArtifact.
+func OpenDirectoryWithLimit(path string, limit int) (*Directory, error) {
+	if limit < HeaderSize+16 || limit > MaxExtendedArtifact {
+		return nil, ErrInvalid
+	}
 	if !filepath.IsAbs(path) || strings.IndexByte(path, 0) >= 0 || len(path) > 4096 {
 		return nil, ErrInvalid
 	}
@@ -45,7 +55,7 @@ func OpenDirectory(path string) (*Directory, error) {
 		_ = root.Close()
 		return nil, ErrInvalid
 	}
-	return &Directory{root: root, path: path, device: device, inode: inode}, nil
+	return &Directory{root: root, path: path, device: device, inode: inode, maxArtifact: limit}, nil
 }
 func (*Directory) String() string         { return "coldarchive.Directory" }
 func (*Directory) GoString() string       { return "coldarchive.Directory" }
@@ -84,7 +94,7 @@ func (directory *Directory) read(name string) ([]byte, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, os.ErrNotExist
 	}
-	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0077 != 0 || before.Size() < HeaderSize+16 || before.Size() > MaxArtifact {
+	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0077 != 0 || before.Size() < HeaderSize+16 || before.Size() > int64(directory.maxArtifact) {
 		return nil, ErrInvalid
 	}
 	if _, _, err := identity(before); err != nil {
@@ -99,8 +109,8 @@ func (directory *Directory) read(name string) ([]byte, error) {
 	if err != nil || !os.SameFile(before, actual) {
 		return nil, ErrInvalid
 	}
-	value, err := io.ReadAll(io.LimitReader(file, MaxArtifact+1))
-	if err != nil || len(value) > MaxArtifact || int64(len(value)) != actual.Size() {
+	value, err := io.ReadAll(io.LimitReader(file, int64(directory.maxArtifact)+1))
+	if err != nil || len(value) > directory.maxArtifact || int64(len(value)) != actual.Size() {
 		clear(value)
 		return nil, ErrInvalid
 	}
@@ -142,7 +152,7 @@ func (directory *Directory) syncFile(name string) error {
 // every claimed success has been read back, validated and directory-synced.
 func (directory *Directory) Publish(id string, artifact []byte, validate func([]byte) error) error {
 	name, err := filename(id)
-	if err != nil || len(artifact) > MaxArtifact || len(artifact) < HeaderSize+16 || validate == nil {
+	if err != nil || len(artifact) > directory.maxArtifact || len(artifact) < HeaderSize+16 || validate == nil {
 		return ErrInvalid
 	}
 	if validate(artifact) != nil {

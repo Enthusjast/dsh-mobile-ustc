@@ -15,10 +15,13 @@ import (
 // Administrative local CLI only; no listener or caller-selected source SQL.
 func runArchiveCommand(arguments []string, output io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("remote archive requires control, audit, verify-approval, export, verify, verify-offline, abort-export or import")
+		return errors.New("remote archive requires a maintenance or verification command")
 	}
 	if arguments[0] == "verify-approval" {
 		return runApprovalEvidenceCommand(arguments[1:], output)
+	}
+	if arguments[0] == "export-audit" || arguments[0] == "verify-audit-export" || arguments[0] == "verify-audit-offline" || arguments[0] == "abort-audit-export" {
+		return runAuditColdExportCommand(arguments[0], arguments[1:], output)
 	}
 	if arguments[0] == "export-approval" || arguments[0] == "verify-approval-export" || arguments[0] == "verify-approval-offline" || arguments[0] == "abort-approval-export" {
 		return runEvidenceExportCommand(arguments[0], arguments[1:], output)
