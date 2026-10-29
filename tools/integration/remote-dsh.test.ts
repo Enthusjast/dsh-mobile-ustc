@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, writeFile, unlink } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, writeFile, unlink } from 'node:fs/promises'
 import { createServer, request } from 'node:http'
 import { createServer as createTCPServer } from 'node:net'
 import { createRequire } from 'node:module'
@@ -368,17 +368,22 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const wrapper = join(root, 'plugin.mjs')
   const accessFile = join(root, 'host-resource-session.json')
   await writeFile(accessFile, JSON.stringify(hostAccess), { mode: 0o600 })
+  const journalProtectorFile = join(root, 'journal-protector-fixture.key')
+  const journalProtectorKey = randomBytes(32)
+  await writeFile(journalProtectorFile, journalProtectorKey, { mode: 0o600 })
+  journalProtectorKey.fill(0)
   const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
   const checkpointFailureSecret = `PRIVATE_CHECKPOINT_FAILURE_${randomUUID()}`
   await writeFile(wrapper, [
-    "import { createPrivateKey, sign } from 'node:crypto'",
+    "import { createCipheriv, createDecipheriv, createPrivateKey, randomBytes, sign } from 'node:crypto'",
     "import { writeFile, readFile } from 'node:fs/promises'",
     `import { createRemoteControlPlugin, HostRestCredentialProvider } from ${JSON.stringify(plugin)}`,
     `const privateKey = createPrivateKey({format:'jwk',key:${JSON.stringify(installationKey.privateKey.export({ format: 'jwk' }))}})`,
+    `const journalMaster=await readFile(${JSON.stringify(journalProtectorFile)});const journalProtector={id:'fixture-platform-v1',async wrap(value,aad){const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',journalMaster,nonce);cipher.setAAD(aad);return Buffer.concat([nonce,cipher.update(value),cipher.final(),cipher.getAuthTag()])},async unwrap(value,aad){const bytes=Buffer.from(value),decipher=createDecipheriv('aes-256-gcm',journalMaster,bytes.subarray(0,12));decipher.setAAD(aad);decipher.setAuthTag(bytes.subarray(44));return Buffer.concat([decipher.update(bytes.subarray(12,44)),decipher.final()])}}`,
     `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(enrollment.installation_id)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}},account:{signal:new AbortController().signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
-    `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)})`,
+    `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)},journalProtector)`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>()=>credentialProvider.close());ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>()=>{credentialProvider.close();journalMaster.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -393,6 +398,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     `        runtimeId: ${enrollment.runtime_id}`, `        socketPath: ${JSON.stringify(socketPath)}`,
     `        relayUrl: ${JSON.stringify(origin)}`, '        applicationVersion: dsh-go-integration',
     `        commandJournalPath: ${JSON.stringify(join(root, 'journal', 'commands.sqlite'))}`,
+    '        requireProtectedJournalKey: true',
     '        workspaces:', '          - id: probe', `            remoteId: ${enrollment.workspaces[0].workspace_id}`, `            cwd: ${JSON.stringify(workspace)}`,
     '        presets: [standard, remote-timed]', '        highRiskTools: [bash, pwsh, run_code]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
   ].join('\n') + '\n' + timedPreset, { mode: 0o600 })
@@ -424,6 +430,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     try { return await local('GET', '/m0/probe') } catch { return undefined }
   }, 'DSH readiness', 30_000)
   assert.equal(probe.payload.dsh_version, '0.2.1-rc.2')
+  const journalPath = join(root, 'journal', 'commands.sqlite')
+  assert.equal((await lstat(`${journalPath}.wrapped-key`)).mode & 0o777, 0o600)
+  await assert.rejects(lstat(`${journalPath}.key`), error => (error as NodeJS.ErrnoException).code === 'ENOENT')
   await until(async () => query(`select count(*) from runtimes where id='${enrollment.runtime_id}' and epoch='${probe.runtime_epoch}' and connection_id is not null`) === '1' ? true : undefined,
     'committed host attachment')
   assert.equal(query(`select count(*) from audit_log where action='host.credential.issue'`), '2', 'normal plugin did not issue its own provider credential')

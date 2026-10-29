@@ -14,10 +14,12 @@ import { RelayFiles } from './relay-files.js'
 import { RelayExports } from './relay-exports.js'
 import { PinnedExportSource } from './file-export-source.js'
 import { RelayQuestionReferences } from './relay-question-references.js'
+import type { JournalKeyProtector } from './journal-key-protection.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
 export { HostRestCredentialProvider, HostCredentialError } from './host-credentials.js'
 export type { HostResourceIdentity, HostResourceAccess, HostResourceRequest, HostResourceAccessProvider, HostRestCredentialOptions } from './host-credentials.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
+export type { JournalKeyProtector } from './journal-key-protection.js'
 
 export const name = 'ustc-remote-control'
 export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections', 'workspaceRegistry', 'fileUploads', 'attachments', 'fs']
@@ -31,6 +33,7 @@ export interface Config {
   highRiskTools?: string[]
   interactionTimeoutMs?: number
   commandJournalPath?: string
+  requireProtectedJournalKey?: boolean
   relayUrl?: string
   applicationVersion?: string
 }
@@ -45,12 +48,13 @@ export const Config: z<Config> = z.object({
   highRiskTools: z.array(String).default(['bash', 'pwsh', 'run_code']),
   interactionTimeoutMs: z.number().min(100).max(600_000).default(180_000),
   commandJournalPath: z.string().default(''),
+  requireProtectedJournalKey: z.boolean().default(false),
   relayUrl: z.string().default(''),
   applicationVersion: z.string().default(''),
 })
 
 /** Opt-in M0 integration into the current Cordis profile; no default export. */
-export async function apply(ctx: Context, config: Config = {}, credentials?: HostCredentialProvider, signedOptions?: SignedApprovalOptions): Promise<void> {
+export async function apply(ctx: Context, config: Config = {}, credentials?: HostCredentialProvider, signedOptions?: SignedApprovalOptions, journalKeyProtector?: JournalKeyProtector): Promise<void> {
   if (!config.enabled) return
   const options = Config(config)
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.runtimeId!)) {
@@ -61,6 +65,7 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
     throw new Error('remote-control Relay requires an external host credential provider and applicationVersion')
   }
   if (signedOptions && (!options.relayUrl || !credentials)) throw new Error('signed approval requires an authenticated Relay connection')
+  if (options.requireProtectedJournalKey && !journalKeyProtector) throw new Error('remote-control requires a journal key protector')
   if (!options.socketPath && !options.relayUrl) throw new Error('remote-control requires an explicit local socket or Relay endpoint')
   const managed = (agent: Agent | undefined): boolean => {
     const seen = new Set<string>()
@@ -77,21 +82,36 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
     return false
   }
   const client = new DshClient(ctx, options.runtimeId!, workspaces, options.presets!)
-  await ctx.effect(async () => {
+  const keyOpen = new AbortController()
+  const ownerFiber = ctx.fiber
+  ctx.on('internal/plugin', fiber => { if (fiber === ownerFiber && fiber.uid === null) keyOpen.abort() }, { global: true })
+  if (ownerFiber.uid === null) keyOpen.abort()
+  const credentialSignal = credentials?.signal
+  if (credentialSignal) {
+    const cancelled = () => keyOpen.abort()
+    credentialSignal.addEventListener('abort', cancelled, { once: true })
+    try { ctx.effect(() => () => credentialSignal.removeEventListener('abort', cancelled), 'remote-control.key-owner') }
+    catch (error) { credentialSignal.removeEventListener('abort', cancelled); keyOpen.abort(); throw error }
+    if (credentialSignal.aborted) cancelled()
+  }
+  const startup = ctx.effect(async () => {
     const journalPath = options.commandJournalPath || defaultCommandJournalPath(options.runtimeId!)
-    const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!)
+    const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!, journalKeyProtector ? { protector: journalKeyProtector, signal: keyOpen.signal } : {})
     let runtime: ProbeRuntime | undefined
     let signed: SignedApprovals | undefined
     try {
+      if (keyOpen.signal.aborted) throw new Error('remote-control startup cancelled')
       const epoch = randomUUID()
       const interactions = new InteractionRouter(ctx, options.runtimeId!, managed, signedOptions ? [] : options.highRiskTools!, options.interactionTimeoutMs!)
       if (signedOptions) signed = new SignedApprovals(ctx, options.runtimeId!, epoch, journal.approvals(epoch), workspaces, managed, options.interactionTimeoutMs!, signedOptions)
       runtime = new ProbeRuntime(client, interactions, journal, epoch)
       const exportSupported=await PinnedExportSource.supported()
+      if (keyOpen.signal.aborted) throw new Error('remote-control startup cancelled')
       let server: Awaited<ReturnType<typeof startDebugServer>> | undefined
       let relay: Awaited<ReturnType<typeof startHostRelay>> | undefined
       try {
         if (options.socketPath) server = await startDebugServer(options.socketPath, runtime)
+        if (keyOpen.signal.aborted) throw new Error('remote-control startup cancelled')
         if (options.relayUrl && credentials) relay = startHostRelay({
           url: options.relayUrl, runtime, credentials,
           dshVersion: '0.2.1-rc.2', applicationVersion: options.applicationVersion!, pluginVersion: '0.0.1',
@@ -120,13 +140,16 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
       throw error
     }
   }, 'remote-control.debug')
+  try { ctx.effect(() => () => keyOpen.abort(), 'remote-control.key-open') }
+  catch (error) { keyOpen.abort(); throw error }
+  await startup
 }
 
 /** Build a Cordis plugin entry that receives credentials from an OS-backed integration. */
-export function createRemoteControlPlugin(credentials: HostCredentialProvider, signedOptions?: SignedApprovalOptions) {
+export function createRemoteControlPlugin(credentials: HostCredentialProvider, signedOptions?: SignedApprovalOptions, journalKeyProtector?: JournalKeyProtector) {
   return {
     name,
     inject: signedOptions && !signedOptions.workingDirectory ? [...inject, 'workingDirectory'] : inject,
-    apply(ctx: Context, config: Config = {}) { return apply(ctx, config, credentials, signedOptions) },
+    apply(ctx: Context, config: Config = {}) { return apply(ctx, config, credentials, signedOptions, journalKeyProtector) },
   }
 }

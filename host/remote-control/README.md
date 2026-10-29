@@ -71,6 +71,10 @@ Relay 双方协商 `question.blocking.v1` 后，普通阻塞式问题和计划�
 
 默认数据库路径是 Linux 的 `$XDG_STATE_HOME`（否则 `~/.local/state`）、macOS 的 `~/Library/Application Support` 或 Windows 的 `%LOCALAPPDATA%` 下按 runtimeId 隔离的目录；可用 `commandJournalPath` 指定绝对路径。POSIX 目录必须是当前用户拥有的 0700 目录，数据库和 `.key` 文件为 0600。Windows 路径限制在当前用户的 `%LOCALAPPDATA%`，依赖该目录继承的用户 ACL，仍需 Windows 实机检查。AES 密钥与数据库位于同一受保护目录，因此复制整个目录仍包含解密密钥；M1 还需把密钥包装进平台安全存储。当前本机调试协议使用 `local` 用户 / 设备标识；Relay 接入后必须由已验证的 user_id/device_id 作为日志分区键。
 
+可显式注入[日志密钥封装器](../../docs/host-journal-key-protection.md)，将数据密钥写成绑定路径和
+runtime 的受保护文件，并在验证后迁移旧 `.key`。设置 `requireProtectedJournalKey: true` 可要求
+调用方提供封装器。仓库尚未提供生产操作系统密钥库适配器；默认文件模式和平台验收边界仍如上。
+
 SQLite 使用 Node.js v24 的 `node:sqlite` 同步 API；该 Node 版本将模块标记为 Release Candidate，且同步数据库操作会短暂占用事件循环。单条正文和事务均有界；构建及 DSH CLI 集成验证以仓库锁定的 Node 24 runtime 为准。[Node.js v24 SQLite 文档](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)。主机 Relay 接受经签名握手后的文本 queue / steer 帧，校验服务端提供的规范化摘要，以验证后的 user_id/device_id 分区写入命令日志，并发送 host_accepted、dispatching、agent_queued 等回执。agent_queued 仍等待 DSH 会话持久化检查点。主机同时通过 `session.catalog.v1` 发布会话目录元数据；目录包含确定性 session UUID、原生 DSH ID、可选控制面 workspace UUID、状态和持久化位置，不包含正文、标题或本机路径。插件在连接建立及会话增删时发布完整快照，运行状态和消息活动变化使用增量更新；离开允许工作区的会话会被标记为不可用并清除 workspace 映射。
 
 若授权按 workspace 限定，workspace 配置必须带 `remoteId`，其值为主机登记返回的 workspace UUID；缺少映射时该会话不会匹配 workspace grant。session grant 可按 session UUID 单独限定。

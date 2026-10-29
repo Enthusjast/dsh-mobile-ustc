@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { ProbeError, type Command } from './protocol.js'
 import { PersistentApprovalJournal, migrateApprovalJournal } from './approval-journal.js'
 import { encryptJournalBytes, decryptJournalBytes, type Ciphertext } from './journal-crypto.js'
+import { finalizeProtectedKey, hasProtectedKey, loadProtectedKey, type JournalKeyOptions, type ProtectedKey } from './journal-key-protection.js'
 
 export const MAX_JOURNAL_COMMANDS = 100_000
 const MAX_PENDING_JOURNAL_COMMANDS = 4096
@@ -222,8 +223,9 @@ export class PersistentCommandJournal implements CommandJournal {
   private approvalLog: PersistentApprovalJournal | undefined
   private constructor(private readonly database: DatabaseSync, private readonly key: Buffer, private readonly runtimeId: string) {}
 
-  static async open(path: string, runtimeId: string): Promise<PersistentCommandJournal> {
+  static async open(path: string, runtimeId: string, options: JournalKeyOptions = {}): Promise<PersistentCommandJournal> {
     if (!isAbsolute(path) || !RUNTIME_ID.test(runtimeId)) throw new Error('command journal requires an absolute path and runtime UUID')
+    if (options.signal?.aborted) throw new Error('command journal key protection unavailable')
     if (process.platform === 'win32') {
       const root = process.env.LOCALAPPDATA
       if (!root || !isAbsolute(root)) throw new Error('LOCALAPPDATA is required for the command journal')
@@ -234,6 +236,7 @@ export class PersistentCommandJournal implements CommandJournal {
     }
     const parent = dirname(path)
     await ensurePrivateDirectory(parent)
+    if (options.signal?.aborted) throw new Error('command journal key protection unavailable')
     let databaseExists = false
     try {
       await assertPrivateFile(path)
@@ -241,13 +244,22 @@ export class PersistentCommandJournal implements CommandJournal {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
-    const key = await loadOrCreateKey(`${path}.key`, databaseExists)
-    if (!databaseExists) {
-      await createPrivateFile(path)
-      await assertPrivateFile(path)
+    let protectedKey: ProtectedKey | undefined
+    let key: Buffer
+    if (options.protector) {
+      protectedKey = await loadProtectedKey(path, runtimeId, databaseExists, options.protector, options.signal)
+      key = protectedKey.key
+    } else {
+      if (await hasProtectedKey(path)) throw new Error('command journal requires its configured key protector')
+      key = await loadOrCreateKey(`${path}.key`, databaseExists)
     }
     let database: DatabaseSync | undefined
     try {
+      if (options.signal?.aborted) throw new Error('command journal key protection unavailable')
+      if (!databaseExists) {
+        await createPrivateFile(path)
+        await assertPrivateFile(path)
+      }
       database = new DatabaseSync(path, { timeout: 5000, enableForeignKeyConstraints: true })
       database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA secure_delete = ON; PRAGMA trusted_schema = OFF;')
       if (database.prepare('PRAGMA journal_mode').get()?.journal_mode !== 'wal'
@@ -314,6 +326,8 @@ export class PersistentCommandJournal implements CommandJournal {
         throw error
       }
       migrateApprovalJournal(database)
+      if (protectedKey) await finalizeProtectedKey(path, protectedKey, options.signal)
+      if (options.signal?.aborted) throw new Error('command journal key protection unavailable')
       return new PersistentCommandJournal(database, key, runtimeId)
     } catch (error) {
       if (database?.isOpen) {
@@ -322,6 +336,7 @@ export class PersistentCommandJournal implements CommandJournal {
         }
         database.close()
       }
+      protectedKey?.context.fill(0)
       key.fill(0)
       throw error
     }
