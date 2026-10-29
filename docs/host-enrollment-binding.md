@@ -15,6 +15,7 @@ profile 和安装公钥重新核对。首次本机确认前的显示信息仍会
 
 `open` 每次使用当前资源账号和安装密钥访问 host-review，核对原 request / enrollment、组织、
 主机、安装、runtime、profile、工作区及公钥指纹；只有服务端报告已批准才返回不可变的绑定元数据。
+返回值包含原 `requestId` 和 `enrollmentId`，可用于与待处理尝试精确对账。
 待确认、拒绝或无法核对时不会返回可用绑定。**历史批准不是当前连接授权**：启动 Relay 时仍须通过
 `HostRestCredentialProvider` 获取当前短期凭据，服务端继续检查安装、runtime、grant 和撤销状态。
 不能把恢复的 ID、历史批准或旧备份当作绕过在线授权的凭据。
@@ -73,4 +74,5 @@ await recovery.remove(attempt, signal); attempt.destroy()
 小型测试覆盖确认前持久化、相同回执幂等、伪造 / 冲突 / 篡改 / 错误账号拒绝、确认响应丢失、
 确认后查询失败、账号取消和并发删除。测试将本机时间推进超过配对码恢复期限，再以当前资源身份
 重新读取已批准绑定。Go / PostgreSQL / 本机 DSH 双节点夹具另验证重启后使用持久的 installation、
-runtime 和工作区映射完成 Host 连接；学校身份、本机确认界面和生产密钥库仍未验收。
+runtime 和工作区映射完成 Host 连接。Linux 的[终端确认入口](host-local-enrollment.md)另使用
+临时 PTY 验证；学校身份、真实桌面确认界面和生产密钥库仍未验收。

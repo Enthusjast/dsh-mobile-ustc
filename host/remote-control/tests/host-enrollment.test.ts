@@ -8,9 +8,10 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { inspect } from 'node:util'
 import { pathToFileURL } from 'node:url'
-import { captureEnrollmentBinding, HostEnrollmentClient, type HostEnrollmentOptions } from '../src/host-enrollment.js'
-import { HostEnrollmentRecoveryStore } from '../src/host-enrollment-recovery.js'
+import { captureEnrollmentBinding, HostEnrollmentClient, type HostEnrollmentBinding, type HostEnrollmentOptions } from '../src/host-enrollment.js'
+import { HostEnrollmentRecoveryError, HostEnrollmentRecoveryStore } from '../src/host-enrollment-recovery.js'
 import { HostEnrollmentBindingError, HostEnrollmentBindingStore } from '../src/host-enrollment-binding.js'
+import { HostLocalEnrollmentError, runHostEnrollmentOnTerminal } from '../src/host-local-enrollment.js'
 import { HostEnrollmentError } from '../src/host-enrollment-transport.js'
 import type { HostResourceAccess } from '../src/host-credentials.js'
 import type { JournalKeyProtector } from '../src/journal-key-protection.js'
@@ -279,6 +280,7 @@ test('binding pointer survives confirmation, recovery cleanup and attempt expiry
     assert.deepEqual(await readFile(bindingPath), before)
     return true
   }, AbortSignal.timeout(5_000))
+  assert.equal(result.requestId, attempt.requestId); assert.equal(result.enrollmentId, enrollment)
   assert.equal(result.organizationId, organization); assert.equal(result.hostId, host)
   assert.equal(result.installationId, installation); assert.equal(result.runtimeId, runtime)
   assert.equal(result.profileRef, 'profile'); assert.equal(result.workspaces.length, 2)
@@ -298,6 +300,54 @@ test('binding pointer survives confirmation, recovery cleanup and attempt expiry
     assert.deepEqual(await readFile(bindingPath), before)
     f.state.denyReview = false
   } finally { Date.now = now }
+})
+
+test('terminal enrollment requires durable recovery before displaying a pairing code', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-terminal-recovery-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), attempt = f.prepare()
+  // Exercise callers that created the attempt without the recovery store.
+  const receipt = await f.client.create(attempt, AbortSignal.timeout(5_000))
+  await writeFile(join(root, 'not-a-directory'), 'fixture')
+  const missing = new HostEnrollmentRecoveryStore({ path: join(root, 'not-a-directory', 'pending.bin'), client: f.client, protector })
+  const recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  t.after(() => { missing.close(); recovery.close(); binding.close(); attempt.destroy() })
+  await assert.rejects(runHostEnrollmentOnTerminal({ client: f.client, recovery: missing, binding, attempt, receipt,
+    signal: AbortSignal.timeout(5_000) }), (error: unknown) => error instanceof HostEnrollmentRecoveryError && error.code === 'host.enrollment_recovery.unavailable')
+  assert.equal(f.counts().reviews, 0)
+
+  const controller = new AbortController()
+  const cancellingRecovery = { async save(value: typeof attempt, signal: AbortSignal) {
+    await recovery.save(value, signal); controller.abort()
+  } } as unknown as HostEnrollmentRecoveryStore
+  await assert.rejects(runHostEnrollmentOnTerminal({ client: f.client, recovery: cancellingRecovery, binding, attempt, receipt,
+    signal: controller.signal }), (error: unknown) => error instanceof HostLocalEnrollmentError && error.code === 'host.local_enrollment.cancelled')
+  const recovered = await recovery.load(AbortSignal.timeout(5_000))
+  assert.ok(recovered); assert.equal(recovered.requestId, attempt.requestId); assert.equal(recovered.code, attempt.code)
+  recovered.destroy(); assert.equal(f.counts().reviews, 0)
+})
+
+test('terminal enrollment reconciles only the exact request and enrollment', async t => {
+  const f = await fixture(t), attempt = f.prepare()
+  f.state.phoneConfirmed = true; f.state.approved = true
+  const receipt = await f.client.create(attempt, AbortSignal.timeout(5_000))
+  const saved = captureEnrollmentBinding(f.client, attempt, receipt)
+  const matching: HostEnrollmentBinding = { requestId: saved.request_id, enrollmentId: saved.enrollment_id,
+    organizationId: saved.organization_id, hostId: saved.host_id, installationId: saved.installation_id,
+    installationKeyThumbprint: saved.installation_key_jkt, runtimeId: saved.runtime_id, profileRef: saved.profile_ref,
+    workspaces: saved.workspaces.map(item => ({ reference: item.reference, workspaceId: item.workspace_id })) }
+  const recovery = {} as HostEnrollmentRecoveryStore
+  const run = async (result: HostEnrollmentBinding) => {
+    const binding = { async open() { return result } } as unknown as HostEnrollmentBindingStore
+    return await runHostEnrollmentOnTerminal({ client: f.client, recovery, binding, attempt, receipt, signal: AbortSignal.timeout(5_000) })
+  }
+  assert.equal(await run(matching), matching)
+  for (const field of ['requestId', 'enrollmentId'] as const) {
+    await assert.rejects(run({ ...matching, [field]: randomUUID() }),
+      (error: unknown) => error instanceof HostLocalEnrollmentError && error.code === 'host.local_enrollment.recovery_required')
+  }
+  attempt.destroy()
 })
 
 test('binding pointer reconciles a lost confirmation without the expired pairing attempt', { skip: process.platform !== 'linux' }, async t => {

@@ -426,6 +426,13 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(preview.user_confirmed_by_me, false)
   assert.equal(preview.host_confirmed, false)
   assert.equal(JSON.stringify(preview).includes(code), false)
+  let terminalRun: Promise<import('../../host/remote-control/src/host-enrollment.js').HostEnrollmentBinding> | undefined
+  if (process.env.REMOTE_TEST_HOST_TERMINAL === '1') {
+    assert.ok(recoveryStore && bindingStore, 'terminal fixture requires the Linux protected stores')
+    terminalRun = hostPackage.runHostEnrollmentOnTerminal({ client: enrollmentClient, recovery: recoveryStore, binding: bindingStore,
+      attempt, receipt, signal: AbortSignal.timeout(20_000) })
+    void terminalRun.catch(() => {})
+  }
   const partial = await phone('POST', `/v1/enrollments/${enrollment.enrollment_id}/confirm`, { code })
   assert.equal(partial.state, 'user_confirmed')
   assert.equal(partial.host_confirmed, false)
@@ -447,7 +454,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   let persistedHostId = enrollment.host_id, persistedInstallationId = enrollment.installation_id, persistedRuntimeId = enrollment.runtime_id
   let persistedPrimaryWorkspace = primaryWorkspace
   if (bindingStore && recoveryStore && bindingProtector) {
-    const active = await bindingStore.confirm(recoveryStore, attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
+    const active = terminalRun ? await terminalRun : await bindingStore.confirm(recoveryStore, attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
     assert.equal(active.installationId, enrollment.installation_id); assert.equal(active.runtimeId, enrollment.runtime_id)
     assert.equal(await recoveryStore.remove(attempt, AbortSignal.timeout(10_000)), true)
     attempt.destroy(); bindingStore.close(); recoveryStore.close(); enrollmentClient.close()
@@ -462,7 +469,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const active = await enrollmentClient.confirm(attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
     assert.equal(active.state, 'approved'); assert.equal(active.host_confirmed, true); assert.equal(active.user_confirmed, true)
   }
-  assert.equal(localReviews, 1)
+  assert.equal(localReviews, terminalRun ? 0 : 1)
+  if (terminalRun) t.diagnostic('A disposable controlling terminal displayed the pairing details and required the exact local confirmation response.')
   t.diagnostic('The Host enrollment client restored its fixture recovery attempt, repeated creation idempotently, reviewed the confirmed identity and reopened its durable binding before connecting.')
   assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
   const runtimeAccess = (await phone('GET', '/v1/runtimes')).items.find((runtime: any) => runtime.id === enrollment.runtime_id)

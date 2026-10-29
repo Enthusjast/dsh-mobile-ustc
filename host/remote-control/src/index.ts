@@ -26,6 +26,8 @@ export type { HostEnrollmentRecoveryOptions } from './host-enrollment-recovery.j
 export { HostEnrollmentBindingStore, HostEnrollmentBindingError } from './host-enrollment-binding.js'
 export type { HostEnrollmentBindingOptions } from './host-enrollment-binding.js'
 export type { HostEnrollmentBinding } from './host-enrollment.js'
+export { HostLocalEnrollmentError, presentHostEnrollmentOnTerminal, approveHostEnrollmentOnTerminal, runHostEnrollmentOnTerminal } from './host-local-enrollment.js'
+export type { HostLocalEnrollmentOptions } from './host-local-enrollment.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
 export type { JournalKeyProtector } from './journal-key-protection.js'
 export { LinuxSecretServiceJournalProtector } from './secret-service-journal-protector.js'

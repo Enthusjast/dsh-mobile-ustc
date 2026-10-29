@@ -57,6 +57,8 @@ export type HostEnrollmentApprovalReview = {
 }
 export type HostEnrollmentConfirmation = z.infer<typeof confirmation>['data']
 export interface HostEnrollmentBinding {
+  readonly requestId: string
+  readonly enrollmentId: string
   readonly organizationId: string
   readonly hostId: string
   readonly installationId: string
@@ -116,7 +118,8 @@ export async function verifyEnrollmentBinding(client: HostEnrollmentClient, sour
       Date.parse(row.expires_at) !== Date.parse(expected.expires_at) || !sameWorkspaces(row.workspaces, expected.workspaces) ||
       row.user_confirmed !== (result.confirmed_user !== null)) throw enrollmentError('identity_changed')
   if (row.state !== 'approved' || !row.host_confirmed || !row.user_confirmed || !result.confirmed_user) throw enrollmentError('review_required')
-  return Object.freeze({ organizationId: expected.organization_id, hostId: expected.host_id, installationId: expected.installation_id,
+  return Object.freeze({ requestId: expected.request_id, enrollmentId: expected.enrollment_id,
+    organizationId: expected.organization_id, hostId: expected.host_id, installationId: expected.installation_id,
     installationKeyThumbprint: expected.installation_key_jkt, runtimeId: expected.runtime_id, profileRef: expected.profile_ref,
     workspaces: Object.freeze(expected.workspaces.map(item => Object.freeze({ reference: item.reference, workspaceId: item.workspace_id }))) })
 }
