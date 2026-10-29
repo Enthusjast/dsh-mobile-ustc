@@ -2,7 +2,8 @@ import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from '
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { inspect } from 'node:util'
 import { invoke, protectorFrom, type JournalKeyProtector, type Protector } from './journal-key-protection.js'
-import { enrollmentRecoveryBinding, type HostEnrollmentApprovalReview, type HostEnrollmentClient, type HostEnrollmentConfirmation, type HostEnrollmentIntent, type HostEnrollmentReceipt } from './host-enrollment.js'
+import { enrollmentRecoveryBinding, enrollmentRecoveryMatchesBinding, requireEnrollmentBindingOwner, type HostEnrollmentApprovalReview, type HostEnrollmentBinding, type HostEnrollmentClient, type HostEnrollmentConfirmation, type HostEnrollmentIntent, type HostEnrollmentReceipt } from './host-enrollment.js'
+import type { HostEnrollmentBindingStore } from './host-enrollment-binding.js'
 import { guards } from './host-process-guards.js'
 import { assertLinuxPrivateDirectory, openLinuxPrivateDirectory, publishLinuxPrivateFile, readLinuxPrivateFile, unlinkLinuxPrivateFile, type LinuxPrivateDirectory, type LinuxPrivateFile } from './linux-private-files.js'
 
@@ -225,12 +226,24 @@ export class HostEnrollmentRecoveryStore {
     return await this.#remove(attempt, signal)
   }
 
+  /** Recheck an approved binding online, then remove only its matching recovery record. */
+  async removeApproved(binding: HostEnrollmentBindingStore, signal: AbortSignal): Promise<boolean> {
+    if (!(signal instanceof AbortSignal) || !binding || !(binding.signal instanceof AbortSignal) || typeof binding.open !== 'function') throw failure()
+    return await this.#hold(AbortSignal.any([signal, binding.signal]), async (permit, lifetime) => {
+      const approved = await binding.open(lifetime)
+      if (lifetime.aborted) throw failure('cancelled')
+      if (!approved) throw failure('conflict')
+      requireEnrollmentBindingOwner(this.#client, approved)
+      return await this.#remove(undefined, lifetime, permit, approved)
+    })
+  }
+
   /** Explicitly discard an authenticated record, including an expired one. */
   async discard(signal: AbortSignal): Promise<boolean> {
     return await this.#remove(undefined, signal)
   }
 
-  async #remove(attempt: HostEnrollmentIntent | undefined, signal: AbortSignal): Promise<boolean> {
+  async #remove(attempt: HostEnrollmentIntent | undefined, signal: AbortSignal, permit?: symbol, approved?: HostEnrollmentBinding): Promise<boolean> {
     return await this.#run(signal, async (directory, lifetime) => {
       const stored = await readLinuxPrivateFile(directory, this.#name, MAX_FILE, lifetime)
       if (!stored) return false
@@ -244,9 +257,10 @@ export class HostEnrollmentRecoveryStore {
           if (expected !== exported) exported.fill(0)
           if (expected.length !== plaintext.length || !timingSafeEqual(expected, plaintext)) throw failure('conflict')
         }
+        if (approved && !enrollmentRecoveryMatchesBinding(this.#client, plaintext, approved)) throw failure('conflict')
         await unlinkLinuxPrivateFile(directory, this.#name, stored, MAX_FILE, lifetime)
         return true
       } finally { stored.bytes.fill(0); plaintext?.fill(0); expected?.fill(0) }
-    })
+    }, permit)
   }
 }

@@ -432,13 +432,14 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(preview.host_confirmed, false)
   assert.equal(JSON.stringify(preview).includes(code), false)
   let terminalRun: Promise<import('../../host/remote-control/src/host-enrollment.js').HostEnrollmentBinding> | undefined
+  let terminalWorkflow: InstanceType<typeof hostPackage.HostTerminalEnrollmentWorkflow> | undefined
   if (process.env.REMOTE_TEST_HOST_TERMINAL === '1') {
     assert.ok(recoveryStore && bindingStore, 'terminal fixture requires the Linux protected stores')
     // Model a restart after a pending binding pointer was durably reserved.
     await bindingStore.reserve(attempt, receipt, AbortSignal.timeout(10_000))
-    const workflow = new hostPackage.HostTerminalEnrollmentWorkflow({ client: enrollmentClient, recovery: recoveryStore, binding: bindingStore })
-    t.after(() => workflow.close())
-    terminalRun = workflow.resume(AbortSignal.timeout(20_000)).then(result => {
+    terminalWorkflow = new hostPackage.HostTerminalEnrollmentWorkflow({ client: enrollmentClient, recovery: recoveryStore, binding: bindingStore })
+    t.after(() => terminalWorkflow?.close())
+    terminalRun = terminalWorkflow.resume(AbortSignal.timeout(20_000)).then(result => {
       assert.ok(result, 'the protected attempt disappeared during resume')
       return result
     })
@@ -467,7 +468,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   if (bindingStore && recoveryStore && bindingProtector) {
     const active = terminalRun ? await terminalRun : await bindingStore.confirm(recoveryStore, attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
     assert.equal(active.installationId, enrollment.installation_id); assert.equal(active.runtimeId, enrollment.runtime_id)
-    assert.equal(await recoveryStore.remove(attempt, AbortSignal.timeout(10_000)), true)
+    const cleaned = terminalWorkflow ? await terminalWorkflow.cleanup(AbortSignal.timeout(10_000)) : await recoveryStore.remove(attempt, AbortSignal.timeout(10_000))
+    assert.equal(cleaned, true)
     attempt.destroy(); bindingStore.close(); recoveryStore.close(); enrollmentClient.close()
     enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
     bindingStore = new hostPackage.HostEnrollmentBindingStore({ path: bindingPath, client: enrollmentClient, protector: bindingProtector })
@@ -481,7 +483,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     assert.equal(active.state, 'approved'); assert.equal(active.host_confirmed, true); assert.equal(active.user_confirmed, true)
   }
   assert.equal(localReviews, terminalRun ? 0 : 1)
-  if (terminalRun) t.diagnostic('The terminal workflow reopened a pending binding pointer and restored the original protected request; a disposable controlling terminal displayed pairing details and required the exact local confirmation response.')
+  if (terminalRun) t.diagnostic('The terminal workflow reopened a pending binding pointer, restored the original protected request, required explicit confirmation on a disposable controlling terminal, and removed only its matching recovery record after online approval verification.')
   t.diagnostic('The Host enrollment client restored its fixture recovery attempt, repeated creation idempotently, reviewed the confirmed identity and reopened its durable binding before connecting.')
   assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
   const runtimeAccess = (await phone('GET', '/v1/runtimes')).items.find((runtime: any) => runtime.id === enrollment.runtime_id)

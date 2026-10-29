@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { inspect } from 'node:util'
 import { z } from 'zod'
 import { parseSigningObject } from './canonical.js'
@@ -31,10 +31,14 @@ const review = z.strictObject({ ok: z.literal(true), data: z.strictObject({ enro
   confirmed_user: z.strictObject({ user_id: uuid, issuer: z.string().min(1).max(2048), subject: z.string().min(1).max(2048), eligible: z.boolean() }).nullable() }) })
 const confirmation = z.strictObject({ ok: z.literal(true), data: z.strictObject({ enrollment_id: uuid, host_id: uuid, runtime_id: uuid,
   state: z.enum(['pending', 'user_confirmed', 'approved']), expires_at: z.string().datetime({ offset: true }), host_confirmed: z.boolean(), user_confirmed: z.boolean() }) })
-export const hostEnrollmentBindingRecord = z.strictObject({ version: z.literal(1), purpose: z.literal('dsh-host-enrollment-binding-v1'),
+const bindingRecordFields = { purpose: z.literal('dsh-host-enrollment-binding-v1'),
   binding: z.string().regex(/^[0-9a-f]{64}$/), request_id: uuid, enrollment_id: uuid, organization_id: uuid,
   host_id: uuid, installation_id: uuid, installation_key_jkt: secret, runtime_id: uuid,
-  profile_ref: ref, expires_at: z.string().datetime({ offset: true }), workspaces: z.array(workspace).max(64) })
+  profile_ref: ref, expires_at: z.string().datetime({ offset: true }), workspaces: z.array(workspace).max(64) }
+export const hostEnrollmentBindingRecord = z.discriminatedUnion('version', [
+  z.strictObject({ version: z.literal(1), ...bindingRecordFields }),
+  z.strictObject({ version: z.literal(2), ...bindingRecordFields, recovery_sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
+])
 
 export interface HostEnrollmentRequest {
   organizationId: string
@@ -78,6 +82,8 @@ const receiptStates = new WeakMap<HostEnrollmentReceipt, { attempt: HostEnrollme
 const activeApprovals = guards.enrollmentApprovals
 const clientBindings = new WeakMap<HostEnrollmentClient, string>()
 const clientTransports = new WeakMap<HostEnrollmentClient, HostEnrollmentTransport>()
+type VerifiedBindingOwner = Readonly<{ binding: string; recoverySha256: string | undefined }>
+const verifiedBindings = new WeakMap<HostEnrollmentBinding, VerifiedBindingOwner>()
 
 /** @internal A recovery store binds its encryption to this exact account and installation. */
 export function enrollmentRecoveryBinding(client: HostEnrollmentClient): string {
@@ -92,11 +98,16 @@ export function captureEnrollmentBinding(client: HostEnrollmentClient, attempt: 
   const binding = enrollmentRecoveryBinding(client), transport = clientTransports.get(client)
   const value = currentAttempt(attempt, binding), saved = receiptStates.get(receipt)
   if (!transport || !saved || saved.attempt !== attempt) throw enrollmentError('invalid_config')
-  return hostEnrollmentBindingRecord.parse({ version: 1, purpose: 'dsh-host-enrollment-binding-v1', binding,
+  const recovery = attempt.exportRecovery()
+  let recoverySha256: string
+  try { recoverySha256 = createHash('sha256').update(recovery).digest('hex') }
+  finally { recovery.fill(0) }
+  return hostEnrollmentBindingRecord.parse({ version: 2, purpose: 'dsh-host-enrollment-binding-v1', binding,
     request_id: value.requestId, enrollment_id: saved.data.enrollment_id, organization_id: value.input.organizationId,
     host_id: saved.data.host_id, installation_id: saved.data.installation_id, installation_key_jkt: transport.thumbprint,
     runtime_id: saved.data.runtime_id, profile_ref: value.input.profileRef, expires_at: saved.data.expires_at,
-    workspaces: [...saved.data.workspaces].sort((a, b) => a.reference < b.reference ? -1 : a.reference > b.reference ? 1 : 0) })
+    workspaces: [...saved.data.workspaces].sort((a, b) => a.reference < b.reference ? -1 : a.reference > b.reference ? 1 : 0),
+    recovery_sha256: recoverySha256 })
 }
 
 /** @internal Recheck persisted metadata against the live host-only review route. */
@@ -118,10 +129,34 @@ export async function verifyEnrollmentBinding(client: HostEnrollmentClient, sour
       Date.parse(row.expires_at) !== Date.parse(expected.expires_at) || !sameWorkspaces(row.workspaces, expected.workspaces) ||
       row.user_confirmed !== (result.confirmed_user !== null)) throw enrollmentError('identity_changed')
   if (row.state !== 'approved' || !row.host_confirmed || !row.user_confirmed || !result.confirmed_user) throw enrollmentError('review_required')
-  return Object.freeze({ requestId: expected.request_id, enrollmentId: expected.enrollment_id,
+  const verified = Object.freeze({ requestId: expected.request_id, enrollmentId: expected.enrollment_id,
     organizationId: expected.organization_id, hostId: expected.host_id, installationId: expected.installation_id,
     installationKeyThumbprint: expected.installation_key_jkt, runtimeId: expected.runtime_id, profileRef: expected.profile_ref,
     workspaces: Object.freeze(expected.workspaces.map(item => Object.freeze({ reference: item.reference, workspaceId: item.workspace_id }))) })
+  verifiedBindings.set(verified, Object.freeze({ binding, recoverySha256: expected.version === 2 ? expected.recovery_sha256 : undefined }))
+  return verified
+}
+
+/** @internal Require a binding verified for this resource account and installation. */
+export function requireEnrollmentBindingOwner(client: HostEnrollmentClient, approved: HostEnrollmentBinding): VerifiedBindingOwner {
+  const binding = enrollmentRecoveryBinding(client)
+  const verified = approved && verifiedBindings.get(approved)
+  if (!verified || verified.binding !== binding) throw enrollmentError('invalid_config')
+  return verified
+}
+
+/** @internal Compare authenticated recovery bytes without reviving an expired attempt. */
+export function enrollmentRecoveryMatchesBinding(client: HostEnrollmentClient, raw: Uint8Array, approved: HostEnrollmentBinding): boolean {
+  const { binding, recoverySha256 } = requireEnrollmentBindingOwner(client, approved)
+  if (!(raw instanceof Uint8Array) || raw.length < 1 || raw.length > 16 * 1024) throw enrollmentError('invalid_config')
+  if (!recoverySha256 || createHash('sha256').update(raw).digest('hex') !== recoverySha256) return false
+  let value: IntentState
+  try { value = recoverySchema.parse(parseSigningObject(raw)) } catch { throw enrollmentError('invalid_config') }
+  if (value.binding !== binding || value.input.workspaceRefs.some((item, index, items) => index > 0 && items[index - 1]! >= item)) throw enrollmentError('invalid_config')
+  const references = approved.workspaces.map(item => item.reference).sort()
+  return value.requestId === approved.requestId && value.input.organizationId === approved.organizationId &&
+    (!value.input.hostId || value.input.hostId === approved.hostId) && value.input.profileRef === approved.profileRef &&
+    value.input.workspaceRefs.length === references.length && value.input.workspaceRefs.every((item, index) => item === references[index])
 }
 
 function currentAttempt(attempt: HostEnrollmentIntent, binding: string): IntentState {

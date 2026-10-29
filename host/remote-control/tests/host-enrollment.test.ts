@@ -10,14 +10,15 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { inspect } from 'node:util'
 import { pathToFileURL } from 'node:url'
+import { canonicalObject } from '../src/canonical.js'
 import { captureEnrollmentBinding, HostEnrollmentClient, type HostEnrollmentBinding, type HostEnrollmentOptions } from '../src/host-enrollment.js'
-import { HostEnrollmentRecoveryError, HostEnrollmentRecoveryStore } from '../src/host-enrollment-recovery.js'
+import { HostEnrollmentRecoveryError, HostEnrollmentRecoveryStore, seal } from '../src/host-enrollment-recovery.js'
 import { HostEnrollmentBindingError, HostEnrollmentBindingStore } from '../src/host-enrollment-binding.js'
 import { HostLocalEnrollmentError, runHostEnrollmentOnTerminal } from '../src/host-local-enrollment.js'
 import { HostTerminalEnrollmentWorkflow, HostTerminalEnrollmentWorkflowError } from '../src/host-enrollment-workflow.js'
 import { HostEnrollmentError } from '../src/host-enrollment-transport.js'
 import type { HostResourceAccess } from '../src/host-credentials.js'
-import type { JournalKeyProtector } from '../src/journal-key-protection.js'
+import { protectorFrom, type JournalKeyProtector } from '../src/journal-key-protection.js'
 
 const expected = { issuer: 'https://id.example.edu', subject: 'fixture-owner', audience: 'urn:fixture-host', clientId: 'fixture-host' }
 const organization = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -62,7 +63,7 @@ async function fixture(t: test.TestContext) {
   let origin = '', input: any, createdCount = 0, confirmedCount = 0, reviews = 0
   const expires = new Date(Date.now() + 300_000).toISOString()
   const state = { phoneConfirmed: false, approved: false, eligible: true, confirmedUser: user, subject: 'fixture-phone', organizationName: 'Fixture organization',
-    dropCreate: false, holdCreate: false, redirectCreate: false, dropConfirm: false, dropReviewAt: 0, denyReview: false, wrongReceipt: false,
+    dropCreate: false, holdCreate: false, redirectCreate: false, dropConfirm: false, dropReviewAt: 0, holdReview: false, denyReview: false, wrongReceipt: false,
     aliasOverride: undefined as string | undefined, dshOverride: undefined as string | undefined, appOverride: undefined as string | undefined,
     pluginOverride: undefined as string | undefined, protocolOverride: undefined as number | undefined,
     onCreate: undefined as undefined | (() => void), onReview: undefined as undefined | ((count: number) => void) }
@@ -102,6 +103,7 @@ async function fixture(t: test.TestContext) {
       } else if (request.method === 'GET' && request.url === `/v1/enrollments/${enrollment}/host-review`) {
         assert.ok(input); reviews++; state.onReview?.(reviews)
         if (reviews === state.dropReviewAt) { response.destroy(); return }
+        if (state.holdReview) { state.holdReview = false; return }
         if (state.denyReview) { send(response, 403, { ok: false, error: { code: 'access.denied' } }, next); return }
         send(response, 200, { ok: true, data: { enrollment: { enrollment_id: enrollment, request_id: input.request_id,
           organization_id: input.organization_id, organization_name: state.organizationName, host_id: host, host_alias: state.aliasOverride ?? input.alias,
@@ -446,7 +448,168 @@ test('terminal workflow returns an online-verified binding and keeps a pending r
   const saved = await recovery.load(AbortSignal.timeout(5_000))
   assert.ok(saved); assert.equal(saved.requestId, attempt.requestId); saved.destroy()
   assert.equal(f.counts().createdCount, 1); assert.equal(f.counts().confirmedCount, 1)
-  assert.equal(await recovery.remove(attempt, AbortSignal.timeout(5_000)), true); attempt.destroy()
+  assert.equal(await workflow.cleanup(AbortSignal.timeout(5_000)), true)
+  assert.equal(await workflow.cleanup(AbortSignal.timeout(5_000)), false); attempt.destroy()
+})
+
+test('approved cleanup matches an expired protected attempt without reviving it', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-cleanup-expired-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  t.after(() => { workflow.close(); recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  const approved = await binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000))
+  attempt.destroy(); workflow.close(); binding.close(); recovery.close(); f.client.close()
+  const reopenedClient = new HostEnrollmentClient(f.options)
+  const reopenedRecovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: reopenedClient, protector })
+  const reopenedBinding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: reopenedClient, protector })
+  const reopenedWorkflow = new HostTerminalEnrollmentWorkflow({ client: reopenedClient, recovery: reopenedRecovery, binding: reopenedBinding })
+  t.after(() => { reopenedWorkflow.close(); reopenedRecovery.close(); reopenedBinding.close(); reopenedClient.close() })
+  const realNow = Date.now
+  try {
+    Date.now = () => realNow() + 601_000
+    f.account.expiresAt = Date.now() + 300_000
+    await assert.rejects(reopenedRecovery.load(AbortSignal.timeout(5_000)), (cause: unknown) =>
+      cause instanceof HostEnrollmentRecoveryError && cause.code === 'host.enrollment_recovery.unavailable')
+    assert.equal(await reopenedWorkflow.cleanup(AbortSignal.timeout(5_000)), true)
+    assert.equal(await reopenedWorkflow.cleanup(AbortSignal.timeout(5_000)), false)
+    assert.deepEqual(await reopenedBinding.open(AbortSignal.timeout(5_000)), approved)
+    assert.equal(f.counts().confirmedCount, 1)
+  } finally { Date.now = realNow }
+})
+
+test('legacy binding pointers stay usable but cannot authorize digest-based cleanup', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-cleanup-legacy-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), pendingPath = join(root, 'pending.bin'), bindingPath = join(root, 'binding.bin')
+  const recovery = new HostEnrollmentRecoveryStore({ path: pendingPath, client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: bindingPath, client: f.client, protector })
+  const workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  t.after(() => { workflow.close(); recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  const captured = captureEnrollmentBinding(f.client, attempt, receipt)
+  assert.equal(captured.version, 2)
+  const { recovery_sha256: _digest, ...fields } = captured
+  const legacy = { ...fields, version: 1 as const }
+  const plaintext = Buffer.from(canonicalObject(legacy))
+  const context = Buffer.from(`dsh-host-enrollment-binding-store-v1\0${bindingPath}\0${legacy.binding}\0${protector.id}`, 'utf8')
+  const sealed = await seal(plaintext, protectorFrom(protector), context, AbortSignal.timeout(5_000), Buffer.from('DSHENB01'))
+  await writeFile(bindingPath, sealed, { mode: 0o600 })
+  plaintext.fill(0); context.fill(0); sealed.fill(0)
+  const originalBinding = await readFile(bindingPath), originalRecovery = await readFile(pendingPath)
+  await binding.reserve(attempt, receipt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  const approved = await binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000))
+  assert.deepEqual(await binding.open(AbortSignal.timeout(5_000)), approved)
+  assert.deepEqual(await readFile(bindingPath), originalBinding)
+  await assert.rejects(workflow.cleanup(AbortSignal.timeout(5_000)), (cause: unknown) =>
+    cause instanceof HostEnrollmentRecoveryError && cause.code === 'host.enrollment_recovery.conflict')
+  assert.deepEqual(await readFile(pendingPath), originalRecovery)
+  assert.equal(await recovery.remove(attempt, AbortSignal.timeout(5_000)), true)
+  attempt.destroy()
+})
+
+test('new binding pointers reject a different recovery payload even with the same request metadata', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-digest-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const bindingPath = join(root, 'binding.bin'), binding = new HostEnrollmentBindingStore({ path: bindingPath, client: f.client, protector: recoveryProtector(master) })
+  t.after(() => binding.close())
+  const first = f.prepare(), receipt = await f.client.create(first, AbortSignal.timeout(5_000))
+  await binding.reserve(first, receipt, AbortSignal.timeout(5_000))
+  const original = await readFile(bindingPath), exported = first.exportRecovery()
+  const altered = JSON.parse(exported.toString('utf8')) as { code: string }
+  exported.fill(0); altered.code = randomBytes(32).toString('base64url')
+  const changed = Buffer.from(JSON.stringify(altered)), second = f.client.restore(changed)
+  changed.fill(0); assert.equal(second.requestId, first.requestId)
+  f.resetEnrollment()
+  const changedReceipt = await f.client.create(second, AbortSignal.timeout(5_000))
+  await assert.rejects(binding.reserve(second, changedReceipt, AbortSignal.timeout(5_000)), bindingError('conflict'))
+  assert.deepEqual(await readFile(bindingPath), original)
+  first.destroy(); second.destroy()
+})
+
+test('approved cleanup preserves absent, pending, mismatched, forged and wrong-owner records', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-cleanup-conflict-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), path = join(root, 'pending.bin')
+  const recovery = new HostEnrollmentRecoveryStore({ path, client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  t.after(() => { workflow.close(); recovery.close(); binding.close() })
+  const first = f.prepare(), receipt = await recovery.create(first, AbortSignal.timeout(5_000))
+  const initial = await readFile(path)
+  await assert.rejects(workflow.cleanup(AbortSignal.timeout(5_000)), (cause: unknown) =>
+    cause instanceof HostEnrollmentRecoveryError && cause.code === 'host.enrollment_recovery.conflict')
+  await binding.reserve(first, receipt, AbortSignal.timeout(5_000))
+  await assert.rejects(workflow.cleanup(AbortSignal.timeout(5_000)), valid('review_required'))
+  assert.deepEqual(await readFile(path), initial)
+  f.state.phoneConfirmed = true
+  const approved = await binding.confirm(recovery, first, receipt, () => true, AbortSignal.timeout(5_000))
+  const fakeStore = { signal: binding.signal, async open() { return { ...approved } } } as unknown as HostEnrollmentBindingStore
+  await assert.rejects(recovery.removeApproved(fakeStore, AbortSignal.timeout(5_000)), valid('invalid_config'))
+  assert.deepEqual(await readFile(path), initial)
+  const exported = first.exportRecovery()
+  const altered = JSON.parse(exported.toString('utf8')) as { code: string; input: { alias: string } }
+  exported.fill(0); altered.code = randomBytes(32).toString('base64url'); altered.input.alias = 'Different host alias'
+  const alteredBytes = Buffer.from(JSON.stringify(altered)), sameRequestWrongPayload = f.client.restore(alteredBytes)
+  alteredBytes.fill(0)
+  assert.equal(await recovery.remove(first, AbortSignal.timeout(5_000)), true)
+  await recovery.save(sameRequestWrongPayload, AbortSignal.timeout(5_000))
+  const changedPayload = await readFile(path)
+  await assert.rejects(workflow.cleanup(AbortSignal.timeout(5_000)), (cause: unknown) =>
+    cause instanceof HostEnrollmentRecoveryError && cause.code === 'host.enrollment_recovery.conflict')
+  assert.deepEqual(await readFile(path), changedPayload)
+  assert.equal(await recovery.remove(sameRequestWrongPayload, AbortSignal.timeout(5_000)), true)
+  const second = f.prepare()
+  await recovery.save(second, AbortSignal.timeout(5_000))
+  const otherRecord = await readFile(path)
+  await assert.rejects(workflow.cleanup(AbortSignal.timeout(5_000)), (cause: unknown) =>
+    cause instanceof HostEnrollmentRecoveryError && cause.code === 'host.enrollment_recovery.conflict')
+  assert.deepEqual(await readFile(path), otherRecord)
+  const damaged = Buffer.from(otherRecord); damaged[damaged.length - 1] = damaged[damaged.length - 1]! ^ 1
+  await writeFile(path, damaged, { mode: 0o600 })
+  await assert.rejects(workflow.cleanup(AbortSignal.timeout(5_000)), (cause: unknown) =>
+    cause instanceof HostEnrollmentRecoveryError && cause.code === 'host.enrollment_recovery.unavailable')
+  assert.deepEqual(await readFile(path), damaged)
+
+  const other = new HostEnrollmentClient({ ...f.options, identity: { ...expected, subject: 'other-owner' } })
+  const wrongOwner = new HostEnrollmentRecoveryStore({ path: join(root, 'other-pending.bin'), client: other, protector })
+  t.after(() => { wrongOwner.close(); other.close() })
+  const otherAttempt = other.prepare({ organizationId: organization, alias: 'Other host', profileRef: 'profile', protocolVersion: 1, workspaceRefs: [] })
+  await wrongOwner.save(otherAttempt, AbortSignal.timeout(5_000))
+  const ownedBytes = await readFile(join(root, 'other-pending.bin'))
+  await assert.rejects(wrongOwner.removeApproved(binding, AbortSignal.timeout(5_000)), valid('invalid_config'))
+  assert.deepEqual(await readFile(join(root, 'other-pending.bin')), ownedBytes)
+  first.destroy(); sameRequestWrongPayload.destroy(); second.destroy(); otherAttempt.destroy()
+})
+
+test('approved cleanup locks the pending file during online review and preserves it on cancellation', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-cleanup-lock-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), path = join(root, 'pending.bin')
+  const recovery = new HostEnrollmentRecoveryStore({ path, client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  t.after(() => { workflow.close(); recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  await binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000))
+  const before = await readFile(path), cancel = new AbortController()
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  f.state.holdReview = true; f.state.onReview = () => entered()
+  const cleaning = workflow.cleanup(cancel.signal)
+  await started
+  await assert.rejects(recovery.discard(AbortSignal.timeout(1_000)), (cause: unknown) =>
+    cause instanceof HostEnrollmentRecoveryError && cause.code === 'host.enrollment_recovery.busy')
+  cancel.abort(); await assert.rejects(cleaning, valid('cancelled'))
+  assert.deepEqual(await readFile(path), before)
+  f.state.onReview = undefined
+  assert.equal(await workflow.cleanup(AbortSignal.timeout(5_000)), true)
+  attempt.destroy()
 })
 
 test('terminal workflow refuses missing recovery and conflicting pointers before displaying a code', { skip: process.platform !== 'linux' }, async t => {

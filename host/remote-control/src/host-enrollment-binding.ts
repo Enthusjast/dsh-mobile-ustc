@@ -95,7 +95,14 @@ export class HostEnrollmentBindingStore {
         stored = await readLinuxPrivateFile(directory, this.#name, MAX_FILE, lifetime)
         if (stored) {
           prior = await unseal(stored.bytes, this.#protector, this.#context, lifetime, BINDING_MAGIC)
-          if (prior.length !== plaintext.length || !timingSafeEqual(prior, plaintext)) throw failure('conflict')
+          if (prior.length !== plaintext.length || !timingSafeEqual(prior, plaintext)) {
+            // Older binding pointers did not include a recovery digest. Preserve
+            // them only when every other authenticated field is unchanged.
+            const legacy = hostEnrollmentBindingRecord.parse(parseSigningObject(prior))
+            if (legacy.version !== 1 || record.version !== 2) throw failure('conflict')
+            const { recovery_sha256: _digest, ...fields } = record
+            if (!Buffer.from(canonicalObject(legacy)).equals(Buffer.from(canonicalObject({ ...fields, version: 1 })))) throw failure('conflict')
+          }
           await directory.file.sync(); await assertLinuxPrivateDirectory(directory)
           if (lifetime.aborted) throw failure('cancelled')
           return

@@ -35,7 +35,8 @@ export class HostTerminalEnrollmentWorkflow {
     if (!options || !(options.client?.signal instanceof AbortSignal) || !(options.recovery?.signal instanceof AbortSignal) ||
         !(options.binding?.signal instanceof AbortSignal) || typeof options.client.prepare !== 'function' ||
         typeof options.client.review !== 'function' || typeof options.recovery.load !== 'function' ||
-        typeof options.recovery.create !== 'function' || typeof options.recovery.save !== 'function' || typeof options.recovery.confirm !== 'function' ||
+        typeof options.recovery.create !== 'function' || typeof options.recovery.save !== 'function' ||
+        typeof options.recovery.confirm !== 'function' || typeof options.recovery.removeApproved !== 'function' ||
         typeof options.binding.open !== 'function' || typeof options.binding.reserve !== 'function' || typeof options.binding.confirm !== 'function') throw failure('invalid_config')
     this.#client = options.client; this.#recovery = options.recovery; this.#binding = options.binding
     this.signal = AbortSignal.any([this.#closed.signal, options.client.signal, options.recovery.signal, options.binding.signal])
@@ -116,5 +117,10 @@ export class HostTerminalEnrollmentWorkflow {
       try { return await this.#continue(attempt, lifetime) }
       finally { attempt.destroy() }
     })
+  }
+
+  /** Explicitly remove only recovery data matched to a freshly approved binding. */
+  async cleanup(signal: AbortSignal): Promise<boolean> {
+    return await this.#run(signal, async lifetime => await this.#recovery.removeApproved(this.#binding, lifetime))
   }
 }
