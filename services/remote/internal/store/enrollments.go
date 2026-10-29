@@ -93,8 +93,9 @@ type EnrollmentInfo struct {
 	Workspaces         []EnrollmentWorkspace `json:"workspaces"`
 	// These values are never serialized in phone/status responses. They are
 	// disclosed only by the installation-owner, key-bound host review route.
-	HostReviewOwner bool                  `json:"-"`
-	HostReviewUser  *EnrollmentReviewUser `json:"-"`
+	HostReviewOwner        bool                  `json:"-"`
+	HostReviewTargetActive bool                  `json:"-"`
+	HostReviewUser         *EnrollmentReviewUser `json:"-"`
 }
 
 type EnrollmentReviewUser struct {
@@ -439,7 +440,8 @@ func (postgres *Postgres) enrollmentInfo(ctx context.Context, identity UserIdent
 		       coalesce(r.application_version,''), coalesce(r.plugin_version,''), r.protocol_version,
 		       case when e.state in ('pending','user_confirmed') and e.expires_at <= clock_timestamp() then 'expired' else e.state end,
 		       e.expires_at, e.user_confirmed_by::text, e.host_confirmed_at, e.code_hash, e.expires_at <= clock_timestamp(),
-		       i.owner_user_id::text, e.user_confirmed_device_id::text, e.user_confirmed_device_key_version,
+		       i.owner_user_id::text, h.state <> 'revoked' and i.revoked_at is null and r.revoked_at is null,
+		       e.user_confirmed_device_id::text, e.user_confirmed_device_key_version,
 		       case when i.owner_user_id = $2 then confirmed.issuer end,
 		       case when i.owner_user_id = $2 then confirmed.subject end,
 		       coalesce(i.owner_user_id = $2 and h.state <> 'revoked' and i.revoked_at is null and r.revoked_at is null and confirmed.status = 'active'
@@ -457,7 +459,7 @@ func (postgres *Postgres) enrollmentInfo(ctx context.Context, identity UserIdent
 		Scan(&info.EnrollmentID, &info.RequestID, &info.OrganizationID, &info.OrganizationName, &info.HostID, &info.HostAlias,
 			&info.InstallationID, &info.InstallationKeyJKT, &info.RuntimeID, &info.ProfileRef, &info.DSHVersion, &info.ApplicationVersion,
 			&info.PluginVersion, &info.ProtocolVersion, &info.State, &info.ExpiresAt, &userConfirmed, &hostConfirmed, &expectedCodeHash, &codeExpired,
-			&installationOwner, &confirmedDeviceID, &confirmedDeviceKeyVersion, &confirmedIssuer, &confirmedSubject, &confirmedEligible)
+			&installationOwner, &info.HostReviewTargetActive, &confirmedDeviceID, &confirmedDeviceKeyVersion, &confirmedIssuer, &confirmedSubject, &confirmedEligible)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EnrollmentInfo{}, ErrAccessDenied
 	}

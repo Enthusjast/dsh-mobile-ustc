@@ -285,6 +285,7 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 			t.Fatal("preview did not bind verified identity and private request body")
 		}
 		repo.enrollmentInfo.HostReviewOwner = true
+		repo.enrollmentInfo.HostReviewTargetActive = true
 		repo.enrollmentInfo.HostReviewUser = &store.EnrollmentReviewUser{UserID: "66666666-6666-4666-8666-666666666666", Issuer: issuer, Subject: "private-confirmed-subject", Eligible: true}
 		plain := send(hostAccess, http.MethodGet, path)
 		if plain.Code != http.StatusOK || strings.Contains(plain.Body.String(), "private-confirmed-subject") {
@@ -300,6 +301,12 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 			t.Fatal("non-owner accessed host review")
 		}
 		repo.enrollmentInfo.HostReviewOwner = true
+		repo.enrollmentInfo.HostReviewTargetActive = false
+		revokedTarget := send(hostAccess, http.MethodGet, path+"/host-review")
+		if revokedTarget.Code != http.StatusForbidden || strings.Contains(revokedTarget.Body.String(), "private-confirmed-subject") {
+			t.Fatal("revoked installation accessed host review")
+		}
+		repo.enrollmentInfo.HostReviewTargetActive = true
 		repo.enrollmentInfo.InstallationKeyJKT = strings.Repeat("A", 43)
 		otherKey := send(hostAccess, http.MethodGet, path+"/host-review")
 		if otherKey.Code != http.StatusForbidden || strings.Contains(otherKey.Body.String(), "private-confirmed-subject") {

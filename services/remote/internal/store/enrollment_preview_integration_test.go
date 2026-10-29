@@ -307,7 +307,7 @@ func TestEnrollmentConfirmationRejectsRevokedTargets(t *testing.T) {
 				t.Fatal(err)
 			}
 			info, err := postgres.GetEnrollment(ctx, owner, created.EnrollmentID)
-			if err != nil || info.HostReviewUser == nil || info.HostReviewUser.Eligible {
+			if err != nil || info.HostReviewTargetActive || info.HostReviewUser == nil || info.HostReviewUser.Eligible {
 				t.Fatalf("revoked target remained eligible: %+v %v", info.HostReviewUser, err)
 			}
 			if _, err := postgres.ConfirmEnrollmentHost(ctx, owner, input.InstallationKeyThumbprint, created.EnrollmentID, input.Code, phoneID); !errors.Is(err, ErrAccessDenied) {

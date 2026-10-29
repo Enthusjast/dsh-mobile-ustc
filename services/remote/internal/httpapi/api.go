@@ -363,7 +363,7 @@ func (api *API) reviewEnrollmentHost(response http.ResponseWriter, request *http
 		api.writeStoreError(response, err)
 		return
 	}
-	if !info.HostReviewOwner || info.InstallationKeyJKT != principal.ProofKeyJKT {
+	if !info.HostReviewOwner || !info.HostReviewTargetActive || info.InstallationKeyJKT != principal.ProofKeyJKT {
 		writeError(response, http.StatusForbidden, "access.denied")
 		return
 	}

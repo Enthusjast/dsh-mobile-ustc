@@ -128,7 +128,7 @@ paths:
         '503': { $ref: '#/components/responses/Error' }
   /v1/enrollments/{id}/host-review:
     get:
-      description: Installation-owner-only review, requiring the allowlisted host client and the registered installation DPoP key. Returns the verified identity of the already confirmed phone user and current eligibility. Rejects query selectors; never returns the enrollment code.
+      description: Installation-owner-only review, requiring the allowlisted host client, the registered installation DPoP key and a non-revoked host, installation and runtime. Returns the verified identity of the already confirmed phone user and current eligibility. Rejects query selectors; never returns the enrollment code.
       parameters:
         - $ref: '#/components/parameters/UUID'
       responses:
