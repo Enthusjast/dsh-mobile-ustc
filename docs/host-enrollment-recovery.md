@@ -41,7 +41,7 @@ if (!attempt) {
 }
 const receipt = await store.create(attempt, signal) // 先持久保存，再发起创建请求
 // 手机确认后，调用 store.confirm 并在本机界面取得明确同意。
-// 已确认完成时：await store.remove(attempt, signal); attempt.destroy();
+// 已确认完成且服务端绑定 ID 已可靠保存后：await store.remove(attempt, signal); attempt.destroy();
 // 不再使用时：store.close(); client.close();
 ```
 

@@ -3,7 +3,8 @@
 `LinuxSecretServiceInstallationSigner` 为现有
 [`HostRestCredentialProvider`](host-credential-provider.md) 提供安装密钥签名。它从当前用户的
 Secret Service 读取**预先配置**的安装私钥，用于资源请求、一次性凭据交换和 Relay 握手；
-不创建或替换密钥、不发起安装登记，也不自行取得学校资源登录态。
+不创建或替换密钥、不发起安装登记，也不自行取得学校资源登录态。Linux 首次安装可使用
+[安装密钥生成与重开](linux-installation-key.md)，其生命周期和生产验收边界单独说明。
 
 部署方通过可信流程配置唯一条目。值须为 P-256 私钥的 PKCS#8 DER 编码，再按 RFC 4648
 标准 base64 编码；此格式应与 Node 的 PKCS#8 导出一致。查找属性 `service` 和 `account`

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
-import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto'
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto'
 import { once } from 'node:events'
 import { lstat, mkdir, mkdtemp, readFile, writeFile, unlink } from 'node:fs/promises'
 import { createServer, request } from 'node:http'
@@ -17,6 +17,7 @@ import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext
 import { canonicalObject } from '../../host/remote-control/src/canonical.js'
 import { relayNodeFixtures } from './relay-node-fixture.js'
 import { HostCredentialError, HostRestCredentialProvider, type HostResourceAccess, type HostRestCredentialOptions } from '../../host/remote-control/src/host-credentials.js'
+import { decodeSecretBase64 } from '../../host/remote-control/src/linux-secret-service.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -129,7 +130,34 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(database.startsWith(`host=${cluster} `), 'Only the disposable Unix-socket cluster is allowed')
   const root = await mkdtemp(join(cluster, 'clients-'))
   const query = (sql: string) => execFileSync(psql, ['-X', '--dbname', database, '-v', 'ON_ERROR_STOP=1', '-At'], { input: sql, encoding: 'utf8' }).trim()
-  const signingKey = key(), installationKey = key(), phoneKey = key(), approvalKey = key(), outsiderKey = key(), outsiderApprovalKey = key()
+  const hostPackage = await import(pathToFileURL(resolve('host/remote-control/lib/index.js')).href) as typeof import('../../host/remote-control/src/index.js')
+  const installationOwner = new AbortController(), installationReference = join(root, 'installation-identity', 'installation.json')
+  const installationTool = join(root, 'installation-secret-tool'), installationCalls = join(root, 'installation-secret-tool-calls')
+  let installationKey: ReturnType<typeof key>, installationStore: InstanceType<typeof hostPackage.LinuxInstallationKeyStore> | undefined
+  let generatedIdentity: Awaited<ReturnType<InstanceType<typeof hostPackage.LinuxInstallationKeyStore>['create']>> | undefined
+  if (process.platform === 'linux') {
+    const keyring = join(root, 'installation-keyring')
+    await mkdir(keyring, { mode: 0o700 })
+    await writeFile(installationTool, [
+      '#!/usr/bin/env node', "const fs=require('node:fs'),path=require('node:path')",
+      `const root=${JSON.stringify(keyring)},calls=${JSON.stringify(installationCalls)},args=process.argv.slice(2);fs.appendFileSync(calls,JSON.stringify(args)+'\\n',{mode:0o600})`,
+      "let account;if(args[0]==='store'&&args.length===6&&args[1]==='--label=DSH remote installation key'&&args[2]==='service'&&args[3]==='fixture-installation'&&args[4]==='account')account=args[5];else if(args[0]==='lookup'&&args.length===5&&args[1]==='service'&&args[2]==='fixture-installation'&&args[3]==='account')account=args[4];else process.exit(2)",
+      "if(!/^installation-[0-9a-f]{48}$/.test(account))process.exit(2);const file=path.join(root,account)",
+      "if(args[0]==='store')fs.writeFileSync(file,fs.readFileSync(0),{mode:0o600,flag:'wx'});else process.stdout.write(fs.readFileSync(file))", '',
+    ].join('\n'), { mode: 0o700 })
+    installationStore = new hostPackage.LinuxInstallationKeyStore({ path: installationReference, executable: installationTool, service: 'fixture-installation', ownerSignal: installationOwner.signal })
+    generatedIdentity = await installationStore.create(AbortSignal.timeout(10_000))
+    const reference = JSON.parse(await readFile(installationReference, 'utf8')) as { account: string }
+    // The fixture peer needs a private test key to issue independent proofs;
+    // the actual plugin opens only the generated key-store signer below.
+    const encoded = await readFile(join(keyring, reference.account)), der = decodeSecretBase64(encoded, 1024)
+    try {
+      const privateKey = createPrivateKey({ key: der, format: 'der', type: 'pkcs8' }), publicKey = createPublicKey(privateKey)
+      installationKey = { privateKey, publicKey, jwk: publicKey.export({ format: 'jwk' }), jkt: generatedIdentity.thumbprint }
+    } finally { encoded.fill(0); der.fill(0) }
+  } else installationKey = key()
+  t.after(() => { generatedIdentity?.close(); installationStore?.close(); installationOwner.abort() })
+  const signingKey = key(), phoneKey = key(), approvalKey = key(), outsiderKey = key(), outsiderApprovalKey = key()
   const approvalAuthority = key()
   const siblingKey = key(), siblingApprovalKey = key()
   const orgId = randomUUID(), ownerId = randomUUID(), phoneUserId = randomUUID(), outsiderId = randomUUID()
@@ -320,10 +348,10 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   const hostIdentity = { issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host' }
   const resourceLifetime = new AbortController()
-  const hostPackage = await import(pathToFileURL(resolve('host/remote-control/lib/index.js')).href) as typeof import('../../host/remote-control/src/index.js')
+  const hostSigner = generatedIdentity?.signer ?? { sign(input: Uint8Array) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } }
   const enrollmentOptions: import('../../host/remote-control/src/host-enrollment.js').HostEnrollmentOptions = { origin, identity: hostIdentity,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
-    signer: { sign(input) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } },
+    signer: hostSigner,
     requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
   }
   let enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
@@ -428,7 +456,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(runtimeAccess.access.scope.workspaces.includes(primaryWorkspace))
   const credentialOptions: HostRestCredentialOptions = { origin, identity: hostIdentity, installationId: enrollment.installation_id,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
-    signer: { sign(input) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } },
+    signer: hostSigner,
     requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
   }
   const credentialProvider = new HostRestCredentialProvider(credentialOptions)
@@ -448,16 +476,18 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await writeFile(journalProtectorFile, journalProtectorKey, { mode: 0o600 })
   journalProtectorKey.fill(0)
   const installationKeyFile = join(root, 'installation-signer-fixture.pk8')
-  const installationDer = installationKey.privateKey.export({ format: 'der', type: 'pkcs8' })
-  await writeFile(installationKeyFile, installationDer, { mode: 0o600 })
-  installationDer.fill(0)
+  if (process.platform !== 'linux') {
+    const installationDer = installationKey.privateKey.export({ format: 'der', type: 'pkcs8' })
+    await writeFile(installationKeyFile, installationDer, { mode: 0o600 })
+    installationDer.fill(0)
+  }
   const secretToolFixture = join(root, 'secret-tool-fixture')
   const secretToolCalls = join(root, 'secret-tool-calls')
   await writeFile(secretToolFixture, [
     '#!/usr/bin/env node', "const fs=require('node:fs')",
     "const args=process.argv.slice(2);if(args.length!==5||args[0]!=='lookup'||args[1]!=='service'||args[2]!=='fixture-service'||args[3]!=='account')process.exit(2)",
     `fs.appendFileSync(${JSON.stringify(secretToolCalls)},JSON.stringify(args)+'\\n',{mode:0o600})`,
-    `const path=args[4]==='fixture-account'?${JSON.stringify(journalProtectorFile)}:args[4]==='fixture-installation'?${JSON.stringify(installationKeyFile)}:null;if(!path)process.exit(2)`,
+    `const path=args[4]==='fixture-account'?${JSON.stringify(journalProtectorFile)}:null;if(!path)process.exit(2)`,
     "process.stdout.write(fs.readFileSync(path).toString('base64')+'\\n')", '',
   ].join('\n'), { mode: 0o700 })
   const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
@@ -465,15 +495,17 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await writeFile(wrapper, [
     "import { createCipheriv, createDecipheriv, createPrivateKey, randomBytes, sign } from 'node:crypto'",
     "import { writeFile, readFile } from 'node:fs/promises'",
-    `import { createRemoteControlPlugin, HostRestCredentialProvider, LinuxSecretServiceJournalProtector, LinuxSecretServiceInstallationSigner } from ${JSON.stringify(plugin)}`,
+    `import { createRemoteControlPlugin, HostRestCredentialProvider, LinuxSecretServiceJournalProtector, LinuxInstallationKeyStore } from ${JSON.stringify(plugin)}`,
     'const owner=new AbortController()',
     `const fallbackKey=process.platform==='linux'?null:createPrivateKey({format:'der',type:'pkcs8',key:await readFile(${JSON.stringify(installationKeyFile)})})`,
-    `const signer=process.platform==='linux'?new LinuxSecretServiceInstallationSigner({executable:${JSON.stringify(secretToolFixture)},service:'fixture-service',account:'fixture-installation',publicJwk:${JSON.stringify(installationKey.jwk)},ownerSignal:owner.signal}):{sign(input){return sign('sha256',Buffer.from(input),{key:fallbackKey,dsaEncoding:'ieee-p1363'})}}`,
+    `const localInstallationStore=process.platform==='linux'?new LinuxInstallationKeyStore({path:${JSON.stringify(installationReference)},executable:${JSON.stringify(installationTool)},service:'fixture-installation',ownerSignal:owner.signal}):null`,
+    "const localInstallation=localInstallationStore?await localInstallationStore.open(AbortSignal.timeout(10000)):null;if(localInstallationStore&&!localInstallation)throw new Error('missing generated installation')",
+    "const signer=localInstallation?.signer??{sign(input){return sign('sha256',Buffer.from(input),{key:fallbackKey,dsaEncoding:'ieee-p1363'})}}",
     `const journalMaster=process.platform==='linux'?null:await readFile(${JSON.stringify(journalProtectorFile)});const journalProtector=process.platform==='linux'?new LinuxSecretServiceJournalProtector({executable:${JSON.stringify(secretToolFixture)},service:'fixture-service',account:'fixture-account'}):{id:'fixture-platform-v1',async wrap(value,aad){const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',journalMaster,nonce);cipher.setAAD(aad);return Buffer.concat([nonce,cipher.update(value),cipher.final(),cipher.getAuthTag()])},async unwrap(value,aad){const bytes=Buffer.from(value),decipher=createDecipheriv('aes-256-gcm',journalMaster,bytes.subarray(0,12));decipher.setAAD(aad);decipher.setAuthTag(bytes.subarray(44));return Buffer.concat([decipher.update(bytes.subarray(12,44)),decipher.final()])}}`,
     `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(enrollment.installation_id)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer,account:{signal:owner.signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
     `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)},journalProtector)`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>()=>{owner.abort();credentialProvider.close();signer.close?.();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>()=>{owner.abort();credentialProvider.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -504,6 +536,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   const dshArgs = ['--profile', 'remote-e2e', '--from-default-profile', 'web', '--patch', patch,
     '--host', '127.0.0.1', '--port', '0', '--no-open']
+  const installationLookupsBeforeDsh = process.platform === 'linux'
+    ? (await readFile(installationCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[]).filter(args => args[0] === 'lookup').length : 0
   const dsh = await startProcess(installedDsh ?? process.execPath,
     installedDsh ? dshArgs : [join(dshPackage, 'lib/bin.js'), ...dshArgs], dshEnv)
   t.after(async () => { await dsh.stop('SIGINT') })
@@ -537,9 +571,10 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(query(`select count(*) from audit_log where action='host.credential.issue'`), '2', 'normal plugin did not issue its own provider credential')
   if (process.platform === 'linux') {
     const calls = (await readFile(secretToolCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
-    assert.ok(calls.filter(args => args[4] === 'fixture-installation').length >= 3, 'normal plugin did not use the installation signer for acquisition and handshake')
+    const installationLookups = (await readFile(installationCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[]).filter(args => args[0] === 'lookup').length
+    assert.ok(installationLookups >= installationLookupsBeforeDsh + 3, 'normal plugin did not reopen the generated installation for acquisition and handshake')
     assert.ok(calls.some(args => args[4] === 'fixture-account'), 'normal plugin did not use the journal protector')
-    t.diagnostic('The normal Linux plugin uses the installation signer and journal protector against a test Secret Service command; no production keyring is accessed.')
+    t.diagnostic('The normal Linux plugin reopens the generated installation key and journal protector against test Secret Service commands; no production keyring is accessed.')
   }
   t.diagnostic('The normal npm DSH plugin acquires its credential through the exported REST provider, current resource JWT/DPoP, one-use installation challenge and registered key. A separate parent acquisition checks the live cache; no static connection secret is embedded in the plugin fixture.')
   const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {

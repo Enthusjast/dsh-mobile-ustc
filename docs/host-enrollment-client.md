@@ -2,8 +2,9 @@
 
 `HostEnrollmentClient` 使用现有的已验证资源登录适配器和安装密钥签名器，向远控服务发起
 短期登记申请、读取主机专用的用户核对信息，并在调用方明确确认后提交主机决定。它不包含
-学校登录、安装密钥生成或桌面确认界面；这些能力必须由发行端提供。Linux 可使用
-[受保护恢复存储](host-enrollment-recovery.md)持久保存未完成的登记尝试。
+学校登录或桌面确认界面；这些能力必须由发行端提供。Linux 可使用
+[安装密钥生成器](linux-installation-key.md)和[受保护恢复存储](host-enrollment-recovery.md)
+管理本机身份及未完成的登记尝试。
 
 ## 接入顺序
 
@@ -21,6 +22,7 @@ declare const organizationIdFromTrustedConfiguration: string
 declare const protector: JournalKeyProtector
 declare const privateRecoveryPath: string
 declare const trustedLocalConfirmation: (review: HostEnrollmentApprovalReview, signal: AbortSignal) => Promise<boolean>
+declare const trustedBindingStore: { save(value: { hostId: string; installationId: string; runtimeId: string }): Promise<void> }
 const client = new HostEnrollmentClient(options)
 const store = new HostEnrollmentRecoveryStore({ path: privateRecoveryPath, client, protector })
 let attempt = await store.load(signal)
@@ -40,7 +42,9 @@ const receipt = await store.create(attempt, signal) // 先持久保存，再发�
 const approved = await store.confirm(attempt, receipt, async (review, consentSignal) => {
   return await trustedLocalConfirmation(review, consentSignal) // 只有明确同意才返回 true
 }, signal)
-// 确认完成后：await store.remove(attempt, signal); attempt.destroy()。
+// 先可靠保存绑定 ID，之后才删除待处理记录。
+await trustedBindingStore.save({ hostId: receipt.details.host_id, installationId: receipt.details.installation_id, runtimeId: receipt.details.runtime_id })
+await store.remove(attempt, signal); attempt.destroy()
 // 不再使用时调用 store.close(); client.close()。
 ```
 
@@ -81,5 +85,5 @@ signal 取消或客户端关闭后也不能继续使用该尝试。
 issuer、模型和手机协议夹具，通过实际主机客户端完成创建、手机确认、主机核对及确认，再
 接入正常 Host Relay。没有使用 TokenWorks、学校身份、生产密钥库或 Android APP。
 
-目标发行版仍需提供受信任的本机确认界面、安装密钥生成与登记生命周期，核验恢复存储的实际平台配置，
+目标发行版仍需提供受信任的本机确认界面、已确认绑定 ID 的可靠存储、安装密钥的轮换和登记生命周期，核验实际平台配置，
 并与学校资源登录适配器和实际身份目录联调。不能把当前回调或本地夹具当作这些验收已完成。

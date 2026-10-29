@@ -1,11 +1,10 @@
 import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto'
-import { constants, type Stats } from 'node:fs'
-import { link, lstat, mkdir, open, opendir, realpath, unlink, type FileHandle } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { inspect } from 'node:util'
 import { invoke, protectorFrom, type JournalKeyProtector, type Protector } from './journal-key-protection.js'
 import { enrollmentRecoveryBinding, type HostEnrollmentApprovalReview, type HostEnrollmentClient, type HostEnrollmentConfirmation, type HostEnrollmentIntent, type HostEnrollmentReceipt } from './host-enrollment.js'
 import { guards } from './host-process-guards.js'
+import { assertLinuxPrivateDirectory, openLinuxPrivateDirectory, publishLinuxPrivateFile, readLinuxPrivateFile, unlinkLinuxPrivateFile, type LinuxPrivateDirectory, type LinuxPrivateFile } from './linux-private-files.js'
 
 type Code = 'unavailable' | 'cancelled' | 'conflict' | 'busy'
 export class HostEnrollmentRecoveryError extends Error {
@@ -30,101 +29,6 @@ export interface HostEnrollmentRecoveryOptions {
   client: HostEnrollmentClient
   /** A trusted platform protector; no unprotected file-key fallback exists. */
   protector: JournalKeyProtector
-}
-
-type Directory = { file: FileHandle; path: string; proc: string; dev: number; ino: number }
-type StoredFile = { bytes: Buffer; dev: number; ino: number }
-
-async function assertDirectory(directory: Directory): Promise<void> {
-  const entry = await lstat(directory.path)
-  if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== process.getuid?.() || (entry.mode & 0o7777) !== 0o700 ||
-      entry.dev !== directory.dev || entry.ino !== directory.ino || await realpath(directory.path) !== directory.path) throw failure()
-}
-
-async function openDirectory(path: string): Promise<Directory> {
-  if (process.platform !== 'linux' || typeof constants.O_NOFOLLOW !== 'number' || typeof constants.O_DIRECTORY !== 'number' || process.getuid?.() === undefined) throw failure()
-  await mkdir(path, { recursive: true, mode: 0o700 })
-  if (await realpath(path) !== path) throw failure()
-  const uid = process.getuid!()
-  let ancestor = path, immediate = true
-  for (;;) {
-    const entry = await lstat(ancestor)
-    if (!entry.isDirectory() || entry.isSymbolicLink() || (entry.uid !== 0 && entry.uid !== uid) ||
-        (immediate && (entry.uid !== uid || (entry.mode & 0o7777) !== 0o700)) ||
-        (!immediate && (entry.mode & 0o022) !== 0 && (entry.mode & 0o1000) === 0)) throw failure()
-    const parent = dirname(ancestor)
-    if (parent === ancestor) break
-    ancestor = parent; immediate = false
-  }
-  const before = await lstat(path)
-  const file = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-  try {
-    const actual = await file.stat()
-    if (!actual.isDirectory() || actual.dev !== before.dev || actual.ino !== before.ino || actual.uid !== uid || (actual.mode & 0o7777) !== 0o700) throw failure()
-    const directory = { file, path, proc: `/proc/self/fd/${file.fd}`, dev: actual.dev, ino: actual.ino }
-    await assertDirectory(directory)
-    return directory
-  } catch (error) { await file.close(); throw error }
-}
-
-function privateFile(info: Stats): boolean {
-  return info.isFile() && info.uid === process.getuid?.() && (info.mode & 0o7777) === 0o600 && info.size <= MAX_FILE
-}
-
-// An interrupted link-based publication can leave its own temporary hard link.
-// Remove only matching temporary names for this exact inode, never other aliases.
-async function cleanPublicationLinks(directory: Directory, name: string, file: FileHandle): Promise<void> {
-  const initial = await file.stat()
-  if (initial.nlink === 1) return
-  if (initial.nlink < 1 || initial.nlink > 16) throw failure()
-  const prefix = `.${name}.`, entries = await opendir(directory.proc)
-  let count = 0, removed = false
-  try {
-    for await (const entry of entries) {
-      if (++count > 4096) throw failure()
-      if (!entry.name.startsWith(prefix) || !/^[0-9a-f]{32}\.tmp$/.test(entry.name.slice(prefix.length))) continue
-      const path = `${directory.proc}/${entry.name}`
-      let candidate
-      try { candidate = await lstat(path) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error }
-      if (!privateFile(candidate) || candidate.dev !== initial.dev || candidate.ino !== initial.ino) continue
-      try { await unlink(path); removed = true } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-    }
-  } finally { await entries.close().catch(() => {}) }
-  if (removed) await directory.file.sync()
-  const after = await file.stat()
-  if (!privateFile(after) || after.dev !== initial.dev || after.ino !== initial.ino || after.nlink !== 1) throw failure()
-}
-
-async function readStored(directory: Directory, name: string, signal: AbortSignal): Promise<StoredFile | undefined> {
-  if (signal.aborted) throw failure('cancelled')
-  const path = `${directory.proc}/${name}`
-  let before
-  try { before = await lstat(path) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
-  if (!privateFile(before) || before.isSymbolicLink() || before.size < 1) throw failure()
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-  try {
-    const actual = await file.stat()
-    if (!privateFile(actual) || actual.dev !== before.dev || actual.ino !== before.ino || actual.size !== before.size) throw failure()
-    await cleanPublicationLinks(directory, name, file)
-    const buffer = Buffer.alloc(MAX_FILE + 1)
-    try {
-      let length = 0
-      while (length < buffer.length) {
-        if (signal.aborted) throw failure('cancelled')
-        const { bytesRead } = await file.read(buffer, length, buffer.length - length, null)
-        if (bytesRead === 0) break
-        length += bytesRead
-      }
-      const after = await file.stat()
-      if (!privateFile(after) || after.dev !== actual.dev || after.ino !== actual.ino || after.size !== actual.size || after.nlink !== 1 || length !== actual.size || length > MAX_FILE) throw failure()
-      await assertDirectory(directory)
-      if (signal.aborted) throw failure('cancelled')
-      await file.sync()
-      const current = await lstat(path)
-      if (!privateFile(current) || current.nlink !== 1 || current.dev !== actual.dev || current.ino !== actual.ino || current.size !== actual.size) throw failure()
-      return { bytes: Buffer.from(buffer.subarray(0, length)), dev: actual.dev, ino: actual.ino }
-    } finally { buffer.fill(0) }
-  } finally { await file.close() }
 }
 
 function header(id: string, wrapped: Buffer, nonce: Buffer, size: number): Buffer {
@@ -210,7 +114,7 @@ export class HostEnrollmentRecoveryStore {
   [inspect.custom](): string { return this.toString() }
   close(): void { this.#closed.abort() }
 
-  async #run<T>(caller: AbortSignal, action: (directory: Directory, signal: AbortSignal) => Promise<T>, permit?: symbol): Promise<T> {
+  async #run<T>(caller: AbortSignal, action: (directory: LinuxPrivateDirectory, signal: AbortSignal) => Promise<T>, permit?: symbol): Promise<T> {
     if (!(caller instanceof AbortSignal)) throw failure()
     if (caller.aborted || this.signal.aborted) throw failure('cancelled')
     const owner = busyPaths.get(this.#path)
@@ -218,9 +122,9 @@ export class HostEnrollmentRecoveryStore {
     const token = permit ?? Symbol('enrollment-recovery-operation'), acquired = owner === undefined
     if (acquired) busyPaths.set(this.#path, token)
     const signal = AbortSignal.any([caller, this.signal, AbortSignal.timeout(15_000)])
-    let directory: Directory | undefined
+    let directory: LinuxPrivateDirectory | undefined
     try {
-      directory = await openDirectory(dirname(this.#path))
+      directory = await openLinuxPrivateDirectory(dirname(this.#path))
       if (signal.aborted) throw failure('cancelled')
       return await action(directory, signal)
     } catch (cause) {
@@ -239,8 +143,7 @@ export class HostEnrollmentRecoveryStore {
 
   async #save(attempt: HostEnrollmentIntent, signal: AbortSignal, permit?: symbol): Promise<void> {
     return await this.#run(signal, async (directory, lifetime) => {
-      let plaintext: Buffer | undefined, existing: StoredFile | undefined, prior: Buffer | undefined, sealed: Buffer | undefined
-      let temporary: string | undefined, temporaryIdentity: { dev: number; ino: number } | undefined
+      let plaintext: Buffer | undefined, existing: LinuxPrivateFile | undefined, prior: Buffer | undefined, sealed: Buffer | undefined
       try {
         const exported: unknown = attempt.exportRecovery()
         if (!(exported instanceof Uint8Array)) throw failure()
@@ -250,54 +153,32 @@ export class HostEnrollmentRecoveryStore {
         const checked = this.#client.restore(plaintext)
         try { if (checked.requestId !== attempt.requestId || checked.code !== attempt.code) throw failure() }
         finally { checked.destroy() }
-        existing = await readStored(directory, this.#name, lifetime)
+        existing = await readLinuxPrivateFile(directory, this.#name, MAX_FILE, lifetime)
         if (existing) {
           prior = await unseal(existing.bytes, this.#protector, this.#context, lifetime)
           if (prior.length !== plaintext.length || !timingSafeEqual(prior, plaintext)) throw failure('conflict')
-          await directory.file.sync(); await assertDirectory(directory)
+          await directory.file.sync(); await assertLinuxPrivateDirectory(directory)
           if (lifetime.aborted) throw failure('cancelled')
           return
         }
         sealed = await seal(plaintext, this.#protector, this.#context, lifetime)
         if (lifetime.aborted) throw failure('cancelled')
-        temporary = `${directory.proc}/.${this.#name}.${randomBytes(16).toString('hex')}.tmp`
-        const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-        try {
-          const info = await file.stat(); temporaryIdentity = { dev: info.dev, ino: info.ino }
-          if (!privateFile(info) || info.nlink !== 1) throw failure()
-          await file.writeFile(sealed); await file.sync()
-        } finally { await file.close() }
-        if (lifetime.aborted) throw failure('cancelled')
-        try { await link(temporary, `${directory.proc}/${this.#name}`) }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
-        try {
-          const current = await lstat(temporary)
-          if (!temporaryIdentity || current.dev !== temporaryIdentity.dev || current.ino !== temporaryIdentity.ino) throw failure()
-          await unlink(temporary); temporary = undefined
-        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-        await directory.file.sync(); await assertDirectory(directory)
-        if (lifetime.aborted) throw failure('cancelled')
-        existing = await readStored(directory, this.#name, lifetime)
+        await publishLinuxPrivateFile(directory, this.#name, sealed, MAX_FILE, lifetime)
+        existing = await readLinuxPrivateFile(directory, this.#name, MAX_FILE, lifetime)
         if (!existing) throw failure()
         prior = await unseal(existing.bytes, this.#protector, this.#context, lifetime)
         if (prior.length !== plaintext.length || !timingSafeEqual(prior, plaintext)) throw failure('conflict')
-        await directory.file.sync(); await assertDirectory(directory)
+        await directory.file.sync(); await assertLinuxPrivateDirectory(directory)
         if (lifetime.aborted) throw failure('cancelled')
       } finally {
         plaintext?.fill(0); existing?.bytes.fill(0); prior?.fill(0); sealed?.fill(0)
-        if (temporary && temporaryIdentity) {
-          try {
-            const current = await lstat(temporary)
-            if (current.dev === temporaryIdentity.dev && current.ino === temporaryIdentity.ino) { await unlink(temporary); await directory.file.sync() }
-          } catch { /* An absent or replaced temporary entry is not removed. */ }
-        }
       }
     }, permit)
   }
 
   async load(signal: AbortSignal): Promise<HostEnrollmentIntent | undefined> {
     return await this.#run(signal, async (directory, lifetime) => {
-      const stored = await readStored(directory, this.#name, lifetime)
+      const stored = await readLinuxPrivateFile(directory, this.#name, MAX_FILE, lifetime)
       if (!stored) return undefined
       let plaintext: Buffer | undefined
       try {
@@ -349,7 +230,7 @@ export class HostEnrollmentRecoveryStore {
 
   async #remove(attempt: HostEnrollmentIntent | undefined, signal: AbortSignal): Promise<boolean> {
     return await this.#run(signal, async (directory, lifetime) => {
-      const stored = await readStored(directory, this.#name, lifetime)
+      const stored = await readLinuxPrivateFile(directory, this.#name, MAX_FILE, lifetime)
       if (!stored) return false
       let plaintext: Buffer | undefined, expected: Buffer | undefined
       try {
@@ -361,12 +242,7 @@ export class HostEnrollmentRecoveryStore {
           if (expected !== exported) exported.fill(0)
           if (expected.length !== plaintext.length || !timingSafeEqual(expected, plaintext)) throw failure('conflict')
         }
-        const path = `${directory.proc}/${this.#name}`, current = await lstat(path)
-        if (!privateFile(current) || current.nlink !== 1 || current.dev !== stored.dev || current.ino !== stored.ino) throw failure()
-        await assertDirectory(directory)
-        if (lifetime.aborted) throw failure('cancelled')
-        await unlink(path); await directory.file.sync(); await assertDirectory(directory)
-        if (lifetime.aborted) throw failure('cancelled')
+        await unlinkLinuxPrivateFile(directory, this.#name, stored, MAX_FILE, lifetime)
         return true
       } finally { stored.bytes.fill(0); plaintext?.fill(0); expected?.fill(0) }
     })

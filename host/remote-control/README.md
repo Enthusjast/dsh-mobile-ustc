@@ -76,7 +76,8 @@ runtime 的受保护文件，并在验证后迁移旧 `.key`。设置 `requirePr
 调用方提供封装器。[Linux Secret Service 适配器](../../docs/linux-secret-service-journal-key.md)
 支持预先配置的保护密钥；默认文件模式和生产平台验收边界仍如上。
 主机安装密钥另有[Linux Secret Service 签名器](../../docs/linux-secret-service-installation-signer.md)，
-它使用预配置密钥并校验已登记公钥；安装登记和学校登录仍由发行端负责。
+它使用预配置密钥并校验已登记公钥；Linux 可通过[安装密钥生成器](../../docs/linux-installation-key.md)
+显式创建和重开本机身份。学校登录和实际发行集成仍由发行端负责。
 主机侧[登记客户端](../../docs/host-enrollment-client.md)提供可恢复的绑定尝试、身份核对和明确
 确认回调；Linux 提供[受保护恢复存储](../../docs/host-enrollment-recovery.md)。发行端仍需提供
 本机确认界面、平台密钥配置及学校登录适配。

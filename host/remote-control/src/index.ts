@@ -29,6 +29,8 @@ export { LinuxSecretServiceJournalProtector } from './secret-service-journal-pro
 export type { LinuxSecretServiceJournalOptions } from './secret-service-journal-protector.js'
 export { LinuxSecretServiceInstallationSigner } from './secret-service-installation-signer.js'
 export type { LinuxSecretServiceInstallationSignerOptions } from './secret-service-installation-signer.js'
+export { LinuxInstallationKeyStore, LinuxInstallationKeyError } from './linux-installation-key.js'
+export type { LinuxInstallationKeyOptions, LinuxInstallationIdentity } from './linux-installation-key.js'
 
 export const name = 'ustc-remote-control'
 export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections', 'workspaceRegistry', 'fileUploads', 'attachments', 'fs']
