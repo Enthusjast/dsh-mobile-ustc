@@ -20,6 +20,8 @@ export { HostRestCredentialProvider, HostCredentialError } from './host-credenti
 export type { HostResourceIdentity, HostResourceAccess, HostResourceRequest, HostResourceAccessProvider, HostRestCredentialOptions } from './host-credentials.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
 export type { JournalKeyProtector } from './journal-key-protection.js'
+export { LinuxSecretServiceJournalProtector } from './secret-service-journal-protector.js'
+export type { LinuxSecretServiceJournalOptions } from './secret-service-journal-protector.js'
 
 export const name = 'ustc-remote-control'
 export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections', 'workspaceRegistry', 'fileUploads', 'attachments', 'fs']

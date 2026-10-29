@@ -4,8 +4,8 @@
 `JournalKeyProtector`，由受信任的平台适配层封装该密钥；SQLite 同目录只保留受保护的
 `.wrapped-key` 文件，命令和审批内容仍由现有 AES-256-GCM 日志加密。
 
-仓库目前只提供接口和迁移逻辑，没有随此接口提供生产操作系统密钥库适配器。测试使用本地
-AES 夹具，不代表已接入 Secret Service、Keychain、DPAPI、硬件密钥或生产发行版。默认的本地
+仓库提供[Linux Secret Service 适配器](linux-secret-service-journal-key.md)，其目标发行版和
+生产会话仍需验收；Keychain、DPAPI 和硬件密钥适配尚未实现。默认的本地
 文件模式仍会使用 `.key`；它适用于明确接受该边界的开发环境，不能当作平台保护。生产集成
 必须自行提供经过审阅的平台封装器并配置 `requireProtectedJournalKey: true`，封装器缺失、
 不可用、损坏或身份不匹配时启动失败，不回退到文件模式。
@@ -60,6 +60,6 @@ const plugin = createRemoteControlPlugin(hostCredentials, signedApprovalOptions,
 ## 本地验证边界
 
 临时目录测试覆盖新建、旧日志迁移、错误密钥、封装器失败、取消、路径/身份绑定、损坏文件、
-硬链接和符号链接拒绝、并发创建及插件卸载。Go/PostgreSQL/npm DSH 双节点夹具使用显式测试
-封装器验证正常插件链路；测试主密钥仍是临时文件。未使用 TokenWorks、真实学校身份、生产
-系统密钥库、Android、真机、大负载或厂商推送配置。
+硬链接和符号链接拒绝、并发创建及插件卸载。Go/PostgreSQL/npm DSH 双节点夹具使用测试密钥
+服务对端验证正常插件链路；隔离的 D-Bus/GNOME Keyring 另行验证 Secret Service 存取。
+未使用 TokenWorks、真实学校身份、生产系统密钥库、Android、真机、大负载或厂商推送配置。
