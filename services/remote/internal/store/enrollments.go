@@ -91,6 +91,22 @@ type EnrollmentInfo struct {
 	UserConfirmed      bool                  `json:"user_confirmed"`
 	UserConfirmedByMe  bool                  `json:"user_confirmed_by_me"`
 	Workspaces         []EnrollmentWorkspace `json:"workspaces"`
+	// These values are never serialized in phone/status responses. They are
+	// disclosed only by the installation-owner, key-bound host review route.
+	HostReviewOwner bool                  `json:"-"`
+	HostReviewUser  *EnrollmentReviewUser `json:"-"`
+}
+
+type EnrollmentReviewUser struct {
+	UserID   string `json:"user_id"`
+	Issuer   string `json:"issuer"`
+	Subject  string `json:"subject"`
+	Eligible bool   `json:"eligible"`
+}
+
+type EnrollmentHostReview struct {
+	Enrollment    EnrollmentInfo        `json:"enrollment"`
+	ConfirmedUser *EnrollmentReviewUser `json:"confirmed_user"`
 }
 
 type EnrollmentConfirmation struct {
@@ -104,21 +120,26 @@ type EnrollmentConfirmation struct {
 }
 
 type enrollmentRow struct {
-	ID                  string
-	HostID              string
-	InstallationID      string
-	RuntimeID           string
-	RequestedBy         string
-	OrgID               string
-	State               string
-	CodeHash            []byte
-	ExpiresAt           time.Time
-	Expired             bool
-	UserConfirmedBy     sql.NullString
-	UserConfirmedAt     sql.NullTime
-	HostConfirmedAt     sql.NullTime
-	InstallationOwnerID string
-	InstallationKeyJKT  string
+	ID                            string
+	HostID                        string
+	InstallationID                string
+	RuntimeID                     string
+	RequestedBy                   string
+	OrgID                         string
+	State                         string
+	CodeHash                      []byte
+	ExpiresAt                     time.Time
+	Expired                       bool
+	UserConfirmedBy               sql.NullString
+	UserConfirmedAt               sql.NullTime
+	UserConfirmedDeviceID         sql.NullString
+	UserConfirmedDeviceKeyVersion sql.NullInt64
+	HostConfirmedAt               sql.NullTime
+	HostState                     string
+	InstallationRevoked           sql.NullTime
+	RuntimeRevoked                sql.NullTime
+	InstallationOwnerID           string
+	InstallationKeyJKT            string
 }
 
 func NormalizeEnrollmentInput(input EnrollmentInput) (EnrollmentInput, []byte, []byte, error) {
@@ -407,22 +428,36 @@ func (postgres *Postgres) enrollmentInfo(ctx context.Context, identity UserIdent
 	var hostConfirmed sql.NullTime
 	var expectedCodeHash []byte
 	var codeExpired bool
+	var installationOwner string
+	var confirmedIssuer, confirmedSubject sql.NullString
+	var confirmedEligible bool
+	var confirmedDeviceID sql.NullString
+	var confirmedDeviceKeyVersion sql.NullInt64
 	err = postgres.DB.QueryRowContext(ctx, `
 		select e.id::text, e.request_id::text, o.id::text, o.name, h.id::text, h.alias,
 		       i.id::text, i.public_key_thumbprint, r.id::text, r.profile_ref, coalesce(r.dsh_version,''),
 		       coalesce(r.application_version,''), coalesce(r.plugin_version,''), r.protocol_version,
 		       case when e.state in ('pending','user_confirmed') and e.expires_at <= clock_timestamp() then 'expired' else e.state end,
-		       e.expires_at, e.user_confirmed_by::text, e.host_confirmed_at, e.code_hash, e.expires_at <= clock_timestamp()
+		       e.expires_at, e.user_confirmed_by::text, e.host_confirmed_at, e.code_hash, e.expires_at <= clock_timestamp(),
+		       i.owner_user_id::text, e.user_confirmed_device_id::text, e.user_confirmed_device_key_version,
+		       case when i.owner_user_id = $2 then confirmed.issuer end,
+		       case when i.owner_user_id = $2 then confirmed.subject end,
+		       coalesce(i.owner_user_id = $2 and h.state <> 'revoked' and i.revoked_at is null and r.revoked_at is null and confirmed.status = 'active'
+		         and exists(select 1 from org_memberships cm where cm.org_id = h.org_id and cm.user_id = confirmed.id)
+		         and exists(select 1 from devices d where d.id = e.user_confirmed_device_id and d.user_id = confirmed.id
+		                    and d.key_version = e.user_confirmed_device_key_version and d.revoked_at is null), false)
 		from enrollments e
 		join hosts h on h.id = e.host_id
 		join orgs o on o.id = h.org_id
 		join installations i on i.id = e.installation_id and i.host_id = h.id
 		join runtimes r on r.id = e.runtime_id and r.installation_id = i.id
 		join org_memberships m on m.org_id = h.org_id and m.user_id = $2
+		left join users confirmed on confirmed.id = e.user_confirmed_by
 		where e.id = $1 and (e.requested_by = $2 or e.user_confirmed_by = $2 or $3)`, enrollmentID, actorID, codeHash != nil).
 		Scan(&info.EnrollmentID, &info.RequestID, &info.OrganizationID, &info.OrganizationName, &info.HostID, &info.HostAlias,
 			&info.InstallationID, &info.InstallationKeyJKT, &info.RuntimeID, &info.ProfileRef, &info.DSHVersion, &info.ApplicationVersion,
-			&info.PluginVersion, &info.ProtocolVersion, &info.State, &info.ExpiresAt, &userConfirmed, &hostConfirmed, &expectedCodeHash, &codeExpired)
+			&info.PluginVersion, &info.ProtocolVersion, &info.State, &info.ExpiresAt, &userConfirmed, &hostConfirmed, &expectedCodeHash, &codeExpired,
+			&installationOwner, &confirmedDeviceID, &confirmedDeviceKeyVersion, &confirmedIssuer, &confirmedSubject, &confirmedEligible)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EnrollmentInfo{}, ErrAccessDenied
 	}
@@ -434,7 +469,15 @@ func (postgres *Postgres) enrollmentInfo(ctx context.Context, identity UserIdent
 	}
 	info.UserConfirmed = userConfirmed.Valid
 	info.UserConfirmedByMe = userConfirmed.Valid && userConfirmed.String == actorID
-	info.HostConfirmed = hostConfirmed.Valid
+	// A legacy host-first timestamp did not review a phone identity.
+	info.HostConfirmed = hostConfirmed.Valid && userConfirmed.Valid && (info.State == "approved" || confirmedDeviceID.Valid && confirmedDeviceKeyVersion.Valid)
+	info.HostReviewOwner = installationOwner == actorID
+	if userConfirmed.Valid && info.HostReviewOwner {
+		if !confirmedIssuer.Valid || !confirmedSubject.Valid {
+			return EnrollmentInfo{}, ErrDatabaseUnavailable
+		}
+		info.HostReviewUser = &EnrollmentReviewUser{UserID: userConfirmed.String, Issuer: confirmedIssuer.String, Subject: confirmedSubject.String, Eligible: confirmedEligible}
+	}
 	info.Workspaces, err = enrollmentWorkspaces(ctx, postgres.DB, info.RuntimeID)
 	if err != nil {
 		return EnrollmentInfo{}, err
@@ -442,15 +485,18 @@ func (postgres *Postgres) enrollmentInfo(ctx context.Context, identity UserIdent
 	return info, nil
 }
 
-func (postgres *Postgres) ConfirmEnrollmentUser(ctx context.Context, identity UserIdentity, deviceID, enrollmentID, code string) (EnrollmentConfirmation, error) {
-	return postgres.confirmEnrollment(ctx, identity, deviceID, enrollmentID, code, false, "")
+func (postgres *Postgres) ConfirmEnrollmentUser(ctx context.Context, identity UserIdentity, deviceID, proofKeyThumbprint, enrollmentID, code string) (EnrollmentConfirmation, error) {
+	return postgres.confirmEnrollment(ctx, identity, deviceID, proofKeyThumbprint, enrollmentID, code, false, "", "")
 }
 
-func (postgres *Postgres) ConfirmEnrollmentHost(ctx context.Context, identity UserIdentity, installationKeyThumbprint, enrollmentID, code string) (EnrollmentConfirmation, error) {
-	return postgres.confirmEnrollment(ctx, identity, "", enrollmentID, code, true, installationKeyThumbprint)
+func (postgres *Postgres) ConfirmEnrollmentHost(ctx context.Context, identity UserIdentity, installationKeyThumbprint, enrollmentID, code, confirmedUserID string) (EnrollmentConfirmation, error) {
+	if !grantUUIDPattern.MatchString(confirmedUserID) {
+		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
+	}
+	return postgres.confirmEnrollment(ctx, identity, "", "", enrollmentID, code, true, installationKeyThumbprint, confirmedUserID)
 }
 
-func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserIdentity, deviceID, enrollmentID, code string, hostConfirmation bool, installationKeyThumbprint string) (EnrollmentConfirmation, error) {
+func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserIdentity, deviceID, proofKeyThumbprint, enrollmentID, code string, hostConfirmation bool, installationKeyThumbprint, confirmedUserID string) (EnrollmentConfirmation, error) {
 	if !grantUUIDPattern.MatchString(enrollmentID) {
 		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
 	}
@@ -477,6 +523,10 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 	if subtle.ConstantTimeCompare(row.CodeHash, codeHash) != 1 {
 		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
 	}
+	if row.HostState == "revoked" || row.InstallationRevoked.Valid || row.RuntimeRevoked.Valid {
+		return EnrollmentConfirmation{}, ErrAccessDenied
+	}
+	var activeDeviceVersion int64
 	if hostConfirmation {
 		if actorID != row.InstallationOwnerID || installationKeyThumbprint != row.InstallationKeyJKT {
 			return EnrollmentConfirmation{}, ErrAccessDenied
@@ -484,7 +534,7 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 	} else {
 		var activeDevice string
 		err := transaction.QueryRowContext(ctx, `
-			select id::text from devices where id = $1 and user_id = $2 and revoked_at is null for share`, deviceID, actorID).Scan(&activeDevice)
+			select id::text,key_version from devices where id = $1 and user_id = $2 and proof_key_thumbprint = $3 and revoked_at is null for share`, deviceID, actorID, proofKeyThumbprint).Scan(&activeDevice, &activeDeviceVersion)
 		if errors.Is(err, sql.ErrNoRows) {
 			return EnrollmentConfirmation{}, ErrDeviceNotFound
 		}
@@ -504,7 +554,13 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 	if !hostConfirmation && row.UserConfirmedBy.Valid && row.UserConfirmedBy.String != actorID {
 		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
 	}
+	if hostConfirmation && row.UserConfirmedBy.Valid && row.UserConfirmedBy.String != confirmedUserID {
+		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
+	}
 	if row.State == "approved" {
+		if hostConfirmation && !row.UserConfirmedBy.Valid {
+			return EnrollmentConfirmation{}, ErrEnrollmentInvalid
+		}
 		if err := transaction.Commit(); err != nil {
 			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 		}
@@ -554,14 +610,48 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 		}
 		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
 	}
+	// A host decision must refer to an already confirmed phone identity. This
+	// prevents a host-first decision from preauthorizing an unknown future user.
+	if hostConfirmation && !row.UserConfirmedBy.Valid {
+		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
+	}
+	if hostConfirmation {
+		if !row.UserConfirmedDeviceID.Valid || !row.UserConfirmedDeviceKeyVersion.Valid {
+			return EnrollmentConfirmation{}, ErrEnrollmentInvalid
+		}
+		var activeDevice string
+		err := transaction.QueryRowContext(ctx, `
+			select id::text from devices where id=$1 and user_id=$2 and key_version=$3 and revoked_at is null for share`,
+			row.UserConfirmedDeviceID.String, row.UserConfirmedBy.String, row.UserConfirmedDeviceKeyVersion.Int64).Scan(&activeDevice)
+		if errors.Is(err, sql.ErrNoRows) {
+			return EnrollmentConfirmation{}, ErrAccessDenied
+		}
+		if err != nil {
+			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
+		}
+	}
 	changed := false
 	if hostConfirmation && !row.HostConfirmedAt.Valid {
 		row.HostConfirmedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
 		changed = true
 	}
 	if !hostConfirmation && !row.UserConfirmedBy.Valid {
+		// Older versions allowed a host-first decision. Do not carry that
+		// unreviewed decision into the first phone confirmation.
+		row.HostConfirmedAt = sql.NullTime{}
 		row.UserConfirmedBy = sql.NullString{String: actorID, Valid: true}
 		row.UserConfirmedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+		row.UserConfirmedDeviceID = sql.NullString{String: deviceID, Valid: true}
+		row.UserConfirmedDeviceKeyVersion = sql.NullInt64{Int64: activeDeviceVersion, Valid: true}
+		changed = true
+	} else if !hostConfirmation && (!row.UserConfirmedDeviceID.Valid || row.UserConfirmedDeviceID.String != deviceID ||
+		!row.UserConfirmedDeviceKeyVersion.Valid || row.UserConfirmedDeviceKeyVersion.Int64 != activeDeviceVersion) {
+		// Reconfirmation with a different key or a legacy unbound record must
+		// not carry forward an earlier host decision.
+		row.HostConfirmedAt = sql.NullTime{}
+		row.UserConfirmedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+		row.UserConfirmedDeviceID = sql.NullString{String: deviceID, Valid: true}
+		row.UserConfirmedDeviceKeyVersion = sql.NullInt64{Int64: activeDeviceVersion, Valid: true}
 		changed = true
 	}
 	if !changed {
@@ -580,9 +670,11 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 	}
 	if _, err := transaction.ExecContext(ctx, `
 		update enrollments set state = $2, user_confirmed_by = $3, user_confirmed_at = $4,
-		                      host_confirmed_at = $5, decided_by = $6, decided_at = $7
+		                      host_confirmed_at = $5, decided_by = $6, decided_at = $7,
+		                      user_confirmed_device_id = $8, user_confirmed_device_key_version = $9
 		where id = $1`, row.ID, state, nullStringValue(row.UserConfirmedBy), nullTimeValue(row.UserConfirmedAt),
-		nullTimeValue(row.HostConfirmedAt), nullableUserID(approved, actorID), nullableTime(approved, time.Now().UTC())); err != nil {
+		nullTimeValue(row.HostConfirmedAt), nullableUserID(approved, actorID), nullableTime(approved, time.Now().UTC()),
+		nullStringValue(row.UserConfirmedDeviceID), row.UserConfirmedDeviceKeyVersion); err != nil {
 		return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 	}
 	actorType, actorIDForAudit, auditDeviceID := "device", deviceID, deviceID
@@ -594,6 +686,9 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 		action = "enrollment.host_confirm"
 	}
 	metadata, _ := json.Marshal(map[string]any{"enrollment_id": row.ID, "host_id": row.HostID, "installation_id": row.InstallationID, "runtime_id": row.RuntimeID, "state": state})
+	if hostConfirmation {
+		metadata, _ = json.Marshal(map[string]any{"enrollment_id": row.ID, "host_id": row.HostID, "installation_id": row.InstallationID, "runtime_id": row.RuntimeID, "state": state, "confirmed_user_id": confirmedUserID})
+	}
 	var auditDeviceValue any
 	if auditDeviceID != "" {
 		auditDeviceValue = auditDeviceID
@@ -669,8 +764,8 @@ func loadEnrollmentForUpdate(ctx context.Context, transaction *sql.Tx, enrollmen
 	err := transaction.QueryRowContext(ctx, `
 		select e.id::text, e.host_id::text, e.installation_id::text, e.runtime_id::text,
 		       e.requested_by::text, h.org_id::text, e.state, e.code_hash, e.expires_at <= clock_timestamp(),
-	       e.expires_at, e.user_confirmed_by::text, e.user_confirmed_at, e.host_confirmed_at,
-	       i.owner_user_id::text, i.public_key_thumbprint
+	       e.expires_at, e.user_confirmed_by::text, e.user_confirmed_at, e.user_confirmed_device_id::text, e.user_confirmed_device_key_version, e.host_confirmed_at,
+	       h.state, i.revoked_at, r.revoked_at, i.owner_user_id::text, i.public_key_thumbprint
 		from enrollments e
 		join hosts h on h.id = e.host_id
 		join installations i on i.id = e.installation_id and i.host_id = e.host_id
@@ -679,7 +774,8 @@ func loadEnrollmentForUpdate(ctx context.Context, transaction *sql.Tx, enrollmen
 		for update of e, h, i, r`, enrollmentID).Scan(
 		&row.ID, &row.HostID, &row.InstallationID, &row.RuntimeID, &row.RequestedBy, &row.OrgID,
 		&row.State, &row.CodeHash, &row.Expired, &row.ExpiresAt, &row.UserConfirmedBy,
-		&row.UserConfirmedAt, &row.HostConfirmedAt, &row.InstallationOwnerID, &row.InstallationKeyJKT)
+		&row.UserConfirmedAt, &row.UserConfirmedDeviceID, &row.UserConfirmedDeviceKeyVersion, &row.HostConfirmedAt,
+		&row.HostState, &row.InstallationRevoked, &row.RuntimeRevoked, &row.InstallationOwnerID, &row.InstallationKeyJKT)
 	return row, err
 }
 

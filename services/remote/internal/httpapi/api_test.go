@@ -63,6 +63,7 @@ type fakeRepository struct {
 	enrollmentPreviewCode   string
 	hostConfirmCalls        int
 	hostConfirmJKT          string
+	hostConfirmUser         string
 	challengeCalls          int
 	challengeJKT            string
 	challengeResult         store.HostCredentialChallenge
@@ -123,12 +124,13 @@ func (fake *fakeRepository) PreviewEnrollment(_ context.Context, actor store.Use
 	}
 	return fake.enrollmentInfo, nil
 }
-func (fake *fakeRepository) ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error) {
+func (fake *fakeRepository) ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string, string) (store.EnrollmentConfirmation, error) {
 	return store.EnrollmentConfirmation{}, errors.New("not implemented")
 }
-func (fake *fakeRepository) ConfirmEnrollmentHost(_ context.Context, _ store.UserIdentity, thumbprint, enrollmentID, _ string) (store.EnrollmentConfirmation, error) {
+func (fake *fakeRepository) ConfirmEnrollmentHost(_ context.Context, _ store.UserIdentity, thumbprint, enrollmentID, _, confirmedUser string) (store.EnrollmentConfirmation, error) {
 	fake.hostConfirmCalls++
 	fake.hostConfirmJKT = thumbprint
+	fake.hostConfirmUser = confirmedUser
 	return store.EnrollmentConfirmation{EnrollmentID: enrollmentID, State: "approved"}, nil
 }
 func (fake *fakeRepository) CreateHostCredentialChallenge(_ context.Context, _ store.UserIdentity, thumbprint string) (store.HostCredentialChallenge, error) {

@@ -10,6 +10,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
+import { parse as parseYaml } from 'yaml'
 import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, relayCreateDigest, relayQuestionDigest, relayTimedQuestionDigest } from '../../host/remote-control/src/relay-client.js'
 import { CompactSign } from 'jose'
 import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext, type ApprovalDecision } from '../../host/remote-control/src/approval-contract.js'
@@ -312,6 +313,20 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     application_version: 'dsh-go-integration', plugin_version: '0.0.1', protocol_version: 1,
     installation_public_jwk: installationKey.jwk, code, workspace_refs: ['e2e-workspace', 'other-workspace'],
   }, 201)
+  const reviewPath = `/v1/enrollments/${enrollment.enrollment_id}/host-review`
+  const apiContract = parseYaml(await readFile('contracts/openapi/remote.yaml', 'utf8'))
+  const apiValidator = new Ajv2020({ strict: false })
+  apiValidator.addFormat('date-time', value => Number.isFinite(Date.parse(value)))
+  apiValidator.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  const validateHostReview = apiValidator.compile({ $ref: '#/components/schemas/EnrollmentHostReview', components: apiContract.components })
+  const validateHostConfirmation = apiValidator.compile({ $ref: '#/components/schemas/EnrollmentHostConfirmationRequest', components: apiContract.components })
+  const emptyReview = await owner('GET', reviewPath)
+  assert.equal(emptyReview.confirmed_user, null)
+  assert.equal(validateHostReview({ ok: true, data: emptyReview }), true, JSON.stringify(validateHostReview.errors))
+  assert.equal(validateHostConfirmation({ code }), false)
+  assert.equal(validateHostConfirmation({ code, confirmed_user_id: phoneUserId }), true, JSON.stringify(validateHostConfirmation.errors))
+  await phone('GET', reviewPath, undefined, 403)
+  await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code, confirmed_user_id: phoneUserId }, 403)
   await phone('GET', `/v1/enrollments/${enrollment.enrollment_id}`, undefined, 403)
   await phone('POST', `/v1/enrollments/${enrollment.enrollment_id}/preview`, { code: randomBytes(32).toString('base64url') }, 403)
   assert.equal((await outsider('POST', `/v1/enrollments/${enrollment.enrollment_id}/preview`, { code })).user_confirmed_by_me, false)
@@ -327,7 +342,11 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(partial.host_confirmed, false)
   assert.equal((await phone('GET', `/v1/enrollments/${enrollment.enrollment_id}`)).user_confirmed_by_me, true)
   assert.equal((await owner('GET', `/v1/enrollments/${enrollment.enrollment_id}`)).user_confirmed_by_me, false)
-  const active = await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code })
+  const hostReview = await owner('GET', reviewPath)
+  assert.equal(validateHostReview({ ok: true, data: hostReview }), true, JSON.stringify(validateHostReview.errors))
+  assert.deepEqual(hostReview.confirmed_user, { user_id: phoneUserId, issuer, subject: 'phone', eligible: true })
+  await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code, confirmed_user_id: outsiderId }, 403)
+  const active = await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code, confirmed_user_id: phoneUserId })
   assert.equal(active.state, 'approved')
   assert.equal(active.host_confirmed, true)
   assert.equal(active.user_confirmed, true)

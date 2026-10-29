@@ -126,6 +126,23 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/enrollments/{id}/host-review:
+    get:
+      description: Installation-owner-only review, requiring the allowlisted host client and the registered installation DPoP key. Returns the verified identity of the already confirmed phone user and current eligibility. Rejects query selectors; never returns the enrollment code.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Key-bound enrollment and confirming-user review.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollmentHostReview' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/enrollments/{id}/preview:
     post:
       description: Read-only phone preview before confirmation. Requires a registered device, current organization membership and the exact 256-bit code in the JSON body. Does not activate resources or create grants.
@@ -171,14 +188,14 @@ paths:
         '503': { $ref: '#/components/responses/Error' }
   /v1/enrollments/{id}/host-confirm:
     post:
-      description: Host-client-only local confirmation. The DPoP key must match the registered installation key.
+      description: Host-client-only local confirmation after phone confirmation. The DPoP key must match the installation, and confirmed_user_id must match the identity reviewed by the host.
       parameters:
         - $ref: '#/components/parameters/UUID'
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/EnrollmentCodeRequest' }
+            schema: { $ref: '#/components/schemas/EnrollmentHostConfirmationRequest' }
       responses:
         '200':
           description: Host confirmation; both confirmations activate the host and create initial owner grants.
@@ -1413,6 +1430,13 @@ components:
       required: [code]
       properties:
         code: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+    EnrollmentHostConfirmationRequest:
+      type: object
+      additionalProperties: false
+      required: [code, confirmed_user_id]
+      properties:
+        code: { type: string, minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]{43}$' }
+        confirmed_user_id: { type: string, format: uuid, description: The confirming user reviewed by the installation owner. }
     HostCredentialExchangeRequest:
       type: object
       additionalProperties: false
@@ -1482,31 +1506,57 @@ components:
       required: [ok, data]
       properties:
         ok: { const: true }
+        data: { $ref: '#/components/schemas/EnrollmentRecord' }
+    EnrollmentRecord:
+      type: object
+      additionalProperties: false
+      required: [enrollment_id, request_id, organization_id, organization_name, host_id, host_alias, installation_id, installation_key_jkt, runtime_id, profile_ref, protocol_version, state, expires_at, host_confirmed, user_confirmed, user_confirmed_by_me, workspaces]
+      properties:
+        enrollment_id: { type: string, format: uuid }
+        request_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        organization_name: { type: string }
+        host_id: { type: string, format: uuid }
+        host_alias: { type: string }
+        installation_id: { type: string, format: uuid }
+        installation_key_jkt: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+        runtime_id: { type: string, format: uuid }
+        profile_ref: { type: string }
+        dsh_version: { type: string }
+        application_version: { type: string }
+        plugin_version: { type: string }
+        protocol_version: { type: integer, minimum: 1 }
+        state: { enum: [pending, user_confirmed, approved, denied, expired, cancelled] }
+        expires_at: { type: string, format: date-time }
+        host_confirmed: { type: boolean }
+        user_confirmed: { type: boolean }
+        user_confirmed_by_me: { type: boolean }
+        workspaces: { type: array, items: { $ref: '#/components/schemas/EnrollmentWorkspace' } }
+    EnrollmentHostReview:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
         data:
           type: object
           additionalProperties: false
-          required: [enrollment_id, request_id, organization_id, organization_name, host_id, host_alias, installation_id, installation_key_jkt, runtime_id, profile_ref, protocol_version, state, expires_at, host_confirmed, user_confirmed, user_confirmed_by_me, workspaces]
+          required: [enrollment, confirmed_user]
           properties:
-            enrollment_id: { type: string, format: uuid }
-            request_id: { type: string, format: uuid }
-            organization_id: { type: string, format: uuid }
-            organization_name: { type: string }
-            host_id: { type: string, format: uuid }
-            host_alias: { type: string }
-            installation_id: { type: string, format: uuid }
-            installation_key_jkt: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
-            runtime_id: { type: string, format: uuid }
-            profile_ref: { type: string }
-            dsh_version: { type: string }
-            application_version: { type: string }
-            plugin_version: { type: string }
-            protocol_version: { type: integer, minimum: 1 }
-            state: { enum: [pending, user_confirmed, approved, denied, expired, cancelled] }
-            expires_at: { type: string, format: date-time }
-            host_confirmed: { type: boolean }
-            user_confirmed: { type: boolean }
-            user_confirmed_by_me: { type: boolean }
-            workspaces: { type: array, items: { $ref: '#/components/schemas/EnrollmentWorkspace' } }
+            enrollment: { $ref: '#/components/schemas/EnrollmentRecord' }
+            confirmed_user:
+              oneOf:
+                - type: 'null'
+                - $ref: '#/components/schemas/EnrollmentReviewUser'
+    EnrollmentReviewUser:
+      type: object
+      additionalProperties: false
+      required: [user_id, issuer, subject, eligible]
+      properties:
+        user_id: { type: string, format: uuid }
+        issuer: { type: string }
+        subject: { type: string }
+        eligible: { type: boolean, description: The user and confirming device/key version are active, the user belongs to the organization, and the target is not revoked; confirmation rechecks these conditions transactionally. }
     EnrollmentWorkspace:
       type: object
       additionalProperties: false

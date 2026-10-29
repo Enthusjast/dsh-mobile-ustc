@@ -188,7 +188,7 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 				return
 			}
 			if confirmed {
-				hostResult <- confirmKotlinBindingHost(ctx, server.Client(), server.URL, hostAccess, installationKey, created.EnrollmentID, code)
+				hostResult <- confirmKotlinBindingHost(ctx, server.Client(), server.URL, hostAccess, installationKey, created.EnrollmentID, code, userID)
 				return
 			}
 			select {
@@ -268,9 +268,9 @@ func TestKotlinReadClientAgainstPostgresRelayOverTLS(t *testing.T) {
 	t.Log(string(output))
 }
 
-func confirmKotlinBindingHost(ctx context.Context, client *http.Client, origin, access string, key *ecdsa.PrivateKey, enrollment, code string) error {
+func confirmKotlinBindingHost(ctx context.Context, client *http.Client, origin, access string, key *ecdsa.PrivateKey, enrollment, code, confirmedUserID string) error {
 	path := "/v1/enrollments/" + enrollment + "/host-confirm"
-	body, _ := json.Marshal(map[string]string{"code": code})
+	body, _ := json.Marshal(map[string]string{"code": code, "confirmed_user_id": confirmedUserID})
 	nonce := ""
 	digest := sha256.Sum256([]byte(access))
 	for attempt := 0; attempt < 2; attempt++ {

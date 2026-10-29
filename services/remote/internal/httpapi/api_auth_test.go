@@ -190,10 +190,16 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 	if created.Code != http.StatusCreated || repo.enrollmentCalls != 1 {
 		t.Fatalf("allowlisted DPoP host client could not create enrollment: status=%d calls=%d body=%s", created.Code, repo.enrollmentCalls, created.Body.String())
 	}
+	missingReview := sendDPoPRequest(t, hostAPI, hostAccess, proofKey, proofJWK, http.MethodPost,
+		"https://api.example.edu/v1/enrollments/77777777-7777-4777-8777-777777777777/host-confirm",
+		"proof-jti-host-confirm-missing", created.Header().Get("DPoP-Nonce"), map[string]any{"code": createBody["code"]})
+	if missingReview.Code != http.StatusBadRequest || repo.hostConfirmCalls != 0 {
+		t.Fatal("host confirmation accepted an unspecified phone user")
+	}
 	confirmed := sendDPoPRequest(t, hostAPI, hostAccess, proofKey, proofJWK, http.MethodPost,
 		"https://api.example.edu/v1/enrollments/77777777-7777-4777-8777-777777777777/host-confirm",
-		"proof-jti-host-confirm-0011", created.Header().Get("DPoP-Nonce"), map[string]any{"code": createBody["code"]})
-	if confirmed.Code != http.StatusOK || repo.hostConfirmCalls != 1 || repo.hostConfirmJKT != proofJKT {
+		"proof-jti-host-confirm-0011", missingReview.Header().Get("DPoP-Nonce"), map[string]any{"code": createBody["code"], "confirmed_user_id": "66666666-6666-4666-8666-666666666666"})
+	if confirmed.Code != http.StatusOK || repo.hostConfirmCalls != 1 || repo.hostConfirmJKT != proofJKT || repo.hostConfirmUser != "66666666-6666-4666-8666-666666666666" {
 		t.Fatalf("host confirmation did not bind to the DPoP installation key: status=%d calls=%d key=%s", confirmed.Code, repo.hostConfirmCalls, repo.hostConfirmJKT)
 	}
 	repo.challengeResult = store.HostCredentialChallenge{
@@ -277,6 +283,36 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		preview := send(access, http.MethodPost, path+"/preview?user_id=attacker", map[string]any{"code": createBody["code"]})
 		if preview.Code != http.StatusOK || repo.enrollmentPreviewCalls != 1 || repo.enrollmentPreviewCode != createBody["code"] || repo.enrollmentPreviewActor != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || preview.Header().Get("Cache-Control") != "no-store" || strings.Contains(preview.Body.String(), createBody["code"].(string)) {
 			t.Fatal("preview did not bind verified identity and private request body")
+		}
+		repo.enrollmentInfo.HostReviewOwner = true
+		repo.enrollmentInfo.HostReviewUser = &store.EnrollmentReviewUser{UserID: "66666666-6666-4666-8666-666666666666", Issuer: issuer, Subject: "private-confirmed-subject", Eligible: true}
+		plain := send(hostAccess, http.MethodGet, path)
+		if plain.Code != http.StatusOK || strings.Contains(plain.Body.String(), "private-confirmed-subject") {
+			t.Fatal("ordinary status disclosed host-only identity")
+		}
+		phoneReview := send(access, http.MethodGet, path+"/host-review")
+		if phoneReview.Code != http.StatusForbidden || strings.Contains(phoneReview.Body.String(), "private-confirmed-subject") {
+			t.Fatal("phone client accessed host-only review")
+		}
+		repo.enrollmentInfo.HostReviewOwner = false
+		otherOwner := send(hostAccess, http.MethodGet, path+"/host-review")
+		if otherOwner.Code != http.StatusForbidden || strings.Contains(otherOwner.Body.String(), "private-confirmed-subject") {
+			t.Fatal("non-owner accessed host review")
+		}
+		repo.enrollmentInfo.HostReviewOwner = true
+		repo.enrollmentInfo.InstallationKeyJKT = strings.Repeat("A", 43)
+		otherKey := send(hostAccess, http.MethodGet, path+"/host-review")
+		if otherKey.Code != http.StatusForbidden || strings.Contains(otherKey.Body.String(), "private-confirmed-subject") {
+			t.Fatal("different installation key accessed host review")
+		}
+		repo.enrollmentInfo.InstallationKeyJKT = proofJKT
+		selector := send(hostAccess, http.MethodGet, path+"/host-review?user_id=attacker")
+		if selector.Code != http.StatusBadRequest {
+			t.Fatal("host review accepted a caller identity selector")
+		}
+		review := send(hostAccess, http.MethodGet, path+"/host-review")
+		if review.Code != http.StatusOK || review.Header().Get("Cache-Control") != "no-store" || !strings.Contains(review.Body.String(), "private-confirmed-subject") || !strings.Contains(review.Body.String(), `"eligible":true`) {
+			t.Fatal("owner could not review the verified confirming identity")
 		}
 	})
 	t.Run("cache read access binds the current phone and exact resource", func(t *testing.T) {

@@ -60,13 +60,13 @@ func TestAnActiveHostDoesNotActivateAnUnconfirmedInstallationOrGrant(t *testing.
 	if _, err := postgres.DB.ExecContext(ctx, `delete from runtime_grants where runtime_id=$1`, created.RuntimeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := postgres.ConfirmEnrollmentUser(ctx, UserIdentity{Issuer: input.Issuer, Subject: "target-subject"}, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", created.EnrollmentID, input.Code); err != nil {
+	if _, err := postgres.ConfirmEnrollmentUser(ctx, UserIdentity{Issuer: input.Issuer, Subject: "target-subject"}, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "proof-jkt-target", created.EnrollmentID, input.Code); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := postgres.AttachRuntimeConnection(ctx, enrollmentConnection(created)); !errors.Is(err, ErrHostCredentialInvalid) {
 		t.Errorf("phone-only confirmation attached: %v", err)
 	}
-	if _, err := postgres.ConfirmEnrollmentHost(ctx, owner, input.InstallationKeyThumbprint, created.EnrollmentID, input.Code); err != nil {
+	if _, err := postgres.ConfirmEnrollmentHost(ctx, owner, input.InstallationKeyThumbprint, created.EnrollmentID, input.Code, "66666666-6666-4666-8666-666666666666"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := postgres.CreateHostCredentialChallenge(ctx, owner, input.InstallationKeyThumbprint); err != nil {
@@ -80,10 +80,14 @@ func TestAnActiveHostDoesNotActivateAnUnconfirmedInstallationOrGrant(t *testing.
 func TestSharedInstallationCannotAttachItsPendingSiblingAndLeasesRecheckEnrollment(t *testing.T) {
 	ctx, postgres, input, first := pendingActiveHostFixture(t)
 	owner := UserIdentity{Issuer: input.Issuer, Subject: input.Subject}
-	if _, err := postgres.ConfirmEnrollmentUser(ctx, owner, "44444444-4444-4444-8444-444444444444", first.EnrollmentID, input.Code); err != nil {
+	var ownerProof string
+	if err := postgres.DB.QueryRowContext(ctx, `select proof_key_thumbprint from devices where id=$1`, "44444444-4444-4444-8444-444444444444").Scan(&ownerProof); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := postgres.ConfirmEnrollmentHost(ctx, owner, input.InstallationKeyThumbprint, first.EnrollmentID, input.Code); err != nil {
+	if _, err := postgres.ConfirmEnrollmentUser(ctx, owner, "44444444-4444-4444-8444-444444444444", ownerProof, first.EnrollmentID, input.Code); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.ConfirmEnrollmentHost(ctx, owner, input.InstallationKeyThumbprint, first.EnrollmentID, input.Code, "22222222-2222-4222-8222-222222222222"); err != nil {
 		t.Fatal(err)
 	}
 	connection := enrollmentConnection(first)

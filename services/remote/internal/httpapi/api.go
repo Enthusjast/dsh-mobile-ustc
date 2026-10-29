@@ -36,8 +36,8 @@ type Repository interface {
 	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
 	GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error)
 	PreviewEnrollment(context.Context, store.UserIdentity, string, string) (store.EnrollmentInfo, error)
-	ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
-	ConfirmEnrollmentHost(context.Context, store.UserIdentity, string, string, string) (store.EnrollmentConfirmation, error)
+	ConfirmEnrollmentUser(context.Context, store.UserIdentity, string, string, string, string) (store.EnrollmentConfirmation, error)
+	ConfirmEnrollmentHost(context.Context, store.UserIdentity, string, string, string, string) (store.EnrollmentConfirmation, error)
 	CreateHostCredentialChallenge(context.Context, store.UserIdentity, string) (store.HostCredentialChallenge, error)
 	ExchangeHostCredential(context.Context, store.UserIdentity, string, string, string) (store.HostConnectionCredential, error)
 	RegisterDevice(context.Context, store.DeviceRegistration) (string, error)
@@ -154,6 +154,11 @@ type enrollmentCodeRequest struct {
 	Code string `json:"code"`
 }
 
+type enrollmentHostConfirmationRequest struct {
+	Code            string `json:"code"`
+	ConfirmedUserID string `json:"confirmed_user_id"`
+}
+
 type hostCredentialExchangeRequest struct {
 	ChallengeID string `json:"challenge_id"`
 	Proof       string `json:"proof"`
@@ -180,6 +185,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.Handle("GET /v1/devices/current", api.phoneAuthenticated(http.HandlerFunc(api.currentDevice)))
 	mux.Handle("POST /v1/enrollments", api.hostAuthenticated(http.HandlerFunc(api.createEnrollment)))
 	mux.Handle("GET /v1/enrollments/{id}", api.authenticated(http.HandlerFunc(api.getEnrollment)))
+	mux.Handle("GET /v1/enrollments/{id}/host-review", api.hostAuthenticated(http.HandlerFunc(api.reviewEnrollmentHost)))
 	mux.Handle("POST /v1/enrollments/{id}/preview", api.protected(http.HandlerFunc(api.previewEnrollment)))
 	mux.Handle("POST /v1/enrollments/{id}/confirm", api.protected(http.HandlerFunc(api.confirmEnrollmentUser)))
 	mux.Handle("POST /v1/enrollments/{id}/host-confirm", api.hostAuthenticated(http.HandlerFunc(api.confirmEnrollmentHost)))
@@ -345,6 +351,25 @@ func (api *API) getEnrollment(response http.ResponseWriter, request *http.Reques
 	writeData(response, http.StatusOK, info)
 }
 
+func (api *API) reviewEnrollmentHost(response http.ResponseWriter, request *http.Request) {
+	enrollmentID := request.PathValue("id")
+	if !uuidPattern.MatchString(enrollmentID) || request.URL.RawQuery != "" {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	info, err := api.database.GetEnrollment(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, enrollmentID)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	if !info.HostReviewOwner || info.InstallationKeyJKT != principal.ProofKeyJKT {
+		writeError(response, http.StatusForbidden, "access.denied")
+		return
+	}
+	writeData(response, http.StatusOK, store.EnrollmentHostReview{Enrollment: info, ConfirmedUser: info.HostReviewUser})
+}
+
 func (api *API) confirmEnrollmentUser(response http.ResponseWriter, request *http.Request) {
 	api.confirmEnrollment(response, request, false)
 }
@@ -379,10 +404,21 @@ func (api *API) confirmEnrollment(response http.ResponseWriter, request *http.Re
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 		return
 	}
-	var input enrollmentCodeRequest
-	if !decodeBody(response, request, &input) {
-		writeError(response, http.StatusBadRequest, "enrollment.invalid")
-		return
+	var code, confirmedUserID string
+	if hostConfirmation {
+		var input enrollmentHostConfirmationRequest
+		if !decodeBody(response, request, &input) || !uuidPattern.MatchString(input.ConfirmedUserID) {
+			writeError(response, http.StatusBadRequest, "enrollment.invalid")
+			return
+		}
+		code, confirmedUserID = input.Code, input.ConfirmedUserID
+	} else {
+		var input enrollmentCodeRequest
+		if !decodeBody(response, request, &input) {
+			writeError(response, http.StatusBadRequest, "enrollment.invalid")
+			return
+		}
+		code = input.Code
 	}
 	principal, _ := auth.PrincipalFromContext(request.Context())
 	var confirmation store.EnrollmentConfirmation
@@ -390,12 +426,12 @@ func (api *API) confirmEnrollment(response http.ResponseWriter, request *http.Re
 	if hostConfirmation {
 		confirmation, err = api.database.ConfirmEnrollmentHost(request.Context(),
 			store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject},
-			principal.ProofKeyJKT, enrollmentID, input.Code)
+			principal.ProofKeyJKT, enrollmentID, code, confirmedUserID)
 	} else {
 		deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
 		confirmation, err = api.database.ConfirmEnrollmentUser(request.Context(),
 			store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject},
-			deviceID, enrollmentID, input.Code)
+			deviceID, principal.ProofKeyJKT, enrollmentID, code)
 	}
 	if err != nil {
 		api.writeStoreError(response, err)

@@ -286,20 +286,20 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	for index := range wrongCodeBytes {
 		wrongCodeBytes[index] = 0
 	}
-	if _, err := postgres.ConfirmEnrollmentUser(ctx, phoneIdentity, phoneDeviceID, enrollment.EnrollmentID, wrongCode); !errors.Is(err, ErrEnrollmentInvalid) {
+	if _, err := postgres.ConfirmEnrollmentUser(ctx, phoneIdentity, phoneDeviceID, "proof-jkt-target", enrollment.EnrollmentID, wrongCode); !errors.Is(err, ErrEnrollmentInvalid) {
 		t.Fatalf("wrong enrollment code error=%v, want ErrEnrollmentInvalid", err)
 	}
-	partial, err := postgres.ConfirmEnrollmentUser(ctx, phoneIdentity, phoneDeviceID, enrollment.EnrollmentID, enrollmentCode)
+	partial, err := postgres.ConfirmEnrollmentUser(ctx, phoneIdentity, phoneDeviceID, "proof-jkt-target", enrollment.EnrollmentID, enrollmentCode)
 	if err != nil || partial.State != "user_confirmed" {
 		t.Fatalf("phone confirmation: state=%s error=%v", partial.State, err)
 	}
 	if err := assertChangeCounts(ctx, testDB, 9, 5); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, "wrong-installation-key", enrollment.EnrollmentID, enrollmentCode); !errors.Is(err, ErrAccessDenied) {
+	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, "wrong-installation-key", enrollment.EnrollmentID, enrollmentCode, targetID); !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("host confirmation with wrong key error=%v, want ErrAccessDenied", err)
 	}
-	approved, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode)
+	approved, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode, targetID)
 	if err != nil || approved.State != "approved" {
 		t.Fatalf("host confirmation: state=%s error=%v", approved.State, err)
 	}
@@ -689,7 +689,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err != nil || len(phoneHosts) != 1 || phoneHosts[0].Alias != "Second host" {
 		t.Fatalf("confirmed phone owner host visibility: hosts=%+v error=%v", phoneHosts, err)
 	}
-	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode); err != nil {
+	if _, err := postgres.ConfirmEnrollmentHost(ctx, identity, installationThumbprint, enrollment.EnrollmentID, enrollmentCode, targetID); err != nil {
 		t.Fatalf("idempotent host confirmation: %v", err)
 	}
 	if err := assertChangeCounts(ctx, testDB, 43, 8); err != nil {
