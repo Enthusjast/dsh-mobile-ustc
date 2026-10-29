@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { createDecipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto'
+import { createDecipheriv, createHmac, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -170,7 +170,22 @@ test('Secret Service protector copies input before an asynchronous lookup', { sk
   reopened.fill(0); original.fill(0)
 })
 
-test('isolated Secret Service stores the wrapping key outside the protected journal', { skip: process.platform !== 'linux', timeout: 25_000 }, async t => {
+test('Secret Service protector snapshots the lookup reference used for its stable identity', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t)
+  let reads = 0
+  const protector = new LinuxSecretServiceJournalProtector({ executable: f.executable, service,
+    get account() { return ++reads === 1 ? account : 'changed-account' } })
+  assert.equal(reads, 1)
+  assert.equal(protector.id, f.protector.id)
+  const key = randomBytes(32)
+  t.after(() => key.fill(0))
+  const wrapped = await protector.wrap(key, context, AbortSignal.timeout(2_000))
+  const reopened = Buffer.from(await protector.unwrap(wrapped, context, AbortSignal.timeout(2_000)))
+  assert.deepEqual(reopened, key)
+  reopened.fill(0)
+})
+
+test('isolated Secret Service supplies the journal and installation keys', { skip: process.platform !== 'linux', timeout: 25_000 }, async t => {
   const gi = spawnSync('/usr/bin/python3', ['-c', "import gi;gi.require_version('Secret','1');from gi.repository import Secret"], { stdio: 'ignore' })
   const dbus = spawnSync('dbus-run-session', ['--version'], { stdio: 'ignore' })
   const keyring = spawnSync('gnome-keyring-daemon', ['--version'], { stdio: 'ignore' })
@@ -181,21 +196,28 @@ test('isolated Secret Service stores the wrapping key outside the protected jour
   await Promise.all([data, config, runtimeDir].map(path => mkdir(path, { mode: 0o700 })))
   const shim = join(root, 'secret-tool'), coordinator = join(root, 'coordinator.py'), client = join(root, 'client.mts')
   const schema = 'org.example.DshJournalFixture'
+  const installationAccount = 'fixture-installation'
+  const installationKeys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const installationPublic = installationKeys.publicKey.export({ format: 'jwk' })
+  const installationPrivate = installationKeys.privateKey.export({ format: 'der', type: 'pkcs8' })
+  t.after(() => installationPrivate.fill(0))
   await writeFile(shim, [
     '#!/usr/bin/python3', 'import sys, gi', "gi.require_version('Secret','1')", 'from gi.repository import Secret',
     `schema=Secret.Schema.new(${JSON.stringify(schema)},Secret.SchemaFlags.NONE,{'service':Secret.SchemaAttributeType.STRING,'account':Secret.SchemaAttributeType.STRING})`,
-    `expected=['lookup','service',${JSON.stringify(service)},'account',${JSON.stringify(account)}]`,
-    'if sys.argv[1:] != expected: sys.exit(2)',
-    `value=Secret.password_lookup_sync(schema,{'service':${JSON.stringify(service)},'account':${JSON.stringify(account)}},None)`,
+    `expected=['lookup','service',${JSON.stringify(service)},'account']`,
+    `if len(sys.argv[1:])!=5 or sys.argv[1:5]!=expected or sys.argv[5] not in [${JSON.stringify(account)},${JSON.stringify(installationAccount)}]: sys.exit(2)`,
+    `value=Secret.password_lookup_sync(schema,{'service':${JSON.stringify(service)},'account':sys.argv[5]},None)`,
     'if value is None: sys.exit(1)', "sys.stdout.write(value+'\\n')", '',
   ].join('\n'), { mode: 0o700 })
   const protectorModule = pathToFileURL(resolve('host/remote-control/src/secret-service-journal-protector.ts')).href
+  const signerModule = pathToFileURL(resolve('host/remote-control/src/secret-service-installation-signer.ts')).href
   const journalModule = pathToFileURL(resolve('host/remote-control/src/command-journal.ts')).href
   const protocolModule = pathToFileURL(resolve('host/remote-control/src/protocol.ts')).href
   const journalPath = join(root, 'commands.sqlite'), runtime = randomUUID()
   await writeFile(client, [
-    "import assert from 'node:assert/strict'", "import { lstat, readFile } from 'node:fs/promises'", "import { randomUUID } from 'node:crypto'",
+    "import assert from 'node:assert/strict'", "import { lstat, readFile } from 'node:fs/promises'", "import { createPublicKey, randomUUID, verify } from 'node:crypto'",
     `import { LinuxSecretServiceJournalProtector } from ${JSON.stringify(protectorModule)}`,
+    `import { LinuxSecretServiceInstallationSigner } from ${JSON.stringify(signerModule)}`,
     `import { PersistentCommandJournal } from ${JSON.stringify(journalModule)}`,
     `import { parseCommand } from ${JSON.stringify(protocolModule)}`,
     `const path=${JSON.stringify(journalPath)},runtime=${JSON.stringify(runtime)}`,
@@ -207,20 +229,25 @@ test('isolated Secret Service stores the wrapping key outside the protected jour
     "assert.equal((await lstat(path+'.wrapped-key')).mode&0o777,0o600)",
     "assert.equal((await readFile(path+'.wrapped-key')).includes(Buffer.from('PRIVATE_ISOLATED_KEYRING_COMMAND')),false)",
     'journal=await PersistentCommandJournal.open(path,runtime,{protector});assert.deepEqual(journal.get(input.request_id,owner)?.command,input);journal.close()',
+    `const publicJwk=${JSON.stringify(installationPublic)}`,
+    `const signer=new LinuxSecretServiceInstallationSigner({executable:${JSON.stringify(shim)},service:${JSON.stringify(service)},account:${JSON.stringify(installationAccount)},publicJwk,ownerSignal:new AbortController().signal})`,
+    "const message=Buffer.from('isolated-installation-proof');assert.equal(verify('sha256',message,{key:createPublicKey({key:publicJwk,format:'jwk'}),dsaEncoding:'ieee-p1363'},await signer.sign(message)),true);signer.close()",
     "process.stdout.write('isolated-client-ok\\n')", '',
   ].join('\n'), { mode: 0o600 })
   await writeFile(coordinator, [
     'import base64, subprocess, sys, time, gi', "gi.require_version('Secret','1')", 'from gi.repository import Secret',
-    'master=bytearray(sys.stdin.buffer.read())', 'if len(master)!=32: sys.exit(2)',
+    'fixture=bytearray(sys.stdin.buffer.read())', 'if len(fixture)<=32: sys.exit(2)', 'master=fixture[:32]', 'installation=fixture[32:]',
     "daemon=subprocess.Popen(['gnome-keyring-daemon','--foreground','--unlock','--components=secrets'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)",
     'try:', " daemon.stdin.write(b'isolated-fixture-password\\n');daemon.stdin.close();time.sleep(0.5)",
     ` schema=Secret.Schema.new(${JSON.stringify(schema)},Secret.SchemaFlags.NONE,{'service':Secret.SchemaAttributeType.STRING,'account':Secret.SchemaAttributeType.STRING})`,
     ` attrs={'service':${JSON.stringify(service)},'account':${JSON.stringify(account)}}`,
     " if not Secret.password_store_sync(schema,attrs,Secret.COLLECTION_DEFAULT,'fixture',base64.b64encode(master).decode('ascii'),None): sys.exit(3)",
-    ' master[:]=bytes(len(master))',
+    ` attrs={'service':${JSON.stringify(service)},'account':${JSON.stringify(installationAccount)}}`,
+    " if not Secret.password_store_sync(schema,attrs,Secret.COLLECTION_DEFAULT,'installation-fixture',base64.b64encode(installation).decode('ascii'),None): sys.exit(3)",
+    ' master[:]=bytes(len(master));installation[:]=bytes(len(installation));fixture[:]=bytes(len(fixture))',
     ' result=subprocess.run(sys.argv[1:],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)',
     " if result.returncode!=0 or b'isolated-client-ok' not in result.stdout: sys.exit(4)",
-    " print('isolated-secret-service-ok')", 'finally:', ' master[:]=bytes(len(master))', ' daemon.terminate()',
+    " print('isolated-secret-service-ok')", 'finally:', ' master[:]=bytes(len(master));installation[:]=bytes(len(installation));fixture[:]=bytes(len(fixture))', ' daemon.terminate()',
     ' try: daemon.wait(timeout=3)', ' except subprocess.TimeoutExpired:', '  daemon.kill();daemon.wait(timeout=3)', '',
   ].join('\n'), { mode: 0o600 })
   const env: NodeJS.ProcessEnv = { ...process.env, XDG_DATA_HOME: data, XDG_CONFIG_HOME: config, XDG_RUNTIME_DIR: runtimeDir }
@@ -234,8 +261,10 @@ test('isolated Secret Service stores the wrapping key outside the protected jour
   child.stderr.setEncoding('utf8').on('data', value => { stderr = (stderr + value).slice(-4096) })
   const master = randomBytes(32)
   t.after(() => master.fill(0))
-  child.stdin.on('error', () => { master.fill(0) })
-  child.stdin.end(master, () => master.fill(0))
+  const keyMaterial = Buffer.concat([master, installationPrivate])
+  t.after(() => keyMaterial.fill(0))
+  child.stdin.on('error', () => { master.fill(0); keyMaterial.fill(0) })
+  child.stdin.end(keyMaterial, () => { master.fill(0); keyMaterial.fill(0) })
   const timer = setTimeout(() => { if (child.pid) { try { process.kill(-child.pid, 'SIGKILL') } catch { /* Already exited. */ } } }, 20_000)
   let code: number | null
   try {

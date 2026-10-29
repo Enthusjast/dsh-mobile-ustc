@@ -5,6 +5,9 @@ Host 包导出 `HostRestCredentialProvider`，实现既有 `HostCredentialProvid
 握手。不生成安装密钥、不登记/重新绑定 installation、不读取学校/模型配置、不实现 OAuth
 登录或 refresh token 流程，也不把短期连接秘密写到磁盘。
 
+Linux 可选择[Secret Service 安装密钥签名器](linux-secret-service-installation-signer.md)读取
+预配置私钥；它不代替安装登记、学校身份适配或目标系统验收。
+
 ## 接入条件与所有权
 
 调用方提供这些固定输入：可信远控 origin、已确认的 installation UUID、P-256 公共 JWK、

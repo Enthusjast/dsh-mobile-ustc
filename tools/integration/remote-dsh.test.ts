@@ -372,24 +372,33 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const journalProtectorKey = randomBytes(32)
   await writeFile(journalProtectorFile, journalProtectorKey, { mode: 0o600 })
   journalProtectorKey.fill(0)
+  const installationKeyFile = join(root, 'installation-signer-fixture.pk8')
+  const installationDer = installationKey.privateKey.export({ format: 'der', type: 'pkcs8' })
+  await writeFile(installationKeyFile, installationDer, { mode: 0o600 })
+  installationDer.fill(0)
   const secretToolFixture = join(root, 'secret-tool-fixture')
+  const secretToolCalls = join(root, 'secret-tool-calls')
   await writeFile(secretToolFixture, [
     '#!/usr/bin/env node', "const fs=require('node:fs')",
-    "if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['lookup','service','fixture-service','account','fixture-account']))process.exit(2)",
-    `process.stdout.write(fs.readFileSync(${JSON.stringify(journalProtectorFile)}).toString('base64')+'\\n')`, '',
+    "const args=process.argv.slice(2);if(args.length!==5||args[0]!=='lookup'||args[1]!=='service'||args[2]!=='fixture-service'||args[3]!=='account')process.exit(2)",
+    `fs.appendFileSync(${JSON.stringify(secretToolCalls)},JSON.stringify(args)+'\\n',{mode:0o600})`,
+    `const path=args[4]==='fixture-account'?${JSON.stringify(journalProtectorFile)}:args[4]==='fixture-installation'?${JSON.stringify(installationKeyFile)}:null;if(!path)process.exit(2)`,
+    "process.stdout.write(fs.readFileSync(path).toString('base64')+'\\n')", '',
   ].join('\n'), { mode: 0o700 })
   const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
   const checkpointFailureSecret = `PRIVATE_CHECKPOINT_FAILURE_${randomUUID()}`
   await writeFile(wrapper, [
     "import { createCipheriv, createDecipheriv, createPrivateKey, randomBytes, sign } from 'node:crypto'",
     "import { writeFile, readFile } from 'node:fs/promises'",
-    `import { createRemoteControlPlugin, HostRestCredentialProvider, LinuxSecretServiceJournalProtector } from ${JSON.stringify(plugin)}`,
-    `const privateKey = createPrivateKey({format:'jwk',key:${JSON.stringify(installationKey.privateKey.export({ format: 'jwk' }))}})`,
+    `import { createRemoteControlPlugin, HostRestCredentialProvider, LinuxSecretServiceJournalProtector, LinuxSecretServiceInstallationSigner } from ${JSON.stringify(plugin)}`,
+    'const owner=new AbortController()',
+    `const fallbackKey=process.platform==='linux'?null:createPrivateKey({format:'der',type:'pkcs8',key:await readFile(${JSON.stringify(installationKeyFile)})})`,
+    `const signer=process.platform==='linux'?new LinuxSecretServiceInstallationSigner({executable:${JSON.stringify(secretToolFixture)},service:'fixture-service',account:'fixture-installation',publicJwk:${JSON.stringify(installationKey.jwk)},ownerSignal:owner.signal}):{sign(input){return sign('sha256',Buffer.from(input),{key:fallbackKey,dsaEncoding:'ieee-p1363'})}}`,
     `const journalMaster=process.platform==='linux'?null:await readFile(${JSON.stringify(journalProtectorFile)});const journalProtector=process.platform==='linux'?new LinuxSecretServiceJournalProtector({executable:${JSON.stringify(secretToolFixture)},service:'fixture-service',account:'fixture-account'}):{id:'fixture-platform-v1',async wrap(value,aad){const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',journalMaster,nonce);cipher.setAAD(aad);return Buffer.concat([nonce,cipher.update(value),cipher.final(),cipher.getAuthTag()])},async unwrap(value,aad){const bytes=Buffer.from(value),decipher=createDecipheriv('aes-256-gcm',journalMaster,bytes.subarray(0,12));decipher.setAAD(aad);decipher.setAuthTag(bytes.subarray(44));return Buffer.concat([decipher.update(bytes.subarray(12,44)),decipher.final()])}}`,
-    `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(enrollment.installation_id)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer:{sign(input){return sign('sha256',Buffer.from(input),{key:privateKey,dsaEncoding:'ieee-p1363'})}},account:{signal:new AbortController().signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
+    `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(enrollment.installation_id)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer,account:{signal:owner.signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
     `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)},journalProtector)`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>()=>{credentialProvider.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>()=>{owner.abort();credentialProvider.close();signer.close?.();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -442,6 +451,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await until(async () => query(`select count(*) from runtimes where id='${enrollment.runtime_id}' and epoch='${probe.runtime_epoch}' and connection_id is not null`) === '1' ? true : undefined,
     'committed host attachment')
   assert.equal(query(`select count(*) from audit_log where action='host.credential.issue'`), '2', 'normal plugin did not issue its own provider credential')
+  if (process.platform === 'linux') {
+    const calls = (await readFile(secretToolCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+    assert.ok(calls.filter(args => args[4] === 'fixture-installation').length >= 3, 'normal plugin did not use the installation signer for acquisition and handshake')
+    assert.ok(calls.some(args => args[4] === 'fixture-account'), 'normal plugin did not use the journal protector')
+    t.diagnostic('The normal Linux plugin uses the installation signer and journal protector against a test Secret Service command; no production keyring is accessed.')
+  }
   t.diagnostic('The normal npm DSH plugin acquires its credential through the exported REST provider, current resource JWT/DPoP, one-use installation challenge and registered key. A separate parent acquisition checks the live cache; no static connection secret is embedded in the plugin fixture.')
   const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {
     v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId === undefined ? {} : { session_id: sessionId }),
