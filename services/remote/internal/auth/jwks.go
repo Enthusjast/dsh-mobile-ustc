@@ -8,7 +8,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const maxJWKSBytes = 1 << 20
@@ -28,10 +28,6 @@ type publicJWK struct {
 	kid string
 	alg string
 	key crypto.PublicKey
-}
-
-type jwksDocument struct {
-	Keys []map[string]any `json:"keys"`
 }
 
 type keySet struct {
@@ -123,12 +119,23 @@ func (set *keySet) refresh(ctx context.Context) error {
 	if err != nil || len(body) > maxJWKSBytes {
 		return errors.New("auth: invalid JWKS response")
 	}
-	var document jwksDocument
-	if err := json.Unmarshal(body, &document); err != nil || len(document.Keys) == 0 {
+	if !utf8.Valid(body) {
 		return errors.New("auth: invalid JWKS response")
 	}
-	keys := make(map[string]publicJWK, len(document.Keys))
-	for _, raw := range document.Keys {
+	document, err := decodeObject(body)
+	if err != nil {
+		return errors.New("auth: invalid JWKS response")
+	}
+	entries, ok := document["keys"].([]any)
+	if !ok || len(entries) == 0 {
+		return errors.New("auth: invalid JWKS response")
+	}
+	keys := make(map[string]publicJWK, len(entries))
+	for _, entry := range entries {
+		raw, ok := entry.(map[string]any)
+		if !ok {
+			return errors.New("auth: invalid JWKS key")
+		}
 		parsed, err := parsePublicJWK(raw)
 		if err != nil {
 			return errors.New("auth: invalid JWKS key")
@@ -176,14 +183,10 @@ func parsePublicJWK(raw map[string]any) (publicJWK, error) {
 		return value
 	}
 	kid, alg := stringClaim("kid"), stringClaim("alg")
-	if _, exists := raw["d"]; exists {
-		return publicJWK{}, errors.New("auth: private or remote JWK is not accepted")
-	}
-	if _, exists := raw["jku"]; exists {
-		return publicJWK{}, errors.New("auth: private or remote JWK is not accepted")
-	}
-	if _, exists := raw["x5u"]; exists {
-		return publicJWK{}, errors.New("auth: private or remote JWK is not accepted")
+	for _, name := range []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k", "jku", "x5u"} {
+		if _, exists := raw[name]; exists {
+			return publicJWK{}, errors.New("auth: private or remote JWK is not accepted")
+		}
 	}
 	if rawUse, exists := raw["use"]; exists {
 		usage, ok := rawUse.(string)
