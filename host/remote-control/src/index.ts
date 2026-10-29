@@ -21,6 +21,8 @@ export type { HostResourceIdentity, HostResourceAccess, HostResourceRequest, Hos
 export { HostEnrollmentClient } from './host-enrollment.js'
 export { HostEnrollmentError } from './host-enrollment-transport.js'
 export type { HostEnrollmentOptions, HostEnrollmentRequest, HostEnrollmentIntent, HostEnrollmentReceipt, HostEnrollmentDetails, HostEnrollmentReview, HostEnrollmentApprovalReview, HostEnrollmentConfirmation } from './host-enrollment.js'
+export { HostEnrollmentRecoveryStore, HostEnrollmentRecoveryError } from './host-enrollment-recovery.js'
+export type { HostEnrollmentRecoveryOptions } from './host-enrollment-recovery.js'
 export type { SignedApprovalOptions } from './signed-approvals.js'
 export type { JournalKeyProtector } from './journal-key-protection.js'
 export { LinuxSecretServiceJournalProtector } from './secret-service-journal-protector.js'

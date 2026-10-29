@@ -321,21 +321,48 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const hostIdentity = { issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host' }
   const resourceLifetime = new AbortController()
   const hostPackage = await import(pathToFileURL(resolve('host/remote-control/lib/index.js')).href) as typeof import('../../host/remote-control/src/index.js')
-  const enrollmentClient = new hostPackage.HostEnrollmentClient({ origin, identity: hostIdentity,
+  const enrollmentOptions: import('../../host/remote-control/src/host-enrollment.js').HostEnrollmentOptions = { origin, identity: hostIdentity,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
     signer: { sign(input) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } },
     requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
-  })
-  t.after(() => { enrollmentClient.close(); resourceLifetime.abort() })
+  }
+  let enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
+  let recoveryStore: InstanceType<typeof hostPackage.HostEnrollmentRecoveryStore> | undefined
+  t.after(() => { recoveryStore?.close(); enrollmentClient.close(); resourceLifetime.abort() })
   const prepared = enrollmentClient.prepare({ organizationId: orgId, alias: 'DSH integration', profileRef: 'e2e', dshVersion: '0.2.1-rc.2',
     applicationVersion: 'dsh-go-integration', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: ['other-workspace', 'e2e-workspace'] })
-  const recovery = prepared.exportRecovery()
-  const attempt = enrollmentClient.restore(recovery)
-  recovery.fill(0); prepared.destroy()
+  let attempt = prepared
+  if (process.platform === 'linux') {
+    const recoveryKeyFile = join(root, 'enrollment-recovery-fixture.key'), recoveryTool = join(root, 'enrollment-secret-tool')
+    const recoveryKey = randomBytes(32)
+    await writeFile(recoveryKeyFile, recoveryKey, { mode: 0o600 }); recoveryKey.fill(0)
+    await writeFile(recoveryTool, [
+      '#!/usr/bin/env node', "const fs=require('node:fs')",
+      "if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['lookup','service','fixture-recovery','account','fixture-owner']))process.exit(2)",
+      `process.stdout.write(fs.readFileSync(${JSON.stringify(recoveryKeyFile)}).toString('base64')+'\\n')`, '',
+    ].join('\n'), { mode: 0o700 })
+    const protector = new hostPackage.LinuxSecretServiceJournalProtector({ executable: recoveryTool, service: 'fixture-recovery', account: 'fixture-owner' })
+    const recoveryPath = join(root, 'enrollment-recovery', 'pending.bin')
+    recoveryStore = new hostPackage.HostEnrollmentRecoveryStore({ path: recoveryPath, client: enrollmentClient, protector })
+    const originalCode = prepared.code, originalRequest = prepared.requestId
+    await recoveryStore.save(prepared, AbortSignal.timeout(10_000))
+    const protectedBytes = await readFile(recoveryPath)
+    assert.equal(protectedBytes.includes(Buffer.from(originalCode)), false)
+    recoveryStore.close(); prepared.destroy(); enrollmentClient.close()
+    enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
+    recoveryStore = new hostPackage.HostEnrollmentRecoveryStore({ path: recoveryPath, client: enrollmentClient, protector })
+    const restored = await recoveryStore.load(AbortSignal.timeout(10_000))
+    assert.ok(restored); assert.equal(restored.requestId, originalRequest); assert.equal(restored.code, originalCode)
+    attempt = restored
+  } else {
+    const recovery = prepared.exportRecovery()
+    attempt = enrollmentClient.restore(recovery)
+    recovery.fill(0); prepared.destroy()
+  }
   const code = attempt.code
   assert.equal(JSON.stringify(attempt).includes(code), false)
-  const receipt = await enrollmentClient.create(attempt, AbortSignal.timeout(10_000))
-  const retriedReceipt = await enrollmentClient.create(attempt, AbortSignal.timeout(10_000))
+  const receipt = recoveryStore ? await recoveryStore.create(attempt, AbortSignal.timeout(10_000)) : await enrollmentClient.create(attempt, AbortSignal.timeout(10_000))
+  const retriedReceipt = recoveryStore ? await recoveryStore.create(attempt, AbortSignal.timeout(10_000)) : await enrollmentClient.create(attempt, AbortSignal.timeout(10_000))
   assert.deepEqual(retriedReceipt.details, receipt.details)
   assert.equal(query(`select count(*) from enrollments where request_id='${attempt.requestId}'`), '1')
   const enrollment = receipt.details
@@ -376,19 +403,22 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.deepEqual(hostReview.confirmed_user, { user_id: phoneUserId, issuer, subject: 'phone', eligible: true })
   await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code, confirmed_user_id: outsiderId }, 403)
   let localReviews = 0
-  const active = await enrollmentClient.confirm(attempt, receipt, (review, signal) => {
+  const reviewLocally = (review: import('../../host/remote-control/src/host-enrollment.js').HostEnrollmentApprovalReview, signal: AbortSignal) => {
     assert.equal(signal.aborted, false)
     assert.equal(review.confirmed_user?.user_id, phoneUserId)
     assert.equal(review.confirmed_user?.subject, 'phone')
     assert.equal(review.enrollment.installation_key_jkt, installationKey.jkt)
     localReviews++
     return true
-  }, AbortSignal.timeout(10_000))
+  }
+  const active = recoveryStore ? await recoveryStore.confirm(attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
+    : await enrollmentClient.confirm(attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
   assert.equal(localReviews, 1)
   assert.equal(active.state, 'approved')
   assert.equal(active.host_confirmed, true)
   assert.equal(active.user_confirmed, true)
-  t.diagnostic('The Host enrollment client restored an in-memory recovery attempt, repeated creation idempotently, reviewed the confirmed identity and obtained one explicit local approval before activation.')
+  if (recoveryStore) assert.equal(await recoveryStore.remove(attempt, AbortSignal.timeout(10_000)), true)
+  t.diagnostic('The Host enrollment client restored its fixture recovery attempt, repeated creation idempotently, reviewed the confirmed identity and obtained one explicit local approval before activation.')
   assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
   const runtimeAccess = (await phone('GET', '/v1/runtimes')).items.find((runtime: any) => runtime.id === enrollment.runtime_id)
   assert.equal(runtimeAccess.organization_id, orgId)

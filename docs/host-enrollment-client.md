@@ -2,14 +2,15 @@
 
 `HostEnrollmentClient` 使用现有的已验证资源登录适配器和安装密钥签名器，向远控服务发起
 短期登记申请、读取主机专用的用户核对信息，并在调用方明确确认后提交主机决定。它不包含
-学校登录、安装密钥生成、桌面确认界面或自动恢复存储；这些能力必须由发行端提供。
+学校登录、安装密钥生成或桌面确认界面；这些能力必须由发行端提供。Linux 可使用
+[受保护恢复存储](host-enrollment-recovery.md)持久保存未完成的登记尝试。
 
 ## 接入顺序
 
 ```ts
 import {
-  HostEnrollmentClient,
-  type HostEnrollmentOptions, type HostEnrollmentApprovalReview,
+  HostEnrollmentClient, HostEnrollmentRecoveryStore,
+  type HostEnrollmentOptions, type HostEnrollmentApprovalReview, type JournalKeyProtector,
 } from '@ustc/dsh-remote-control'
 
 // account 必须验证资源 access token、签名、issuer、audience、scope 和 DPoP 绑定，
@@ -17,31 +18,30 @@ import {
 declare const options: HostEnrollmentOptions
 declare const signal: AbortSignal
 declare const organizationIdFromTrustedConfiguration: string
-declare const protectedPendingStore: { save(value: Uint8Array): Promise<void> }
+declare const protector: JournalKeyProtector
+declare const privateRecoveryPath: string
 declare const trustedLocalConfirmation: (review: HostEnrollmentApprovalReview, signal: AbortSignal) => Promise<boolean>
 const client = new HostEnrollmentClient(options)
-const attempt = client.prepare({
-  organizationId: organizationIdFromTrustedConfiguration,
-  alias: '办公室电脑',
-  profileRef: 'default',
-  dshVersion: '0.2.1-rc.2',
-  applicationVersion: 'example',
-  pluginVersion: '0.0.1',
-  protocolVersion: 1,
-  workspaceRefs: ['project'],
-})
-
-// 在首次请求前，将恢复数据写入调用方的认证加密存储，并清除临时缓冲区。
-const recovery = attempt.exportRecovery()
-try { await protectedPendingStore.save(recovery) } finally { recovery.fill(0) }
-const receipt = await client.create(attempt, signal)
+const store = new HostEnrollmentRecoveryStore({ path: privateRecoveryPath, client, protector })
+let attempt = await store.load(signal)
+if (!attempt) {
+  // 仅在已确认没有未对账的旧请求时创建新尝试。
+  attempt = client.prepare({
+    organizationId: organizationIdFromTrustedConfiguration,
+    alias: '办公室电脑', profileRef: 'default', dshVersion: '0.2.1-rc.2',
+    applicationVersion: 'example', pluginVersion: '0.0.1', protocolVersion: 1,
+    workspaceRefs: ['project'],
+  })
+}
+const receipt = await store.create(attempt, signal) // 先持久保存，再发起创建请求
 // 仅在本机受信任界面展示 receipt.details.enrollment_id 和 attempt.code，供手机绑定。
 
 // 手机完成确认后，调用方在受信任本机界面显示用户和主机信息并取得明确选择。
-const approved = await client.confirm(attempt, receipt, async (review, consentSignal) => {
+const approved = await store.confirm(attempt, receipt, async (review, consentSignal) => {
   return await trustedLocalConfirmation(review, consentSignal) // 只有明确同意才返回 true
 }, signal)
-// 完成或放弃后，删除受保护恢复数据并销毁 attempt；不再使用时调用 client.close()。
+// 确认完成后：await store.remove(attempt, signal); attempt.destroy()。
+// 不再使用时调用 store.close(); client.close()。
 ```
 
 示例中的组织 ID、受保护存储和确认界面由发行端提供，不能从手机请求或不受信任文本直接
@@ -69,8 +69,9 @@ signal 取消或客户端关闭后也不能继续使用该尝试。
 
 每个请求独立取得并验证资源会话，以新的 DPoP proof 向固定 origin 和三个登记路径发送；它不
 接受任意 RPC 路径或跟随重定向。并发操作使用各自的 nonce，最多八个在途请求；每个操作有
-十五秒期限，同一进程内的同一尝试只允许一个本机确认流程，确认界面最多等待两分钟并受登记期限约束；
-多个宿主进程共享恢复记录时，发行端还需协调所有权。响应必须是有界、无重复字段、
+十五秒期限，同一 JavaScript 运行域内（包括重复加载的包）的同一尝试只允许一个本机确认流程，
+确认界面最多等待两分钟并受登记期限约束；多个运行域或宿主进程共享恢复记录时，发行端还需
+协调所有权。响应必须是有界、无重复字段、
 `no-store` 的 JSON，签名器的每个 ES256 输出都会用已登记公钥验证。
 
 ## 本地证据与边界
@@ -80,5 +81,5 @@ signal 取消或客户端关闭后也不能继续使用该尝试。
 issuer、模型和手机协议夹具，通过实际主机客户端完成创建、手机确认、主机核对及确认，再
 接入正常 Host Relay。没有使用 TokenWorks、学校身份、生产密钥库或 Android APP。
 
-目标发行版仍需提供受信任的本机确认界面、认证加密恢复存储、安装密钥生成与登记生命周期，
+目标发行版仍需提供受信任的本机确认界面、安装密钥生成与登记生命周期，核验恢复存储的实际平台配置，
 并与学校资源登录适配器和实际身份目录联调。不能把当前回调或本地夹具当作这些验收已完成。

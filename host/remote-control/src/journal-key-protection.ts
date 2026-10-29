@@ -21,10 +21,11 @@ const MAX_WRAPPED = 16 * 1024
 const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const failure = () => new Error('command journal key protection unavailable')
 
-type Protector = { id: string; wrap: JournalKeyProtector['wrap']; unwrap: JournalKeyProtector['unwrap'] }
+export type Protector = { id: string; wrap: JournalKeyProtector['wrap']; unwrap: JournalKeyProtector['unwrap'] }
 export type ProtectedKey = { key: Buffer; needsWrap: boolean; protector: Protector; context: Buffer }
 
-function protectorFrom(value: JournalKeyProtector): Protector {
+/** @internal Capture the adapter methods and stable identity for another protected local store. */
+export function protectorFrom(value: JournalKeyProtector): Protector {
   try {
     if (!value) throw failure()
     const id = value.id, wrap = value.wrap, unwrap = value.unwrap
@@ -43,7 +44,8 @@ function clearBytes(value: unknown): void {
   try { if (value instanceof Uint8Array) value.fill(0) } catch { /* Detached buffers cannot retain usable bytes. */ }
 }
 
-async function invoke(protector: Protector, operation: 'wrap' | 'unwrap', input: Uint8Array, context: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
+/** @internal Bound an adapter call and wipe its temporary and late-returned buffers. */
+export async function invoke(protector: Protector, operation: 'wrap' | 'unwrap', input: Uint8Array, context: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
   const deadline = new AbortController()
   const timer = setTimeout(() => deadline.abort(), 5_000)
   const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal

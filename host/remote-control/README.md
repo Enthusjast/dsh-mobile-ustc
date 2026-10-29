@@ -78,7 +78,8 @@ runtime 的受保护文件，并在验证后迁移旧 `.key`。设置 `requirePr
 主机安装密钥另有[Linux Secret Service 签名器](../../docs/linux-secret-service-installation-signer.md)，
 它使用预配置密钥并校验已登记公钥；安装登记和学校登录仍由发行端负责。
 主机侧[登记客户端](../../docs/host-enrollment-client.md)提供可恢复的绑定尝试、身份核对和明确
-确认回调；发行端仍需提供本机确认界面、受保护恢复存储及学校登录适配。
+确认回调；Linux 提供[受保护恢复存储](../../docs/host-enrollment-recovery.md)。发行端仍需提供
+本机确认界面、平台密钥配置及学校登录适配。
 
 SQLite 使用 Node.js v24 的 `node:sqlite` 同步 API；该 Node 版本将模块标记为 Release Candidate，且同步数据库操作会短暂占用事件循环。单条正文和事务均有界；构建及 DSH CLI 集成验证以仓库锁定的 Node 24 runtime 为准。[Node.js v24 SQLite 文档](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)。主机 Relay 接受经签名握手后的文本 queue / steer 帧，校验服务端提供的规范化摘要，以验证后的 user_id/device_id 分区写入命令日志，并发送 host_accepted、dispatching、agent_queued 等回执。agent_queued 仍等待 DSH 会话持久化检查点。主机同时通过 `session.catalog.v1` 发布会话目录元数据；目录包含确定性 session UUID、原生 DSH ID、可选控制面 workspace UUID、状态和持久化位置，不包含正文、标题或本机路径。插件在连接建立及会话增删时发布完整快照，运行状态和消息活动变化使用增量更新；离开允许工作区的会话会被标记为不可用并清除 workspace 映射。
 

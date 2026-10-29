@@ -1,11 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { inspect } from 'node:util'
+import { pathToFileURL } from 'node:url'
 import { HostEnrollmentClient, type HostEnrollmentOptions } from '../src/host-enrollment.js'
+import { HostEnrollmentRecoveryStore } from '../src/host-enrollment-recovery.js'
 import { HostEnrollmentError } from '../src/host-enrollment-transport.js'
 import type { HostResourceAccess } from '../src/host-credentials.js'
+import type { JournalKeyProtector } from '../src/journal-key-protection.js'
 
 const expected = { issuer: 'https://id.example.edu', subject: 'fixture-owner', audience: 'urn:fixture-host', clientId: 'fixture-host' }
 const organization = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -23,6 +29,20 @@ const valid = (code: string) => (cause: unknown) => cause instanceof HostEnrollm
 const send = (response: ServerResponse, status: number, body: unknown, next: string) => {
   response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'dpop-nonce': next })
   response.end(JSON.stringify(body))
+}
+
+function recoveryProtector(master: Buffer): JournalKeyProtector {
+  return { id: 'fixture-enrollment-recovery',
+    async wrap(key, context) {
+      const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', master, nonce)
+      cipher.setAAD(context)
+      return Buffer.concat([nonce, cipher.update(key), cipher.final(), cipher.getAuthTag()])
+    },
+    async unwrap(wrapped, context) {
+      const bytes = Buffer.from(wrapped), decipher = createDecipheriv('aes-256-gcm', master, bytes.subarray(0, 12))
+      decipher.setAAD(context); decipher.setAuthTag(bytes.subarray(44))
+      return Buffer.concat([decipher.update(bytes.subarray(12, 44)), decipher.final()])
+    } }
 }
 
 async function fixture(t: test.TestContext) {
@@ -170,6 +190,63 @@ test('unknown create and confirmation outcomes require explicit reconciliation',
   assert.equal(f.counts().confirmedCount, 1)
 })
 
+test('protected recovery reconciles a lost create response without a second enrollment', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-lost-create-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const store = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector: recoveryProtector(master) })
+  t.after(() => store.close())
+  const attempt = f.prepare(), requestId = attempt.requestId
+  f.state.dropCreate = true
+  await assert.rejects(store.create(attempt, AbortSignal.timeout(5_000)), valid('outcome_unknown'))
+  attempt.destroy()
+  const recovered = await store.load(AbortSignal.timeout(5_000))
+  assert.ok(recovered); assert.equal(recovered.requestId, requestId)
+  const receipt = await store.create(recovered, AbortSignal.timeout(5_000))
+  assert.equal(receipt.details.request_id, requestId); assert.equal(f.counts().createdCount, 1)
+  assert.equal(await store.remove(recovered, AbortSignal.timeout(5_000)), true)
+  recovered.destroy()
+})
+
+test('protected local confirmation keeps recovery busy until the prompt ends', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-confirm-lock-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const store = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector: recoveryProtector(master) })
+  t.after(() => store.close())
+  const attempt = f.prepare(), receipt = await store.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  const controller = new AbortController()
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const confirming = store.confirm(attempt, receipt, () => { entered(); return new Promise<boolean>(() => {}) }, controller.signal)
+  await started
+  await assert.rejects(store.remove(attempt, AbortSignal.timeout(1_000)), error =>
+    error instanceof Error && 'code' in error && error.code === 'host.enrollment_recovery.busy')
+  controller.abort(); await assert.rejects(confirming, valid('cancelled'))
+  await assert.rejects(store.confirm(attempt, receipt, () => false, AbortSignal.timeout(5_000)), valid('declined'))
+  const recovered = await store.load(AbortSignal.timeout(5_000))
+  assert.equal(recovered?.requestId, attempt.requestId); recovered?.destroy()
+})
+
+test('protected recovery reconciles a lost host-confirmation response after restart', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-lost-confirm-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const path = join(root, 'pending.bin'), protector = recoveryProtector(master)
+  const store = new HostEnrollmentRecoveryStore({ path, client: f.client, protector })
+  const attempt = f.prepare(), receipt = await store.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true; f.state.dropConfirm = true
+  await assert.rejects(store.confirm(attempt, receipt, () => true, AbortSignal.timeout(5_000)), valid('outcome_unknown'))
+  store.close(); f.client.close(); attempt.destroy()
+  const client = new HostEnrollmentClient(f.options), reopened = new HostEnrollmentRecoveryStore({ path, client, protector })
+  t.after(() => { reopened.close(); client.close() })
+  const recovered = await reopened.load(AbortSignal.timeout(5_000))
+  assert.ok(recovered)
+  const historical = await reopened.create(recovered, AbortSignal.timeout(5_000))
+  assert.equal((await client.review(recovered, historical, AbortSignal.timeout(5_000))).enrollment.state, 'approved')
+  assert.equal(f.counts().createdCount, 1); assert.equal(f.counts().confirmedCount, 1)
+  assert.equal(await reopened.remove(recovered, AbortSignal.timeout(5_000)), true)
+  recovered.destroy()
+})
+
 test('host enrollment pins account, proof key and response identity before publishing results', async t => {
   const f = await fixture(t)
   const recovery = f.prepare().exportRecovery()
@@ -228,8 +305,12 @@ test('destroying an attempt cancels an unfinished local review', async t => {
 test('one attempt cannot display concurrent local confirmation prompts', async t => {
   const f = await fixture(t), attempt = f.prepare(), receipt = await f.client.create(attempt, AbortSignal.timeout(5_000))
   const recovery = attempt.exportRecovery(), restored = f.client.restore(recovery)
+  const duplicateModule = await import(`${pathToFileURL(resolve('host/remote-control/src/host-enrollment.ts')).href}?fixture=${randomBytes(8).toString('hex')}`) as typeof import('../src/host-enrollment.js')
+  const duplicate = new duplicateModule.HostEnrollmentClient(f.options), duplicateAttempt = duplicate.restore(recovery)
+  t.after(() => duplicate.close())
   recovery.fill(0)
   const restoredReceipt = await f.client.create(restored, AbortSignal.timeout(5_000))
+  const duplicateReceipt = await duplicate.create(duplicateAttempt, AbortSignal.timeout(5_000))
   f.state.phoneConfirmed = true
   const controller = new AbortController()
   let entered!: () => void
@@ -238,6 +319,8 @@ test('one attempt cannot display concurrent local confirmation prompts', async t
   await started
   await assert.rejects(f.client.confirm(attempt, receipt, () => true, AbortSignal.timeout(5_000)), valid('busy'))
   await assert.rejects(f.client.confirm(restored, restoredReceipt, () => true, AbortSignal.timeout(5_000)), valid('busy'))
+  await assert.rejects(duplicate.confirm(duplicateAttempt, duplicateReceipt, () => true, AbortSignal.timeout(5_000)), error =>
+    error instanceof Error && 'code' in error && error.code === 'host.enrollment.busy')
   controller.abort(); await assert.rejects(first, valid('cancelled'))
   await assert.rejects(f.client.confirm(attempt, receipt, () => false, AbortSignal.timeout(5_000)), valid('declined'))
   assert.equal(f.counts().confirmedCount, 0)

@@ -3,6 +3,7 @@ import { inspect } from 'node:util'
 import { z } from 'zod'
 import { parseSigningObject } from './canonical.js'
 import { enrollmentAbortable, enrollmentError, HostEnrollmentError, HostEnrollmentTransport, type HostEnrollmentTransportOptions } from './host-enrollment-transport.js'
+import { guards } from './host-process-guards.js'
 
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 const secret = z.string().regex(/^[A-Za-z0-9_-]{43}$/).refine(value => Buffer.from(value, 'base64url').toString('base64url') === value)
@@ -58,7 +59,16 @@ const attemptStates = new WeakMap<HostEnrollmentIntent, IntentState>()
 const attemptLifetimes = new WeakMap<HostEnrollmentIntent, AbortController>()
 const attemptOwners = new WeakMap<HostEnrollmentIntent, AbortSignal>()
 const receiptStates = new WeakMap<HostEnrollmentReceipt, { attempt: HostEnrollmentIntent; data: ReceiptData }>()
-const activeApprovals = new Set<string>()
+const activeApprovals = guards.enrollmentApprovals
+const clientBindings = new WeakMap<HostEnrollmentClient, string>()
+
+/** @internal A recovery store binds its encryption to this exact account and installation. */
+export function enrollmentRecoveryBinding(client: HostEnrollmentClient): string {
+  const binding = clientBindings.get(client)
+  if (!binding) throw enrollmentError('invalid_config')
+  if (client.signal.aborted) throw enrollmentError('cancelled')
+  return binding
+}
 
 function currentAttempt(attempt: HostEnrollmentIntent, binding: string): IntentState {
   const value = attemptStates.get(attempt)
@@ -114,6 +124,7 @@ export class HostEnrollmentClient {
   constructor(options: HostEnrollmentOptions) {
     this.#transport = new HostEnrollmentTransport(options)
     this.signal = this.#transport.signal
+    clientBindings.set(this, this.#transport.binding)
     Object.freeze(this)
   }
   toString(): string { return 'HostEnrollmentClient' }

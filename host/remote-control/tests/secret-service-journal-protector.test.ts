@@ -185,7 +185,7 @@ test('Secret Service protector snapshots the lookup reference used for its stabl
   reopened.fill(0)
 })
 
-test('isolated Secret Service supplies the journal and installation keys', { skip: process.platform !== 'linux', timeout: 25_000 }, async t => {
+test('isolated Secret Service supplies journal, installation and enrollment recovery keys', { skip: process.platform !== 'linux', timeout: 25_000 }, async t => {
   const gi = spawnSync('/usr/bin/python3', ['-c', "import gi;gi.require_version('Secret','1');from gi.repository import Secret"], { stdio: 'ignore' })
   const dbus = spawnSync('dbus-run-session', ['--version'], { stdio: 'ignore' })
   const keyring = spawnSync('gnome-keyring-daemon', ['--version'], { stdio: 'ignore' })
@@ -211,6 +211,8 @@ test('isolated Secret Service supplies the journal and installation keys', { ski
   ].join('\n'), { mode: 0o700 })
   const protectorModule = pathToFileURL(resolve('host/remote-control/src/secret-service-journal-protector.ts')).href
   const signerModule = pathToFileURL(resolve('host/remote-control/src/secret-service-installation-signer.ts')).href
+  const enrollmentModule = pathToFileURL(resolve('host/remote-control/src/host-enrollment.ts')).href
+  const recoveryModule = pathToFileURL(resolve('host/remote-control/src/host-enrollment-recovery.ts')).href
   const journalModule = pathToFileURL(resolve('host/remote-control/src/command-journal.ts')).href
   const protocolModule = pathToFileURL(resolve('host/remote-control/src/protocol.ts')).href
   const journalPath = join(root, 'commands.sqlite'), runtime = randomUUID()
@@ -218,6 +220,8 @@ test('isolated Secret Service supplies the journal and installation keys', { ski
     "import assert from 'node:assert/strict'", "import { lstat, readFile } from 'node:fs/promises'", "import { createPublicKey, randomUUID, verify } from 'node:crypto'",
     `import { LinuxSecretServiceJournalProtector } from ${JSON.stringify(protectorModule)}`,
     `import { LinuxSecretServiceInstallationSigner } from ${JSON.stringify(signerModule)}`,
+    `import { HostEnrollmentClient } from ${JSON.stringify(enrollmentModule)}`,
+    `import { HostEnrollmentRecoveryStore } from ${JSON.stringify(recoveryModule)}`,
     `import { PersistentCommandJournal } from ${JSON.stringify(journalModule)}`,
     `import { parseCommand } from ${JSON.stringify(protocolModule)}`,
     `const path=${JSON.stringify(journalPath)},runtime=${JSON.stringify(runtime)}`,
@@ -231,7 +235,13 @@ test('isolated Secret Service supplies the journal and installation keys', { ski
     'journal=await PersistentCommandJournal.open(path,runtime,{protector});assert.deepEqual(journal.get(input.request_id,owner)?.command,input);journal.close()',
     `const publicJwk=${JSON.stringify(installationPublic)}`,
     `const signer=new LinuxSecretServiceInstallationSigner({executable:${JSON.stringify(shim)},service:${JSON.stringify(service)},account:${JSON.stringify(installationAccount)},publicJwk,ownerSignal:new AbortController().signal})`,
-    "const message=Buffer.from('isolated-installation-proof');assert.equal(verify('sha256',message,{key:createPublicKey({key:publicJwk,format:'jwk'}),dsaEncoding:'ieee-p1363'},await signer.sign(message)),true);signer.close()",
+    "const message=Buffer.from('isolated-installation-proof');assert.equal(verify('sha256',message,{key:createPublicKey({key:publicJwk,format:'jwk'}),dsaEncoding:'ieee-p1363'},await signer.sign(message)),true)",
+    "const ownerSignal=new AbortController().signal;const options={origin:'https://fixture.example',identity:{issuer:'https://id.example',subject:'fixture',audience:'urn:fixture',clientId:'fixture-host'},publicJwk,signer,account:{signal:ownerSignal,async acquire(){throw new Error('unexpected network')}},requiredScopes:['remote.access']}",
+    `const recoveryPath=${JSON.stringify(join(root, 'recovery', 'pending.bin'))}`,
+    "let client=new HostEnrollmentClient(options),store=new HostEnrollmentRecoveryStore({path:recoveryPath,client,protector})",
+    "const attempt=client.prepare({organizationId:randomUUID(),alias:'PRIVATE_RECOVERY_ALIAS',profileRef:'fixture',protocolVersion:1,workspaceRefs:['workspace']});const code=attempt.code,id=attempt.requestId",
+    "await store.save(attempt,AbortSignal.timeout(5000));const encrypted=await readFile(recoveryPath);assert.equal(encrypted.includes(Buffer.from(code)),false);assert.equal(encrypted.includes(Buffer.from('PRIVATE_RECOVERY_ALIAS')),false);attempt.destroy();store.close();client.close()",
+    "client=new HostEnrollmentClient(options);store=new HostEnrollmentRecoveryStore({path:recoveryPath,client,protector});const restored=await store.load(AbortSignal.timeout(5000));assert.ok(restored);assert.equal(restored.code,code);assert.equal(restored.requestId,id);assert.equal(await store.remove(restored,AbortSignal.timeout(5000)),true);restored.destroy();store.close();client.close();signer.close()",
     "process.stdout.write('isolated-client-ok\\n')", '',
   ].join('\n'), { mode: 0o600 })
   await writeFile(coordinator, [
