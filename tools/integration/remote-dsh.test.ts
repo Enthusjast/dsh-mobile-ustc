@@ -434,8 +434,14 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   let terminalRun: Promise<import('../../host/remote-control/src/host-enrollment.js').HostEnrollmentBinding> | undefined
   if (process.env.REMOTE_TEST_HOST_TERMINAL === '1') {
     assert.ok(recoveryStore && bindingStore, 'terminal fixture requires the Linux protected stores')
-    terminalRun = hostPackage.runHostEnrollmentOnTerminal({ client: enrollmentClient, recovery: recoveryStore, binding: bindingStore,
-      attempt, receipt, signal: AbortSignal.timeout(20_000) })
+    // Model a restart after a pending binding pointer was durably reserved.
+    await bindingStore.reserve(attempt, receipt, AbortSignal.timeout(10_000))
+    const workflow = new hostPackage.HostTerminalEnrollmentWorkflow({ client: enrollmentClient, recovery: recoveryStore, binding: bindingStore })
+    t.after(() => workflow.close())
+    terminalRun = workflow.resume(AbortSignal.timeout(20_000)).then(result => {
+      assert.ok(result, 'the protected attempt disappeared during resume')
+      return result
+    })
     void terminalRun.catch(() => {})
   }
   const partial = await phone('POST', `/v1/enrollments/${enrollment.enrollment_id}/confirm`, { code })
@@ -475,7 +481,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     assert.equal(active.state, 'approved'); assert.equal(active.host_confirmed, true); assert.equal(active.user_confirmed, true)
   }
   assert.equal(localReviews, terminalRun ? 0 : 1)
-  if (terminalRun) t.diagnostic('A disposable controlling terminal displayed the pairing details and required the exact local confirmation response.')
+  if (terminalRun) t.diagnostic('The terminal workflow reopened a pending binding pointer and restored the original protected request; a disposable controlling terminal displayed pairing details and required the exact local confirmation response.')
   t.diagnostic('The Host enrollment client restored its fixture recovery attempt, repeated creation idempotently, reviewed the confirmed identity and reopened its durable binding before connecting.')
   assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
   const runtimeAccess = (await phone('GET', '/v1/runtimes')).items.find((runtime: any) => runtime.id === enrollment.runtime_id)

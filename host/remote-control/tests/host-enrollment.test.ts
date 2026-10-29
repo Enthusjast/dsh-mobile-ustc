@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto'
+import { once } from 'node:events'
 import { writeFileSync } from 'node:fs'
 import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
@@ -12,6 +14,7 @@ import { captureEnrollmentBinding, HostEnrollmentClient, type HostEnrollmentBind
 import { HostEnrollmentRecoveryError, HostEnrollmentRecoveryStore } from '../src/host-enrollment-recovery.js'
 import { HostEnrollmentBindingError, HostEnrollmentBindingStore } from '../src/host-enrollment-binding.js'
 import { HostLocalEnrollmentError, runHostEnrollmentOnTerminal } from '../src/host-local-enrollment.js'
+import { HostTerminalEnrollmentWorkflow, HostTerminalEnrollmentWorkflowError } from '../src/host-enrollment-workflow.js'
 import { HostEnrollmentError } from '../src/host-enrollment-transport.js'
 import type { HostResourceAccess } from '../src/host-credentials.js'
 import type { JournalKeyProtector } from '../src/journal-key-protection.js'
@@ -30,6 +33,7 @@ const part = (value: string) => JSON.parse(Buffer.from(value, 'base64url').toStr
 const nonce = () => randomBytes(32).toString('base64url')
 const valid = (code: string) => (cause: unknown) => cause instanceof HostEnrollmentError && cause.code === `host.enrollment.${code}`
 const bindingError = (code: string) => (cause: unknown) => cause instanceof HostEnrollmentBindingError && cause.code === `host.enrollment_binding.${code}`
+const workflowError = (code: string) => (cause: unknown) => cause instanceof HostTerminalEnrollmentWorkflowError && cause.code === `host.terminal_enrollment.${code}`
 const send = (response: ServerResponse, status: number, body: unknown, next: string) => {
   response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'dpop-nonce': next })
   response.end(JSON.stringify(body))
@@ -129,7 +133,7 @@ async function fixture(t: test.TestContext) {
   t.after(async () => { client.close(); owner.abort(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
   const prepare = () => client.prepare({ organizationId: organization, alias: 'Fixture host', profileRef: 'profile', dshVersion: '0.2.1-rc.2',
     applicationVersion: 'fixture', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: ['z-workspace', 'a-workspace'] })
-  return { client, options, account, owner, requests, prepare, state, resetEnrollment: () => { input = undefined; state.phoneConfirmed = false; state.approved = false },
+  return { client, options, account, privateKey: keys.privateKey, owner, requests, prepare, state, resetEnrollment: () => { input = undefined; state.phoneConfirmed = false; state.approved = false },
     counts: () => ({ createdCount, confirmedCount, reviews }) }
 }
 
@@ -348,6 +352,129 @@ test('terminal enrollment reconciles only the exact request and enrollment', asy
       (error: unknown) => error instanceof HostLocalEnrollmentError && error.code === 'host.local_enrollment.recovery_required')
   }
   attempt.destroy()
+})
+
+test('terminal workflow restores the same protected request after an uncertain create and rejects overlap', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-workflow-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master)
+  const recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  let workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  t.after(() => { workflow.close(); recovery.close(); binding.close() })
+  const request = { organizationId: organization, alias: 'Fixture host', profileRef: 'profile', dshVersion: '0.2.1-rc.2',
+    applicationVersion: 'fixture', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: ['z-workspace', 'a-workspace'] }
+  assert.equal(await workflow.resume(AbortSignal.timeout(5_000)), undefined)
+  let entered!: () => void
+  let started = new Promise<void>(resolve => { entered = resolve })
+  f.state.holdCreate = true; f.state.onCreate = () => entered()
+  const first = workflow.start(request, AbortSignal.timeout(5_000))
+  await started
+  await assert.rejects(workflow.resume(AbortSignal.timeout(1_000)), workflowError('busy'))
+  workflow.close()
+  await assert.rejects(first, valid('outcome_unknown'))
+  const saved = await recovery.load(AbortSignal.timeout(5_000))
+  assert.ok(saved)
+  const requestId = saved.requestId, code = saved.code
+  saved.destroy()
+  workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  await assert.rejects(workflow.start(request, AbortSignal.timeout(5_000)), workflowError('existing'))
+  const cancel = new AbortController()
+  started = new Promise<void>(resolve => { entered = resolve })
+  f.state.holdCreate = true; f.state.onCreate = () => entered()
+  const retry = workflow.resume(cancel.signal)
+  await started; cancel.abort()
+  await assert.rejects(retry, valid('outcome_unknown'))
+  const creates = f.requests.filter(item => item.path === '/v1/enrollments' && item.proof.nonce)
+  assert.equal(creates.length, 2); assert.equal(f.counts().createdCount, 1)
+  assert.deepEqual(creates[0]!.body, creates[1]!.body)
+  assert.equal(creates[0]!.body.request_id, requestId); assert.equal(creates[0]!.body.code, code)
+})
+
+test('terminal workflow starts a new protected request and requires local confirmation', { skip: process.platform !== 'linux', timeout: 20_000 }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-workflow-start-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  // The local identity fixture supplies a pre-confirmed phone; the PTY driver
+  // still has to answer the distinct, fresh host confirmation challenge.
+  f.state.phoneConfirmed = true
+  const module = (name: string) => pathToFileURL(resolve(`host/remote-control/src/${name}.ts`)).href
+  const script = join(root, 'workflow.mts')
+  const configuration = { origin: f.options.origin, identity: expected, publicJwk: f.options.publicJwk, account: f.account,
+    privateKey: f.privateKey.export({ type: 'pkcs8', format: 'pem' }), master: master.toString('base64'), root }
+  await writeFile(script, [
+    "import { createCipheriv,createDecipheriv,createPrivateKey,randomBytes,sign } from 'node:crypto'",
+    `import { HostEnrollmentClient } from ${JSON.stringify(module('host-enrollment'))}`,
+    `import { HostEnrollmentRecoveryStore } from ${JSON.stringify(module('host-enrollment-recovery'))}`,
+    `import { HostEnrollmentBindingStore } from ${JSON.stringify(module('host-enrollment-binding'))}`,
+    `import { HostTerminalEnrollmentWorkflow } from ${JSON.stringify(module('host-enrollment-workflow'))}`,
+    `const c=${JSON.stringify(configuration)},owner=new AbortController(),key=createPrivateKey(c.privateKey),master=Buffer.from(c.master,'base64')`,
+    "const protector={id:'fixture-enrollment-recovery',async wrap(value,aad){const n=randomBytes(12),x=createCipheriv('aes-256-gcm',master,n);x.setAAD(aad);return Buffer.concat([n,x.update(value),x.final(),x.getAuthTag()])},async unwrap(value,aad){const b=Buffer.from(value),x=createDecipheriv('aes-256-gcm',master,b.subarray(0,12));x.setAAD(aad);x.setAuthTag(b.subarray(44));return Buffer.concat([x.update(b.subarray(12,44)),x.final()])}}",
+    "const client=new HostEnrollmentClient({origin:c.origin,identity:c.identity,publicJwk:c.publicJwk,requiredScopes:['remote.access'],allowLoopbackHttp:true,signer:{sign(input){return sign('sha256',Buffer.from(input),{key,dsaEncoding:'ieee-p1363'})}},account:{signal:owner.signal,async acquire(){return c.account}}})",
+    "const recovery=new HostEnrollmentRecoveryStore({path:c.root+'/pending.bin',client,protector}),binding=new HostEnrollmentBindingStore({path:c.root+'/binding.bin',client,protector}),workflow=new HostTerminalEnrollmentWorkflow({client,recovery,binding})",
+    `const result=await workflow.start({organizationId:${JSON.stringify(organization)},alias:'Fixture host',profileRef:'profile',dshVersion:'0.2.1-rc.2',applicationVersion:'fixture',pluginVersion:'0.0.1',protocolVersion:1,workspaceRefs:['z-workspace','a-workspace']},AbortSignal.timeout(6500))`,
+    "const saved=await recovery.load(AbortSignal.timeout(3000));process.stdout.write(JSON.stringify({requestId:result.requestId,enrollmentId:result.enrollmentId,savedRequestId:saved?.requestId})+'\\n');saved?.destroy();workflow.close();binding.close();recovery.close();client.close();owner.abort();master.fill(0)", '',
+  ].join('\n'), { mode: 0o600 })
+  const child = spawn('python3', [resolve('host/remote-control/tests/fixtures/host-terminal-pty.py'), 'accept', resolve('node_modules/.bin/tsx'), script],
+    { cwd: root, env: { PATH: process.env.PATH ?? '', TMPDIR: root }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = '', stderr = ''
+  child.stdout.setEncoding('utf8').on('data', value => { stdout = (stdout + value).slice(-100_000) })
+  child.stderr.setEncoding('utf8').on('data', value => { stderr = (stderr + value).slice(-4096) })
+  const [exit] = await once(child, 'close')
+  assert.equal(exit, 0, `terminal driver failed: ${stderr}`)
+  const output = JSON.parse(stdout) as { exit: number; stdout: string; stderr: string; terminal: string }
+  assert.equal(output.exit, 0, `workflow child failed: ${output.stderr}`)
+  assert.equal(output.stdout.includes(token), false)
+  const result = JSON.parse(output.stdout) as { requestId: string; enrollmentId: string; savedRequestId: string }
+  assert.equal(result.enrollmentId, enrollment); assert.equal(result.requestId, result.savedRequestId)
+  assert.ok(Buffer.from(output.terminal, 'base64').toString('utf8').includes('配对码: '))
+  assert.equal(f.counts().createdCount, 1); assert.equal(f.counts().confirmedCount, 1)
+})
+
+test('terminal workflow returns an online-verified binding and keeps a pending record for explicit cleanup', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-workflow-bound-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  t.after(() => { workflow.close(); recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  const approved = await binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000))
+  assert.deepEqual(await workflow.resume(AbortSignal.timeout(5_000)), approved)
+  await assert.rejects(workflow.start({ organizationId: organization, alias: 'Other host', profileRef: 'profile', protocolVersion: 1, workspaceRefs: [] },
+    AbortSignal.timeout(5_000)), workflowError('existing'))
+  const saved = await recovery.load(AbortSignal.timeout(5_000))
+  assert.ok(saved); assert.equal(saved.requestId, attempt.requestId); saved.destroy()
+  assert.equal(f.counts().createdCount, 1); assert.equal(f.counts().confirmedCount, 1)
+  assert.equal(await recovery.remove(attempt, AbortSignal.timeout(5_000)), true); attempt.destroy()
+})
+
+test('terminal workflow refuses missing recovery and conflicting pointers before displaying a code', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-workflow-conflict-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const workflow = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding })
+  t.after(() => { workflow.close(); recovery.close(); binding.close() })
+  const first = f.prepare(), firstReceipt = await f.client.create(first, AbortSignal.timeout(5_000))
+  await binding.reserve(first, firstReceipt, AbortSignal.timeout(5_000))
+  await assert.rejects(workflow.resume(AbortSignal.timeout(5_000)), workflowError('recovery_required'))
+  await assert.rejects(workflow.start({ organizationId: organization, alias: 'Other host', profileRef: 'profile', protocolVersion: 1, workspaceRefs: [] },
+    AbortSignal.timeout(5_000)), workflowError('existing'))
+  f.resetEnrollment()
+  const second = f.prepare()
+  await recovery.create(second, AbortSignal.timeout(5_000))
+  // This fixture stores only one server enrollment. Keep the first pending
+  // pointer while the second is current, and model the first review as pending.
+  const pendingView = { signal: binding.signal, async open() { throw new HostEnrollmentError('host.enrollment.review_required') },
+    reserve: binding.reserve.bind(binding), confirm: binding.confirm.bind(binding) } as unknown as HostEnrollmentBindingStore
+  const conflicting = new HostTerminalEnrollmentWorkflow({ client: f.client, recovery, binding: pendingView })
+  t.after(() => conflicting.close())
+  const reviews = f.counts().reviews
+  await assert.rejects(conflicting.resume(AbortSignal.timeout(5_000)), bindingError('conflict'))
+  assert.equal(f.counts().reviews, reviews)
+  assert.equal(f.counts().confirmedCount, 0)
+  first.destroy(); second.destroy()
 })
 
 test('binding pointer reconciles a lost confirmation without the expired pairing attempt', { skip: process.platform !== 'linux' }, async t => {
