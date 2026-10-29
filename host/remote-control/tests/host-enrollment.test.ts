@@ -1,14 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
+import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { inspect } from 'node:util'
 import { pathToFileURL } from 'node:url'
-import { HostEnrollmentClient, type HostEnrollmentOptions } from '../src/host-enrollment.js'
+import { captureEnrollmentBinding, HostEnrollmentClient, type HostEnrollmentOptions } from '../src/host-enrollment.js'
 import { HostEnrollmentRecoveryStore } from '../src/host-enrollment-recovery.js'
+import { HostEnrollmentBindingError, HostEnrollmentBindingStore } from '../src/host-enrollment-binding.js'
 import { HostEnrollmentError } from '../src/host-enrollment-transport.js'
 import type { HostResourceAccess } from '../src/host-credentials.js'
 import type { JournalKeyProtector } from '../src/journal-key-protection.js'
@@ -26,6 +28,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('base6
 const part = (value: string) => JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as any
 const nonce = () => randomBytes(32).toString('base64url')
 const valid = (code: string) => (cause: unknown) => cause instanceof HostEnrollmentError && cause.code === `host.enrollment.${code}`
+const bindingError = (code: string) => (cause: unknown) => cause instanceof HostEnrollmentBindingError && cause.code === `host.enrollment_binding.${code}`
 const send = (response: ServerResponse, status: number, body: unknown, next: string) => {
   response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'dpop-nonce': next })
   response.end(JSON.stringify(body))
@@ -54,7 +57,9 @@ async function fixture(t: test.TestContext) {
   let origin = '', input: any, createdCount = 0, confirmedCount = 0, reviews = 0
   const expires = new Date(Date.now() + 300_000).toISOString()
   const state = { phoneConfirmed: false, approved: false, eligible: true, confirmedUser: user, subject: 'fixture-phone', organizationName: 'Fixture organization',
-    dropCreate: false, holdCreate: false, redirectCreate: false, dropConfirm: false, wrongReceipt: false,
+    dropCreate: false, holdCreate: false, redirectCreate: false, dropConfirm: false, dropReviewAt: 0, denyReview: false, wrongReceipt: false,
+    aliasOverride: undefined as string | undefined, dshOverride: undefined as string | undefined, appOverride: undefined as string | undefined,
+    pluginOverride: undefined as string | undefined, protocolOverride: undefined as number | undefined,
     onCreate: undefined as undefined | (() => void), onReview: undefined as undefined | ((count: number) => void) }
   const server = createServer(async (request, response) => {
     try {
@@ -91,11 +96,13 @@ async function fixture(t: test.TestContext) {
           state: state.approved ? 'approved' : state.phoneConfirmed ? 'user_confirmed' : 'pending', expires_at: expires, workspaces: mapped } }, next)
       } else if (request.method === 'GET' && request.url === `/v1/enrollments/${enrollment}/host-review`) {
         assert.ok(input); reviews++; state.onReview?.(reviews)
+        if (reviews === state.dropReviewAt) { response.destroy(); return }
+        if (state.denyReview) { send(response, 403, { ok: false, error: { code: 'access.denied' } }, next); return }
         send(response, 200, { ok: true, data: { enrollment: { enrollment_id: enrollment, request_id: input.request_id,
-          organization_id: input.organization_id, organization_name: state.organizationName, host_id: host, host_alias: input.alias,
+          organization_id: input.organization_id, organization_name: state.organizationName, host_id: host, host_alias: state.aliasOverride ?? input.alias,
           installation_id: installation, installation_key_jkt: thumbprint, runtime_id: runtime, profile_ref: input.profile_ref,
-          dsh_version: input.dsh_version, application_version: input.application_version, plugin_version: input.plugin_version,
-          protocol_version: input.protocol_version, state: state.approved ? 'approved' : state.phoneConfirmed ? 'user_confirmed' : 'pending',
+          dsh_version: state.dshOverride ?? input.dsh_version, application_version: state.appOverride ?? input.application_version, plugin_version: state.pluginOverride ?? input.plugin_version,
+          protocol_version: state.protocolOverride ?? input.protocol_version, state: state.approved ? 'approved' : state.phoneConfirmed ? 'user_confirmed' : 'pending',
           expires_at: expires, host_confirmed: state.approved, user_confirmed: state.phoneConfirmed, user_confirmed_by_me: false, workspaces },
         confirmed_user: state.phoneConfirmed ? { user_id: state.confirmedUser, issuer: expected.issuer, subject: state.subject, eligible: state.eligible } : null } }, next)
       } else if (request.method === 'POST' && request.url === `/v1/enrollments/${enrollment}/host-confirm`) {
@@ -121,7 +128,8 @@ async function fixture(t: test.TestContext) {
   t.after(async () => { client.close(); owner.abort(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
   const prepare = () => client.prepare({ organizationId: organization, alias: 'Fixture host', profileRef: 'profile', dshVersion: '0.2.1-rc.2',
     applicationVersion: 'fixture', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: ['z-workspace', 'a-workspace'] })
-  return { client, options, account, owner, requests, prepare, state, counts: () => ({ createdCount, confirmedCount, reviews }) }
+  return { client, options, account, owner, requests, prepare, state, resetEnrollment: () => { input = undefined; state.phoneConfirmed = false; state.approved = false },
+    counts: () => ({ createdCount, confirmedCount, reviews }) }
 }
 
 test('host enrollment restores a private attempt, validates the peer and requires explicit local review', async t => {
@@ -245,6 +253,168 @@ test('protected recovery reconciles a lost host-confirmation response after rest
   assert.equal(f.counts().createdCount, 1); assert.equal(f.counts().confirmedCount, 1)
   assert.equal(await reopened.remove(recovered, AbortSignal.timeout(5_000)), true)
   recovered.destroy()
+})
+
+test('binding pointer survives confirmation, recovery cleanup and attempt expiry', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), pendingPath = join(root, 'pending.bin'), bindingPath = join(root, 'binding.bin')
+  const recovery = new HostEnrollmentRecoveryStore({ path: pendingPath, client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: bindingPath, client: f.client, protector })
+  t.after(() => { recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  const captured = JSON.stringify(captureEnrollmentBinding(f.client, attempt, receipt))
+  assert.equal(captured.includes(attempt.code), false); assert.equal(captured.includes('fixture-phone'), false)
+  await binding.reserve(attempt, receipt, AbortSignal.timeout(5_000))
+  const before = await readFile(bindingPath)
+  await binding.reserve(attempt, receipt, AbortSignal.timeout(5_000))
+  assert.deepEqual(await readFile(bindingPath), before)
+  assert.equal((await lstat(bindingPath)).mode & 0o777, 0o600)
+  assert.equal(before.includes(Buffer.from(attempt.code)), false)
+  assert.equal(before.includes(Buffer.from('fixture-phone')), false)
+  await assert.rejects(binding.open(AbortSignal.timeout(5_000)), valid('review_required'))
+  f.state.phoneConfirmed = true
+  const result = await binding.confirm(recovery, attempt, receipt, async review => {
+    assert.equal(review.confirmed_user?.user_id, user)
+    assert.deepEqual(await readFile(bindingPath), before)
+    return true
+  }, AbortSignal.timeout(5_000))
+  assert.equal(result.organizationId, organization); assert.equal(result.hostId, host)
+  assert.equal(result.installationId, installation); assert.equal(result.runtimeId, runtime)
+  assert.equal(result.profileRef, 'profile'); assert.equal(result.workspaces.length, 2)
+  assert.equal(Object.isFrozen(result), true); assert.equal(Object.isFrozen(result.workspaces), true)
+  assert.equal(await recovery.remove(attempt, AbortSignal.timeout(5_000)), true)
+  attempt.destroy(); binding.close(); recovery.close(); f.client.close()
+  const client = new HostEnrollmentClient(f.options), reopened = new HostEnrollmentBindingStore({ path: bindingPath, client, protector })
+  t.after(() => { reopened.close(); client.close() })
+  const now = Date.now
+  try {
+    Date.now = () => now() + 601_000
+    f.account.expiresAt = Date.now() + 300_000
+    f.state.aliasOverride = 'Renamed host'; f.state.dshOverride = '0.2.2'; f.state.appOverride = 'new-app'; f.state.pluginOverride = 'new-plugin'; f.state.protocolOverride = 2
+    assert.deepEqual(await reopened.open(AbortSignal.timeout(5_000)), result)
+    f.state.denyReview = true
+    await assert.rejects(reopened.open(AbortSignal.timeout(5_000)), valid('denied'))
+    assert.deepEqual(await readFile(bindingPath), before)
+    f.state.denyReview = false
+  } finally { Date.now = now }
+})
+
+test('binding pointer reconciles a lost confirmation without the expired pairing attempt', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-lost-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), pendingPath = join(root, 'pending.bin'), bindingPath = join(root, 'binding.bin')
+  const recovery = new HostEnrollmentRecoveryStore({ path: pendingPath, client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: bindingPath, client: f.client, protector })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true; f.state.dropConfirm = true
+  await assert.rejects(binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000)), valid('outcome_unknown'))
+  assert.equal(f.counts().confirmedCount, 1)
+  binding.close(); recovery.close(); f.client.close(); attempt.destroy()
+  const client = new HostEnrollmentClient(f.options), reopened = new HostEnrollmentBindingStore({ path: bindingPath, client, protector })
+  t.after(() => { reopened.close(); client.close() })
+  const now = Date.now
+  try {
+    Date.now = () => now() + 601_000
+    f.account.expiresAt = Date.now() + 300_000
+    const result = await reopened.open(AbortSignal.timeout(5_000))
+    assert.equal(result?.installationId, installation); assert.equal(result?.runtimeId, runtime)
+    assert.equal(f.counts().confirmedCount, 1)
+  } finally { Date.now = now }
+})
+
+test('binding confirmation preserves its pointer if the subsequent server review fails', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-review-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  t.after(() => { recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true; f.state.dropReviewAt = 3
+  await assert.rejects(binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000)), valid('outcome_unknown'))
+  assert.equal(f.counts().confirmedCount, 1)
+  f.state.dropReviewAt = 0
+  assert.equal((await binding.open(AbortSignal.timeout(5_000)))?.runtimeId, runtime)
+})
+
+test('cancellation after confirmation is reported as unknown and remains reconcilable', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-cancel-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  t.after(() => { recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  const controller = new AbortController()
+  f.state.onReview = count => { if (count === 3) controller.abort() }
+  await assert.rejects(binding.confirm(recovery, attempt, receipt, () => true, controller.signal), valid('outcome_unknown'))
+  assert.equal(f.counts().confirmedCount, 1)
+  assert.equal((await binding.open(AbortSignal.timeout(5_000)))?.installationId, installation)
+})
+
+test('a binding file changed during final review never produces a durable success', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-replaced-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const path = join(root, 'binding.bin'), binding = new HostEnrollmentBindingStore({ path, client: f.client, protector })
+  t.after(() => { recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  f.state.onReview = count => { if (count === 3) writeFileSync(path, 'corrupt-after-confirmation', { mode: 0o600 }) }
+  await assert.rejects(binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000)), valid('outcome_unknown'))
+  assert.equal(f.counts().confirmedCount, 1)
+  await assert.rejects(binding.open(AbortSignal.timeout(5_000)), bindingError('unavailable'))
+  assert.equal((await recovery.load(AbortSignal.timeout(5_000)))?.requestId, attempt.requestId)
+})
+
+test('binding pointer remains locked throughout local confirmation', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-lock-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  t.after(() => { recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve }), controller = new AbortController()
+  const confirming = binding.confirm(recovery, attempt, receipt, () => { entered(); return new Promise<boolean>(() => {}) }, controller.signal)
+  await started
+  await assert.rejects(binding.discard(AbortSignal.timeout(1_000)), bindingError('busy'))
+  controller.abort(); await assert.rejects(confirming, valid('cancelled'))
+  await assert.rejects(binding.open(AbortSignal.timeout(5_000)), valid('review_required'))
+  assert.equal(f.counts().confirmedCount, 0)
+})
+
+test('binding pointers reject forged, conflicting, corrupted and wrong-account data', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrollment-binding-conflict-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), path = join(root, 'binding.bin')
+  const binding = new HostEnrollmentBindingStore({ path, client: f.client, protector })
+  const recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  t.after(() => { binding.close(); recovery.close() })
+  const first = f.prepare(), receipt = await f.client.create(first, AbortSignal.timeout(5_000))
+  await assert.rejects(binding.reserve(first, { details: receipt.details }, AbortSignal.timeout(5_000)), valid('invalid_config'))
+  await assert.rejects(lstat(path), error => (error as NodeJS.ErrnoException).code === 'ENOENT')
+  await recovery.save(first, AbortSignal.timeout(5_000))
+  await writeFile(path, await readFile(join(root, 'pending.bin')), { mode: 0o600 })
+  await assert.rejects(binding.open(AbortSignal.timeout(5_000)), bindingError('unavailable'))
+  await assert.rejects(binding.discard(AbortSignal.timeout(5_000)), bindingError('unavailable'))
+  await rm(path)
+  await binding.reserve(first, receipt, AbortSignal.timeout(5_000))
+  const original = await readFile(path)
+  f.resetEnrollment()
+  const second = f.prepare(), secondReceipt = await f.client.create(second, AbortSignal.timeout(5_000))
+  await assert.rejects(binding.reserve(second, secondReceipt, AbortSignal.timeout(5_000)), bindingError('conflict'))
+  assert.deepEqual(await readFile(path), original)
+  const different = new HostEnrollmentClient({ ...f.options, identity: { ...expected, subject: 'other-owner' } })
+  const wrongOwner = new HostEnrollmentBindingStore({ path, client: different, protector })
+  t.after(() => { wrongOwner.close(); different.close() })
+  await assert.rejects(wrongOwner.open(AbortSignal.timeout(5_000)), bindingError('unavailable'))
+  const damaged = Buffer.from(original); damaged[damaged.length - 1] = damaged[damaged.length - 1]! ^ 1
+  await writeFile(path, damaged, { mode: 0o600 })
+  await assert.rejects(binding.open(AbortSignal.timeout(5_000)), bindingError('unavailable'))
+  await assert.rejects(binding.discard(AbortSignal.timeout(5_000)), bindingError('unavailable'))
+  assert.deepEqual(await readFile(path), damaged)
 })
 
 test('host enrollment pins account, proof key and response identity before publishing results', async t => {

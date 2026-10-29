@@ -356,7 +356,10 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   let enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
   let recoveryStore: InstanceType<typeof hostPackage.HostEnrollmentRecoveryStore> | undefined
-  t.after(() => { recoveryStore?.close(); enrollmentClient.close(); resourceLifetime.abort() })
+  let bindingStore: InstanceType<typeof hostPackage.HostEnrollmentBindingStore> | undefined
+  let bindingProtector: import('../../host/remote-control/src/journal-key-protection.js').JournalKeyProtector | undefined
+  const bindingPath = join(root, 'enrollment-binding', 'binding.bin')
+  t.after(() => { bindingStore?.close(); recoveryStore?.close(); enrollmentClient.close(); resourceLifetime.abort() })
   const prepared = enrollmentClient.prepare({ organizationId: orgId, alias: 'DSH integration', profileRef: 'e2e', dshVersion: '0.2.1-rc.2',
     applicationVersion: 'dsh-go-integration', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: ['other-workspace', 'e2e-workspace'] })
   let attempt = prepared
@@ -370,6 +373,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
       `process.stdout.write(fs.readFileSync(${JSON.stringify(recoveryKeyFile)}).toString('base64')+'\\n')`, '',
     ].join('\n'), { mode: 0o700 })
     const protector = new hostPackage.LinuxSecretServiceJournalProtector({ executable: recoveryTool, service: 'fixture-recovery', account: 'fixture-owner' })
+    bindingProtector = protector
     const recoveryPath = join(root, 'enrollment-recovery', 'pending.bin')
     recoveryStore = new hostPackage.HostEnrollmentRecoveryStore({ path: recoveryPath, client: enrollmentClient, protector })
     const originalCode = prepared.code, originalRequest = prepared.requestId
@@ -379,6 +383,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     recoveryStore.close(); prepared.destroy(); enrollmentClient.close()
     enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
     recoveryStore = new hostPackage.HostEnrollmentRecoveryStore({ path: recoveryPath, client: enrollmentClient, protector })
+    bindingStore = new hostPackage.HostEnrollmentBindingStore({ path: bindingPath, client: enrollmentClient, protector })
     const restored = await recoveryStore.load(AbortSignal.timeout(10_000))
     assert.ok(restored); assert.equal(restored.requestId, originalRequest); assert.equal(restored.code, originalCode)
     attempt = restored
@@ -439,14 +444,26 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     localReviews++
     return true
   }
-  const active = recoveryStore ? await recoveryStore.confirm(attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
-    : await enrollmentClient.confirm(attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
+  let persistedHostId = enrollment.host_id, persistedInstallationId = enrollment.installation_id, persistedRuntimeId = enrollment.runtime_id
+  let persistedPrimaryWorkspace = primaryWorkspace
+  if (bindingStore && recoveryStore && bindingProtector) {
+    const active = await bindingStore.confirm(recoveryStore, attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
+    assert.equal(active.installationId, enrollment.installation_id); assert.equal(active.runtimeId, enrollment.runtime_id)
+    assert.equal(await recoveryStore.remove(attempt, AbortSignal.timeout(10_000)), true)
+    attempt.destroy(); bindingStore.close(); recoveryStore.close(); enrollmentClient.close()
+    enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
+    bindingStore = new hostPackage.HostEnrollmentBindingStore({ path: bindingPath, client: enrollmentClient, protector: bindingProtector })
+    const reopened = await bindingStore.open(AbortSignal.timeout(10_000))
+    assert.ok(reopened); assert.equal(reopened.hostId, enrollment.host_id); assert.equal(reopened.installationId, enrollment.installation_id); assert.equal(reopened.runtimeId, enrollment.runtime_id)
+    const reopenedWorkspace = reopened.workspaces.find(item => item.reference === 'e2e-workspace')?.workspaceId
+    assert.equal(reopenedWorkspace, primaryWorkspace); assert.ok(reopenedWorkspace)
+    persistedHostId = reopened.hostId; persistedInstallationId = reopened.installationId; persistedRuntimeId = reopened.runtimeId; persistedPrimaryWorkspace = reopenedWorkspace
+  } else {
+    const active = await enrollmentClient.confirm(attempt, receipt, reviewLocally, AbortSignal.timeout(10_000))
+    assert.equal(active.state, 'approved'); assert.equal(active.host_confirmed, true); assert.equal(active.user_confirmed, true)
+  }
   assert.equal(localReviews, 1)
-  assert.equal(active.state, 'approved')
-  assert.equal(active.host_confirmed, true)
-  assert.equal(active.user_confirmed, true)
-  if (recoveryStore) assert.equal(await recoveryStore.remove(attempt, AbortSignal.timeout(10_000)), true)
-  t.diagnostic('The Host enrollment client restored its fixture recovery attempt, repeated creation idempotently, reviewed the confirmed identity and obtained one explicit local approval before activation.')
+  t.diagnostic('The Host enrollment client restored its fixture recovery attempt, repeated creation idempotently, reviewed the confirmed identity and reopened its durable binding before connecting.')
   assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
   const runtimeAccess = (await phone('GET', '/v1/runtimes')).items.find((runtime: any) => runtime.id === enrollment.runtime_id)
   assert.equal(runtimeAccess.organization_id, orgId)
@@ -454,7 +471,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(runtimeAccess.access.grant_version >= 1)
   assert.ok(runtimeAccess.access.scope.actions.includes('session.read'))
   assert.ok(runtimeAccess.access.scope.workspaces.includes(primaryWorkspace))
-  const credentialOptions: HostRestCredentialOptions = { origin, identity: hostIdentity, installationId: enrollment.installation_id,
+  const credentialOptions: HostRestCredentialOptions = { origin, identity: hostIdentity, installationId: persistedInstallationId,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
     signer: hostSigner,
     requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
@@ -502,8 +519,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     "const localInstallation=localInstallationStore?await localInstallationStore.open(AbortSignal.timeout(10000)):null;if(localInstallationStore&&!localInstallation)throw new Error('missing generated installation')",
     "const signer=localInstallation?.signer??{sign(input){return sign('sha256',Buffer.from(input),{key:fallbackKey,dsaEncoding:'ieee-p1363'})}}",
     `const journalMaster=process.platform==='linux'?null:await readFile(${JSON.stringify(journalProtectorFile)});const journalProtector=process.platform==='linux'?new LinuxSecretServiceJournalProtector({executable:${JSON.stringify(secretToolFixture)},service:'fixture-service',account:'fixture-account'}):{id:'fixture-platform-v1',async wrap(value,aad){const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',journalMaster,nonce);cipher.setAAD(aad);return Buffer.concat([nonce,cipher.update(value),cipher.final(),cipher.getAuthTag()])},async unwrap(value,aad){const bytes=Buffer.from(value),decipher=createDecipheriv('aes-256-gcm',journalMaster,bytes.subarray(0,12));decipher.setAAD(aad);decipher.setAuthTag(bytes.subarray(44));return Buffer.concat([decipher.update(bytes.subarray(12,44)),decipher.final()])}}`,
-    `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(enrollment.installation_id)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer,account:{signal:owner.signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
-    `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(enrollment.host_id)},installationId:${JSON.stringify(enrollment.installation_id)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)},journalProtector)`,
+    `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(persistedInstallationId)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer,account:{signal:owner.signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
+    `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(persistedHostId)},installationId:${JSON.stringify(persistedInstallationId)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)},journalProtector)`,
     'export const {name,inject}=plugin',
     `export function apply(ctx,config){ctx.effect(()=>()=>{owner.abort();credentialProvider.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
@@ -517,11 +534,11 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await writeFile(patch, [
     '- insert:', '    - id: local-model', `      name: ${JSON.stringify(resolve('host/remote-control/tests/fixtures/dsh-local-model.mjs'))}`,
     '    - id: remote-control', `      name: ${JSON.stringify(wrapper)}`, '      config:', '        enabled: true',
-    `        runtimeId: ${enrollment.runtime_id}`, `        socketPath: ${JSON.stringify(socketPath)}`,
+    `        runtimeId: ${persistedRuntimeId}`, `        socketPath: ${JSON.stringify(socketPath)}`,
     `        relayUrl: ${JSON.stringify(origin)}`, '        applicationVersion: dsh-go-integration',
     `        commandJournalPath: ${JSON.stringify(join(root, 'journal', 'commands.sqlite'))}`,
     '        requireProtectedJournalKey: true',
-    '        workspaces:', '          - id: probe', `            remoteId: ${primaryWorkspace}`, `            cwd: ${JSON.stringify(workspace)}`,
+    '        workspaces:', '          - id: probe', `            remoteId: ${persistedPrimaryWorkspace}`, `            cwd: ${JSON.stringify(workspace)}`,
     '        presets: [standard, remote-timed]', '        highRiskTools: [bash, pwsh, run_code]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
   ].join('\n') + '\n' + timedPreset, { mode: 0o600 })
   const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
@@ -568,6 +585,15 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await assert.rejects(lstat(`${journalPath}.key`), error => (error as NodeJS.ErrnoException).code === 'ENOENT')
   await until(async () => query(`select count(*) from runtimes where id='${enrollment.runtime_id}' and epoch='${probe.runtime_epoch}' and connection_id is not null`) === '1' ? true : undefined,
     'committed host attachment')
+  if (bindingStore) {
+    query(`update hosts set alias='Renamed fixture host' where id='${enrollment.host_id}'; update runtimes set dsh_version='future-fixture' where id='${enrollment.runtime_id}'`)
+    try {
+      const upgraded = await bindingStore.open(AbortSignal.timeout(10_000))
+      assert.equal(upgraded?.installationId, persistedInstallationId); assert.equal(upgraded?.runtimeId, persistedRuntimeId)
+    } finally {
+      query(`update hosts set alias='DSH integration' where id='${enrollment.host_id}'; update runtimes set dsh_version='0.2.1-rc.2' where id='${enrollment.runtime_id}'`)
+    }
+  }
   assert.equal(query(`select count(*) from audit_log where action='host.credential.issue'`), '2', 'normal plugin did not issue its own provider credential')
   if (process.platform === 'linux') {
     const calls = (await readFile(secretToolCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
@@ -1060,6 +1086,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   query(`update installations set revoked_at=clock_timestamp() where id='${enrollment.installation_id}'`)
   await until(async () => query(`select connection_id is null from runtimes where id='${enrollment.runtime_id}'`) === 't' ? true : undefined,
     'revoked Host connection detached', 5000)
+  if (bindingStore) await assert.rejects(bindingStore.open(AbortSignal.timeout(5000)), cause =>
+    cause instanceof hostPackage.HostEnrollmentError && cause.code === 'host.enrollment.denied')
   const freshProvider = new HostRestCredentialProvider(credentialOptions)
   t.after(() => freshProvider.close())
   await assert.rejects(freshProvider.acquire(AbortSignal.timeout(5000)), cause => cause instanceof HostCredentialError && cause.code === 'host.credentials.denied')

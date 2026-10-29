@@ -31,6 +31,10 @@ const review = z.strictObject({ ok: z.literal(true), data: z.strictObject({ enro
   confirmed_user: z.strictObject({ user_id: uuid, issuer: z.string().min(1).max(2048), subject: z.string().min(1).max(2048), eligible: z.boolean() }).nullable() }) })
 const confirmation = z.strictObject({ ok: z.literal(true), data: z.strictObject({ enrollment_id: uuid, host_id: uuid, runtime_id: uuid,
   state: z.enum(['pending', 'user_confirmed', 'approved']), expires_at: z.string().datetime({ offset: true }), host_confirmed: z.boolean(), user_confirmed: z.boolean() }) })
+export const hostEnrollmentBindingRecord = z.strictObject({ version: z.literal(1), purpose: z.literal('dsh-host-enrollment-binding-v1'),
+  binding: z.string().regex(/^[0-9a-f]{64}$/), request_id: uuid, enrollment_id: uuid, organization_id: uuid,
+  host_id: uuid, installation_id: uuid, installation_key_jkt: secret, runtime_id: uuid,
+  profile_ref: ref, expires_at: z.string().datetime({ offset: true }), workspaces: z.array(workspace).max(64) })
 
 export interface HostEnrollmentRequest {
   organizationId: string
@@ -52,6 +56,16 @@ export type HostEnrollmentApprovalReview = {
   readonly confirmed_user: Readonly<NonNullable<HostEnrollmentReview['confirmed_user']>> | null
 }
 export type HostEnrollmentConfirmation = z.infer<typeof confirmation>['data']
+export interface HostEnrollmentBinding {
+  readonly organizationId: string
+  readonly hostId: string
+  readonly installationId: string
+  readonly installationKeyThumbprint: string
+  readonly runtimeId: string
+  readonly profileRef: string
+  readonly workspaces: readonly Readonly<{ reference: string; workspaceId: string }>[]
+}
+export type HostEnrollmentBindingRecord = z.infer<typeof hostEnrollmentBindingRecord>
 type IntentState = z.infer<typeof recoverySchema>
 type ReceiptData = z.infer<typeof created>['data']
 export type HostEnrollmentDetails = Readonly<Omit<ReceiptData, 'workspaces'>> & { readonly workspaces: readonly Readonly<ReceiptData['workspaces'][number]>[] }
@@ -61,6 +75,7 @@ const attemptOwners = new WeakMap<HostEnrollmentIntent, AbortSignal>()
 const receiptStates = new WeakMap<HostEnrollmentReceipt, { attempt: HostEnrollmentIntent; data: ReceiptData }>()
 const activeApprovals = guards.enrollmentApprovals
 const clientBindings = new WeakMap<HostEnrollmentClient, string>()
+const clientTransports = new WeakMap<HostEnrollmentClient, HostEnrollmentTransport>()
 
 /** @internal A recovery store binds its encryption to this exact account and installation. */
 export function enrollmentRecoveryBinding(client: HostEnrollmentClient): string {
@@ -68,6 +83,42 @@ export function enrollmentRecoveryBinding(client: HostEnrollmentClient): string 
   if (!binding) throw enrollmentError('invalid_config')
   if (client.signal.aborted) throw enrollmentError('cancelled')
   return binding
+}
+
+/** @internal Capture only metadata from an attempt and a verified create receipt. */
+export function captureEnrollmentBinding(client: HostEnrollmentClient, attempt: HostEnrollmentIntent, receipt: HostEnrollmentReceipt): HostEnrollmentBindingRecord {
+  const binding = enrollmentRecoveryBinding(client), transport = clientTransports.get(client)
+  const value = currentAttempt(attempt, binding), saved = receiptStates.get(receipt)
+  if (!transport || !saved || saved.attempt !== attempt) throw enrollmentError('invalid_config')
+  return hostEnrollmentBindingRecord.parse({ version: 1, purpose: 'dsh-host-enrollment-binding-v1', binding,
+    request_id: value.requestId, enrollment_id: saved.data.enrollment_id, organization_id: value.input.organizationId,
+    host_id: saved.data.host_id, installation_id: saved.data.installation_id, installation_key_jkt: transport.thumbprint,
+    runtime_id: saved.data.runtime_id, profile_ref: value.input.profileRef, expires_at: saved.data.expires_at,
+    workspaces: [...saved.data.workspaces].sort((a, b) => a.reference < b.reference ? -1 : a.reference > b.reference ? 1 : 0) })
+}
+
+/** @internal Recheck persisted metadata against the live host-only review route. */
+export async function verifyEnrollmentBinding(client: HostEnrollmentClient, source: HostEnrollmentBindingRecord, signal: AbortSignal): Promise<HostEnrollmentBinding> {
+  const binding = enrollmentRecoveryBinding(client), transport = clientTransports.get(client)
+  if (!transport) throw enrollmentError('invalid_config')
+  let expected: HostEnrollmentBindingRecord
+  try { expected = hostEnrollmentBindingRecord.parse(source) } catch { throw enrollmentError('invalid_config') }
+  if (expected.binding !== binding || expected.installation_key_jkt !== transport.thumbprint || new Set(expected.workspaces.map(item => item.reference)).size !== expected.workspaces.length ||
+      !sameReferences([...expected.workspaces.map(item => item.reference)].sort(), expected.workspaces)) throw enrollmentError('identity_changed')
+  let result: HostEnrollmentReview
+  try { result = review.parse(await transport.request('GET', `/v1/enrollments/${expected.enrollment_id}/host-review`, undefined, 200, signal)).data }
+  catch (cause) { if (cause instanceof HostEnrollmentError) throw cause; throw enrollmentError('response_invalid') }
+  if (enrollmentRecoveryBinding(client) !== binding) throw enrollmentError('cancelled')
+  const row = result.enrollment
+  if (row.enrollment_id !== expected.enrollment_id || row.request_id !== expected.request_id || row.organization_id !== expected.organization_id ||
+      row.host_id !== expected.host_id || row.installation_id !== expected.installation_id ||
+      row.installation_key_jkt !== expected.installation_key_jkt || row.runtime_id !== expected.runtime_id || row.profile_ref !== expected.profile_ref ||
+      Date.parse(row.expires_at) !== Date.parse(expected.expires_at) || !sameWorkspaces(row.workspaces, expected.workspaces) ||
+      row.user_confirmed !== (result.confirmed_user !== null)) throw enrollmentError('identity_changed')
+  if (row.state !== 'approved' || !row.host_confirmed || !row.user_confirmed || !result.confirmed_user) throw enrollmentError('review_required')
+  return Object.freeze({ organizationId: expected.organization_id, hostId: expected.host_id, installationId: expected.installation_id,
+    installationKeyThumbprint: expected.installation_key_jkt, runtimeId: expected.runtime_id, profileRef: expected.profile_ref,
+    workspaces: Object.freeze(expected.workspaces.map(item => Object.freeze({ reference: item.reference, workspaceId: item.workspace_id }))) })
 }
 
 function currentAttempt(attempt: HostEnrollmentIntent, binding: string): IntentState {
@@ -125,6 +176,7 @@ export class HostEnrollmentClient {
     this.#transport = new HostEnrollmentTransport(options)
     this.signal = this.#transport.signal
     clientBindings.set(this, this.#transport.binding)
+    clientTransports.set(this, this.#transport)
     Object.freeze(this)
   }
   toString(): string { return 'HostEnrollmentClient' }

@@ -40,7 +40,7 @@ if (!attempt) {
     profileRef: 'default', protocolVersion: 1, workspaceRefs: ['project'] })
 }
 const receipt = await store.create(attempt, signal) // 先持久保存，再发起创建请求
-// 手机确认后，调用 store.confirm 并在本机界面取得明确同意。
+// 手机确认后，使用 HostEnrollmentBindingStore.confirm 保留绑定 ID 并取得本机明确同意。
 // 已确认完成且服务端绑定 ID 已可靠保存后：await store.remove(attempt, signal); attempt.destroy();
 // 不再使用时：store.close(); client.close();
 ```

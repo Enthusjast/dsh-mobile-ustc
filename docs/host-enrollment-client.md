@@ -10,7 +10,7 @@
 
 ```ts
 import {
-  HostEnrollmentClient, HostEnrollmentRecoveryStore,
+  HostEnrollmentBindingStore, HostEnrollmentClient, HostEnrollmentRecoveryStore,
   type HostEnrollmentOptions, type HostEnrollmentApprovalReview, type JournalKeyProtector,
 } from '@ustc/dsh-remote-control'
 
@@ -21,10 +21,11 @@ declare const signal: AbortSignal
 declare const organizationIdFromTrustedConfiguration: string
 declare const protector: JournalKeyProtector
 declare const privateRecoveryPath: string
+declare const privateBindingPath: string
 declare const trustedLocalConfirmation: (review: HostEnrollmentApprovalReview, signal: AbortSignal) => Promise<boolean>
-declare const trustedBindingStore: { save(value: { hostId: string; installationId: string; runtimeId: string }): Promise<void> }
 const client = new HostEnrollmentClient(options)
 const store = new HostEnrollmentRecoveryStore({ path: privateRecoveryPath, client, protector })
+const binding = new HostEnrollmentBindingStore({ path: privateBindingPath, client, protector })
 let attempt = await store.load(signal)
 if (!attempt) {
   // 仅在已确认没有未对账的旧请求时创建新尝试。
@@ -39,13 +40,12 @@ const receipt = await store.create(attempt, signal) // 先持久保存，再发�
 // 仅在本机受信任界面展示 receipt.details.enrollment_id 和 attempt.code，供手机绑定。
 
 // 手机完成确认后，调用方在受信任本机界面显示用户和主机信息并取得明确选择。
-const approved = await store.confirm(attempt, receipt, async (review, consentSignal) => {
+const approved = await binding.confirm(store, attempt, receipt, async (review, consentSignal) => {
   return await trustedLocalConfirmation(review, consentSignal) // 只有明确同意才返回 true
 }, signal)
-// 先可靠保存绑定 ID，之后才删除待处理记录。
-await trustedBindingStore.save({ hostId: receipt.details.host_id, installationId: receipt.details.installation_id, runtimeId: receipt.details.runtime_id })
+// binding.confirm 已可靠保存绑定定位信息并重新核对服务端状态。
 await store.remove(attempt, signal); attempt.destroy()
-// 不再使用时调用 store.close(); client.close()。
+// 不再使用时调用 binding.close(); store.close(); client.close()。
 ```
 
 示例中的组织 ID、受保护存储和确认界面由发行端提供，不能从手机请求或不受信任文本直接
@@ -85,5 +85,5 @@ signal 取消或客户端关闭后也不能继续使用该尝试。
 issuer、模型和手机协议夹具，通过实际主机客户端完成创建、手机确认、主机核对及确认，再
 接入正常 Host Relay。没有使用 TokenWorks、学校身份、生产密钥库或 Android APP。
 
-目标发行版仍需提供受信任的本机确认界面、已确认绑定 ID 的可靠存储、安装密钥的轮换和登记生命周期，核验实际平台配置，
+目标发行版仍需提供受信任的本机确认界面、安装密钥的轮换和登记生命周期，核验实际平台配置，
 并与学校资源登录适配器和实际身份目录联调。不能把当前回调或本地夹具当作这些验收已完成。

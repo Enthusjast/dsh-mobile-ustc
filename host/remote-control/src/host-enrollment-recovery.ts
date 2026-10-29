@@ -18,8 +18,8 @@ export class HostEnrollmentRecoveryError extends Error {
 const failure = (code: Code = 'unavailable') => new HostEnrollmentRecoveryError(`host.enrollment_recovery.${code}`)
 const MAGIC = Buffer.from('DSHENR01')
 const MAX_WRAPPED = 16 * 1024
-const MAX_PLAINTEXT = 16 * 1024
-const MAX_FILE = 8 + 1 + 64 + 4 + MAX_WRAPPED + 12 + 4 + MAX_PLAINTEXT + 16
+export const MAX_PLAINTEXT = 16 * 1024
+export const MAX_FILE = 8 + 1 + 64 + 4 + MAX_WRAPPED + 12 + 4 + MAX_PLAINTEXT + 16
 const busyPaths = guards.recoveryPaths
 
 export interface HostEnrollmentRecoveryOptions {
@@ -31,10 +31,10 @@ export interface HostEnrollmentRecoveryOptions {
   protector: JournalKeyProtector
 }
 
-function header(id: string, wrapped: Buffer, nonce: Buffer, size: number): Buffer {
+function header(id: string, wrapped: Buffer, nonce: Buffer, size: number, magic: Buffer): Buffer {
   const name = Buffer.from(id, 'ascii')
   const output = Buffer.alloc(8 + 1 + name.length + 4 + wrapped.length + 12 + 4)
-  MAGIC.copy(output); output[8] = name.length; name.copy(output, 9)
+  magic.copy(output); output[8] = name.length; name.copy(output, 9)
   let offset = 9 + name.length
   output.writeUInt32BE(wrapped.length, offset); offset += 4
   wrapped.copy(output, offset); offset += wrapped.length
@@ -43,14 +43,15 @@ function header(id: string, wrapped: Buffer, nonce: Buffer, size: number): Buffe
   return output
 }
 
-async function seal(value: Buffer, protector: Protector, context: Buffer, signal: AbortSignal): Promise<Buffer> {
+/** @internal Shared authenticated envelope; callers must clear sensitive buffers. */
+export async function seal(value: Buffer, protector: Protector, context: Buffer, signal: AbortSignal, magic = MAGIC): Promise<Buffer> {
   const key = randomBytes(32)
   let wrapped: Buffer | undefined, verified: Buffer | undefined, aad: Buffer | undefined
   try {
     wrapped = await invoke(protector, 'wrap', key, context, signal)
     verified = await invoke(protector, 'unwrap', wrapped, context, signal)
     if (!timingSafeEqual(key, verified) || signal.aborted) throw failure()
-    const nonce = randomBytes(12), encoded = header(protector.id, wrapped, nonce, value.length)
+    const nonce = randomBytes(12), encoded = header(protector.id, wrapped, nonce, value.length, magic)
     aad = Buffer.concat([context, encoded])
     const cipher = createCipheriv('aes-256-gcm', key, nonce)
     cipher.setAAD(aad)
@@ -59,8 +60,9 @@ async function seal(value: Buffer, protector: Protector, context: Buffer, signal
   } finally { key.fill(0); wrapped?.fill(0); verified?.fill(0); aad?.fill(0) }
 }
 
-async function unseal(raw: Buffer, protector: Protector, context: Buffer, signal: AbortSignal): Promise<Buffer> {
-  if (raw.length < 8 + 1 + 1 + 4 + 48 + 12 + 4 + 1 + 16 || raw.length > MAX_FILE || !raw.subarray(0, 8).equals(MAGIC)) throw failure()
+/** @internal Shared authenticated envelope; callers must clear returned buffers. */
+export async function unseal(raw: Buffer, protector: Protector, context: Buffer, signal: AbortSignal, magic = MAGIC): Promise<Buffer> {
+  if (raw.length < 8 + 1 + 1 + 4 + 48 + 12 + 4 + 1 + 16 || raw.length > MAX_FILE || !raw.subarray(0, 8).equals(magic)) throw failure()
   const nameLength = raw[8]!
   let offset = 9 + nameLength
   if (nameLength < 1 || nameLength > 64 || offset + 4 > raw.length || !raw.subarray(9, offset).equals(Buffer.from(protector.id, 'ascii'))) throw failure()
