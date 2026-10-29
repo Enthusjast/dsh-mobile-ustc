@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PinnedExportSource } from '../src/file-export-source.js'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { createPrivateKey, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto'
 import { access, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createServer, request } from 'node:http'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -280,8 +280,15 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
       LOCALAPPDATA: join(root, 'host-home', 'AppData', 'Local'),
     } : {}),
   }
-  const child = spawn(process.execPath, [dshBin, '--profile', 'm0-probe', '--from-default-profile', 'web', '--patch', patchPath,
-    '--host', '127.0.0.1', '--port', '0', '--no-open'], { cwd: process.cwd(), env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
+  const installedDsh = process.env.REMOTE_TEST_DSH_BIN
+  if (installedDsh !== undefined) {
+    assert.ok(isAbsolute(installedDsh), 'REMOTE_TEST_DSH_BIN must be an absolute path to the installed CLI')
+    assert.equal(execFileSync(installedDsh, ['--version'], { encoding: 'utf8', env: environment, timeout: 5_000 }).trim(), '0.2.1-rc.2')
+  }
+  const dshArgs = ['--profile', 'm0-probe', '--from-default-profile', 'web', '--patch', patchPath,
+    '--host', '127.0.0.1', '--port', '0', '--no-open']
+  const child = spawn(installedDsh ?? process.execPath, installedDsh ? dshArgs : [dshBin, ...dshArgs],
+    { cwd: process.cwd(), env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = ''
   let stderr = ''
   child.stdout.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-32_768) })

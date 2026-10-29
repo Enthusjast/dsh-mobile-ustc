@@ -307,12 +307,41 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   query(`insert into org_memberships(org_id,user_id,role) values ('${orgId}','${phoneUserId}','member')`)
   assert.deepEqual((await phone('GET', releaseQuery)).release, publication.release)
   t.diagnostic('Configured APK metadata selected the supported newer fixture under the current registered phone and organization before any runtime grant; current/newer clients, foreign organization, host client and caller device selectors were fenced. No APK bytes or installation were involved.')
-  const code = randomBytes(32).toString('base64url')
-  const enrollment = await owner('POST', '/v1/enrollments', {
-    request_id: randomUUID(), organization_id: orgId, alias: 'DSH integration', profile_ref: 'e2e', dsh_version: '0.2.1-rc.2',
-    application_version: 'dsh-go-integration', plugin_version: '0.0.1', protocol_version: 1,
-    installation_public_jwk: installationKey.jwk, code, workspace_refs: ['e2e-workspace', 'other-workspace'],
-  }, 201)
+  // This local issuer owns and verifies the fixture identity. Production supplies
+  // the existing verified resource-session adapter; no OAuth login lives here.
+  const hostAccessIssued = now()
+  const hostAccess: HostResourceAccess = {
+    issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host', tokenType: 'DPoP',
+    proofKeyThumbprint: installationKey.jkt, expiresAt: (hostAccessIssued + 300) * 1000, scopes: ['remote.access'],
+    token: jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
+      iss: issuer, sub: 'owner', aud: 'urn:dsh-e2e', client_id: 'fixture-host', jti: randomUUID(), iat: hostAccessIssued, exp: hostAccessIssued + 300,
+      scope: 'remote.access', cnf: { jkt: installationKey.jkt },
+    }),
+  }
+  const hostIdentity = { issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host' }
+  const resourceLifetime = new AbortController()
+  const hostPackage = await import(pathToFileURL(resolve('host/remote-control/lib/index.js')).href) as typeof import('../../host/remote-control/src/index.js')
+  const enrollmentClient = new hostPackage.HostEnrollmentClient({ origin, identity: hostIdentity,
+    publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
+    signer: { sign(input) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } },
+    requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
+  })
+  t.after(() => { enrollmentClient.close(); resourceLifetime.abort() })
+  const prepared = enrollmentClient.prepare({ organizationId: orgId, alias: 'DSH integration', profileRef: 'e2e', dshVersion: '0.2.1-rc.2',
+    applicationVersion: 'dsh-go-integration', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: ['other-workspace', 'e2e-workspace'] })
+  const recovery = prepared.exportRecovery()
+  const attempt = enrollmentClient.restore(recovery)
+  recovery.fill(0); prepared.destroy()
+  const code = attempt.code
+  assert.equal(JSON.stringify(attempt).includes(code), false)
+  const receipt = await enrollmentClient.create(attempt, AbortSignal.timeout(10_000))
+  const retriedReceipt = await enrollmentClient.create(attempt, AbortSignal.timeout(10_000))
+  assert.deepEqual(retriedReceipt.details, receipt.details)
+  assert.equal(query(`select count(*) from enrollments where request_id='${attempt.requestId}'`), '1')
+  const enrollment = receipt.details
+  const primaryWorkspace = enrollment.workspaces.find(item => item.reference === 'e2e-workspace')?.workspace_id
+  const alternateWorkspace = enrollment.workspaces.find(item => item.reference === 'other-workspace')?.workspace_id
+  assert.ok(primaryWorkspace && alternateWorkspace)
   const reviewPath = `/v1/enrollments/${enrollment.enrollment_id}/host-review`
   const apiContract = parseYaml(await readFile('contracts/openapi/remote.yaml', 'utf8'))
   const apiValidator = new Ajv2020({ strict: false })
@@ -346,30 +375,27 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(validateHostReview({ ok: true, data: hostReview }), true, JSON.stringify(validateHostReview.errors))
   assert.deepEqual(hostReview.confirmed_user, { user_id: phoneUserId, issuer, subject: 'phone', eligible: true })
   await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code, confirmed_user_id: outsiderId }, 403)
-  const active = await owner('POST', `/v1/enrollments/${enrollment.enrollment_id}/host-confirm`, { code, confirmed_user_id: phoneUserId })
+  let localReviews = 0
+  const active = await enrollmentClient.confirm(attempt, receipt, (review, signal) => {
+    assert.equal(signal.aborted, false)
+    assert.equal(review.confirmed_user?.user_id, phoneUserId)
+    assert.equal(review.confirmed_user?.subject, 'phone')
+    assert.equal(review.enrollment.installation_key_jkt, installationKey.jkt)
+    localReviews++
+    return true
+  }, AbortSignal.timeout(10_000))
+  assert.equal(localReviews, 1)
   assert.equal(active.state, 'approved')
   assert.equal(active.host_confirmed, true)
   assert.equal(active.user_confirmed, true)
+  t.diagnostic('The Host enrollment client restored an in-memory recovery attempt, repeated creation idempotently, reviewed the confirmed identity and obtained one explicit local approval before activation.')
   assert.ok((await phone('GET', '/v1/hosts')).items.some((host: any) => host.id === enrollment.host_id && host.state === 'active'))
   const runtimeAccess = (await phone('GET', '/v1/runtimes')).items.find((runtime: any) => runtime.id === enrollment.runtime_id)
   assert.equal(runtimeAccess.organization_id, orgId)
   assert.equal(runtimeAccess.access.role, 'owner')
   assert.ok(runtimeAccess.access.grant_version >= 1)
   assert.ok(runtimeAccess.access.scope.actions.includes('session.read'))
-  assert.ok(runtimeAccess.access.scope.workspaces.includes(enrollment.workspaces[0].workspace_id))
-  // This local issuer owns and verifies the fixture identity. Production supplies
-  // the existing verified resource-session adapter; no OAuth login lives here.
-  const hostAccessIssued = now()
-  const hostAccess: HostResourceAccess = {
-    issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host', tokenType: 'DPoP',
-    proofKeyThumbprint: installationKey.jkt, expiresAt: (hostAccessIssued + 300) * 1000, scopes: ['remote.access'],
-    token: jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
-      iss: issuer, sub: 'owner', aud: 'urn:dsh-e2e', client_id: 'fixture-host', jti: randomUUID(), iat: hostAccessIssued, exp: hostAccessIssued + 300,
-      scope: 'remote.access', cnf: { jkt: installationKey.jkt },
-    }),
-  }
-  const hostIdentity = { issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host' }
-  const resourceLifetime = new AbortController()
+  assert.ok(runtimeAccess.access.scope.workspaces.includes(primaryWorkspace))
   const credentialOptions: HostRestCredentialOptions = { origin, identity: hostIdentity, installationId: enrollment.installation_id,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
     signer: { sign(input) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } },
@@ -433,7 +459,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     `        relayUrl: ${JSON.stringify(origin)}`, '        applicationVersion: dsh-go-integration',
     `        commandJournalPath: ${JSON.stringify(join(root, 'journal', 'commands.sqlite'))}`,
     '        requireProtectedJournalKey: true',
-    '        workspaces:', '          - id: probe', `            remoteId: ${enrollment.workspaces[0].workspace_id}`, `            cwd: ${JSON.stringify(workspace)}`,
+    '        workspaces:', '          - id: probe', `            remoteId: ${primaryWorkspace}`, `            cwd: ${JSON.stringify(workspace)}`,
     '        presets: [standard, remote-timed]', '        highRiskTools: [bash, pwsh, run_code]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
   ].join('\n') + '\n' + timedPreset, { mode: 0o600 })
   const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
@@ -491,7 +517,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   })
   const beforeCreate = (await command('session.list', {})).payload.items.length
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
-  const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.archive', 'session.cancel', 'session.create', 'session.read'], workspaces: [enrollment.workspaces[0].workspace_id], sessions: [] }
+  const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.archive', 'session.cancel', 'session.create', 'session.read'], workspaces: [primaryWorkspace], sessions: [] }
   await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
@@ -524,7 +550,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await mobile.wait(frame => frame.type === 'approval.snapshot' && frame.request_id === approvalWatchId)
   const creationId = randomUUID()
   const creation = { v: 1, type: 'session.create', request_id: creationId, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
-    payload: { workspace_id: enrollment.workspaces[0].workspace_id, preset: 'standard' } }
+    payload: { workspace_id: primaryWorkspace, preset: 'standard' } }
   mobile.send(creation)
   for (const state of ['received', 'host_accepted', 'dispatching', 'settled']) {
     const receipt = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === creationId && frame.payload.state === state)
@@ -554,10 +580,10 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(creationStatus.workspace_id, creation.payload.workspace_id)
   await until(async () => {
     const directory = await phone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)
-    return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available' && item.workspace_id === enrollment.workspaces[0].workspace_id) ? true : undefined
+    return directory.items.some((item: any) => item.session_id === sessionId && item.state === 'available' && item.workspace_id === primaryWorkspace) ? true : undefined
   }, 'created session in PostgreSQL directory')
   const unrelatedTicket = await phone('POST', '/v1/realtime/tickets', {
-    runtime_id: enrollment.runtime_id, scope: { actions: ['message.submit'], workspaces: [enrollment.workspaces[1].workspace_id], sessions: [] },
+    runtime_id: enrollment.runtime_id, scope: { actions: ['message.submit'], workspaces: [alternateWorkspace], sessions: [] },
   }, 201)
   const unrelatedMobile = await connectPhone(phone, device.device_id, phoneKey, unrelatedTicket)
   const subscribe = () => {
@@ -830,7 +856,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const binding = approvalBinding(context)
     assert.equal(context.approval_id, approvalID)
     assert.equal(context.tool, 'bash')
-    assert.equal(context.workspace.workspace_id, enrollment.workspaces[0].workspace_id)
+    assert.equal(context.workspace.workspace_id, primaryWorkspace)
     assert.equal(binding.sha256, pending.payload.status.binding_sha256)
     const sentinel = join(workspace, `approval-${choice.toLowerCase()}.txt`)
     const commandText = (context.arguments as { command: string }).command

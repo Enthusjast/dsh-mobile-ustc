@@ -17,6 +17,8 @@ REMOTE_TEST_DSH_BIN="$(command -v dsh)" python3 tools/integration/run_remote_dsh
 
 Without this setting the test uses the repository's pinned npm package. Both
 paths require DSH `0.2.1-rc.2`; neither starts TokenWorks.
+The same `REMOTE_TEST_DSH_BIN` setting also selects the installed CLI for the
+Host suite's local DSH integration (`REMOTE_TEST_DSH_BIN="$(command -v dsh)" npm run verify`).
 When rerunning only the DSH composition after a Host change, add `--dsh-only`
 to skip the separate Go test suite. It still starts disposable PostgreSQL,
 applies migrations and builds the real Go service and Host plugin. Run the
