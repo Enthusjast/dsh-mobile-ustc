@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="question_needs_reply">需要你答复</string>
+    <string name="question_kind_ordinary">普通提问</string>
+    <string name="question_kind_timed">计时提问</string>
+    <string name="question_kind_plan">计划确认</string>
+    <string name="question_open_answer">查看并答复</string>
+    <string name="question_open_readonly">查看问题</string>
+    <string name="question_close">关闭答复表单</string>
+    <string name="question_plan_not_approval">这是对助手的计划答复，不是工具执行批准。</string>
+    <string name="question_status_queued">后续答复已入队，等待电脑更新</string>
+    <string name="question_status_continued">任务已继续；新的答复会作为后续消息发送</string>
+    <string name="question_status_unavailable">当前问题暂不可应答，请核对电脑上的最新状态</string>
+    <string name="question_status_blocking">正在等待完整答复</string>
+    <string name="question_status_claiming">正在向电脑申请答复时间</string>
+    <string name="question_status_remaining">剩余约 %1$d 秒；以电脑状态为准</string>
+    <string name="question_status_unknown_time">电脑尚未提供等待倒计时</string>
+    <string name="question_prompt_position">问题 %1$d / %2$d</string>
+    <string name="question_plan_detail">计划详情</string>
+    <string name="question_detail">问题详情</string>
+    <string name="question_plan_reviewed">已核对以上完整计划</string>
+    <string name="question_plan_expand_first">请继续显示全部计划内容，完整核对后才能选择继续。</string>
+    <string name="question_mode_text">自由文本答复</string>
+    <string name="question_mode_multiple">多选 · 可选择多个选项，也可补充文字</string>
+    <string name="question_mode_single">单选 · 请选择一个选项，或填写自定义答复</string>
+    <string name="question_answer_label">答复：%1$s</string>
+    <string name="question_custom_label">补充或自定义答复：%1$s</string>
+    <string name="question_optional">此项可留空跳过；不会替你选择任何选项。</string>
+    <string name="question_readonly">当前无法在手机答复，请在电脑处理或恢复本机答复权限。</string>
+    <string name="question_timed_late">若电脑已继续运行，答复将作为后续消息；不会再次完成旧问题。</string>
+    <string name="question_original_confirmed">答复已确认，等待电脑更新问题列表</string>
+    <string name="question_original_queued">后续答复已入队</string>
+    <string name="question_original_unknown">原答复结果待确认，请先核对原请求</string>
+    <string name="question_query_original">核对原答复</string>
+    <string name="question_plan_review_first">请先显示并核对完整计划详情，再选择继续该计划。</string>
+    <string name="question_saving">正在保存答复…</string>
+    <string name="question_send_continued">作为后续答复发送</string>
+    <string name="question_send_plan">发送计划答复</string>
+    <string name="question_send">发送完整答复</string>
+    <string name="question_not_now">暂不回答</string>
+    <string name="question_close_explanation">关闭只结束本机的答复时间申请，不会取消电脑上的问题；未发送内容不会保留。</string>
+    <string name="question_refresh">刷新提问状态</string>
+    <string name="question_show_more">继续显示问题详情</string>
+    <string name="question_submitted_id">问题 %1$s</string>
+    <string name="question_answer_empty">此项留空</string>
+</resources>

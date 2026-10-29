@@ -1,0 +1,5 @@
+<resources>
+    <string name="onboarding_steps">学校账号 → 登记手机 → 进入会话</string>
+    <string name="onboarding_source_open">查看学校登录来源</string>
+    <string name="onboarding_source_close">收起学校登录来源</string>
+</resources>

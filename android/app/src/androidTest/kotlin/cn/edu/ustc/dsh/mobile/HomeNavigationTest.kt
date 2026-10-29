@@ -62,7 +62,7 @@ class HomeNavigationTest {
         return action(id)
     }
     private fun tab(@StringRes id: Int) = action(id)
-    private fun row() = rule.onNode(hasText(text(R.string.session_short_title, fixture!!.sessionId.take(8))) and hasClickAction())
+    private fun row() = rule.onNodeWithTag("session-${fixture!!.sessionId}")
     private fun until(label: String, condition: () -> Boolean) {
         try {
             rule.waitUntil(30_000) {
@@ -93,7 +93,7 @@ class HomeNavigationTest {
             }
         }
         tab(R.string.nav_sessions).assertIsSelected()
-        rule.onNodeWithText(text(R.string.session_short_title, fixture!!.sessionId.take(8))).assertIsDisplayed()
+        rule.onNodeWithTag("session-${fixture!!.sessionId}").assertIsDisplayed()
     }
 
     private fun openRead(expectedSubscriptions: Int) {
@@ -138,7 +138,7 @@ class HomeNavigationTest {
         val requests = fixture!!.sessionRequests.get()
 
         openRead(1)
-        rule.onNodeWithText("返回会话列表").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("返回会话列表").performClick()
         assertRetired(1)
         directory()
         assertSame(rows, controller!!.state.value.sessions)
@@ -170,7 +170,7 @@ class HomeNavigationTest {
         tab(R.string.nav_computers).assertIsSelected()
 
         tab(R.string.nav_sessions).performClick(); directory(); openRead(2)
-        rule.onNodeWithText("返回会话列表").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("返回会话列表").performClick()
         assertRetired(2); directory()
         tab(R.string.nav_settings).performClick()
         until("settings destination clears directory ownership") { controller!!.state.value.selectedRuntimeId == null }
@@ -244,7 +244,7 @@ class HomeNavigationTest {
     @Test fun listOnlyAuthorizationNeverStartsAReader() {
         fixture!!.allowSessionRead = false
         start(); directory()
-        rule.onNodeWithText(text(R.string.session_short_title, fixture!!.sessionId.take(8))).assertHasNoClickAction()
+        rule.onNodeWithTag("session-${fixture!!.sessionId}").assertHasNoClickAction()
         assertNull(controller!!.state.value.reader)
         assertNull(controller!!.state.value.selectedSessionId)
         assertEquals(0, fixture!!.ticketRequests.get())
@@ -293,7 +293,7 @@ class HomeNavigationTest {
         assertFalse("command.status" in server.ticketScopes.single().actions)
         assertEquals(0, server.questionWrites.get())
 
-        rule.onNodeWithText("返回提醒").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("返回提醒").performClick()
         assertRetired(1)
         assertTrue(controller!!.state.value.notificationSettings)
         assertNull(controller!!.state.value.knownTarget)

@@ -11,6 +11,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.*
@@ -30,17 +33,23 @@ fun HostBindingScreen(state: HostBindingState, subject: String, onPreview: (Stri
         Box(Modifier.fillMaxSize().padding(insets).imePadding(), contentAlignment = Alignment.TopCenter) {
             Column(Modifier.widthIn(max = 720.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.fillMaxWidth()) {
                     TextButton(onBack, Modifier.heightIn(min = 48.dp)) { Text("返回电脑列表") }
                     TextButton(onExit, Modifier.heightIn(min = 48.dp)) { Text("退出本机登录") }
                 }
                 Text("绑定电脑", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
                 Text("当前账号：$subject", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(when (state.phase) {
+                    HostBindingPhase.ENTER -> R.string.flow_binding_step_input
+                    HostBindingPhase.LOADING, HostBindingPhase.REVIEW -> R.string.flow_binding_step_review
+                    HostBindingPhase.CONFIRMING, HostBindingPhase.WAITING_HOST -> R.string.flow_binding_step_wait
+                    else -> R.string.flow_binding_step_result
+                }), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
                 if (state.phase == HostBindingPhase.ENTER) key(state.formRevision) {
                     BindingEntry(state.id, state.error, onPreview, onQuery)
                 } else {
                     BindingStatus(state)
-                    state.details?.let { BindingFacts(it) }
+                    if (state.phase == HostBindingPhase.REVIEW) state.details?.let { BindingFacts(it) }
                     when (state.phase) {
                         HostBindingPhase.REVIEW -> {
                             val details = state.details!!
@@ -61,6 +70,7 @@ fun HostBindingScreen(state: HostBindingState, subject: String, onPreview: (Stri
                         HostBindingPhase.READY -> Button(onBack, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看授权的电脑") }
                         else -> Unit
                     }
+                    if (state.phase != HostBindingPhase.REVIEW) state.details?.let { BindingFacts(it) }
                 }
             }
         }
@@ -77,7 +87,7 @@ private fun BindingEntry(initialId: String, error: String?, onPreview: (String, 
     var codeTouched by remember { mutableStateOf(false) }
     val idValid = runCatching { Contract.uuid(id.trim().lowercase()) }.isSuccess
     val codeValid = runCatching { Contract.nonce(code.trim()) }.isSuccess
-    Text("在电脑上发起绑定，然后复制申请编号和绑定码到这里。")
+    Text(stringResource(R.string.flow_binding_input_help))
     OutlinedTextField(id, { if (it.length <= 64) id = it }, singleLine = true, label = { Text("绑定申请编号") },
         supportingText = { Text(if (idTouched && !idValid) "请填写电脑显示的完整申请编号。" else "填写申请编号，不要输入网址。") }, isError = idTouched && !idValid,
         keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
@@ -96,6 +106,8 @@ private fun BindingEntry(initialId: String, error: String?, onPreview: (String, 
 
 @Composable
 private fun BindingFacts(details: HostBindingDetails) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember(details.reviewHash) { mutableStateOf(false) }
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("请与电脑上的信息逐项核对", style = MaterialTheme.typography.titleMedium)
@@ -107,6 +119,13 @@ private fun BindingFacts(details: HostBindingDetails) {
             SelectionContainer {
                 Text(details.keyThumbprint.chunked(8).joinToString(" "), style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, textDirection = TextDirection.Ltr))
             }
+            OutlinedButton({
+                clipboard.setText(AnnotatedString(details.keyThumbprint))
+                copied = true
+            }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text(stringResource(R.string.flow_binding_copy_fingerprint))
+            }
+            if (copied) Text(stringResource(R.string.flow_binding_fingerprint_copied), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             Text("请核对全部字符，不能只比较电脑名称。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             BindingFact("工作区", if (details.workspaces.isEmpty()) "尚未配置可用工作区" else details.workspaces.joinToString("\n") { it.reference })
             BindingFact("申请编号", details.id)
@@ -149,6 +168,25 @@ private fun BindingFacts(details: HostBindingDetails) {
                 HostBindingPhase.WAITING_ACCESS -> Text("请刷新状态，或联系管理员核对当前授权。")
                 HostBindingPhase.READY -> Text("此运行环境已出现在当前账号的授权目录中。可返回列表查看可用操作。")
                 else -> Unit
+            }
+            if (state.id.isNotEmpty()) BindingFact(stringResource(R.string.flow_binding_public_id), state.id)
+            if (state.phase != HostBindingPhase.REVIEW) {
+                if (state.details != null) Text(stringResource(R.string.flow_binding_snapshot), style = MaterialTheme.typography.bodySmall)
+                BindingFact(stringResource(R.string.flow_binding_phone), stringResource(when (state.details?.confirmedByMe) {
+                    true -> R.string.flow_binding_confirmed
+                    false -> R.string.flow_binding_unconfirmed
+                    null -> R.string.flow_binding_unverified
+                }))
+                BindingFact(stringResource(R.string.flow_binding_host), stringResource(when (state.details?.hostConfirmed) {
+                    true -> R.string.flow_binding_confirmed
+                    false -> R.string.flow_binding_unconfirmed
+                    null -> R.string.flow_binding_unverified
+                }))
+                BindingFact(stringResource(R.string.flow_binding_access), stringResource(when (state.phase) {
+                    HostBindingPhase.READY -> R.string.flow_binding_access_ready
+                    HostBindingPhase.WAITING_ACCESS -> R.string.flow_binding_access_missing
+                    else -> R.string.flow_binding_unverified
+                }))
             }
             state.error?.let { Text(bindingError(it), color = MaterialTheme.colorScheme.error) }
         }

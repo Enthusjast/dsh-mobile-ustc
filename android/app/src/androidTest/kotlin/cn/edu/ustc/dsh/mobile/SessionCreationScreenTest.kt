@@ -1,6 +1,13 @@
 package cn.edu.ustc.dsh.mobile
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -51,13 +58,22 @@ class SessionCreationScreenTest {
     @Test fun unknownCreationRequiresANewIntentDecisionAndNeverOffersBlindRetry() {
         val intent=CommandIntent.createSession(id,id,workspace,"standard",epoch)
         val unknown=CommandEvolution.receipt(CommandEvolution.begin(CommandEvolution.created(intent,0),1),CommandReceipt(id,null,intent.digest,RemoteCommandState.OUTCOME_UNKNOWN,"2026-10-25T00:00:00Z",workspaceId=workspace))
-        var submitted=0
-        rule.setContent {DshTheme {SessionCreationScreen(state(listOf(unknown)),{_,_,_->submitted++},{},{},{},{},{},{})}}
+        var submitted=0; var queries=0
+        rule.setContent {
+            val density=LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density,2f)) {
+                DshTheme { Box(Modifier.width(320.dp)) { SessionCreationScreen(state(listOf(unknown)),{_,_,_->submitted++},{},{queries++},{},{},{},{}) } }
+            }
+        }
         rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("创建结果待确认"))
         rule.onNodeWithText("创建结果待确认").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("重新转交同一请求").assertDoesNotExist();rule.onNodeWithText("会话已创建").assertDoesNotExist()
+        rule.onNodeWithText("原始请求编号：$id").performScrollTo().assertIsDisplayed()
         select();rule.onNodeWithText("创建新会话").performScrollTo().performClick()
         rule.runOnIdle {assertEquals(0,submitted)}
+        rule.onNodeWithText("先核对原请求").performClick()
+        rule.runOnIdle {assertEquals(1,queries);assertEquals(0,submitted)}
+        rule.onNodeWithText("创建新会话").performScrollTo().performClick()
         rule.onNodeWithText("确认为另一个新请求").performClick()
         rule.runOnIdle {assertEquals(1,submitted);assertEquals(id,unknown.intent.requestId)}
     }

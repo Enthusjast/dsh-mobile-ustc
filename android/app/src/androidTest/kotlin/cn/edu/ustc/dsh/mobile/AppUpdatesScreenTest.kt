@@ -39,6 +39,12 @@ class AppUpdatesScreenTest {
         rule.runOnIdle { assertEquals(1, permissions); assertEquals(0, downloads); assertEquals(0, installs); state = state.copy(canInstall = true) }
         rule.onNodeWithText("下载并校验").performScrollTo().assertHeightIsAtLeast(48.dp).performClick()
         rule.runOnIdle { assertEquals(1, downloads); assertEquals(0, installs) }
+        rule.runOnIdle { state = state.copy(phase = AppUpdatePhase.PREPARED) }
+        rule.onNodeWithText("安装包已校验").performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText("已核对当前安装版本").assertDoesNotExist()
+        rule.onNodeWithText("下载并校验").assertDoesNotExist()
+        rule.onNodeWithText("打开系统安装确认").performScrollTo().assertIsEnabled().performClick()
+        rule.runOnIdle { assertEquals(1, installs); assertEquals(1, downloads) }
     }
     @Test fun unknownOutcomeOnlyOffersReconciliationAndCleanupNeedsExplicitConfirmation() {
         var reads = 0; var installs = 0; var cleanups = 0
@@ -57,8 +63,8 @@ class AppUpdatesScreenTest {
         var installs = 0; var cleanups = 0
         rule.setContent {
             val density = LocalDensity.current
-            CompositionLocalProvider(LocalDensity provides Density(density.density, 1.8f)) {
-                DshTheme(darkTheme = true) { Box(Modifier.width(340.dp)) { AppUpdatesScreen(state, {}, {}, { installs++ }, {}, { cleanups++ }, {}, {}) } }
+            CompositionLocalProvider(LocalDensity provides Density(density.density, 2f)) {
+                DshTheme(darkTheme = true) { Box(Modifier.width(320.dp)) { AppUpdatesScreen(state, {}, {}, { installs++ }, {}, { cleanups++ }, {}, {}) } }
             }
         }
         rule.onNodeWithText("放弃待处理更新").performScrollTo().performClick()

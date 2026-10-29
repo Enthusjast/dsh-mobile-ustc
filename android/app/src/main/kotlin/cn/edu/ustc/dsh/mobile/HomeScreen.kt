@@ -12,6 +12,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.heading
@@ -38,12 +39,17 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
 private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () -> Unit) {
     // Only presentation state survives child pages. Leaving READY disposes this scope.
     val navigation = remember { HomeNavigation() }
+    // Positions are scoped to this READY identity and contain only stable message keys and offsets.
+    val readingPositions = remember { LinkedHashMap<Pair<String, String>, ChatReadingPosition>() }
     val bindingState = state.binding
     val shellVisible = !state.appUpdateSettings && !state.notificationSettings &&
         state.reviewingApprovalId == null && bindingState == null && state.creation == null && state.selectedSessionId == null
     val keyboard = LocalSoftwareKeyboardController.current
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val back: () -> Unit = { if (imeVisible) keyboard?.hide() else model.back() }
+    LaunchedEffect(state.selectedRuntimeId, state.selectedSessionId, state.reader?.phase, state.knownTarget) {
+        navigation.recordVisited(state)
+    }
 
     // Controller-driven entries (including creation results) share the same directory position.
     // A known-session notification remains on its exact-resource path, outside this shell.
@@ -111,12 +117,19 @@ private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () 
     } else if (state.selectedSessionId != null) {
         BackHandler(onBack = back)
         key(state.selectedRuntimeId, state.selectedSessionId) {
+            val position = remember(state.selectedRuntimeId, state.selectedSessionId) {
+                val resource = state.selectedRuntimeId!! to state.selectedSessionId!!
+                readingPositions.remove(resource)?.also { readingPositions[resource] = it } ?: ChatReadingPosition().also {
+                    if (readingPositions.size >= 16) readingPositions.remove(readingPositions.keys.first())
+                    readingPositions[resource] = it
+                }
+            }
             SessionsScreen(state, back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
                 model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, model::answerQuestion, model::claimQuestion, model::releaseQuestion, model::refreshQuestions,
                 model::reviewApproval, model::queryApprovals, model::archiveSession,
                 model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload,
                 model::browseExports, model::requestExport, model::queryExports, model::cancelExport, model::removeExport,
-                model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave)
+                model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave, readingPosition = position)
         }
     } else {
         BackHandler(enabled = navigation.destination != HomeDestination.SESSIONS || navigation.directoryFromComputer) {
@@ -157,6 +170,7 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                         Text("让电脑上的会话，随你继续", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
+                Text(stringResource(R.string.onboarding_steps), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
                     Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         val title = when (state.phase) {
@@ -169,11 +183,14 @@ fun HomeScreen(state: HomeState, onLogin: () -> Unit, onRegister: (String) -> Un
                             HomePhase.READY -> error("READY requires task-focused navigation")
                             HomePhase.UNCONFIGURED, HomePhase.INVALID_CONFIGURATION -> {
                                 Text("请联系管理员获取配置了学校登录的安装包。", style = MaterialTheme.typography.bodyLarge)
-                                Button({}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("等待学校配置") }
                             }
                             HomePhase.SIGNED_OUT -> {
                                 Text("使用学校统一身份认证，在浏览器中完成登录。", style = MaterialTheme.typography.bodyLarge)
-                                Text(state.issuer, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                var showIssuer by remember { mutableStateOf(false) }
+                                TextButton({ showIssuer = !showIssuer }, Modifier.heightIn(min = 48.dp)) {
+                                    Text(stringResource(if (showIssuer) R.string.onboarding_source_close else R.string.onboarding_source_open))
+                                }
+                                if (showIssuer) SelectionContainer { Text(state.issuer, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 Button(onLogin, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("使用学校账号登录") }
                             }
                             HomePhase.REAUTHENTICATE -> {

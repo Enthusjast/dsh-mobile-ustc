@@ -1,6 +1,7 @@
 package cn.edu.ustc.dsh.mobile
 
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -69,5 +70,13 @@ class SessionsScreenTest {
         rule.runOnIdle { assertEquals(0, claims); assertEquals(0, answers) }
         rule.onNodeWithText("查看并答复").performScrollTo().performClick()
         rule.runOnIdle { assertEquals(1, claims); assertEquals(0, answers) }
+    }
+    @Test fun pendingApprovalHintRequiresCurrentOwnerAuthority() {
+        val fixture = ApprovalUiFixture()
+        val state = mutableStateOf(fixture.state(role = "viewer").copy(reviewingApprovalId = null, reader = SessionReadState(SessionReadPhase.READY)))
+        rule.setContent { DshTheme { SessionsScreen(state.value, {}, {}, {}, {}, {}) } }
+        rule.onNodeWithText("当前会话需要你处理 · 查看").assertDoesNotExist()
+        rule.runOnIdle { state.value = fixture.state().copy(reviewingApprovalId = null, reader = SessionReadState(SessionReadPhase.READY)) }
+        rule.onNodeWithText("当前会话需要你处理 · 查看").assertIsDisplayed()
     }
 }

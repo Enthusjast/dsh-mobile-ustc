@@ -53,6 +53,12 @@ class FileUploadsTest {
         http = LoginHttp.forTests(OkHttpClient.Builder().sslSocketFactory(trusted.sslSocketFactory(), trusted.trustManager).build())
     }
     @After fun cleanup() { service.shutdown(); objects.shutdown() }
+    @Test fun staleOrMissingAttachmentCanBeUnselectedButNeverNewlySelected() {
+        val selected = SessionUploadState(selected = setOf(request))
+        val removed = toggleUploadSelection(selected, request)
+        assertTrue(removed.selected.isEmpty())
+        assertTrue(toggleUploadSelection(removed, request).selected.isEmpty())
+    }
     private fun digest(value: ByteArray) = MessageDigest.getInstance("SHA-256").digest(value).joinToString("") { "%02x".format(it.toInt() and 255) }
     private fun api(onConfig: (LoginConfiguration) -> Unit = {}): RemoteApi {
         val config = LoginConfiguration.parse(JsonDocument.of(jsonObject("issuer" to "$origin/issuer".json(), "client_id" to "mobile".json(), "redirect_uri" to LoginConfiguration.REDIRECT_URI.json(),

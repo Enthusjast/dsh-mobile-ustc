@@ -39,7 +39,7 @@ class HomeScreenTest {
                 }
             }
         }
-        rule.onNodeWithText("等待学校配置").performScrollTo().assertIsDisplayed().assertIsNotEnabled()
+        rule.onNodeWithText("学校登录尚未配置").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("请联系管理员获取配置了学校登录的安装包。").assertExists()
         save("unconfigured-large-text")
     }
@@ -51,6 +51,7 @@ class HomeScreenTest {
                 HomeScreen(HomeState(HomePhase.SIGNED_OUT, "https://id.example.edu"), { requests++ }, {}, {}, {})
             }
         }
+        rule.onNodeWithText("查看学校登录来源").performScrollTo().performClick()
         rule.onNodeWithText("https://id.example.edu").assertIsDisplayed()
         rule.onNodeWithText("使用学校账号登录").assertHasClickAction().performClick()
         rule.runOnIdle { assertEquals(1, requests) }
@@ -131,11 +132,11 @@ class MainStartupTest {
     @Test fun actualHiltApplicationKeepsLoginDisabledWithoutSchoolConfigurationAndIgnoresUnsolicitedCallback() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         assumeFalse(context.assets.list("")!!.contains("deployment.json"))
-        rule.waitUntil(10_000) { rule.onAllNodesWithText("等待学校配置").fetchSemanticsNodes().isNotEmpty() }
-        rule.onNodeWithText("等待学校配置").assertIsNotEnabled()
+        rule.waitUntil(10_000) { rule.onAllNodesWithText("学校登录尚未配置").fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithText("使用学校账号登录").assertDoesNotExist()
         assertTrue("default startup must not initialize Firebase", com.google.firebase.FirebaseApp.getApps(context).isEmpty())
         rule.activity.startActivity(Intent(context, LoginRedirectActivity::class.java).setData(Uri.parse("cn.edu.ustc.dsh.mobile:/oauth2redirect?code=unsolicited&state=wrong")))
         rule.waitForIdle()
-        rule.onNodeWithText("等待学校配置").assertIsNotEnabled()
+        rule.onNodeWithText("学校登录尚未配置").assertIsDisplayed()
     }
 }

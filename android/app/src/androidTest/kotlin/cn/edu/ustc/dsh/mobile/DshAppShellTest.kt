@@ -23,6 +23,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import cn.edu.ustc.dsh.network.RuntimeDirectoryEntry
 import cn.edu.ustc.dsh.network.SessionDirectoryEntry
+import cn.edu.ustc.dsh.network.SessionReadPhase
+import cn.edu.ustc.dsh.network.SessionReadState
 import cn.edu.ustc.dsh.protocol.*
 import cn.edu.ustc.dsh.ui.DshTheme
 import org.junit.Assert.assertEquals
@@ -44,12 +46,18 @@ class DshAppShellTest {
     private val sessionB = "44444444-4444-4444-8444-444444444444"
     private val workspace = "55555555-5555-4555-8555-555555555555"
 
-    private fun runtime(id: String, actions: List<String> = listOf("session.list", "session.read"), alias: String = "同名电脑"): RuntimeRow {
+    private fun runtime(
+        id: String,
+        actions: List<String> = listOf("session.list", "session.read"),
+        alias: String = "同名电脑",
+        workspaces: List<String> = listOf(workspace),
+        sessions: List<String> = listOf(sessionA, sessionB),
+    ): RuntimeRow {
         val grant = RuntimeDirectoryEntry.parse(jsonObject(
             "id" to id.json(), "host_id" to workspace.json(), "organization_id" to workspace.json(),
             "protocol_version" to 1L.json(), "dsh_version" to "0.2.1".json(),
             "access" to jsonObject("role" to "owner".json(), "grant_version" to 1L.json(),
-                "scope" to RelayScope(actions, listOf(workspace), listOf(sessionA, sessionB)).json()),
+                "scope" to RelayScope(actions, workspaces, sessions).json()),
         ))
         return RuntimeRow(id, workspace, "0.2.1", alias, grant)
     }
@@ -81,11 +89,12 @@ class DshAppShellTest {
         onNotifications: () -> Unit = {},
         onAppUpdates: () -> Unit = {},
         onExit: () -> Unit = {},
+        onRefreshSessions: () -> Unit = {},
     ) {
         val density = LocalDensity.current
         SideEffect { fixtureDensity = density }
         DshAppShell(state, navigation, { navigation.destination = it }, onRuntime, onSession,
-            {}, {}, onCreate, onBinding, onNotifications, onAppUpdates, onExit,
+            {}, onRefreshSessions, onCreate, onBinding, onNotifications, onAppUpdates, onExit,
             { navigation.destination = HomeDestination.COMPUTERS })
     }
 
@@ -96,6 +105,7 @@ class DshAppShellTest {
         }
         rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
         rule.onNodeWithTag("session-$sessionA").assertHasNoClickAction()
+        rule.onNodeWithTag("session-$sessionA").assertIsNotEnabled()
         rule.onNodeWithTag("session-$sessionA").performTouchInput { click() }
         rule.onNodeWithText("当前授权仅可查看目录，不能读取正文。").assertIsDisplayed()
         rule.runOnIdle { assertEquals(0, reads) }
@@ -165,6 +175,165 @@ class DshAppShellTest {
         rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
     }
 
+    @Test fun localSearchUsesOnlyAcquiredRowsInsideTheCurrentResourceGrant() {
+        val nav = navigation()
+        val restricted = runtime(runtimeA, workspaces = emptyList(), sessions = listOf(sessionA))
+        // Keep wider acquired rows after revocation to prove search does not trust retained data.
+        var current by mutableStateOf(state().copy(sessions = listOf(session(sessionA), session(sessionB))))
+        var reads = 0
+        var refreshes = 0
+        rule.setContent {
+            DshTheme { Shell(current, nav, onSession = { reads++ }, onRefreshSessions = { refreshes++ }) }
+        }
+        rule.onNodeWithTag("directory-open-search").performClick()
+        rule.onNodeWithTag("directory-search").performTextInput(sessionB)
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionB"))
+        rule.onNodeWithTag("session-$sessionB").assertExists()
+        rule.runOnIdle { current = current.copy(runtimes = listOf(restricted)) }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("当前目录没有匹配项"))
+        rule.onNodeWithText("当前目录没有匹配项").assertIsDisplayed()
+        rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-search"))
+        rule.onNodeWithTag("directory-search").performTextReplacement(sessionA)
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertExists()
+        rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(0, reads); assertEquals(0, refreshes) }
+
+        // An error and a subsequent load cannot turn retained rows into search results.
+        rule.runOnIdle { current = current.copy(sessionError = "network.unavailable") }
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.onNodeWithTag("directory-search").assertDoesNotExist()
+        rule.onNodeWithTag("directory-open-search").assertIsNotEnabled()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("暂时无法读取会话目录，请检查网络后刷新。"))
+        rule.onNodeWithText("当前授权范围内没有会话。").assertDoesNotExist()
+        rule.onNodeWithContentDescription("刷新").performClick()
+        rule.runOnIdle {
+            assertEquals(1, refreshes)
+            current = current.copy(sessionError = null, loadingSessions = true)
+        }
+        rule.onNodeWithTag("directory-search").assertDoesNotExist()
+        rule.onNodeWithTag("directory-open-search").assertIsNotEnabled()
+        rule.onNodeWithContentDescription("刷新").assertIsNotEnabled()
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.runOnIdle { current = current.copy(loadingSessions = false, sessions = listOf(session(sessionA))) }
+        rule.onNodeWithTag("directory-search").assertIsEnabled()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertExists()
+    }
+
+    @Test fun switchingRuntimeClearsSearchWithoutReadingAnySession() {
+        val nav = navigation()
+        val rows = listOf(runtime(runtimeA), runtime(runtimeB))
+        var current by mutableStateOf(state(rows))
+        var reads = 0
+        rule.setContent {
+            DshTheme { Shell(current, nav, onRuntime = { id ->
+                nav.selectRuntime(id)
+                current = current.copy(selectedRuntimeId = id, sessions = listOf(session(sessionB)))
+            }, onSession = { reads++ }) }
+        }
+        rule.onNodeWithTag("directory-open-search").performClick()
+        rule.onNodeWithTag("directory-search").performTextInput(sessionA)
+        rule.onNodeWithTag("runtime-filter").performClick()
+        rule.onNodeWithTag("runtime-filter-$runtimeB").performScrollTo().performClick()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionB"))
+        rule.onNodeWithTag("session-$sessionB").assertExists()
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.runOnIdle { assertEquals("", nav.directoryQuery); assertEquals(0, reads) }
+    }
+
+    @Test fun recentVisitRequiresAReadyAuthorizedReaderAndRevalidatesCurrentRows() {
+        val nav = navigation()
+        val original = state().copy(selectedSessionId = sessionA, reader = SessionReadState(SessionReadPhase.CONNECTING))
+        nav.recordVisited(original)
+        var current by mutableStateOf(original.copy(selectedSessionId = null, reader = null))
+        val reads = mutableListOf<String>()
+        rule.setContent { DshTheme { Shell(current, nav, onSession = { reads += it }) } }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+        rule.runOnIdle { nav.recordVisited(original.copy(reader = SessionReadState(SessionReadPhase.READY))) }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-recent"))
+        rule.onNodeWithTag("directory-recent").assertIsDisplayed().performClick()
+        rule.runOnIdle { assertEquals(listOf(sessionA), reads) }
+
+        rule.runOnIdle { current = current.copy(sessions = listOf(session(sessionB))) }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+        rule.runOnIdle {
+            current = current.copy(sessions = original.sessions,
+                runtimes = listOf(runtime(runtimeA, workspaces = emptyList(), sessions = listOf(sessionB))))
+        }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.runOnIdle { current = current.copy(sessions = original.sessions, loadingSessions = true) }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+        rule.runOnIdle { current = current.copy(loadingSessions = false, sessionError = "access.denied") }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+        rule.runOnIdle {
+            current = current.copy(sessionError = null, runtimes = listOf(runtime(runtimeA, listOf("session.list"))))
+        }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertIsNotEnabled().assertHasNoClickAction()
+        rule.runOnIdle {
+            current = original.copy(selectedSessionId = null, reader = null, subject = "another-account")
+        }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+        rule.runOnIdle {
+            nav.selectRuntime(runtimeB)
+            current = original.copy(selectedRuntimeId = runtimeB, selectedSessionId = null, reader = null,
+                runtimes = listOf(runtime(runtimeB)))
+        }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+    }
+
+    @Test fun recentVisitCannotBeRecordedFromAKnownTargetOrDirectoryOnlyGrant() {
+        val nav = navigation()
+        val original = state().copy(selectedSessionId = sessionA, reader = SessionReadState(SessionReadPhase.READY))
+        val known = cn.edu.ustc.dsh.network.SessionTarget.parse(jsonObject(
+            "runtime" to jsonObject(
+                "id" to runtimeA.json(), "host_id" to workspace.json(), "organization_id" to workspace.json(),
+                "protocol_version" to 1L.json(),
+                "access" to jsonObject("role" to "viewer".json(), "grant_version" to 1L.json(),
+                    "scope" to RelayScope(listOf("session.read"), emptyList(), listOf(sessionA)).json()),
+            ),
+            "session" to jsonObject("session_id" to sessionA.json(), "workspace_id" to workspace.json(),
+                "state" to "available".json(), "last_persisted_seq" to 0L.json(), "updated_at" to "2026-10-25T00:00:00Z".json()),
+        ))
+        nav.recordVisited(original.copy(knownTarget = known))
+        nav.recordVisited(original.copy(runtimes = listOf(runtime(runtimeA, listOf("session.list")))))
+        rule.setContent { DshTheme { Shell(original.copy(selectedSessionId = null, reader = null), nav) } }
+        rule.onNodeWithTag("directory-recent").assertDoesNotExist()
+    }
+
+    @Test fun returningToTheSameDirectoryRetainsItsPositionAndDoesNotOpenAReader() {
+        val nav = navigation()
+        val entries = (1..24).map { index ->
+            session("${index.toString(16).padStart(8, '0')}-7777-4777-8777-777777777777")
+        }
+        val current = state().copy(sessions = entries)
+        val position = nav.directoryPosition
+        var index = 0
+        var offset = 0
+        var reads = 0
+        rule.setContent { DshTheme { Shell(current, nav, onSession = { reads++ }) } }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-${entries.last().id}"))
+        rule.runOnIdle {
+            index = position.firstVisibleItemIndex
+            offset = position.firstVisibleItemScrollOffset
+            check(index > 0)
+        }
+        rule.onNode(hasText("电脑") and hasClickAction()).performClick()
+        rule.onNode(hasText("会话") and hasClickAction()).performClick()
+        rule.runOnIdle {
+            nav.selectRuntime(runtimeA)
+            assertEquals(position, nav.directoryPosition)
+            assertEquals(index, position.firstVisibleItemIndex)
+            assertEquals(offset, position.firstVisibleItemScrollOffset)
+            assertEquals(0, reads)
+        }
+    }
+
     @Test fun settingsRequireLogoutConfirmationAndCancelDoesNotExit() {
         var exits = 0
         val nav = navigation(HomeDestination.SETTINGS)
@@ -229,6 +398,19 @@ class DshAppShellTest {
         clickSettingsItem("退出本机登录")
         rule.onNodeWithText("取消").assertIsDisplayed().performClick()
         rule.runOnIdle { assertEquals(1, notifications); assertEquals(1, updates) }
+    }
+    @Test fun wideWindowKeepsDirectoryAndNavigationUsableWithoutExtraReaders() {
+        val nav = navigation()
+        var opened: String? = null
+        rule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(.75f, 1f)) {
+                DshTheme { Box(Modifier.width(840.dp).height(600.dp)) { Shell(state(), nav, onSession = { opened = it }) } }
+            }
+        }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertIsDisplayed().performClick()
+        rule.runOnIdle { assertEquals(sessionA, opened) }
+        saveFixture("sessions-wide-window", dark = false)
     }
     private fun clickSettingsItem(label: String) {
         rule.onNodeWithTag("settings-list").performScrollToNode(hasText(label))

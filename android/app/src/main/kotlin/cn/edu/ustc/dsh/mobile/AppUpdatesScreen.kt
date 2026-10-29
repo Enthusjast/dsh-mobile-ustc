@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
 import java.util.Locale
@@ -23,7 +24,15 @@ internal fun AppUpdatesScreen(state: AppUpdateUiState, check: () -> Unit, downlo
                 item("heading") {
                     TextButton(back, Modifier.heightIn(min = 48.dp)) { Text("返回") }
                     Text("应用更新", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
-                    Text("当前版本 ${BuildConfig.VERSION_NAME}（${state.installedVersion ?: "…"}）", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (state.installedVersion == null) stringResource(R.string.flow_update_version_unknown, BuildConfig.VERSION_NAME) else "当前版本 ${BuildConfig.VERSION_NAME}（${state.installedVersion}）", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                item("stage") {
+                    Text(stringResource(when (state.phase) {
+                        AppUpdatePhase.AVAILABLE, AppUpdatePhase.DOWNLOADING, AppUpdatePhase.VERIFYING, AppUpdatePhase.REPREPARE -> R.string.flow_update_step_prepare
+                        AppUpdatePhase.PREPARED, AppUpdatePhase.WAITING_USER -> R.string.flow_update_step_install
+                        AppUpdatePhase.UNKNOWN, AppUpdatePhase.INSTALLED, AppUpdatePhase.FAILED, AppUpdatePhase.BLOCKED -> R.string.flow_update_step_reconcile
+                        else -> R.string.flow_update_step_check
+                    }), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
                 }
                 item("status") {
                     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -31,6 +40,7 @@ internal fun AppUpdatesScreen(state: AppUpdateUiState, check: () -> Unit, downlo
                             Text(updatePhaseTitle(state.phase), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                             Text(updatePhaseDescription(state.phase), style = MaterialTheme.typography.bodyMedium)
                             if (state.currentSupported == false) Text("当前版本已超出服务公布的支持范围。请安装适用更新，或联系管理员。", color = MaterialTheme.colorScheme.error)
+                            if (state.phase in setOf(AppUpdatePhase.DOWNLOADING, AppUpdatePhase.VERIFYING, AppUpdatePhase.PREPARED, AppUpdatePhase.WAITING_USER, AppUpdatePhase.UNKNOWN)) Text(stringResource(R.string.flow_update_not_installed), style = MaterialTheme.typography.bodySmall)
                             if (state.phase == AppUpdatePhase.DOWNLOADING && state.release != null) {
                                 val total = state.release.sizeBytes
                                 LinearProgressIndicator(progress = { (state.downloadedBytes.toFloat() / total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
@@ -63,7 +73,7 @@ internal fun AppUpdatesScreen(state: AppUpdateUiState, check: () -> Unit, downlo
                             Text("${release.versionName}（${release.versionCode}）", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
                             Text("下载大小 ${updateSize(release.sizeBytes)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text("更新说明", style = MaterialTheme.typography.labelLarge)
-                            SelectionContainer { Text(release.releaseNotes) }
+                            SelectionContainer { Text(release.releaseNotes.ifBlank { stringResource(R.string.flow_update_no_notes) }) }
                         }
                     }
                 } }

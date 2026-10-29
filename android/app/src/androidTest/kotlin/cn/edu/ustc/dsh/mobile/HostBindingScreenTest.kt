@@ -9,6 +9,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -38,14 +39,19 @@ class HostBindingScreenTest {
     @Test fun confirmationRequiresAnExplicitFullFingerprintCheckOnASmallLargeTextScreen() {
         var confirmations = 0
         val public = details()
+        lateinit var clipboard: androidx.compose.ui.platform.ClipboardManager
         rule.setContent {
             val density = LocalDensity.current
-            CompositionLocalProvider(LocalDensity provides Density(density.density, 1.6f)) {
-                DshTheme(darkTheme = true) { Box(Modifier.width(340.dp)) { HostBindingScreen(HostBindingState(HostBindingPhase.REVIEW, id, public), "fixture-account", { _, _ -> }, {}, { confirmations++ }, {}, {}, {}, {}) } }
+            clipboard = LocalClipboardManager.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, 2f)) {
+                DshTheme(darkTheme = true) { Box(Modifier.width(320.dp)) { HostBindingScreen(HostBindingState(HostBindingPhase.REVIEW, id, public), "fixture-account", { _, _ -> }, {}, { confirmations++ }, {}, {}, {}, {}) } }
             }
         }
         rule.onNodeWithText("确认绑定这台电脑").performScrollTo().assertIsNotEnabled()
         rule.onNodeWithText(public.keyThumbprint.chunked(8).joinToString(" ")).performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText("复制完整安装密钥指纹").performScrollTo().assertHeightIsAtLeast(48.dp).performClick()
+        rule.runOnIdle { assertEquals(public.keyThumbprint, clipboard.getText()?.text); assertEquals(0, confirmations) }
+        rule.onNodeWithText("确认绑定这台电脑").performScrollTo().assertIsNotEnabled()
         rule.onNodeWithText("我已在电脑上核对以上信息和完整指纹").performScrollTo().performClick()
         rule.onNodeWithText("确认绑定这台电脑").performScrollTo().assertIsEnabled().performClick()
         rule.runOnIdle { assertEquals(1, confirmations) }
@@ -66,6 +72,16 @@ class HostBindingScreenTest {
         rule.onNodeWithText("绑定结果待核对").assertIsDisplayed()
         rule.onNodeWithText("确认绑定这台电脑").assertDoesNotExist()
         rule.onNodeWithText("查询绑定状态").performScrollTo().performClick()
+        rule.runOnIdle { assertEquals(1, queries) }
+    }
+    @Test fun unknownWithoutReviewFactsRetainsTheOriginalPublicIdentifierWithoutASecretForm() {
+        var queries = 0
+        rule.setContent { DshTheme { HostBindingScreen(HostBindingState(HostBindingPhase.UNKNOWN, id), "fixture-account", { _, _ -> }, {}, {}, { queries++ }, {}, {}, {}) } }
+        rule.onNodeWithText(id).performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText("绑定申请编号").assertDoesNotExist()
+        rule.onNodeWithText("电脑显示的绑定码").assertDoesNotExist()
+        rule.onNodeWithText("确认绑定这台电脑").assertDoesNotExist()
+        rule.onNodeWithText("查询绑定状态").performScrollTo().assertHeightIsAtLeast(48.dp).performClick()
         rule.runOnIdle { assertEquals(1, queries) }
     }
     @Test fun alreadyConfirmedRequestsCanBeQueriedWithOnlyTheirPublicIdentifier() {

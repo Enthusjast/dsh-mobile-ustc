@@ -13,23 +13,33 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
 import cn.edu.ustc.dsh.protocol.NotificationReference
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Composable
 internal fun NotificationsScreen(state: NotificationUiState, refresh: () -> Unit, enable: () -> Unit, disable: () -> Unit, renew: () -> Unit,
     inbox: () -> Unit, more: () -> Unit, open: (String, String?) -> Unit, back: () -> Unit) {
     val context = LocalContext.current
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp), contentPadding = PaddingValues(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Scaffold { insets ->
+    Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
+    LazyColumn(Modifier.widthIn(max = 600.dp).fillMaxWidth().padding(horizontal = 20.dp), contentPadding = PaddingValues(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item("heading") {
             TextButton(back, Modifier.heightIn(min = 48.dp)) { Text("返回") }
             Text("通知与待核对提醒", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
             Text("默认隐藏正文、参数和主机别名。打开提醒后重新核对当前状态。")
+            Text(stringResource(R.string.flow_notifications_foreground), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item("channel") {
             OutlinedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(stringResource(R.string.flow_notifications_permission, stringResource(if (state.allowed) R.string.flow_notifications_allowed else R.string.flow_notifications_not_allowed)), style = MaterialTheme.typography.titleSmall)
+                Text(stringResource(R.string.flow_notifications_registration), style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                 Text(when (state.phase) {
                     NotificationPhase.LOADING -> "正在核对通知通道"
                     NotificationPhase.UNCONFIGURED -> "此安装包尚未配置推送通道"
@@ -40,6 +50,10 @@ internal fun NotificationsScreen(state: NotificationUiState, refresh: () -> Unit
                     NotificationPhase.ERROR -> "通知通道需要重新核对"
                 }, style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                 Text("送达和显示受设备、系统与网络限制。通道登记不代表每条提醒已被看到。", style = MaterialTheme.typography.bodySmall)
+                state.expiresAt?.let { expires ->
+                    val expiry = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(expires))
+                    Text(stringResource(R.string.flow_notifications_expiry, expiry), style = MaterialTheme.typography.bodySmall)
+                }
                 if (!state.allowed) OutlinedButton({
                     if (Build.VERSION.SDK_INT >= 33) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     else context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
@@ -48,7 +62,7 @@ internal fun NotificationsScreen(state: NotificationUiState, refresh: () -> Unit
                     context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
                 }, Modifier.heightIn(min = 48.dp)) { Text("打开系统通知设置") }
                 OutlinedButton(refresh, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("核对通道状态") }
-                if (state.phase != NotificationPhase.ACTIVE) Button(enable, enabled = state.canEnable && !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.phase == NotificationPhase.WAITING) "继续登记原通道" else "启用此账号通知") }
+                if (state.phase != NotificationPhase.ACTIVE && state.canEnable) Button(enable, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.phase == NotificationPhase.WAITING) "继续登记原通道" else "启用此账号通知") }
                 if (state.phase == NotificationPhase.ACTIVE) OutlinedButton(renew, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("续期此通知通道") }
                 if (state.phase in setOf(NotificationPhase.WAITING, NotificationPhase.ACTIVE, NotificationPhase.ERROR)) TextButton(disable, Modifier.heightIn(min = 48.dp)) { Text("停用此账号通知") }
                 state.error?.let { Text(notificationErrorText(it), color = MaterialTheme.colorScheme.error) }
@@ -59,6 +73,10 @@ internal fun NotificationsScreen(state: NotificationUiState, refresh: () -> Unit
             OutlinedButton(inbox, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("核对待处理提醒") }
             Text("这里是提醒引用；完整交互以在线会话为准。", style = MaterialTheme.typography.bodySmall)
         }
+        item("reference-scope") {
+            Text(stringResource(R.string.flow_notifications_references), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+            Text(stringResource(if (state.items.isEmpty()) R.string.flow_notifications_no_references else R.string.flow_notifications_reference_scope), style = MaterialTheme.typography.bodyMedium)
+        }
         state.note?.let { note -> item("note") { Text(note) } }
         items(state.items, key = { it.id }) { reference ->
             OutlinedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -67,6 +85,8 @@ internal fun NotificationsScreen(state: NotificationUiState, refresh: () -> Unit
             } }
         }
         if (state.cursor != null) item("more") { OutlinedButton(more, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("更多提醒") } }
+    }
+    }
     }
 }
 internal fun notificationErrorText(code: String) = when (code) {

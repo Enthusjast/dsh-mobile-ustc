@@ -6,6 +6,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
 import cn.edu.ustc.dsh.command.*
@@ -18,25 +19,28 @@ fun SessionCreationScreen(state: HomeState, onCreate: (String,String,String)->Un
     val creation=state.creation ?: SessionCreationState()
     val choices=creation.options
     val runtime=state.runtimes.firstOrNull { it.id==state.selectedRuntimeId }
-    var workspace by remember(choices?.epoch) { mutableStateOf<String?>(null) }
-    var preset by remember(choices?.epoch) { mutableStateOf<String?>(null) }
-    var chooseWorkspace by remember { mutableStateOf(false) }
-    var choosePreset by remember { mutableStateOf(false) }
+    var workspace by remember(state.selectedRuntimeId, choices?.epoch) { mutableStateOf<String?>(null) }
+    var preset by remember(state.selectedRuntimeId, choices?.epoch) { mutableStateOf<String?>(null) }
+    var chooseWorkspace by remember(state.selectedRuntimeId, choices?.epoch) { mutableStateOf(false) }
+    var choosePreset by remember(state.selectedRuntimeId, choices?.epoch) { mutableStateOf(false) }
+    var workspaceSearch by remember(chooseWorkspace) { mutableStateOf("") }
+    var presetSearch by remember(choosePreset) { mutableStateOf("") }
     var another by remember(workspace,preset,choices?.epoch) { mutableStateOf(false) }
     val selected=choices?.workspaces?.firstOrNull { it.id==workspace }
     val valid=creation.phase==SessionCreationPhase.READY && creation.outbox.connected && selected!=null && preset in choices.presets && !state.submitting
     val unresolved=creation.outbox.records.any { it.intent.workspaceId==workspace && it.remote !in setOf(RemoteCommandState.SETTLED,RemoteCommandState.REJECTED) }
     val submit={ val id=workspace; val configuration=preset; val epoch=choices?.epoch; if(valid && id!=null && configuration!=null && epoch!=null) onCreate(id,configuration,epoch) }
     Scaffold { insets ->
-        LazyColumn(Modifier.fillMaxSize().padding(insets),contentPadding=PaddingValues(24.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
+        LazyColumn(Modifier.fillMaxSize().padding(insets).imePadding(),contentPadding=PaddingValues(24.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
             item("header") {
-                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+                Column(Modifier.fillMaxWidth()) {
                     TextButton(onBack,Modifier.heightIn(min=48.dp)) { Text("返回") }
                     TextButton(onExit,Modifier.heightIn(min=48.dp)) { Text("退出本机登录") }
                 }
                 Text("创建会话",style=MaterialTheme.typography.headlineSmall,modifier=Modifier.semantics { heading() })
+                Text(stringResource(R.string.flow_creation_context), style=MaterialTheme.typography.titleSmall)
                 Text(runtime?.hostAlias ?: "已授权的电脑",style=MaterialTheme.typography.titleMedium)
-                Text("选择电脑允许的工作区与助手配置。创建成功后，可以读取并继续这个会话。")
+                Text(stringResource(R.string.flow_creation_intro))
             }
             item("connection") {
                 Text(when(creation.phase) {
@@ -50,28 +54,52 @@ fun SessionCreationScreen(state: HomeState, onCreate: (String,String,String)->Un
                     SessionCreationPhase.ERROR->"暂时无法创建会话"
                     SessionCreationPhase.CLOSED->"已暂停创建"
                 },modifier=Modifier.semantics { liveRegion=LiveRegionMode.Polite })
+                if (creation.phase != SessionCreationPhase.READY) Text(stringResource(when (creation.phase) {
+                    SessionCreationPhase.OFFLINE, SessionCreationPhase.BACKOFF -> R.string.flow_creation_offline
+                    SessionCreationPhase.AUTH_REQUIRED, SessionCreationPhase.REVOKED -> R.string.flow_creation_access_required
+                    else -> R.string.flow_creation_options_pending
+                }), style=MaterialTheme.typography.bodyMedium)
+                if (creation.phase in setOf(SessionCreationPhase.CONNECTING, SessionCreationPhase.OPTIONS, SessionCreationPhase.BACKOFF)) LinearProgressIndicator(Modifier.fillMaxWidth())
                 OutlinedButton(onRefresh,enabled=creation.phase !in setOf(SessionCreationPhase.CONNECTING,SessionCreationPhase.OPTIONS,SessionCreationPhase.AUTH_REQUIRED,SessionCreationPhase.REVOKED),modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text("刷新创建选项") }
             }
             if(choices!=null) item("choices") {
                 Column(verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                    Text(stringResource(R.string.flow_creation_workspace), style=MaterialTheme.typography.titleMedium, modifier=Modifier.semantics { heading() })
+                    Text(stringResource(R.string.flow_creation_workspace_help), style=MaterialTheme.typography.bodySmall)
                     Box {
-                        OutlinedButton({chooseWorkspace=true},Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(selected?.let { "${it.label} · ${it.id.take(8)}" } ?: "选择工作区") }
+                        OutlinedButton({chooseWorkspace=true},enabled=creation.phase==SessionCreationPhase.READY && choices.workspaces.isNotEmpty(),modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(selected?.let { "${it.label} · ${it.id.take(8)}" } ?: "选择工作区") }
                         DropdownMenu(chooseWorkspace,{chooseWorkspace=false},modifier=Modifier.heightIn(max=360.dp)) {
-                            choices.workspaces.forEach { option -> DropdownMenuItem(text={Text("${option.label} · ${option.id.take(8)}")},onClick={workspace=option.id;chooseWorkspace=false}) }
+                            if (choices.workspaces.size > 8) OutlinedTextField(workspaceSearch, {workspaceSearch=it}, label={Text(stringResource(R.string.flow_creation_search_workspace))}, modifier=Modifier.fillMaxWidth().padding(8.dp))
+                            val filtered=remember(choices, workspaceSearch) {
+                                if (workspaceSearch.isBlank()) choices.workspaces else choices.workspaces.filter { it.label.contains(workspaceSearch,true) || it.id.contains(workspaceSearch,true) }
+                            }
+                            if (filtered.isEmpty()) Text(stringResource(R.string.flow_creation_search_empty), Modifier.padding(16.dp))
+                            filtered.forEach { option -> DropdownMenuItem(text={Text("${option.label} · ${option.id.take(8)}")},onClick={workspace=option.id;chooseWorkspace=false}) }
                         }
                     }
+                    Text(stringResource(R.string.flow_creation_preset), style=MaterialTheme.typography.titleMedium, modifier=Modifier.semantics { heading() })
+                    Text(stringResource(R.string.flow_creation_preset_help), style=MaterialTheme.typography.bodySmall)
                     Box {
-                        OutlinedButton({choosePreset=true},Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(preset ?: "选择助手配置") }
+                        OutlinedButton({choosePreset=true},enabled=creation.phase==SessionCreationPhase.READY && choices.presets.isNotEmpty(),modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(preset?.takeIf { it in choices.presets } ?: "选择助手配置") }
                         DropdownMenu(choosePreset,{choosePreset=false},modifier=Modifier.heightIn(max=360.dp)) {
-                            choices.presets.forEach { option -> DropdownMenuItem(text={Text(option)},onClick={preset=option;choosePreset=false}) }
+                            if (choices.presets.size > 8) OutlinedTextField(presetSearch, {presetSearch=it}, label={Text(stringResource(R.string.flow_creation_search_preset))}, modifier=Modifier.fillMaxWidth().padding(8.dp))
+                            val filtered=remember(choices, presetSearch) {
+                                if (presetSearch.isBlank()) choices.presets else choices.presets.filter { it.contains(presetSearch,true) }
+                            }
+                            if (filtered.isEmpty()) Text(stringResource(R.string.flow_creation_search_empty), Modifier.padding(16.dp))
+                            filtered.forEach { option -> DropdownMenuItem(text={Text(option)},onClick={preset=option;choosePreset=false}) }
                         }
                     }
-                    if(choices.workspaces.isEmpty() || choices.presets.isEmpty()) Text("电脑尚未提供可创建的工作区或助手配置，请在电脑核对后刷新。")
-                    Button({ if(unresolved) another=true else submit() },enabled=valid,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(if(state.submitting) "正在保存创建请求…" else "创建新会话") }
+                    if(choices.workspaces.isEmpty()) Text(stringResource(R.string.flow_creation_no_workspace))
+                    if(choices.presets.isEmpty()) Text(stringResource(R.string.flow_creation_no_preset))
+                    if(choices.workspaces.isNotEmpty() && choices.presets.isNotEmpty()) {
+                        Text(stringResource(if ((workspace!=null && selected==null) || (preset!=null && preset !in choices.presets)) R.string.flow_creation_selection_stale else R.string.flow_creation_selection_required), style=MaterialTheme.typography.bodySmall)
+                        Button({ if(unresolved) another=true else submit() },enabled=valid,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(if(state.submitting) "正在保存创建请求…" else "创建新会话") }
+                    }
                     if(another) AlertDialog(onDismissRequest={another=false},title={Text("创建另一个会话？")},
                         text={Text("此工作区还有结果未完成核对的创建请求。新操作会使用新的请求编号，原请求可能已在电脑上创建了会话。")},
-                        confirmButton={TextButton({another=false;submit()},enabled=valid) {Text("确认为另一个新请求")}},
-                        dismissButton={TextButton({another=false;onQuery()}) {Text("先核对原请求")}})
+                        confirmButton={TextButton({another=false;submit()},enabled=valid,modifier=Modifier.heightIn(min=48.dp)) {Text("确认为另一个新请求")}},
+                        dismissButton={TextButton({another=false;onQuery()},modifier=Modifier.heightIn(min=48.dp)) {Text("先核对原请求")}})
                 }
             }
             val error=state.commandError ?: creation.error ?: creation.outbox.error
@@ -93,15 +121,17 @@ fun SessionCreationScreen(state: HomeState, onCreate: (String,String,String)->Un
                             record.remote==RemoteCommandState.RECEIVED->"中继已接收，尚未确认电脑创建"
                             else->"创建结果待确认"
                         },style=MaterialTheme.typography.titleSmall)
-                        Text("工作区 ${record.intent.workspaceId?.take(8)} · ${record.intent.payload.string("preset")}")
-                        Text("请求 ${record.intent.requestId.take(8)}",style=MaterialTheme.typography.bodySmall)
+                        Text(stringResource(R.string.flow_creation_record_workspace, record.intent.workspaceId.orEmpty()))
+                        Text(stringResource(R.string.flow_creation_record_preset, record.intent.payload.string("preset")))
+                        Text(stringResource(R.string.flow_creation_original_request, record.intent.requestId),style=MaterialTheme.typography.bodySmall)
+                        if(record.remote==RemoteCommandState.OUTCOME_UNKNOWN) Text(stringResource(R.string.flow_creation_unknown_result))
                         val eligible=creation.outbox.connected && choices!=null && choices.epoch==record.intent.epoch && choices.workspaces.any { it.id==record.intent.workspaceId } && record.intent.payload.string("preset") in choices.presets
                         if(record.delivery==CommandDelivery.PENDING && record.attempts==0L) OutlinedButton({onSendPending(record.intent.requestId)},enabled=eligible,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) {Text("转交这个创建请求")}
                         if(record.remote==RemoteCommandState.RECEIVED && !record.everHostSaved) {
                             var retry by remember { mutableStateOf(false) }
                             OutlinedButton({retry=true},enabled=eligible,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) {Text("重新转交同一请求")}
                             if(retry) AlertDialog(onDismissRequest={retry=false},title={Text("重新转交原创建请求？")},text={Text("会先核对原请求状态，保留原编号、工作区和运行代次。已创建或结果不明的请求不会重复转交。")},
-                                confirmButton={TextButton({retry=false;onSendPending(record.intent.requestId)}) {Text("核对并重试")}},dismissButton={TextButton({retry=false}) {Text("取消")}})
+                                confirmButton={TextButton({retry=false;onSendPending(record.intent.requestId)},modifier=Modifier.heightIn(min=48.dp)) {Text("核对并重试")}},dismissButton={TextButton({retry=false},modifier=Modifier.heightIn(min=48.dp)) {Text("取消")}})
                         }
                         if(record.remote==RemoteCommandState.SETTLED && record.createdSessionId!=null) {
                             val readable=runtime?.access?.let { val granted=it.scope; it.canList() && granted!=null && "session.read" in granted.actions && record.intent.workspaceId in granted.workspaces }==true

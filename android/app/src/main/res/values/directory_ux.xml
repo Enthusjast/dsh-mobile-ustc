@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="directory_search_label">搜索当前目录</string>
+    <string name="directory_search_scope">仅搜索所选运行环境已取得、当前获授权的会话 ID 和工作区 ID；不搜索消息正文。</string>
+    <string name="directory_search_clear">清除搜索</string>
+    <string name="directory_search_empty">当前目录没有匹配项</string>
+    <string name="directory_search_empty_detail">请核对会话或工作区 ID，或清除搜索。搜索不包含其他电脑和未取得的目录。</string>
+    <string name="directory_recent">最近访问</string>
+    <string name="directory_recent_scope">仅记录本次使用中已打开的会话；入口以当前运行环境的目录和读取授权重新核对。</string>
+    <string name="directory_organization">组织 %1$s</string>
+</resources>

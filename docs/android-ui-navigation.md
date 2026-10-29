@@ -2,7 +2,7 @@
 
 ## Scope and baseline
 
-This is the first implementation slice of `android-ui-ux-plan.md` §16.2: basic theme/components, session-first navigation, current-runtime directory, computer details, and settings. Chat reading/composer replacement and field-based approval review are subsequent slices; no protocol or persistence changes are included.
+The first implementation slice introduced the task-focused navigation in §16.2; the subsequent reading, input and interaction changes reuse the existing protocol and persistence boundaries. The historical baseline and its verification record remain below.
 
 Baseline source: `HomeScreen.kt` previously placed registration success, refresh, notifications, updates, binding and logout before the runtime cards. Opening a displayed session required its separate `读取会话` button in `SessionsScreen.kt`. Three source-defined paths:
 
@@ -37,16 +37,29 @@ These are path descriptions, not task-time measurements. Existing public synthet
 | Task title/summary/unread count | Not supplied by current directory contract | Not fabricated; no bulk body reads to populate the list |
 | Pending actions | Current foreground session's validated native state | Existing session entries only; not claimed as global inbox |
 
+### Optional metadata and aggregation
+
+No optional U5 protocol extension is included in this UI work. Task titles and message summaries need a separately versioned producer, authorization scope and deletion/retention contract; unread counts additionally need durable, account-isolated read cursors and revocation semantics. Local aliases would require account-isolated storage and deletion on sign-out/revocation. Cross-runtime aggregation and a complete pending-work list require a bounded, paginated authorized query independent of push; QR binding requires a versioned, expiry-checked payload and a non-Google-services implementation. Until those contracts are approved, the UI uses existing directory IDs and validated current-session references only. It does not infer unread counts, fetch all transcripts or claim a global inbox.
+
 ## Navigation and retirement contract
 
 - Main destinations: Sessions (default), Computers, Settings. Chat, full approval, binding, creation, notification settings and application updates remain child pages, without bottom navigation.
-- Navigation holds only destination, current directory runtime ID and `LazyListState` in memory. It is not saved-instance-state authority and never stores drafts, credentials, binding codes, approval handles, or question answers.
+- Navigation holds only destination, current directory runtime ID, an in-memory filter and bounded directory/reading positions. Recent visits contain resource identifiers only and are revalidated against current authorized rows before display or opening. No saved-instance-state authority, drafts, credentials, binding codes, approval handles, or question answers are stored.
 - Navigation is scoped to the READY account/device composition. Leaving READY or changing identity destroys it; a new account does not inherit the old destination or directory position.
 - Only the current runtime's directory is requested automatically. The first eligible authorized runtime supplies the initial list. Switching computer revalidates through `openRuntime`; opening a row uses `openSession` and its existing scoped ticket/read path.
 - Back from chat calls the existing controller `back`, retiring the reader, question scope, approvals, uploads/exports and callbacks before rendering the same safe directory. The list's stable keys and in-memory position remain available within that account composition.
 - Switching to Computers/Settings first leaves the current directory through controller `back`; no hidden child page owns a retained connection. Returning to Sessions re-queries the selected runtime rather than displaying an authority cache.
 - A directory entered from Computers returns to Computers; settings child pages return to Settings. A notification's known-session path still resolves the exact resource independently of broader directory enumeration and returns to reminders.
 - Background/foreground, grant changes, expiry and late platform results continue through existing controller generations. UI navigation must not make an old interaction executable again.
+
+## Reading, interaction and delivery boundaries
+
+- Chat uses stable message keys, an account-scoped bounded in-memory anchor and explicit bottom-follow. Opening a previously visited message restores only when its key exists in the newly authorized snapshot; older-page requests remain owned and bounded by the existing reader. A visible new-message action returns to the latest content.
+- The composer keeps queue/steer selection, explicit offline-only saving, current attachment readiness and the original submission callback. Selecting, removing from this message and deleting a stored transfer record are distinct actions. Original delivery facts and identifiers are shown separately from native transcript messages.
+- Complete approval projection traverses the validated immutable context, including arbitrary nested values, unknown keys and binding fields. It uses bounded Unicode-safe pages and explicit per-page acknowledgements plus independent consent. Switching structured/raw representation clears confirmations. Projection is computed off the main thread and never replaces canonical signature bytes; leaving the foreground retires the ephemeral review.
+- Question summaries never claim timed ownership. Explicitly opening a form may claim the current eligible timed question; closing or retiring the handle releases it. Plan continuation requires the complete displayed plan and explicit review, and unsubmitted form state is not restored.
+- Uploads distinguish preparation, scanning, host staging, message selection and local record deletion. Exports use only authorized sources and retain the existing readback-verified saved state. Phone confirmation, host confirmation and binding grant remain separate; creation, notification and update screens distinguish original-request reconciliation, background delivery and installation results.
+- Current pending entries are limited to validated state in the active session and do not imply a complete cross-device inbox. Notification configuration is not a prerequisite for answering foreground interactions.
 
 ## Layout decision
 
@@ -106,7 +119,7 @@ Low-fidelity 320dp layout targets, not screenshots or claims that later chat/app
 
 Material surfaces, paired light/dark colors, system fonts, spacing tokens and growing controls are shared through `core:ui`. Icons use vectors with semantic labels for actions; decorative arrows have no duplicate announcement. Controls target at least 48dp and no critical content relies on color alone. No motion is needed for main-navigation changes.
 
-## Verification
+## Initial navigation verification (commit 77b19cc)
 
 2026-10-28, debug build, dedicated `dsh-remote-api26` emulator, Android 8.0 x86_64 under software emulation. Display override 720 × 1280 / 320 dpi; physical screenshot buffer 1080 × 1920. The synthetic Compose captures record their actual Compose root, density, font scale and theme in accompanying JSON. The device used its previously provisioned secure PIN and strong biometric; no enrollment or global ADB reset was performed for this run.
 
@@ -119,3 +132,15 @@ Material surfaces, paired light/dark colors, system fonts, spacing tokens and gr
 - Measured static text/background contrast for selected light/dark body, secondary, primary-button and error-container pairs ranged from 6.87:1 to 16.07:1. This does not replace full accessibility or contrast auditing.
 
 The tested APKs and immutable logs/metadata are in ignored `.local/android-ui-navigation/`. Debug APK SHA-256: `1f0b29163f98a6ccea647693b180131a32738fa72c2928354aae8eb1cddf105c`; instrumentation APK: `6ee50a7cfd6f2cc62e764daaa5ddc5ffbb2c7e31e1986585458fafb80288e20e`. Synthetic screenshots demonstrate layout only; TLS/controller, platform key and physical-device evidence remain separate. School identity, physical-device/OEM background delivery, full U2–U6 performance and production release acceptance are not established by this slice.
+
+## Expanded interaction and acceptance evidence
+
+The subsequent reading, composer, approval, question and supporting-flow changes were exercised on the dedicated `dsh-remote-api26` Android 8.0 x86_64 software emulator, at 720 × 1280 / 320 dpi with the system-default font scale. These are debug builds and public synthetic fixtures, not production account data.
+
+- `:app:assembleDebug :app:assembleDebugAndroidTest` and `check` passed after the final source changes. The application APK SHA-256 is `e10067925c5bd4afa67dd1961741127f53266bc56bfb001b16682bd34f79505b`.
+- Six targeted batches on the earlier application APK `8b303e2cc50428cd5b421af16889a41a59fab8c3336dba883d65ed50c492b539` passed 122 instrumentation cases, including account/reader transitions, approval delivery with the emulator's existing strong biometric, question and chat delivery, file selection, export selection and the individual UI screens. These are targeted batches, not the complete device test suite.
+- After the subsequent link accessibility action, attachment availability and owner-authority pending-hint changes, the current application APK passed 41 focused instrumentation cases (`ChatReadingTest`, `SessionComposerTest`, `SessionsScreenTest`, `HomeNavigationTest`, `DshAppShellTest`, `UploadsPanelTest`) with test APK `61bb36dd22a4aeab1b2c92eb3f3313da0b1572e03564b079dcb4d105d55e0d77`. The final test APK `f3aac85db2876fb2f25cd443214097bf8e1408b14869e80d25e892da4d8fe4c5` subsequently passed the question-form screenshot case; its only later change was the timing of that screenshot. Three reading, approval and question scenarios also passed with all three Android animation scales set to zero; the existing settings were restored. The emulator had no enabled accessibility service, so these checks do not claim a TalkBack walkthrough.
+- A separately packaged synthetic showcase using the same fixture data as the pre-change baseline captured 11 current scenes, including directory, chat, offline, approval, question, transfers, binding, creation, notifications and updates. Both runs report the same display override and physical screenshot buffer; timestamps and scroll positions differ, so the images support visual review rather than pixel or timing comparisons. Real activity/Compose tests are separate from the showcase; the production `FLAG_SECURE` policy was not disabled.
+- At 360dp width, default density-independent font scale and no attachments, the measured composer is 122dp high. In one debug long-history/incremental-update instrumentation sample on this software renderer, `gfxinfo` reported 137/137 janky frames and a 350ms median. This is a diagnostic observation, not a 60Hz performance pass or a device-independent benchmark. Startup, directory and network timing, peak memory, actual task completion time and comparative production performance remain unmeasured.
+
+Synthetic screenshots, Compose root/density/font-scale metadata, raw instrumentation results and APK hashes remain under ignored `.local/uiux-acceptance-current/` and `.local/uiux-acceptance-final/`; pre-change captures remain under `.local/android-ui-navigation/before-api26/`. Physical-device/OEM behavior, TalkBack, production identity/server flows and release-build performance require separate acceptance and are not inferred from these fixtures.

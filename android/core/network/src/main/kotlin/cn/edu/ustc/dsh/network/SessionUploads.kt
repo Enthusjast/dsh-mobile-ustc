@@ -16,6 +16,13 @@ data class UploadView(val stored: StoredFileUpload, val phase: UploadPhase, val 
 }
 data class SessionUploadState(val rows: List<UploadView> = emptyList(), val selected: Set<String> = emptySet(), val busy: Boolean = false, val hashing: Boolean = false, val error: String? = null)
 
+internal fun toggleUploadSelection(state: SessionUploadState, id: String): SessionUploadState = when {
+    id in state.selected -> state.copy(selected = state.selected - id, error = null)
+    state.rows.firstOrNull { it.stored.intent.requestId == id }?.ready() != true -> state
+    state.selected.size >= 15 -> state.copy(error = "file.too_many")
+    else -> state.copy(selected = state.selected + id, error = null)
+}
+
 /** Foreground workflow; only immutable intent metadata survives a closed view. */
 class SessionUploads internal constructor(private val api: RemoteApi, private val journal: FileUploadJournal, val runtimeId: String, val sessionId: String, private val workspace: String?, owner: CoroutineScope) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob(owner.coroutineContext[Job]) + Dispatchers.Default)
@@ -96,12 +103,7 @@ class SessionUploads internal constructor(private val api: RemoteApi, private va
     }
     fun cancelTransfer() = synchronized(lock) { task?.cancel(); runCatching { input?.close() }; Unit }
     fun toggle(id: String) {
-        val view = mutable.value.rows.firstOrNull { it.stored.intent.requestId == id } ?: return
-        if (!view.ready()) return
-        update { state ->
-            val selected = if (id in state.selected) state.selected - id else state.selected + id
-            if (selected.size > 15) state.copy(error = "file.too_many") else state.copy(selected = selected, error = null)
-        }
+        update { state -> toggleUploadSelection(state, id) }
     }
     fun selectedFiles(): List<String> {
         val state = mutable.value
