@@ -212,6 +212,7 @@ func TestApprovalEvidenceVerificationFailsClosedWhenAuditUnavailable(t *testing.
 
 func TestApprovalEvidenceFingerprintBackfillsOnlyMatchingOriginals(t *testing.T) {
 	f := newApprovalFixture(t)
+	applyColdHistoryImportFixtureMigration(t, f.ctx, f.database, "down")
 	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "down")
 	down, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
 	if err != nil {
@@ -253,6 +254,7 @@ func TestApprovalEvidenceFingerprintBackfillsOnlyMatchingOriginals(t *testing.T)
 		t.Fatal(err)
 	}
 	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "up")
+	applyColdHistoryImportFixtureMigration(t, f.ctx, f.database, "up")
 	result, err := f.database.VerifyApprovalEvidence(f.ctx, first.ApprovalID, OriginalDatabaseEpoch)
 	if err != nil || result.FingerprintSource != "backfilled" {
 		t.Fatal("matching prior snapshot was not safely backfilled", err)
@@ -268,6 +270,7 @@ func TestApprovalEvidenceFingerprintBackfillsOnlyMatchingOriginals(t *testing.T)
 
 func TestApprovalEvidenceFingerprintMigrationWaitsForInflightDecision(t *testing.T) {
 	f := newApprovalFixture(t)
+	applyColdHistoryImportFixtureMigration(t, f.ctx, f.database, "down")
 	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "down")
 	down, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
 	if err != nil {
@@ -335,6 +338,7 @@ func TestApprovalEvidenceFingerprintMigrationWaitsForInflightDecision(t *testing
 		t.Fatal("fingerprint migration did not complete", err)
 	}
 	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "up")
+	applyColdHistoryImportFixtureMigration(t, f.ctx, f.database, "up")
 	result, err := f.database.VerifyApprovalEvidence(f.ctx, f.request.ApprovalID, OriginalDatabaseEpoch)
 	if err != nil || result.FingerprintSource != "backfilled" {
 		t.Fatal("migration missed an in-flight decision", err)
@@ -495,6 +499,7 @@ func TestApprovalEvidenceVerificationUsesLimitedRole(t *testing.T) {
 
 func TestApprovalEvidenceVerifierPreventsOlderAuditSchemaRollback(t *testing.T) {
 	ctx, db := newPostgresIntegrationDatabase(t)
+	applyColdHistoryImportFixtureMigration(t, ctx, db, "down")
 	applyAuditColdExportFixtureMigration(t, ctx, db, "down")
 	down, err := os.ReadFile("../../../../deploy/sql/026_audit_history.down.sql")
 	if err != nil {
