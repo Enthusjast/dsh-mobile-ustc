@@ -7,7 +7,7 @@ import { lstat, mkdir, mkdtemp, readFile, writeFile, unlink } from 'node:fs/prom
 import { createServer, request } from 'node:http'
 import { createServer as createTCPServer } from 'node:net'
 import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, relayCreateDigest, relayQuestionDigest, relayTimedQuestionDigest } from '../../host/remote-control/src/relay-client.js'
@@ -418,10 +418,19 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     '        presets: [standard, remote-timed]', '        highRiskTools: [bash, pwsh, run_code]', '- id: agent-default-model', '  config:', '    provider: dsh-m0-test', '    model: offline', '',
   ].join('\n') + '\n' + timedPreset, { mode: 0o600 })
   const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
-  const dsh = await startProcess(process.execPath, [join(dshPackage, 'lib/bin.js'), '--profile', 'remote-e2e', '--from-default-profile', 'web', '--patch', patch,
-    '--host', '127.0.0.1', '--port', '0', '--no-open'], {
+  const installedDsh = process.env.REMOTE_TEST_DSH_BIN
+  const dshEnv = {
     PATH: process.env.PATH ?? '', DSH_HOME: join(root, 'dsh-home'), DSH_TELEMETRY_DISABLED: '1', NO_COLOR: '1', TMPDIR: root,
-  })
+  }
+  if (installedDsh !== undefined) {
+    assert.ok(isAbsolute(installedDsh), 'REMOTE_TEST_DSH_BIN must be an absolute path to the installed CLI')
+    assert.equal(execFileSync(installedDsh, ['--version'], { encoding: 'utf8', env: dshEnv, timeout: 5_000 }).trim(), '0.2.1-rc.2')
+    t.diagnostic('Using the explicitly selected installed DSH 0.2.1-rc.2 CLI.')
+  }
+  const dshArgs = ['--profile', 'remote-e2e', '--from-default-profile', 'web', '--patch', patch,
+    '--host', '127.0.0.1', '--port', '0', '--no-open']
+  const dsh = await startProcess(installedDsh ?? process.execPath,
+    installedDsh ? dshArgs : [join(dshPackage, 'lib/bin.js'), ...dshArgs], dshEnv)
   t.after(async () => { await dsh.stop('SIGINT') })
   const local = (method: string, path: string, body?: object) => new Promise<any>((accept, reject) => {
     const req = request({ socketPath, method, path, headers: { 'content-type': 'application/json' } }, response => {

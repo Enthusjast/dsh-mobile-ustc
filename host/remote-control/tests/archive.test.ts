@@ -175,7 +175,13 @@ test('archive journal settles only after native durability, refuses active work 
     assert.throws(() => parseCommand({ ...command, payload: { archived: false, stop_activity: true } }), /protocol.invalid/)
     await client.prompt(native, randomUUID(), 'queue', 'running work', signal())
     await held.started
+    const registry = h.ctx.workspaceRegistry
+    const originalArchive = registry.archiveSession.bind(registry)
+    let archiveCalls = 0
+    registry.archiveSession = async (...args) => { archiveCalls++; return await originalArchive(...args) }
     await assert.rejects(runtime.dispatch(command, signal()), /session.active/)
+    assert.equal(archiveCalls, 0, 'active preflight must reject before invoking the workspace mutation')
+    registry.archiveSession = originalArchive
     assert.equal(journal.admit(command, owner).state, 'rejected')
     const archive = parseCommand({ ...command, request_id: randomUUID(), payload: { archived: true, stop_activity: true } })
     const states: string[] = []
@@ -199,4 +205,29 @@ test('archive journal settles only after native durability, refuses active work 
     await assert.rejects(restarted.dispatch({ ...archive, runtime_epoch: restarted.epoch }, signal()), /request_conflict/)
     restarted.close()
   } finally { held.release(); runtime.close(); await h.close() }
+})
+
+test('an unrecognized active-shaped error after archive is attempted remains an unknown outcome', async () => {
+  const h = await host({ probe: false })
+  const client = new DshClient(h.ctx, h.runtimeId, [{ id: 'fixture', cwd: h.cwd }], ['fixture'])
+  const journal = new MemoryCommandJournal(h.runtimeId)
+  const runtime = new ProbeRuntime(client, { close() {} } as InteractionRouter, journal)
+  const owner = { userId: 'local', deviceId: 'local' }
+  const originalArchive = h.ctx.workspaceRegistry.archiveSession.bind(h.ctx.workspaceRegistry)
+  try {
+    const created = await client.create('fixture', 'fixture')
+    const native = await client.resolve(created.session_id, signal())
+    const foreignError = Object.assign(new Error('foreign workspace error'), {
+      name: 'WorkspaceActiveSessionError', sessionId: native, activity: [{ kind: 'turn' }],
+    })
+    h.ctx.workspaceRegistry.archiveSession = async () => { throw foreignError }
+    const command = parseCommand({ v: 0, type: 'session.archive', request_id: randomUUID(), runtime_epoch: runtime.epoch,
+      session_id: created.session_id, payload: { archived: true, stop_activity: false } })
+    await assert.rejects(runtime.dispatch(command, signal()), /foreign workspace error/)
+    assert.equal(journal.admit(command, owner).state, 'outcome_unknown')
+  } finally {
+    h.ctx.workspaceRegistry.archiveSession = originalArchive
+    runtime.close()
+    await h.close()
+  }
 })

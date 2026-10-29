@@ -21,6 +21,7 @@ def main():
     arguments.add_argument("--android-avd", default="dsh-remote-api26", help="Exact owned AVD identity for the Android composition")
     arguments.add_argument("--go-run", metavar="REGEX", help="Run matching Go cases in the isolated cluster, without the separate Node composition")
     arguments.add_argument("--cross-node", action="store_true", help="Run the real npm DSH composition with Host and phone entering separate mutually authenticated relay processes")
+    arguments.add_argument("--dsh-only", action="store_true", help="Run the DSH composition without repeating the separate Go test suite")
     arguments.add_argument("--relay-load", type=int, metavar="CONNECTIONS", help="Opt-in authenticated TLS capacity probe with an equal Host/phone split")
     arguments.add_argument("--load-output", type=Path, help="Fresh evidence directory strictly inside repository .local")
     arguments.add_argument("--load-workers", type=int)
@@ -32,6 +33,8 @@ def main():
     options = arguments.parse_args()
     if options.cross_node and (options.go_run or options.relay_load or options.android_relay or options.android_upgrade or options.kotlin_relay):
         arguments.error("--cross-node requires its own native DSH composition invocation")
+    if options.dsh_only and (options.go_run or options.relay_load is not None or options.android_relay or options.android_upgrade or options.kotlin_relay):
+        arguments.error("--dsh-only selects the native DSH composition, optionally with --cross-node")
     load_fields = (options.load_output, options.load_workers, options.load_hold_seconds, options.load_active_pairs, options.load_events_per_second, options.load_payload_bytes)
     if options.relay_load is None and (any(value is not None for value in load_fields) or options.load_race):
         arguments.error("load options require --relay-load")
@@ -149,16 +152,17 @@ def main():
                                       cwd=repo / "services/remote", env=env).returncode
             if kotlin_classpath:
                 env.update(REMOTE_TEST_KOTLIN_CLASSPATH=kotlin_classpath, REMOTE_TEST_JAVA=java)
-            # Each Go integration test owns a private database in this cluster.
-            # Running here ensures the security tests cannot silently skip PG.
-            command = [go, "test", "-race", "-count=1"]
-            if options.go_run:
-                command += ["-run", options.go_run, "-v"]
-            result = subprocess.run(command + ["./..."], cwd=repo / "services/remote", env=env)
-            if result.returncode:
-                return result.returncode
-            if options.go_run:
-                return 0
+            if not options.dsh_only:
+                # Each Go integration test owns a private database in this cluster.
+                # Running here ensures the security tests cannot silently skip PG.
+                command = [go, "test", "-race", "-count=1"]
+                if options.go_run:
+                    command += ["-run", options.go_run, "-v"]
+                result = subprocess.run(command + ["./..."], cwd=repo / "services/remote", env=env)
+                if result.returncode:
+                    return result.returncode
+                if options.go_run:
+                    return 0
             result = subprocess.run([str(repo / "node_modules/.bin/tsx"), "--test", str(repo / "tools/integration/remote-dsh.test.ts")], cwd=repo, env=env)
             if result.returncode:
                 for line in log.read_text().splitlines():

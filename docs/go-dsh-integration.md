@@ -8,6 +8,23 @@ Run from the repository root:
 npm run test:remote-dsh
 ```
 
+To exercise an already installed DSH CLI explicitly, provide its absolute path;
+the test checks its version before startup and uses an isolated DSH home:
+
+```sh
+REMOTE_TEST_DSH_BIN="$(command -v dsh)" python3 tools/integration/run_remote_dsh.py --cross-node
+```
+
+Without this setting the test uses the repository's pinned npm package. Both
+paths require DSH `0.2.1-rc.2`; neither starts TokenWorks.
+When rerunning only the DSH composition after a Host change, add `--dsh-only`
+to skip the separate Go test suite. It still starts disposable PostgreSQL,
+applies migrations and builds the real Go service and Host plugin. Run the
+full command separately when Go changes or full regression is needed.
+On 2026-10-29, the explicitly selected locally installed CLI passed the
+cross-node composition, including active-session archive refusal and the
+separate installation signer and journal protector fixture lookups.
+
 The Python runner creates a temporary private directory, initializes an unprivileged PostgreSQL cluster with UTF8 encoding and no TCP listener, applies the migrations, builds the Go executable and host plugin, runs all Go tests with race detection/cache disabled against private databases, then runs the TypeScript integration. It always stops that cluster and removes its directory. It does not accept a database URL or use the existing PostgreSQL service. Go and PostgreSQL binaries must already be installed; use `REMOTE_TEST_GO` and `REMOTE_TEST_PG_BIN` when their paths differ from the local defaults. Run under an unprivileged account with Node/npm, Python 3 and the repository dependencies installed. The ordinary `npm run verify` remains independent of PostgreSQL.
 
 The test seeds only three identities and organization membership through SQL. Before device enrollment it checks that authenticated `/v1/me` returns the correct internal user UUID and organization role, ignores caller-supplied identity selectors, denies an unprovisioned/suspended user and reflects removed membership. The fixture restores its membership/status before proceeding. All subsequent device registration, enrollment and credential/ticket operations use the HTTP API with locally generated ES256 access tokens, DPoP nonce retries and registered-key proofs. Host and phone confirmations are separate calls. A third user with membership but no runtime grant cannot obtain a ticket or list that runtime.

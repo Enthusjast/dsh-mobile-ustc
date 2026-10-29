@@ -397,6 +397,14 @@ export class DshClient {
   async archive(id: SessionId, archived: boolean, stopActivity: boolean) {
     if (!archived && stopActivity) throw new ProbeError('protocol.invalid')
     try {
+      // The running DSH can load its own copy of the workspace package.
+      // In that case its active-session error has a different class identity.
+      // An activity check before calling archive gives a definite rejection
+      // without classifying arbitrary post-write errors by their shape.
+      if (archived && !stopActivity && !this.isArchived(id)) {
+        const activity = await this.ctx.waterfall('workspace/session-activity', { sessionId: id }, () => Promise.resolve([]))
+        if (activity.length > 0) throw new ProbeError('session.active')
+      }
       if (archived) await this.ctx.workspaceRegistry.archiveSession(id, { stopActivity })
       else await this.ctx.workspaceRegistry.unarchiveSession(id)
     } catch (error) {
