@@ -335,8 +335,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   query(`insert into org_memberships(org_id,user_id,role) values ('${orgId}','${phoneUserId}','member')`)
   assert.deepEqual((await phone('GET', releaseQuery)).release, publication.release)
   t.diagnostic('Configured APK metadata selected the supported newer fixture under the current registered phone and organization before any runtime grant; current/newer clients, foreign organization, host client and caller device selectors were fenced. No APK bytes or installation were involved.')
-  // This local issuer owns and verifies the fixture identity. Production supplies
-  // the existing verified resource-session adapter; no OAuth login lives here.
+  // The local issuer supplies a test token. The exported Host adapter verifies
+  // its signature and binding before enrollment or credential acquisition.
   const hostAccessIssued = now()
   const hostAccess: HostResourceAccess = {
     issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host', tokenType: 'DPoP',
@@ -348,11 +348,16 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   const hostIdentity = { issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host' }
   const resourceLifetime = new AbortController()
+  const resourceAccount = new hostPackage.HostResourceJwtProvider({ origin, identity: hostIdentity,
+    publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string }, requiredScopes: ['remote.access'],
+    jwksUrl: `${issuer}/jwks`, allowLoopbackHttp: true,
+    source: { signal: resourceLifetime.signal, async acquire() { return { token: hostAccess.token, tokenType: 'DPoP' } } } })
+  t.after(() => resourceAccount.close())
   const hostSigner = generatedIdentity?.signer ?? { sign(input: Uint8Array) { return sign('sha256', Buffer.from(input), { key: installationKey.privateKey, dsaEncoding: 'ieee-p1363' }) } }
   const enrollmentOptions: import('../../host/remote-control/src/host-enrollment.js').HostEnrollmentOptions = { origin, identity: hostIdentity,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
     signer: hostSigner,
-    requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
+    requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: resourceAccount,
   }
   let enrollmentClient = new hostPackage.HostEnrollmentClient(enrollmentOptions)
   let recoveryStore: InstanceType<typeof hostPackage.HostEnrollmentRecoveryStore> | undefined
@@ -482,7 +487,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const credentialOptions: HostRestCredentialOptions = { origin, identity: hostIdentity, installationId: persistedInstallationId,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
     signer: hostSigner,
-    requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: { signal: resourceLifetime.signal, async acquire() { return hostAccess } },
+    requiredScopes: ['remote.access'], allowLoopbackHttp: true, account: resourceAccount,
   }
   const credentialProvider = new HostRestCredentialProvider(credentialOptions)
   t.after(() => credentialProvider.close())
@@ -495,7 +500,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const plugin = pathToFileURL(resolve('host/remote-control/lib/index.js')).href
   const wrapper = join(root, 'plugin.mjs')
   const accessFile = join(root, 'host-resource-session.json')
-  await writeFile(accessFile, JSON.stringify(hostAccess), { mode: 0o600 })
+  await writeFile(accessFile, JSON.stringify({ token: hostAccess.token, tokenType: hostAccess.tokenType }), { mode: 0o600 })
   const journalProtectorFile = join(root, 'journal-protector-fixture.key')
   const journalProtectorKey = randomBytes(32)
   await writeFile(journalProtectorFile, journalProtectorKey, { mode: 0o600 })
@@ -520,17 +525,18 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await writeFile(wrapper, [
     "import { createCipheriv, createDecipheriv, createPrivateKey, randomBytes, sign } from 'node:crypto'",
     "import { writeFile, readFile } from 'node:fs/promises'",
-    `import { createRemoteControlPlugin, HostRestCredentialProvider, LinuxSecretServiceJournalProtector, LinuxInstallationKeyStore } from ${JSON.stringify(plugin)}`,
+    `import { createRemoteControlPlugin, HostRestCredentialProvider, HostResourceJwtProvider, LinuxSecretServiceJournalProtector, LinuxInstallationKeyStore } from ${JSON.stringify(plugin)}`,
     'const owner=new AbortController()',
     `const fallbackKey=process.platform==='linux'?null:createPrivateKey({format:'der',type:'pkcs8',key:await readFile(${JSON.stringify(installationKeyFile)})})`,
     `const localInstallationStore=process.platform==='linux'?new LinuxInstallationKeyStore({path:${JSON.stringify(installationReference)},executable:${JSON.stringify(installationTool)},service:'fixture-installation',ownerSignal:owner.signal}):null`,
     "const localInstallation=localInstallationStore?await localInstallationStore.open(AbortSignal.timeout(10000)):null;if(localInstallationStore&&!localInstallation)throw new Error('missing generated installation')",
     "const signer=localInstallation?.signer??{sign(input){return sign('sha256',Buffer.from(input),{key:fallbackKey,dsaEncoding:'ieee-p1363'})}}",
     `const journalMaster=process.platform==='linux'?null:await readFile(${JSON.stringify(journalProtectorFile)});const journalProtector=process.platform==='linux'?new LinuxSecretServiceJournalProtector({executable:${JSON.stringify(secretToolFixture)},service:'fixture-service',account:'fixture-account'}):{id:'fixture-platform-v1',async wrap(value,aad){const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',journalMaster,nonce);cipher.setAAD(aad);return Buffer.concat([nonce,cipher.update(value),cipher.final(),cipher.getAuthTag()])},async unwrap(value,aad){const bytes=Buffer.from(value),decipher=createDecipheriv('aes-256-gcm',journalMaster,bytes.subarray(0,12));decipher.setAAD(aad);decipher.setAuthTag(bytes.subarray(44));return Buffer.concat([decipher.update(bytes.subarray(12,44)),decipher.final()])}}`,
-    `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(persistedInstallationId)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer,account:{signal:owner.signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
+    `const resourceAccount=new HostResourceJwtProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],jwksUrl:${JSON.stringify(`${issuer}/jwks`)},allowLoopbackHttp:true,source:{signal:owner.signal,async acquire(){return JSON.parse(await readFile(${JSON.stringify(accessFile)},'utf8'))}}})`,
+    `const credentialProvider = new HostRestCredentialProvider({origin:${JSON.stringify(origin)},identity:${JSON.stringify(hostIdentity)},installationId:${JSON.stringify(persistedInstallationId)},publicJwk:${JSON.stringify(installationKey.jwk)},requiredScopes:['remote.access'],allowLoopbackHttp:true,signer,account:resourceAccount})`,
     `const plugin = createRemoteControlPlugin(credentialProvider, {hostId:${JSON.stringify(persistedHostId)},installationId:${JSON.stringify(persistedInstallationId)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)},journalProtector)`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>()=>{owner.abort();credentialProvider.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>()=>{owner.abort();credentialProvider.close();resourceAccount.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -610,7 +616,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     assert.ok(calls.some(args => args[4] === 'fixture-account'), 'normal plugin did not use the journal protector')
     t.diagnostic('The normal Linux plugin reopens the generated installation key and journal protector against test Secret Service commands; no production keyring is accessed.')
   }
-  t.diagnostic('The normal npm DSH plugin acquires its credential through the exported REST provider, current resource JWT/DPoP, one-use installation challenge and registered key. A separate parent acquisition checks the live cache; no static connection secret is embedded in the plugin fixture.')
+  t.diagnostic('The enrollment client and normal npm DSH plugin verify the fixture resource JWT against its configured JWKS and installation key, then acquire a connection credential through the exported REST provider and one-use installation challenge. A separate parent acquisition checks the live cache; no static connection secret is embedded in the plugin fixture.')
   const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {
     v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId === undefined ? {} : { session_id: sessionId }),
   })

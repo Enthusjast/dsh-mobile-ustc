@@ -136,3 +136,8 @@ account/key/origin, shares concurrent minting, caches valid credentials and neve
 automatically replays an uncertain POST. Its account lifetime also retires the
 Host socket. School login verification/refresh and the production OS key store
 remain responsibilities of the explicit integration adapter.
+
+The [Host resource JWT provider](../../docs/host-resource-jwt.md) can verify an
+existing account's DPoP-bound access token against a configured issuer key set
+before enrollment and credential acquisition. The login/refresh source and
+the issuer-to-key-set trust configuration still come from the distribution.

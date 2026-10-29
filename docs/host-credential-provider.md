@@ -21,6 +21,9 @@ token、DPoP 类型、同一身份/用途/密钥、签名有效期与 scopes。D
 nonce、token 用途与刷新校验由该登录适配器负责；这些描述字段自身不是已验证身份的证明。
 Go 服务还会独立验证 JWT / DPoP、当前账号、安装归属、登记状态、密钥版本及撤销。
 
+也可使用 [HostResourceJwtProvider](host-resource-jwt.md) 对既有登录来源返回的 DPoP JWT
+进行本地签名和用途校验。它需要显式可信 issuer / JWKS 配置，登录和刷新仍由发行端提供。
+
 `HostResourceAccess.expiresAt` 是经过验证的有效 access-token 到期时间，单位为 Unix 毫秒，
 不能把 OAuth 的 expires_in 秒数或未经验证的 JWT payload 直接当作该值。
 
