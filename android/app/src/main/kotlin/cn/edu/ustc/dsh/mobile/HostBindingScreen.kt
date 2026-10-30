@@ -34,6 +34,7 @@ fun HostBindingScreen(state: HostBindingState, subject: String, onPreview: (Stri
         cn.edu.ustc.dsh.ui.DshTopBar(
             title = stringResource(R.string.flow_binding_title),
             subtitle = stringResource(R.string.flow_binding_account, subject),
+            contentMaxWidth = 720.dp,
             navigationIcon = { IconButton(onBack, Modifier.heightIn(min = 48.dp)) {
                 Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_binding_back))
             } },

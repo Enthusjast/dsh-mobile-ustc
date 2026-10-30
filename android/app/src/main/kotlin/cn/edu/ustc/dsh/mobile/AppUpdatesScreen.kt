@@ -23,6 +23,7 @@ internal fun AppUpdatesScreen(state: AppUpdateUiState, check: () -> Unit, downlo
         cn.edu.ustc.dsh.ui.DshTopBar(
             title = stringResource(R.string.settings_updates),
             subtitle = if (state.installedVersion == null) stringResource(R.string.flow_update_version_unknown, BuildConfig.VERSION_NAME) else stringResource(R.string.flow_update_current_version, BuildConfig.VERSION_NAME, state.installedVersion.toString()),
+            contentMaxWidth = 720.dp,
             navigationIcon = { IconButton(back, Modifier.heightIn(min = 48.dp)) {
                 Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_update_back))
             } },

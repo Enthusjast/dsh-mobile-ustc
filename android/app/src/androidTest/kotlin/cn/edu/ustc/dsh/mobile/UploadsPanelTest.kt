@@ -1,11 +1,19 @@
 package cn.edu.ustc.dsh.mobile
 
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.test.core.app.ActivityScenario
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -13,6 +21,9 @@ import cn.edu.ustc.dsh.command.*
 import cn.edu.ustc.dsh.network.*
 import cn.edu.ustc.dsh.protocol.*
 import cn.edu.ustc.dsh.ui.DshTheme
+import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONObject
+import java.io.File
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -24,14 +35,14 @@ class UploadsPanelTest {
     @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
     private val id = "11111111-1111-4111-8111-111111111111"
     private val fileId = "22222222-2222-4222-8222-222222222222"
-    private fun row(phase: UploadPhase): UploadView {
+    private fun row(phase: UploadPhase, requestId: String = id, remoteId: String = fileId, name: String = "研究资料.txt"): UploadView {
         val now = System.currentTimeMillis()
         fun time(offset: Long) = Instant.ofEpochMilli(now + offset).toString().json()
-        val manifest = FileManifest("研究资料.txt", 3, "a".repeat(64))
-        val status = RemoteFileStatus.parse(jsonObject("file_id" to fileId.json(), "runtime_id" to id.json(), "session_id" to id.json(), "direction" to "to_host".json(), "name" to manifest.name.json(),
+        val manifest = FileManifest(name, 3, "a".repeat(64))
+        val status = RemoteFileStatus.parse(jsonObject("file_id" to remoteId.json(), "runtime_id" to id.json(), "session_id" to id.json(), "direction" to "to_host".json(), "name" to manifest.name.json(),
             "size_bytes" to 3L.json(), "sha256" to manifest.sha256.json(), "state" to "clean".json(), "created_at" to time(-1000), "upload_expires_at" to time(60_000), "expires_at" to time(300_000),
             "delivery" to if (phase == UploadPhase.READY) jsonObject("state" to "ready".json(), "expires_at" to time(240_000)) else jsonObject("state" to "waiting".json())))
-        return UploadView(StoredFileUpload(FileUploadIntent(id, id, id, null, manifest), fileId, null, now, now), phase, status)
+        return UploadView(StoredFileUpload(FileUploadIntent(requestId, id, id, null, manifest), remoteId, null, now, now), phase, status)
     }
     private fun base(): HomeState {
         val access = RuntimeDirectoryEntry.parse(jsonObject("id" to id.json(), "host_id" to id.json(), "organization_id" to id.json(), "protocol_version" to 1L.json(), "access" to jsonObject("role" to "operator".json(),
@@ -124,19 +135,70 @@ class UploadsPanelTest {
     }
 
     @Test fun attachmentStripKeepsFullNamesReachableAndRemovalDistinctFromDetails() {
+        val secondId = "33333333-3333-4333-8333-333333333333"
+        val files = mutableStateOf(SessionUploadState(listOf(row(UploadPhase.READY),
+            row(UploadPhase.READY, secondId, "44444444-4444-4444-8444-444444444444", "待分析日志.txt")), setOf(id, secondId)))
         var toggled: String? = null
         rule.setContent { DshTheme {
-            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, onToggleFile = { toggled = it })
+            SessionsScreen(base().copy(uploads = files.value), {}, {}, {}, {}, onToggleFile = { selected ->
+                toggled = selected
+                files.value = files.value.copy(selected = files.value.selected - selected)
+            }, onRemoveFile = { fail("Removing a message selection must not delete an upload record") })
         } }
-        rule.onAllNodesWithText("附件详情").onFirst().performClick()
-        rule.onAllNodesWithText("附件详情").assertCountEquals(2)
-        rule.onAllNodesWithText("研究资料.txt").assertCountEquals(2)
+        rule.onNodeWithContentDescription("查看附件详情：研究资料.txt").performClick()
+        rule.onNode(hasText("研究资料.txt") and hasAnyAncestor(isDialog())).assertIsDisplayed()
         rule.onNodeWithText("关闭").performClick()
-        rule.onAllNodesWithText("研究资料.txt").assertCountEquals(1)
-        rule.onAllNodesWithText("移出").onFirst().performClick()
+        rule.onNodeWithContentDescription("移出本次消息：研究资料.txt").performClick()
         rule.runOnIdle { assertEquals(id, toggled) }
+        rule.onNodeWithContentDescription("移出本次消息：研究资料.txt").assertDoesNotExist()
+        rule.onNodeWithContentDescription("移出本次消息：待分析日志.txt").assertExists()
         rule.onNodeWithText("查看附件").performClick()
         rule.onNodeWithText("会话附件").assertIsDisplayed()
+        rule.onNodeWithContentDescription("核对上传状态：研究资料.txt").performScrollTo().assertIsEnabled()
+        rule.onNodeWithContentDescription("查看文件详情：研究资料.txt").performScrollTo().performClick()
+        assertEquals("已展开", rule.onNodeWithContentDescription("收起文件详情：研究资料.txt").fetchSemanticsNode().config[SemanticsProperties.StateDescription])
+        rule.onNodeWithText("原请求：$id").performScrollTo().assertIsDisplayed()
         rule.onNodeWithContentDescription("返回消息").assertIsDisplayed()
+    }
+    @Test fun aLongAttachmentNameCanBeReadAndClosedAtLargeTextWithoutChangingSelection() {
+        val name = "研究资料".repeat(10) + ".txt"
+        val fontScale = 2f
+        val files = SessionUploadState(listOf(row(UploadPhase.READY, name = name)), setOf(id))
+        ActivityScenario.launch(LargeTextUiFixtureActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                assertEquals(fontScale, activity.resources.configuration.fontScale, 0f)
+                activity.setContent { DshTheme(darkTheme = true) { Box(Modifier.width(320.dp).height(480.dp)) {
+                    SessionsScreen(base().copy(uploads = files), {}, {}, {}, {},
+                        onToggleFile = { fail("Reading attachment details must not change message selection") })
+                } } }
+            }
+            val back = rule.onNodeWithContentDescription("返回会话列表").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            val composer = rule.onNodeWithTag("message-composer").fetchSemanticsNode().boundsInRoot
+            assertTrue("The attachment composer must not cover the title-bar back action", back.bottom <= composer.top)
+            rule.onNodeWithText("消息内容").assertIsDisplayed()
+            rule.onNodeWithContentDescription("发送").assertIsDisplayed().assertIsEnabled()
+            fun revealFileActions() {
+                val options = rule.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.VerticalScrollAxisRange) and
+                    hasAnyDescendant(hasContentDescription("查看附件详情：$name")))
+                val maximum = options.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].maxValue()
+                options.performSemanticsAction(SemanticsActions.ScrollBy) { it(0f, maximum) }
+            }
+            revealFileActions()
+            rule.onNodeWithContentDescription("查看附件详情：$name").assertIsDisplayed().performClick()
+            val appliedFontScale = rule.onNode(hasText(name) and hasAnyAncestor(isDialog())).performScrollTo()
+                .assertIsDisplayed().fetchSemanticsNode().layoutInfo.density.fontScale
+            assertEquals(fontScale, appliedFontScale, 0f)
+            rule.onNodeWithText("关闭").assertIsDisplayed()
+            captureUiFixture(rule, "details-long-attachment-dialog", dialog = true, darkTheme = true)
+            rule.onNodeWithText("关闭").performClick()
+            revealFileActions()
+            rule.onNodeWithContentDescription("移出本次消息：$name").assertIsDisplayed()
+            captureUiFixture(rule, "details-long-attachment-strip", dialog = true, darkTheme = true)
+            for (scene in listOf("details-long-attachment-dialog", "details-long-attachment-strip")) {
+                val metadata = File(InstrumentationRegistry.getInstrumentation().targetContext.filesDir,
+                    "ui-navigation-fixtures/$scene.json")
+                metadata.writeText(JSONObject(metadata.readText()).put("fontScale", appliedFontScale).toString(2))
+            }
+        }
     }
 }

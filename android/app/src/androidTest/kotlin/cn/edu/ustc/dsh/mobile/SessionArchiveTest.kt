@@ -61,7 +61,7 @@ class SessionArchiveTest {
         var result: Triple<String, Boolean, Boolean>? = null
         rule.setContent { DshTheme { SessionsScreen(state, {}, {}, {}, {}, onArchive = { e, a, s -> result = Triple(e, a, s) }) } }
         rule.onNodeWithText("消息内容").assertDoesNotExist()
-        rule.onNodeWithText("会话详情").performClick()
+        rule.onNodeWithContentDescription("会话详情").performClick()
         rule.onNodeWithText("已归档，仍可读取历史").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("恢复会话").performScrollTo().performClick()
         rule.onNodeWithText("同时请求停止当前活动").assertDoesNotExist()

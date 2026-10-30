@@ -1,10 +1,16 @@
 package cn.edu.ustc.dsh.mobile
 
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -79,7 +85,7 @@ class SessionComposerTest {
         val record = CommandEvolution.begin(CommandEvolution.created(command, 1), 2)
         rule.setContent { DshTheme { SessionsScreen(state().copy(outbox = CommandOutboxState(listOf(record), true, error = "command.delivery_unconfirmed")), {}, {}, {}, {}) } }
         rule.onNodeWithText("尚未核对发送结果，请查询原请求状态；不会自动重复发送。").performScrollTo().assertIsDisplayed()
-        rule.onNodeWithText("会话详情").performClick()
+        rule.onNodeWithContentDescription("会话详情").performClick()
         rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("结果待核对"))
         rule.onNodeWithText("结果待核对").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("Agent 已入队").assertDoesNotExist()
@@ -101,5 +107,44 @@ class SessionComposerTest {
         rule.onNodeWithText("等待轮到此消息时处理").assertIsDisplayed()
         rule.onNodeWithText("向电脑当前任务补充内容").assertIsDisplayed()
         rule.runOnIdle { assertEquals(null, submitted) }
+    }
+    @Test fun anOversizedEditPreservesTheOriginalAndRequiresAValidEditBeforeSending() {
+        var submitted: Triple<String, String, Boolean>? = null
+        rule.setContent { DshTheme { SessionsScreen(state(), {}, {}, {}, {}, { mode, text, online -> submitted = Triple(mode, text, online) }) } }
+        rule.onNodeWithText("消息内容").performTextInput("保留🙂")
+        rule.onNodeWithText("消息内容").performTextReplacement("z".repeat(65_537))
+        assertEquals("保留🙂", rule.onNodeWithText("消息内容").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        rule.onNodeWithText("内容过长，本次输入未接收；原输入未改变。").assertIsDisplayed()
+        rule.onNodeWithContentDescription("发送").assertIsNotEnabled()
+        rule.runOnIdle { assertNull(submitted) }
+        rule.onNodeWithText("消息内容").performTextReplacement("修正后的请求")
+        rule.onNodeWithText("内容过长，本次输入未接收；原输入未改变。").assertDoesNotExist()
+        rule.onNodeWithContentDescription("发送").assertIsEnabled().performClick()
+        rule.runOnIdle { assertEquals(Triple("queue", "修正后的请求", true), submitted) }
+    }
+    @Test fun theKeyboardKeepsSendingVisibleAndTheFirstBackOnlyDismissesIt() {
+        var keyboardVisible = false
+        var backs = 0
+        rule.runOnUiThread {
+            rule.activity.enableEdgeToEdge()
+        }
+        rule.setContent {
+            val visible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+            SideEffect { keyboardVisible = visible }
+            DshTheme { SessionsScreen(state(), { backs++ }, {}, {}, {}) }
+        }
+        rule.waitUntil(10_000) { rule.activity.hasWindowFocus() }
+        rule.onNodeWithText("消息内容").performClick().performTextInput("键盘中的消息")
+        rule.waitUntil(10_000) { keyboardVisible }
+        rule.onNodeWithText("键盘中的消息").assertIsDisplayed()
+        rule.onNodeWithContentDescription("发送").assertIsDisplayed().assertIsEnabled()
+        // Use the native-window capture path to include the system IME, not the view's blank inset area.
+        captureUiFixture(rule, "details-input-keyboard", dialog = true, darkTheme = false)
+        rule.onNodeWithContentDescription("返回会话列表").performClick()
+        rule.waitUntil(10_000) { !keyboardVisible }
+        rule.runOnIdle { assertEquals(0, backs) }
+        rule.onNodeWithText("键盘中的消息").assertIsDisplayed()
+        rule.onNodeWithContentDescription("返回会话列表").performClick()
+        rule.runOnIdle { assertEquals(1, backs) }
     }
 }

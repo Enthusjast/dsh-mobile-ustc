@@ -61,6 +61,12 @@ class ChatReadingTest {
         rule.runOnIdle { current.value = state(transcript(0, 41)) }
         rule.onNodeWithText("message 20").assertIsDisplayed()
         rule.onNodeWithText("有新消息 · 回到最新").assertIsDisplayed().performClick()
+        // The control reserves layout space rather than covering transcript text.
+        rule.onNodeWithTag("chat-list").performScrollToNode(hasText("message 20"))
+        val viewport = rule.onNodeWithTag("chat-list").fetchSemanticsNode().boundsInRoot
+        val latest = rule.onNodeWithText("回到最新").fetchSemanticsNode().boundsInRoot
+        org.junit.Assert.assertTrue(viewport.bottom <= latest.top + 1f)
+        rule.onNodeWithText("回到最新").performClick()
         rule.onNodeWithText("message 41").assertIsDisplayed()
         repeat(5) {
             rule.onNodeWithTag("chat-list").performScrollToNode(hasText("message 20"))

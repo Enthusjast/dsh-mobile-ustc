@@ -71,4 +71,8 @@
     <string name="file_ux_content_rejected">文件未通过安全检查，不能保存。</string>
     <string name="file_ux_integrity_mismatch">文件与原请求不一致，已停止处理。</string>
     <string name="file_ux_access_revoked">文件访问权限已变化，请刷新会话授权。</string>
+    <string name="file_ux_query_upload_action">核对上传状态：%1$s</string>
+    <string name="file_ux_save_action">保存到文档：%1$s</string>
+    <string name="file_ux_expand_action">查看文件详情：%1$s</string>
+    <string name="file_ux_collapse_action">收起文件详情：%1$s</string>
 </resources>

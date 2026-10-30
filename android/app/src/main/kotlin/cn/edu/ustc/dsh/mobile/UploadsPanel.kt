@@ -57,6 +57,9 @@ fun UploadsPanel(state: SessionUploadState, online: Boolean, onPick: (String?) -
                 val id = row.stored.intent.requestId
                 var details by remember { mutableStateOf(false) }
                 var deleting by remember { mutableStateOf(false) }
+                val queryName = stringResource(R.string.file_ux_query_upload_action, row.stored.intent.manifest.name)
+                val detailName = stringResource(if (details) R.string.file_ux_collapse_action else R.string.file_ux_expand_action, row.stored.intent.manifest.name)
+                val expansion = stringResource(if (details) R.string.detail_expanded else R.string.detail_collapsed)
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(row.stored.intent.manifest.name, style = MaterialTheme.typography.titleSmall)
                     val size = fileSizeText(row.stored.intent.manifest.sizeBytes)
@@ -95,8 +98,8 @@ fun UploadsPanel(state: SessionUploadState, online: Boolean, onPick: (String?) -
                             Text(stringResource(R.string.file_ux_resume))
                         }
                     }
-                    TextButton({ onQuery(id) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.file_ux_query)) }
-                    TextButton({ details = !details }, Modifier.heightIn(min = 48.dp)) {
+                    TextButton({ onQuery(id) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = queryName }) { Text(stringResource(R.string.file_ux_query)) }
+                    TextButton({ details = !details }, Modifier.heightIn(min = 48.dp).semantics { contentDescription = detailName; stateDescription = expansion }) {
                         Text(stringResource(if (details) R.string.file_ux_hide_details else R.string.file_ux_details))
                     }
                     if (details) {

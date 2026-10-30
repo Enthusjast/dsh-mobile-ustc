@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -17,6 +18,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
@@ -170,26 +172,14 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                         Icon(painterResource(R.drawable.ic_back), contentDescription = stringResource(if (showDetails) R.string.chat_messages else if (state.knownTarget != null) R.string.chat_back_reminders else R.string.chat_back))
                     }
                 },
-                actions = { if (!showDetails) TextButton({ openDetails(ChatDetailSection.DEFAULT, null) }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_details)) } },
+                actions = { if (!showDetails) IconButton({ openDetails(ChatDetailSection.DEFAULT, null) }, Modifier.size(48.dp)) {
+                    Icon(painterResource(R.drawable.ic_info), contentDescription = stringResource(R.string.chat_details))
+                } },
             )
         },
-        bottomBar = {
-            if (!showDetails) Column {
-                val approvalsPending = runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true &&
-                    state.approvals?.view?.items?.any { it.canReview || it.handle != null || it.remainingMillis > 0 && it.status.state in setOf(ApprovalRemoteState.PENDING, ApprovalRemoteState.DECISION_RECEIVED) } == true
-                if (!archived && read.phase == SessionReadPhase.READY && (read.questions.items.isNotEmpty() || approvalsPending)) {
-                    TextButton({ followLatest = false; scope.launch { listState.animateScrollToItem(0) } }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                        Text(stringResource(R.string.chat_pending))
-                    }
-                }
-                if (canCompose) SessionComposer(state, onSubmit, text, mode, { text = it }, { mode = it },
-                    onAttach = { onPickFile(null, text, mode) }, onRemove = onToggleFile,
-                    onViewAttachments = { openDetails(ChatDetailSection.UPLOADS, null) })
-            }
-        },
     ) { insets ->
-        Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
-            LazyColumn(Modifier.widthIn(max = 800.dp).fillMaxSize().testTag("chat-list"), state = listState, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets).imePadding(), horizontalAlignment = Alignment.CenterHorizontally) {
+            LazyColumn(Modifier.widthIn(max = 800.dp).fillMaxWidth().weight(1f).testTag("chat-list"), state = listState, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (read.phase != SessionReadPhase.READY || read.cacheError != null) item("connection") {
                         Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
                             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -397,16 +387,32 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                     }
                     if (!showDetails) item("conversation-end") { Spacer(Modifier.height(1.dp)) }
             }
-            if (!showDetails && initialized && (!followLatest || newMessages)) {
-                FilledTonalButton(
-                    onClick = {
-                        followLatest = true
-                        readingPosition?.following = true
-                        newMessages = false
-                        scope.launch { listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) }
-                    },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).heightIn(min = 48.dp),
-                ) { Text(stringResource(if (newMessages) R.string.chat_new_messages else R.string.chat_latest)) }
+            if (!showDetails) Column {
+                if (initialized && (!followLatest || newMessages)) {
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                        Box(Modifier.widthIn(max = 800.dp).fillMaxWidth().padding(horizontal = 16.dp)) {
+                            FilledTonalButton(
+                                onClick = {
+                                    followLatest = true
+                                    readingPosition?.following = true
+                                    newMessages = false
+                                    scope.launch { chatListState.animateScrollToItem((chatListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) }
+                                },
+                                modifier = Modifier.align(Alignment.CenterEnd).heightIn(min = 48.dp),
+                            ) { Text(stringResource(if (newMessages) R.string.chat_new_messages else R.string.chat_latest)) }
+                        }
+                    }
+                }
+                val approvalsPending = runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true &&
+                    state.approvals?.view?.items?.any { it.canReview || it.handle != null || it.remainingMillis > 0 && it.status.state in setOf(ApprovalRemoteState.PENDING, ApprovalRemoteState.DECISION_RECEIVED) } == true
+                if (!archived && read.phase == SessionReadPhase.READY && (read.questions.items.isNotEmpty() || approvalsPending)) {
+                    TextButton({ followLatest = false; scope.launch { listState.animateScrollToItem(0) } }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text(stringResource(R.string.chat_pending))
+                    }
+                }
+                if (canCompose) SessionComposer(state, onSubmit, text, mode, { text = it }, { mode = it },
+                    onAttach = { onPickFile(null, text, mode) }, onRemove = onToggleFile,
+                    onViewAttachments = { openDetails(ChatDetailSection.UPLOADS, null) })
             }
         }
     }
@@ -422,23 +428,33 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
         dismissButton = { TextButton({ cancelConfirmEpoch = null }) { Text("继续运行") } })
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ChatOperationFooter(summary: PendingCommand?, error: String?, canCancel: Boolean, pendingCancel: PendingCommand?,
     onViewDelivery: () -> Unit, onViewCancel: () -> Unit, onCancel: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val sameCancel = summary != null && summary.intent.requestId == pendingCancel?.intent?.requestId
             if (summary != null) {
-                Text(stringResource(R.string.chat_footer_title), style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(stringResource(R.string.chat_footer_title), style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.align(Alignment.CenterVertically).semantics { heading() })
+                    TextButton(if (sameCancel) onViewCancel else onViewDelivery, Modifier.heightIn(min = 48.dp)) {
+                        Text(stringResource(if (sameCancel) R.string.chat_view_cancel_original else R.string.chat_view_delivery))
+                    }
+                }
                 Text(stringResource(commandLabel(summary)), style = MaterialTheme.typography.bodyMedium)
-                SelectionContainer { Text(stringResource(R.string.chat_original_request, summary.intent.requestId), style = MaterialTheme.typography.bodySmall) }
+                if (needsDeliveryReconciliation(summary) && summary.remote != null && summary.remote != RemoteCommandState.OUTCOME_UNKNOWN) {
+                    Text(stringResource(R.string.chat_original_reconcile), style = MaterialTheme.typography.bodySmall)
+                }
                 if (summary.intent.kind == CommandKind.MESSAGE && summary.remote == RemoteCommandState.SETTLED) {
                     Text(stringResource(R.string.chat_delivery_settled_note), style = MaterialTheme.typography.bodySmall)
                 }
-                TextButton(onViewDelivery, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_view_delivery)) }
+                if (sameCancel) Text(stringResource(R.string.chat_cancel_pending), style = MaterialTheme.typography.bodySmall)
             }
             if (error != null) Text(commandErrorText(error), color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-            if (pendingCancel != null) {
+            if (pendingCancel != null && !sameCancel) {
                 Text(stringResource(R.string.chat_cancel_pending), style = MaterialTheme.typography.bodyMedium)
                 TextButton(onViewCancel, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_view_cancel_original)) }
             }
@@ -478,15 +494,20 @@ private fun ConversationBubble(item: ConversationItem) {
 @Composable
 private fun ToolCallRecord(itemId: String, index: Int, block: DisplayBlock, live: Boolean) {
     var expanded by remember(itemId, index) { mutableStateOf(false) }
+    val name = block.name.ifEmpty { stringResource(R.string.chat_tool_info) }
+    val action = stringResource(if (expanded) R.string.chat_tool_collapse_action else R.string.chat_tool_expand_action, name)
+    val expansion = stringResource(if (expanded) R.string.detail_expanded else R.string.detail_collapsed)
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(stringResource(if (block.name.isEmpty()) R.string.chat_tool_info else R.string.chat_tool_record), style = MaterialTheme.typography.labelLarge)
-            if (block.name.isNotEmpty()) Text(block.name, style = MaterialTheme.typography.titleSmall)
+            TextButton({ expanded = !expanded }, Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics {
+                contentDescription = action
+                stateDescription = expansion
+            }) {
+                Text(name, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                Icon(painterResource(R.drawable.ic_chevron), null, Modifier.rotate(if (expanded) 90f else 0f))
+            }
             if (live && !block.complete) Text(stringResource(R.string.chat_tool_receiving), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-            TextButton({ expanded = !expanded }, Modifier.heightIn(min = 48.dp)) {
-                Text(stringResource(if (expanded) R.string.chat_hide_call else R.string.chat_show_call))
-            }
             if (expanded) {
                 SelectionContainer {
                     Text(stringResource(if (block.callId.isEmpty()) R.string.chat_no_call_id else R.string.chat_call_id, block.callId),
@@ -522,56 +543,62 @@ private fun SessionComposer(
     var menu by remember { mutableStateOf(false) }
     var explainAttachments by remember { mutableStateOf(false) }
     var attachmentDetail by remember { mutableStateOf<Pair<String, Long?>?>(null) }
+    var rejectedInput by remember(state.selectedRuntimeId, state.selectedSessionId, state.composerRevision) { mutableStateOf(false) }
     val attachmentAvailable = online && state.outbox?.canAttachFiles == true && state.uploads != null
     Surface(tonalElevation = 3.dp, modifier = Modifier.testTag("message-composer")) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(horizontal = 8.dp, vertical = 4.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Box {
-                    TextButton({ menu = true }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(if (mode == "queue") R.string.chat_queue else R.string.chat_steer)) }
-                    DropdownMenu(menu, { menu = false }) {
-                        DropdownMenuItem(text = { Column { Text(stringResource(R.string.chat_queue)); Text(stringResource(R.string.chat_queue_desc), style = MaterialTheme.typography.bodySmall) } }, onClick = { menu = false; onMode("queue") })
-                        DropdownMenuItem(text = { Column { Text(stringResource(R.string.chat_steer)); Text(stringResource(R.string.chat_steer_desc), style = MaterialTheme.typography.bodySmall) } }, onClick = { menu = false; onMode("steer") })
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box {
+                        TextButton({ menu = true }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(if (mode == "queue") R.string.chat_queue else R.string.chat_steer)) }
+                        DropdownMenu(menu, { menu = false }) {
+                            DropdownMenuItem(text = { Column { Text(stringResource(R.string.chat_queue)); Text(stringResource(R.string.chat_queue_desc), style = MaterialTheme.typography.bodySmall) } }, onClick = { menu = false; onMode("queue") })
+                            DropdownMenuItem(text = { Column { Text(stringResource(R.string.chat_steer)); Text(stringResource(R.string.chat_steer_desc), style = MaterialTheme.typography.bodySmall) } }, onClick = { menu = false; onMode("steer") })
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton({ if (attachmentAvailable) onAttach() else explainAttachments = true }, enabled = state.uploads?.busy != true, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(stringResource(if (attachmentAvailable) R.string.chat_attach else R.string.chat_attach_unavailable))
                     }
                 }
-                Spacer(Modifier.weight(1f))
-                TextButton({ if (attachmentAvailable) onAttach() else explainAttachments = true }, enabled = state.uploads?.busy != true, modifier = Modifier.heightIn(min = 48.dp)) {
-                    Text(stringResource(if (attachmentAvailable) R.string.chat_attach else R.string.chat_attach_unavailable))
-                }
-            }
-            if (selected.isNotEmpty()) {
-                Text(stringResource(R.string.chat_attachment_count, attachments.size), style = MaterialTheme.typography.bodySmall)
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    selected.forEach { upload ->
-                        val name = upload.stored.intent.manifest.name
-                        val size = upload.stored.intent.manifest.sizeBytes
-                        Column(Modifier.widthIn(max = 240.dp)) {
-                            Text(name, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(fileSizeText(size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Row {
-                                TextButton({ onRemove(upload.stored.intent.requestId) }, Modifier.heightIn(min = 48.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp)) {
-                                    Text(stringResource(R.string.chat_remove_attachment), modifier = Modifier.semantics {
-                                        contentDescription = upload.stored.intent.manifest.name
-                                    })
-                                }
-                                TextButton({ attachmentDetail = name to size }, Modifier.heightIn(min = 48.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp)) {
-                                    Text(stringResource(R.string.chat_attachment_detail), modifier = Modifier.semantics {
-                                        contentDescription = upload.stored.intent.manifest.name
-                                    })
+                if (selected.isNotEmpty()) {
+                    Text(stringResource(R.string.chat_attachment_count, attachments.size), style = MaterialTheme.typography.bodySmall)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        selected.forEach { upload ->
+                            val name = upload.stored.intent.manifest.name
+                            val size = upload.stored.intent.manifest.sizeBytes
+                            val removeName = stringResource(R.string.chat_remove_selection, name)
+                            val detailName = stringResource(R.string.chat_attachment_detail_action, name)
+                            Column(Modifier.widthIn(max = 240.dp)) {
+                                Text(name, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(fileSizeText(size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Row {
+                                    TextButton({ onRemove(upload.stored.intent.requestId) }, Modifier.heightIn(min = 48.dp).semantics {
+                                        contentDescription = removeName
+                                    }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                        Text(stringResource(R.string.chat_remove_attachment))
+                                    }
+                                    TextButton({ attachmentDetail = name to size }, Modifier.heightIn(min = 48.dp).semantics {
+                                        contentDescription = detailName
+                                    }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                        Text(stringResource(R.string.chat_attachment_detail))
+                                    }
                                 }
                             }
                         }
                     }
+                    TextButton(onViewAttachments, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_view_attachments)) }
                 }
-                TextButton(onViewAttachments, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_view_attachments)) }
             }
             val inputLabel = stringResource(R.string.chat_input)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                OutlinedTextField(text, { if (it.length <= 65_536) onText(it) }, label = { Text(inputLabel) },
-                    minLines = 1, maxLines = 5, isError = text.isNotBlank() && !textValid,
+                OutlinedTextField(text, { value ->
+                    if (value.length > 65_536) rejectedInput = true
+                    else { rejectedInput = false; onText(value) }
+                }, label = { Text(inputLabel) },
+                    minLines = 1, maxLines = 5, isError = rejectedInput || text.isNotBlank() && !textValid,
                     modifier = Modifier.weight(1f))
-                FilledIconButton({ onSubmit(mode, text, online) }, enabled = valid && !state.submitting, modifier = Modifier.size(48.dp)) {
+                FilledIconButton({ onSubmit(mode, text, online) }, enabled = valid && !rejectedInput && !state.submitting, modifier = Modifier.size(48.dp)) {
                     Icon(painterResource(R.drawable.ic_send), contentDescription = stringResource(if (state.submitting) R.string.chat_saving else if (online) R.string.chat_send else R.string.chat_save_pending))
                 }
             }
@@ -581,13 +608,17 @@ private fun SessionComposer(
                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             }
             if (!attachmentsReady) Text(stringResource(R.string.chat_attachment_not_ready), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            if (text.isNotBlank() && !textValid) Text(stringResource(R.string.chat_invalid), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            if (rejectedInput) {
+                val rejection = stringResource(R.string.chat_input_rejected)
+                Text(rejection, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics { error(rejection); liveRegion = LiveRegionMode.Polite })
+            } else if (text.isNotBlank() && !textValid) Text(stringResource(R.string.chat_invalid), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (!online) Text(stringResource(R.string.chat_offline), style = MaterialTheme.typography.bodySmall)
         }
     }
     attachmentDetail?.let { (name, size) ->
         AlertDialog(onDismissRequest = { attachmentDetail = null }, title = { Text(stringResource(R.string.chat_attachment_detail)) },
-            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SelectionContainer { Text(name) }
                 Text(fileSizeText(size), style = MaterialTheme.typography.bodySmall)
             } },

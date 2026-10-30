@@ -2,6 +2,7 @@ package cn.edu.ustc.dsh.mobile
 
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -133,12 +134,37 @@ class SessionsScreenTest {
     }
     @Test fun toolRecordsExpandOnlyTheDisplayedFieldsAndNeverInventSuccess() {
         rule.setContent { DshTheme { SessionsScreen(ready(running = true), {}, {}, {}, {}) } }
-        rule.onNodeWithText("工具调用记录").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("bash").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("调用标识：call-1").assertDoesNotExist()
-        rule.onNodeWithText("查看调用信息").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("查看调用信息：bash").performScrollTo().performClick()
+        assertEquals("已展开", rule.onNodeWithContentDescription("收起调用信息：bash").fetchSemanticsNode().config[SemanticsProperties.StateDescription])
         rule.onNodeWithText("调用标识：call-1").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("当前记录未提供更多详情。").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("任务已完成").assertDoesNotExist()
+        captureUiFixture(rule, "details-tool-expanded", darkTheme = false)
+    }
+    @Test fun aSharedCancelSummaryHasOneRouteWhileDifferentRequestsKeepTheirOwnRoutes() {
+        val cancel = PendingCommand(CommandIntent.cancel(request, id, id, epoch), CommandDelivery.RECONCILE,
+            RemoteCommandState.OUTCOME_UNKNOWN, 1, 1, 100, 100, null, true, false, null)
+        val current = mutableStateOf(ready(running = true).copy(outbox = CommandOutboxState(listOf(cancel), connected = true)))
+        rule.setContent { DshTheme { SessionsScreen(current.value, {}, {}, {}, {}) } }
+        rule.onNodeWithText("查看发送记录").assertDoesNotExist()
+        rule.onNodeWithText("查看原中断请求").performScrollTo().assertIsDisplayed()
+        captureUiFixture(rule, "details-footer-pending-cancel", darkTheme = false)
+        rule.onNodeWithText("查看原中断请求").performScrollTo().performClick()
+        // The interruption status section also names this request; its ledger entry must be first and visible.
+        rule.onAllNodesWithText("原请求：$request").onFirst().assertIsDisplayed()
+        rule.onNodeWithContentDescription("返回消息").performClick()
+        rule.runOnIdle {
+            current.value = current.value.copy(outbox = CommandOutboxState(listOf(cancel,
+                pending(otherRequest, 200, CommandDelivery.CONFIRMED, RemoteCommandState.HOST_ACCEPTED, 1)), connected = true))
+        }
+        rule.onNodeWithText("查看发送记录").performScrollTo().assertIsDisplayed()
+        captureUiFixture(rule, "details-footer-distinct-requests", darkTheme = false)
+        rule.onNodeWithText("查看发送记录").performScrollTo().performClick()
+        rule.onNodeWithText("原请求：$otherRequest").assertIsDisplayed()
+        rule.onNodeWithContentDescription("返回消息").performClick()
+        rule.onNodeWithText("查看原中断请求").performScrollTo().performClick()
+        rule.onAllNodesWithText("原请求：$request").onFirst().assertIsDisplayed()
     }
 }

@@ -15,7 +15,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
@@ -186,6 +185,7 @@ private fun ShellIcon(@DrawableRes icon: Int, @StringRes description: Int? = nul
     Icon(painterResource(icon), description?.let { stringResource(it) }, Modifier.size(24.dp))
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation, onRuntime: (String) -> Unit, onSession: (String) -> Unit, onBinding: () -> Unit) {
     val listable = state.runtimes.filter { it.access?.organizationId != null && it.access.canList() }
@@ -224,8 +224,8 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
                     }
                     ShellIcon(R.drawable.ic_chevron)
                 }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.directory_scope_short), Modifier.weight(1f),
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(stringResource(R.string.directory_scope_short),
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton({ explainingScope = true }, Modifier.heightIn(min = 48.dp)) {
                         Text(stringResource(R.string.directory_scope_help))
@@ -285,7 +285,9 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
                 }
             }
             items(matches, key = { it.id }) { session ->
-                SessionListItem(session, stableLabel(session.id, rows) { it.id }, runtime.access?.let(session::viewScope) != null) {
+                SessionListItem(session, stableLabel(session.id, rows) { it.id },
+                    session.workspaceId?.let { stableLabel(it, rows) { entry -> entry.workspaceId.orEmpty() } },
+                    runtime.access?.let(session::viewScope) != null) {
                     if (state.directoryRows(navigation.directoryRuntimeId).any { it.id == session.id } &&
                         runtime.access?.let(session::viewScope) != null) onSession(session.id)
                 }
@@ -332,7 +334,7 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
 }
 
 @Composable
-private fun SessionListItem(session: SessionDirectoryEntry, label: String, canRead: Boolean, onClick: () -> Unit) {
+private fun SessionListItem(session: SessionDirectoryEntry, label: String, workspaceLabel: String?, canRead: Boolean, onClick: () -> Unit) {
     val updated = remember(session.updatedAt) { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(session.updatedAt)) }
     ListItem(
         headlineContent = { Text(stringResource(R.string.session_short_title, label)) },
@@ -346,17 +348,12 @@ private fun SessionListItem(session: SessionDirectoryEntry, label: String, canRe
                         else -> R.string.session_available
                     }), Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.labelMedium)
                 }
-                val wide = LocalConfiguration.current.screenWidthDp >= 400
-                val workspace = session.workspaceId?.let { stringResource(R.string.session_workspace, "${it.take(8)}…${it.takeLast(4)}") }
-                if (wide) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        workspace?.let { Text(it, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall) }
-                        Text(stringResource(R.string.session_updated, updated), style = MaterialTheme.typography.bodySmall)
-                    }
-                } else Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    workspace?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    Text(stringResource(R.string.session_updated, updated), style = MaterialTheme.typography.bodySmall)
+                workspaceLabel?.let {
+                    Text(stringResource(R.string.session_workspace, it), style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                Text(stringResource(R.string.session_updated, updated), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (!canRead) Text(stringResource(R.string.session_directory_only))
             }
         },

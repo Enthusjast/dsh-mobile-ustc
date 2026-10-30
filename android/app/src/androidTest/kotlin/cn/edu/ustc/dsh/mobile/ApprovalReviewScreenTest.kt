@@ -161,7 +161,7 @@ class ApprovalReviewScreenTest {
         val fixture = ApprovalUiFixture("x".repeat(17_000) + "UNREVIEWED_SUFFIX")
         content(fixture.state())
         rule.onNodeWithText("已核对 0 /", substring = true).assertExists()
-        rule.onNodeWithText("定位未核对页").performScrollTo().performClick()
+        rule.onNodeWithText(rule.activity.getString(R.string.approval_ux_find_unreviewed)).performScrollTo().performClick()
         rule.onNodeWithText("仅本次允许并确认身份").performScrollTo().assertIsNotEnabled()
         rule.onNodeWithText("字段目录").performScrollTo().performClick()
         rule.onNodeWithText("完整上下文字段").assertIsDisplayed()

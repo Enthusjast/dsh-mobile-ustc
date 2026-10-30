@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -23,6 +24,7 @@ import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /** A status-bar-aware title row that grows with its text instead of clipping large fonts. */
@@ -33,39 +35,41 @@ fun DshTopBar(
     subtitle: String? = null,
     navigationIcon: @Composable () -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
+    contentMaxWidth: Dp = 800.dp,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
-        Row(
-            modifier = Modifier
-                .windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                .heightIn(min = 64.dp)
-                .padding(horizontal = DshSpacing.page, vertical = DshSpacing.small),
-            horizontalArrangement = Arrangement.spacedBy(DshSpacing.small),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            Modifier.fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            navigationIcon()
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(DshSpacing.extraSmall),
-            ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.semantics { heading() },
-                )
-                if (subtitle != null) {
+            Column(Modifier.widthIn(max = contentMaxWidth).fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = DshSpacing.page),
+                    horizontalArrangement = Arrangement.spacedBy(DshSpacing.small),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    navigationIcon()
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f).semantics { heading() },
+                    )
+                    actions()
+                }
+                if (!subtitle.isNullOrEmpty()) {
                     Text(
                         text = subtitle,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = DshSpacing.page).padding(bottom = DshSpacing.small),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
-            actions()
         }
     }
 }

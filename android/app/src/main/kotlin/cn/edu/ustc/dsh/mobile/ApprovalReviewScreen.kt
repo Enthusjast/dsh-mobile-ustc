@@ -10,7 +10,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -57,6 +56,7 @@ private fun approvalProjectionLabels() = ApprovalProjectionLabels(
     ),
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (String) -> Unit,
     onDecide: (ApprovalReviewHandle, ApprovalChoice) -> Unit, onSend: (ApprovalReviewHandle, String) -> Unit,
@@ -151,7 +151,10 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
                 }
             }
         }) { insets ->
-            Column(Modifier.fillMaxSize().padding(insets).verticalScroll(scroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
+                BoxWithConstraints(Modifier.widthIn(max = 800.dp).fillMaxSize()) {
+                    val rowPaging = maxWidth - 32.dp >= 400.dp && LocalDensity.current.fontScale <= 1.3f
+                    Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(approvalVisibleText(runtime?.hostAlias ?: stringResource(R.string.approval_ux_current_host)), style = MaterialTheme.typography.titleMedium)
                 SelectionContainer {
                     Text(stringResource(R.string.approval_ux_source, runtime?.hostId.orEmpty(), state.selectedRuntimeId.orEmpty(), state.selectedSessionId.orEmpty()), style = MaterialTheme.typography.bodySmall)
@@ -188,7 +191,7 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
                     }
                     Text(stringResource(R.string.approval_ux_switch_warning), style = MaterialTheme.typography.bodySmall)
                     Text(stringResource(R.string.approval_ux_page, page + 1, parts.size), style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (!rawView && fields.isNotEmpty()) TextButton({ fieldsOpen = true }, Modifier.heightIn(min = 48.dp)) {
                             Text(stringResource(R.string.approval_ux_field_directory))
                         }
@@ -205,7 +208,6 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
                         Text(stringResource(if (page in reviewed) R.string.approval_ux_page_reviewed else R.string.approval_ux_acknowledge_page))
                     }
                     // Stack controls: both labels remain readable at 320dp and font scale 2.
-                    val rowPaging = LocalConfiguration.current.screenWidthDp >= 400 && LocalDensity.current.fontScale <= 1.3f
                     if (rowPaging) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton({ page-- }, enabled = page > 0 && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_previous)) }
                         OutlinedButton({ page++ }, enabled = page + 1 < parts.size && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_next)) }
@@ -231,6 +233,8 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
                 OutlinedButton(onBack, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_close)) }
                 if (original?.attempts?.let { it > 0 } == true || state.approvalStage == ApprovalUiStage.SENDING) Text(stringResource(R.string.approval_ux_close_warning), style = MaterialTheme.typography.bodySmall)
                 Text(stringResource(R.string.approval_ux_assurance), style = MaterialTheme.typography.bodySmall)
+            }
+                }
             }
         }
     }

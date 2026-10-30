@@ -72,8 +72,8 @@ class ExportsPanelTest {
         val saving = mutableStateOf(false)
         var saves = 0
         content { ExportsPanel(state.value, { _, _ -> }, {}, {}, {}, {}, { saves++; saving.value = true }, saving.value) }
-        rule.onNodeWithText("保存到文档").performScrollTo().performClick()
-        rule.onNodeWithText("保存到文档").assertIsNotEnabled()
+        rule.onNodeWithContentDescription("保存到文档：$name").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("保存到文档：$name").assertIsNotEnabled()
         rule.onNodeWithText("正在处理保存；下载校验与目标文档回读全部通过后才算保存成功。").performScrollTo().assertIsDisplayed()
         rule.runOnIdle {
             assertEquals(1, saves)

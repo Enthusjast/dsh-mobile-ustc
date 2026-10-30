@@ -144,3 +144,33 @@ The subsequent reading, composer, approval, question and supporting-flow changes
 - At 360dp width, default density-independent font scale and no attachments, the measured composer is 122dp high. In one debug long-history/incremental-update instrumentation sample on this software renderer, `gfxinfo` reported 137/137 janky frames and a 350ms median. This is a diagnostic observation, not a 60Hz performance pass or a device-independent benchmark. Startup, directory and network timing, peak memory, actual task completion time and comparative production performance remain unmeasured.
 
 Synthetic screenshots, Compose root/density/font-scale metadata, raw instrumentation results and APK hashes remain under ignored `.local/uiux-acceptance-current/` and `.local/uiux-acceptance-final/`; pre-change captures remain under `.local/android-ui-navigation/before-api26/`. Physical-device/OEM behavior, TalkBack, production identity/server flows and release-build performance require separate acceptance and are not inferred from these fixtures.
+
+## Content-first detail layout
+
+The shared title bar now places its subtitle below the title/action row, using the existing medium title typography and an 800dp content limit (720dp for the binding, creation, notification and update forms). The surface and system insets remain full-width. Chat details use a labelled information icon; long account, host and version text is not silently removed.
+
+Directory metadata remains a single-column hierarchy. Workspace abbreviations use the same collision-aware rule as session labels, restricted to the currently authorized directory; no additional transcript or directory requests populate these labels. The newest-request card keeps its proven delivery status and existing record route while avoiding a repeated full request ID or duplicate route for the same pending interruption. The latest-message control reserves footer space instead of covering transcript text. Compact tool headers only disclose the fields already in the validated display model.
+
+Attachment and file actions expose the verb and complete filename on the actual button, including expanded/collapsed state where relevant. An edit above the existing 65,536 UTF-16-unit input limit leaves the original input untouched, explains the rejection and disables sending until another valid-length edit. These UI states are transient and do not change draft retention, authority or submission protocols.
+
+The conversation footer is measured below the title bar, inside the available content area. Oversized mode and attachment controls scroll while input and sending stay fixed; navigation and IME insets are consumed once by the page. The main activity declares `adjustResize` before initial window focus for legacy Android IME insets. Production `FLAG_SECURE` protection is unchanged. The 2x attachment-dialog scenario uses an isolated, non-exported debug activity with actual Android font resources and verifies the dialog's applied font scale, rather than relying only on a parent density override. Native fixture captures require the actual Compose window to hold focus and refuse secure windows; an accessibility snapshot is not used as a proxy for window ownership.
+
+Formatted text starts with its content rather than a format-toggle row. Code copying distinguishes a successful clipboard write from a rejected one; its original completeness checks remain. Tables share column widths and horizontal scrolling, with equal-height cells within each row. Approval navigation wraps to its actual reading-panel width without changing page coverage, consent, independent rejection or signature preparation.
+
+Verification for this application artifact passed `check` (including lint), debug app/test APK assembly, and the app JVM suite in both debug and release variants: 29 cases per variant with zero failures, errors or skips. The owned API 26 software AVD completed the following device batches against the same application APK:
+
+| Device scope | Passing cases |
+| --- | ---: |
+| Title, directory, composer, conversation and archive | 47 |
+| Reading and file actions | 19 |
+| Binding, creation, notifications, updates and questions | 29 |
+| Complete approval review | 12 |
+| Explicit account/controller, encrypted history and delivery fixture | 16 |
+| Normal-motion total | 123 |
+| Additional reduced-motion navigation, input and reading checks | 27 |
+
+The reduced-motion run set all three Android animation scales to zero and restored their original values exactly. Viewport fixtures cover narrow, short, landscape, wide and 2x-text layouts; native keyboard, actual-Android-font attachment dialogs, question forms, clipboard feedback and table/approval surfaces were inspected. The account run explicitly enabled its fixture and used normal PIN confirmation and virtual fingerprint enrollment, without lowering key-creation or signing requirements. The real `MainActivity` was launched and its secure bit and `adjustResize` mode were observed; protected pixels were not captured. Earlier interrupted runs, system-overlaid captures and prerequisite failures are retained as diagnostics, not passing evidence.
+
+Application SHA-256: `592c75bd4a192e9283579ddcc899a2f0a8aab4091a3169305b7109ce28e05b22`. Final test APK SHA-256: `377f12c1cbc4072d27e42ba8094ca0435ffb8e8d506131c425be2b1f1fd2a0ae`. Instrumentation ownership checks and an action locator were corrected during integration; per-batch harness identities, raw logs, images and exact restored settings are recorded under ignored `.local/android-ui-details-evidence/continuation/`, with the result index in `final-verification.json`.
+
+These results are software-emulator and fixture evidence, not physical-device performance or hardware-backed biometric assurance. TalkBack was not installed, so no TalkBack walkthrough is claimed. Production school SSO and physical/OEM behavior remain outside this acceptance. Earlier acceptance records above are historical rather than substitutes for this build's results.

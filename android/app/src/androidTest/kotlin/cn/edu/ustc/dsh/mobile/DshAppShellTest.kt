@@ -33,6 +33,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.json.JSONObject
 import java.io.File
+import android.graphics.BitmapFactory
+import android.os.ParcelFileDescriptor
+import android.view.WindowManager
 
 /** Synthetic presentation fixtures only; no real credentials, readers or authentication bypass. */
 @RunWith(AndroidJUnit4::class)
@@ -62,8 +65,8 @@ class DshAppShellTest {
         return RuntimeRow(id, workspace, "0.2.1", alias, grant)
     }
 
-    private fun session(id: String) = SessionDirectoryEntry.parse(jsonObject(
-        "session_id" to id.json(), "workspace_id" to workspace.json(), "state" to "available".json(),
+    private fun session(id: String, workspaceId: String? = workspace) = SessionDirectoryEntry.parse(jsonObject(
+        "session_id" to id.json(), "workspace_id" to (workspaceId?.json() ?: JsonNull), "state" to "available".json(),
         "last_persisted_seq" to 0L.json(), "updated_at" to "2026-10-25T00:00:00Z".json(),
     ))
 
@@ -236,8 +239,9 @@ class DshAppShellTest {
         }
         rule.onNodeWithTag("directory-open-search").performClick()
         rule.onNodeWithTag("directory-search").performTextInput(sessionA)
-        rule.onNodeWithTag("runtime-filter").performClick()
-        rule.onNodeWithTag("runtime-filter-$runtimeB").performScrollTo().performClick()
+        rule.onNodeWithTag("runtime-filter").performScrollTo().assertIsDisplayed().performClick()
+        rule.onNode(hasScrollAction() and hasAnyAncestor(isDialog())).performScrollToNode(hasTestTag("runtime-filter-$runtimeB"))
+        rule.onNodeWithTag("runtime-filter-$runtimeB").performClick()
         rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionB"))
         rule.onNodeWithTag("session-$sessionB").assertExists()
         rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
@@ -412,6 +416,29 @@ class DshAppShellTest {
         rule.runOnIdle { assertEquals(sessionA, opened) }
         saveFixture("sessions-wide-window", dark = false)
     }
+    @Test fun workspaceCollisionsAreReadableAndDisambiguationUsesOnlyAuthorizedRows() {
+        val collision = "55555555-6666-4666-8666-666666665555"
+        var current by mutableStateOf(state().copy(sessions = listOf(session(sessionA), session(sessionB, collision))))
+        val nav = navigation()
+        rule.setContent {
+            val density = LocalDensity.current.density
+            CompositionLocalProvider(LocalDensity provides Density(density, 2f)) {
+                DshTheme(darkTheme = true) { Box(Modifier.width(320.dp).height(480.dp)) { Shell(current, nav) } }
+            }
+        }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("工作区 $workspace"))
+        rule.onNodeWithText("工作区 $workspace").assertIsDisplayed()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("工作区 $collision"))
+        rule.onNodeWithText("工作区 $collision").assertIsDisplayed()
+        saveFixture("details-directory-workspace-collision", dark = true)
+        rule.runOnIdle {
+            current = current.copy(runtimes = listOf(runtime(runtimeA, workspaces = emptyList(), sessions = listOf(sessionA))))
+        }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("工作区 ${workspace.take(8)}…${workspace.takeLast(4)}"))
+        rule.onNodeWithText("工作区 $collision").assertDoesNotExist()
+        rule.onNodeWithText("工作区 $workspace").assertDoesNotExist()
+        rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
+    }
     private fun clickSettingsItem(label: String) {
         rule.onNodeWithTag("settings-list").performScrollToNode(hasText(label))
         rule.onNodeWithText(label).assertIsDisplayed().performClick()
@@ -423,9 +450,16 @@ class DshAppShellTest {
         val root = if (dialog) rule.onNode(isDialog()) else rule.onRoot()
         val rootBounds = root.fetchSemanticsNode().boundsInRoot
         val useDisplayCapture = dialog && android.os.Build.VERSION.SDK_INT < 28
+        var captureMethod = if (useDisplayCapture) "uiAutomation-display" else "compose-root"
         val bitmap = if (useDisplayCapture) {
-            checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()) {
-                "Cannot capture the synthetic dialog host"
+            check(rule.activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE == 0) {
+                "Only the public synthetic fixture may use display capture"
+            }
+            val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+            automation.takeScreenshot() ?: run {
+                captureMethod = "shell-display"
+                val bytes = ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand("screencap -p")).use { it.readBytes() }
+                checkNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size)) { "Cannot capture the synthetic dialog display" }
             }
         } else {
             root.captureToImage().asAndroidBitmap()
@@ -443,7 +477,7 @@ class DshAppShellTest {
             .put("density", density.density)
             .put("fontScale", density.fontScale)
             .put("dark", dark)
-            .put("captureMethod", if (useDisplayCapture) "uiAutomation-display" else "compose-root")
+            .put("captureMethod", captureMethod)
             .put("rootSize", JSONObject()
                 .put("widthPx", rootBounds.width)
                 .put("heightPx", rootBounds.height)

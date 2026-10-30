@@ -8,12 +8,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.*
@@ -23,6 +27,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -75,9 +82,6 @@ internal fun RichMessageText(text: String, initial: Int = 16 * 1024) {
     val current = prepared?.takeIf { it.document.source === text && it.document.visibleEnd == end }
     val uriHandler = LocalUriHandler.current
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (current?.document?.formatted == true) TextButton({ raw = !raw }, Modifier.heightIn(min = 48.dp)) {
-            Text(stringResource(if (raw) R.string.chat_formatted else R.string.chat_raw))
-        }
         if (current == null || raw) {
             SelectionContainer { Text(text.substring(0, end), style = MaterialTheme.typography.bodyLarge) }
         } else for (block in current.document.blocks) key(block.range.start) {
@@ -101,13 +105,13 @@ internal fun RichMessageText(text: String, initial: Int = 16 * 1024) {
                     }.padding(start = 12.dp), onLink = { requestedLink = it })
                 }
                 is MessageMarkdownBlock.Code -> MessageCode(text, block, end < text.length)
-                is MessageMarkdownBlock.Table -> Column(Modifier.horizontalScroll(rememberScrollState())) {
-                    MessageTableRow(current, block.headers, true) { requestedLink = it }
-                    block.rows.forEach { row -> MessageTableRow(current, row, false) { requestedLink = it } }
-                }
+                is MessageMarkdownBlock.Table -> MessageTable(current, block) { requestedLink = it }
             }
         }
         if (current?.excessLinks == true && !raw) Text(stringResource(R.string.chat_link_limit), style = MaterialTheme.typography.bodySmall)
+        if (current?.document?.formatted == true) TextButton({ raw = !raw }, Modifier.heightIn(min = 48.dp)) {
+            Text(stringResource(if (raw) R.string.chat_formatted else R.string.chat_raw))
+        }
         if (end < text.length) TextButton({ limit = (limit.toLong() + 16 * 1024).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }, Modifier.heightIn(min = 48.dp)) {
             Text(stringResource(R.string.chat_show_more))
         }
@@ -152,19 +156,26 @@ private fun MessageInlineText(message: PreparedMessage, spans: List<MessageInlin
     SelectionContainer { Text(formatted, modifier.semantics { customActions = actions }, style = style) }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MessageCode(source: String, block: MessageMarkdownBlock.Code, truncated: Boolean) {
     val clipboard = LocalClipboardManager.current
     val content = remember(source, block.content) { block.content.text(source) }
     var copied by remember(content) { mutableStateOf(false) }
+    var copyFailed by remember(content) { mutableStateOf(false) }
     LaunchedEffect(copied) { if (copied) { delay(2000); copied = false } }
     val complete = block.closed || !truncated
     Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.small) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Text(block.language?.text(source) ?: stringResource(R.string.chat_code), Modifier.weight(1f),
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(block.language?.text(source) ?: stringResource(R.string.chat_code), Modifier.align(Alignment.CenterVertically),
                     style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                TextButton({ clipboard.setText(AnnotatedString(content)); copied = true }, enabled = complete,
+                TextButton({
+                    copied = false
+                    try { clipboard.setText(AnnotatedString(content)); copyFailed = false; copied = true }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { copyFailed = true }
+                }, enabled = complete,
                     modifier = Modifier.heightIn(min = 48.dp).semantics { liveRegion = LiveRegionMode.Polite }) {
                     Text(stringResource(if (copied) R.string.chat_copied else if (block.closed) R.string.chat_copy_code else R.string.chat_copy_visible_code))
                 }
@@ -172,16 +183,47 @@ private fun MessageCode(source: String, block: MessageMarkdownBlock.Code, trunca
             SelectionContainer { Text(content, Modifier.horizontalScroll(rememberScrollState()),
                 fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, softWrap = false) }
             if (!complete) Text(stringResource(R.string.chat_code_incomplete), style = MaterialTheme.typography.bodySmall)
+            if (copyFailed) Text(stringResource(R.string.chat_copy_failed), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         }
     }
 }
 
 @Composable
-private fun MessageTableRow(message: PreparedMessage, cells: List<List<MessageInline>>, header: Boolean, onLink: (String) -> Unit) {
-    Row {
-        cells.forEach { spans ->
-            Surface(color = if (header) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surface) {
-                MessageInlineText(message, spans, Modifier.width(180.dp).border(1.dp, MaterialTheme.colorScheme.outlineVariant).padding(12.dp),
+private fun MessageTable(message: PreparedMessage, block: MessageMarkdownBlock.Table, onLink: (String) -> Unit) {
+    if (block.headers.isEmpty()) {
+        SelectionContainer { Text(block.range.text(message.document.source), style = MaterialTheme.typography.bodyLarge) }
+        return
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val cellWidth = if (constraints.hasBoundedWidth) (maxWidth / block.headers.size).coerceIn(120.dp, 180.dp) else 180.dp
+        Box(Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
+            Column(Modifier.horizontalScroll(rememberScrollState())) {
+                MessageTableRow(message, block.headers, true, cellWidth, 0, onLink)
+                block.rows.forEachIndexed { index, row -> MessageTableRow(message, row, false, cellWidth, index + 1, onLink) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageTableRow(message: PreparedMessage, cells: List<List<MessageInline>>, header: Boolean,
+    cellWidth: Dp, rowIndex: Int, onLink: (String) -> Unit) {
+    val border = MaterialTheme.colorScheme.outlineVariant
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    Row(Modifier.height(IntrinsicSize.Min).drawWithContent {
+        drawContent()
+        if (rowIndex > 0) drawLine(border, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx())
+    }) {
+        cells.forEachIndexed { column, spans ->
+            Surface(Modifier.width(cellWidth).fillMaxHeight().testTag("message-table-cell-$rowIndex-$column").drawWithContent {
+                drawContent()
+                if (column > 0) {
+                    val x = if (rtl) size.width else 0f
+                    drawLine(border, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
+                }
+            }, color = if (header) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surface) {
+                MessageInlineText(message, spans, Modifier.fillMaxWidth().padding(12.dp),
                     if (header) MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold) else MaterialTheme.typography.bodyLarge, onLink)
             }
         }

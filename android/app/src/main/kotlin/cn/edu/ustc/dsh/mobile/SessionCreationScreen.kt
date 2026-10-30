@@ -36,6 +36,7 @@ fun SessionCreationScreen(state: HomeState, onCreate: (String,String,String)->Un
         cn.edu.ustc.dsh.ui.DshTopBar(
             title = stringResource(R.string.flow_creation_title),
             subtitle = runtime?.hostAlias ?: stringResource(R.string.chat_authorized_computer),
+            contentMaxWidth = 720.dp,
             navigationIcon = { IconButton(onBack, Modifier.heightIn(min = 48.dp)) {
                 Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_creation_back))
             } },

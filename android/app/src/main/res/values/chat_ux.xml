@@ -70,12 +70,14 @@
     <string name="chat_queue_desc">等待轮到此消息时处理</string>
     <string name="chat_steer_desc">向电脑当前任务补充内容</string>
     <string name="chat_tool_info">工具调用信息</string>
-    <string name="chat_tool_record">工具调用记录</string>
     <string name="chat_tool_receiving">正在接收调用信息</string>
-    <string name="chat_show_call">查看调用信息</string>
-    <string name="chat_hide_call">收起调用信息</string>
     <string name="chat_call_id">调用标识：%1$s</string>
     <string name="chat_no_call_id">未提供调用标识</string>
     <string name="chat_no_tool_detail">当前记录未提供更多详情。</string>
     <string name="chat_attachments_unavailable">附件当前不可用。</string>
+    <string name="chat_tool_expand_action">查看调用信息：%1$s</string>
+    <string name="chat_tool_collapse_action">收起调用信息：%1$s</string>
+    <string name="chat_attachment_detail_action">查看附件详情：%1$s</string>
+    <string name="chat_input_rejected">内容过长，本次输入未接收；原输入未改变。</string>
+    <string name="chat_copy_failed">复制未完成，请选择代码后重试。</string>
 </resources>

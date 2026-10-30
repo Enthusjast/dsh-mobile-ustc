@@ -62,4 +62,6 @@
     <string name="session_scope_changed">所选电脑的目录授权已变化，请重新选择电脑或刷新核对。</string>
     <string name="session_choose_scope">请选择一台电脑，查看其当前授权范围内的会话。</string>
     <string name="settings_subject">学校账号标识</string>
+    <string name="detail_expanded">已展开</string>
+    <string name="detail_collapsed">已收起</string>
 </resources>

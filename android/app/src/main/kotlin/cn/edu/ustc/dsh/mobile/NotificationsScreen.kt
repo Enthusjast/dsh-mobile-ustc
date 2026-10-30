@@ -31,6 +31,7 @@ internal fun NotificationsScreen(state: NotificationUiState, refresh: () -> Unit
     Scaffold(topBar = {
         cn.edu.ustc.dsh.ui.DshTopBar(
             title = stringResource(R.string.settings_notifications),
+            contentMaxWidth = 720.dp,
             navigationIcon = { IconButton(back, Modifier.heightIn(min = 48.dp)) {
                 Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_notifications_back))
             } },

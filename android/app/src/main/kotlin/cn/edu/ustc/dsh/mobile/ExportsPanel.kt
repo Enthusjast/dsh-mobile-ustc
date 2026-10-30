@@ -58,6 +58,9 @@ internal fun ExportsPanel(state: SessionExportState, browse: (ExportSource?, Boo
                 val id = row.stored.intent.requestId
                 var details by remember { mutableStateOf(false) }
                 var deleting by remember { mutableStateOf(false) }
+                val saveName = stringResource(R.string.file_ux_save_action, row.stored.intent.name)
+                val detailName = stringResource(if (details) R.string.file_ux_collapse_action else R.string.file_ux_expand_action, row.stored.intent.name)
+                val expansion = stringResource(if (details) R.string.detail_expanded else R.string.detail_collapsed)
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(row.stored.intent.name, style = MaterialTheme.typography.titleSmall)
                     Text(fileSizeText(row.stored.intent.sizeBytes), style = MaterialTheme.typography.bodySmall)
@@ -73,14 +76,14 @@ internal fun ExportsPanel(state: SessionExportState, browse: (ExportSource?, Boo
                     if (row.status?.downloadable() == true) Button(
                         { if (row.status?.downloadable() == true) save(id) },
                         enabled = !saving,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = saveName },
                     ) { Text(stringResource(R.string.file_ux_save)) }
                     val error = row.error ?: row.status?.error
                     error?.let { Text(exportReasonText(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                     if (row.status?.state in setOf(FileTransferState.UPLOADING, FileTransferState.SCANNING) || row.stored.fileId == null) {
                         TextButton({ cancel(id) }, enabled = state.connected, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.file_ux_stop_export)) }
                     }
-                    TextButton({ details = !details }, Modifier.heightIn(min = 48.dp)) {
+                    TextButton({ details = !details }, Modifier.heightIn(min = 48.dp).semantics { contentDescription = detailName; stateDescription = expansion }) {
                         Text(stringResource(if (details) R.string.file_ux_hide_details else R.string.file_ux_details))
                     }
                     if (details) {
