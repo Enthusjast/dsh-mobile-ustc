@@ -28,6 +28,8 @@ func main() {
 			operation = func() error { return runRecoveryCommand(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "archive" {
 			operation = func() error { return runArchiveCommand(os.Args[2:], os.Stdout) }
+		} else if os.Args[1] == "identities" {
+			operation = func() error { return runIdentityCommand(os.Args[2:], os.Stdout) }
 		} else {
 			operation = func() error { return errors.New("remote service arguments are invalid") }
 		}

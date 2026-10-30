@@ -160,7 +160,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const signingKey = key(), phoneKey = key(), approvalKey = key(), outsiderKey = key(), outsiderApprovalKey = key()
   const approvalAuthority = key()
   const siblingKey = key(), siblingApprovalKey = key()
-  const orgId = randomUUID(), ownerId = randomUUID(), phoneUserId = randomUUID(), outsiderId = randomUUID()
+  const orgId = randomUUID()
   const jwks = createServer((req, res) => {
     if (req.url !== '/jwks') { res.writeHead(404).end(); return }
     res.setHeader('content-type', 'application/json')
@@ -171,9 +171,22 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const jwksAddress = jwks.address()
   assert.ok(jwksAddress && typeof jwksAddress === 'object')
   const issuer = `http://127.0.0.1:${jwksAddress.port}`
-  query(`insert into orgs(id,slug,name) values ('${orgId}','integration','Integration');
-    insert into users(id,issuer,subject) values ('${ownerId}','${issuer}','owner'),('${phoneUserId}','${issuer}','phone'),('${outsiderId}','${issuer}','outsider');
-    insert into org_memberships(org_id,user_id,role) values ('${orgId}','${ownerId}','member'),('${orgId}','${phoneUserId}','member'),('${orgId}','${outsiderId}','member');`)
+  const databaseEpoch = query('select epoch::text from remote_recovery_state where slot=1')
+  const applyIdentityFile = (path: string) => JSON.parse(execFileSync(serviceBin, ['identities', 'apply', '--authority-file', path], {
+    env: { PATH: process.env.PATH ?? '', REMOTE_DATABASE_URL: database, REMOTE_DATABASE_EPOCH: databaseEpoch, REMOTE_ISSUER: issuer }, encoding: 'utf8',
+  })) as { operation_id: string; revision: number; counts: Record<string, number> }
+  const initialIdentityFile = join(root, 'initial-identity-authority.json')
+  await writeFile(initialIdentityFile, JSON.stringify({ v: 1, complete: true, operation_id: randomUUID(), database_epoch: databaseEpoch,
+    issuer, expected_revision: 0, revision: 1, captured_at: new Date(Date.now() - 1000).toISOString(), expires_at: new Date(Date.now() + 300_000).toISOString(),
+    organizations: [{ organization_id: orgId, slug: 'integration', name: 'Integration' }],
+    users: ['owner', 'phone', 'outsider'].map(subject => ({ subject, status: 'active', memberships: [{ organization_id: orgId, role: 'member' }] })),
+  }), { mode: 0o600 })
+  const initialIdentity = applyIdentityFile(initialIdentityFile)
+  assert.equal(initialIdentity.revision, 1); assert.equal(initialIdentity.counts.users_created, 3)
+  const ownerId = query(`select id::text from users where issuer='${issuer}' and subject='owner'`)
+  const phoneUserId = query(`select id::text from users where issuer='${issuer}' and subject='phone'`)
+  const outsiderId = query(`select id::text from users where issuer='${issuer}' and subject='outsider'`)
+  for (const id of [ownerId, phoneUserId, outsiderId]) assert.match(id, /^[0-9a-f-]{36}$/)
   const reserved = createTCPServer()
   await new Promise<void>(accept => reserved.listen(0, '127.0.0.1', accept))
   const address = reserved.address()
@@ -1107,9 +1120,22 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
   t.diagnostic('Normal Host runtime question metadata reached PostgreSQL without a timed-session phone subscription; fresh resubscription found the same continued native question and admitted one late answer. Full database dump excluded question and answer bodies.')
   t.diagnostic('The normal plugin negotiated signed approval: current Bash context, invalid-proof nonconsumption, phone allow/reject/cancel, one actual execution, duplicate decision reconciliation and durable native result reporting passed through the real Go service.')
-  // Retire only this owned fixture installation. Both a cached bearer string and
-  // fresh REST acquisition must remain subject to the current server authority.
-  query(`update installations set revoked_at=clock_timestamp() where id='${enrollment.installation_id}'`)
+  // Use the production offline directory importer to suspend this fixture owner.
+  // Reenabling an identity later must not resurrect these installed credentials.
+  const authorityPath = join(root, 'current-identity-authority.json')
+  const identityOperation = randomUUID()
+  await writeFile(authorityPath, JSON.stringify({ v: 1, complete: true, operation_id: identityOperation, database_epoch: databaseEpoch,
+    issuer, expected_revision: 1, revision: 2, captured_at: new Date(Date.now() - 1000).toISOString(), expires_at: new Date(Date.now() + 300_000).toISOString(),
+    organizations: [{ organization_id: orgId, slug: 'integration', name: 'Integration' }], users: [
+      { subject: 'owner', status: 'suspended', memberships: [] },
+      { subject: 'phone', status: 'active', memberships: [{ organization_id: orgId, role: 'member' }] },
+      { subject: 'outsider', status: 'active', memberships: [{ organization_id: orgId, role: 'member' }] },
+    ] }), { mode: 0o600 })
+  const syncIdentity = () => applyIdentityFile(authorityPath)
+  const identityReceipt = syncIdentity()
+  assert.equal(identityReceipt.operation_id, identityOperation); assert.equal(identityReceipt.revision, 2)
+  assert.equal(identityReceipt.counts.installations_revoked, 1)
+  assert.deepEqual(syncIdentity(), identityReceipt, 'exact identity synchronization retry changed the committed result')
   await until(async () => query(`select connection_id is null from runtimes where id='${enrollment.runtime_id}'`) === 't' ? true : undefined,
     'revoked Host connection detached', 5000)
   if (bindingStore) await assert.rejects(bindingStore.open(AbortSignal.timeout(5000)), cause =>
@@ -1129,6 +1155,6 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     })
     rejected.once('open', () => { clearTimeout(timer); rejected.terminate(); reject(new Error('revoked cached credential opened a socket')) })
   })
-  t.diagnostic('Revoking the fixture installation detached the normal Host, denied fresh provider acquisition and refused an old cached connection secret at HTTP upgrade. No client cache restored authority.')
+  t.diagnostic('The production identity snapshot CLI initially provisioned the organization and three account mappings, then suspended the fixture owner and retired its installation at the next revision; an exact retry reconciled one committed receipt. The normal Host detached, fresh provider acquisition was denied and an old cached connection secret failed HTTP upgrade. No client cache restored authority.')
   t.diagnostic('Go production entrypoint + isolated PostgreSQL + npm DSH 0.2.1-rc.2: signed enrollment/credentials/ticket, session creation, catalog, snapshots, assistant stream, pagination, idempotency, scoped receipts, cancellation, questions, body-storage boundary and proactive revocation passed. Identity and model are local fixtures; Android and production IdP are not involved.')
 })
