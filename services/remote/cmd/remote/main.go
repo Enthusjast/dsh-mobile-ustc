@@ -29,7 +29,7 @@ func main() {
 		} else if os.Args[1] == "archive" {
 			operation = func() error { return runArchiveCommand(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "command-limits" {
-			operation = func() error { return runCommandRateDescription(os.Args[2:], os.Stdout) }
+			operation = func() error { return runCommandRateCommand(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "identities" {
 			operation = func() error { return runIdentityCommand(os.Args[2:], os.Stdout) }
 		} else {
@@ -64,9 +64,6 @@ func run() error {
 	recovery, err := database.NewRecoveryGuard(context.Background(), os.Getenv("REMOTE_DATABASE_EPOCH"))
 	if err != nil {
 		return errors.New("remote service database recovery is unavailable or deployment epoch does not match")
-	}
-	if err := database.ConfigureCommandRateLimits(context.Background(), commandLimits); err != nil {
-		return errCommandRateConfiguration
 	}
 	scope, err = auth.ProofScopeInEpoch(scope, recovery.Epoch())
 	if err != nil {
@@ -171,6 +168,9 @@ func run() error {
 			log.Print("remote control consumer release unavailable=true")
 		}
 	}()
+	if err := database.ConfigureCommandRateLimits(context.Background(), commandLimits); err != nil {
+		return errCommandRateConfiguration
+	}
 	origin := ""
 	if relayConfig != nil {
 		origin = relayConfig.Origin

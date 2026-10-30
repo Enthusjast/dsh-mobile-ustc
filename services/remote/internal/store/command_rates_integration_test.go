@@ -433,8 +433,8 @@ func TestSharedCommandRateCounterWaitCannotKeepExpiredGrantOrEraseHistoryOnUnuse
 		t.Fatal("expired rate attempt changed committed budget", used)
 	}
 	ctx, unused, _ := commandDeadlineFixture(t)
-	for _, direction := range []string{"down", "up"} {
-		raw, err := os.ReadFile("../../../../deploy/sql/038_command_rates." + direction + ".sql")
+	for _, direction := range []string{"039_command_rate_policy_changes.down", "038_command_rates.down", "038_command_rates.up", "039_command_rate_policy_changes.up"} {
+		raw, err := os.ReadFile("../../../../deploy/sql/" + direction + ".sql")
 		if err != nil {
 			t.Fatal(err)
 		}
