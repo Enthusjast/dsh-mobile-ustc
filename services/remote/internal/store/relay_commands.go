@@ -118,6 +118,11 @@ func (postgres *Postgres) recordRealtimeCommand(ctx context.Context, ticket Tick
 }
 
 func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID, action string, metrics *observability.Metrics, admission ...func(CommandStatus) error) (CommandStatus, error) {
+	// Callers already hold the current authority/resource rows. Their locking
+	// SELECT can have evaluated its expiry predicate before waiting for a lock.
+	if err := checkCommandGrantTime(ctx, transaction, ticket); err != nil {
+		return CommandStatus{}, err
+	}
 	var status CommandStatus
 	var existingUserID, existingRuntimeID string
 	var existingAction sql.NullString
@@ -133,6 +138,9 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 			if err := admission[0](status); err != nil {
 				return CommandStatus{}, err
 			}
+		}
+		if err := checkCommandGrantTime(ctx, transaction, ticket); err != nil {
+			return CommandStatus{}, err
 		}
 		if err := transaction.Commit(); err != nil {
 			return CommandStatus{}, ErrDatabaseUnavailable
@@ -180,6 +188,11 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 			return CommandStatus{}, err
 		}
 	}
+	// Command-row, audit and file-admission waits cannot carry an expired grant
+	// to the final admission decision, including exact retries of an old intent.
+	if err := checkCommandGrantTime(ctx, transaction, ticket); err != nil {
+		return CommandStatus{}, err
+	}
 	if err := transaction.Commit(); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
@@ -187,6 +200,18 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 		metrics.CommandTransition(action, "none", status.State, "device", status.UpdatedAt, time.Time{}, status.UpdatedAt)
 	}
 	return status, nil
+}
+
+func checkCommandGrantTime(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption) error {
+	// The spent admission ticket's deadline is independent of the live socket.
+	err := checkRealtimeGrantTime(ctx, transaction, ticket.UserID, ticket.RuntimeID, ticket.GrantVersion, nil)
+	if errors.Is(err, ErrTicketInvalid) {
+		return ErrAccessDenied
+	}
+	if err != nil {
+		return ErrDatabaseUnavailable
+	}
+	return nil
 }
 
 // RecordRealtimeCommandReceipt accepts a receipt only from the current

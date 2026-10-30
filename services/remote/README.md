@@ -1,5 +1,7 @@
 # Remote service foundation
 
+All [phone command admissions recheck current grant expiry after database waits](../../docs/command-admission-expiry.md), including exact retries, initial session creation and attachment binding before commit. Late attempts roll back new commands, success audits and file claims. Current Host result reporting remains independent, and a spent ticket deadline does not replace the negotiated socket lifetime. No migration is required.
+
 Relay [control notification priority](../../docs/relay-control-priority.md) now reserves eight frames/128 KiB independently of the ordinary 16-frame queue. Explicit approval/revocation metadata precedes ordinary backlog, with a four-control/one-ordinary fairness rule and unchanged single-writer ownership. Stop releases both waiting queues; cancelled send waits retain queued accounting until dequeue or stop. No schema or wire migration is required.
 
 The additive [session model catalog](../../docs/session-model-catalog.md) pages current native provider/model/effort metadata over `session.models.v1`, with current read/selection authority and subscription binding on requests and responses. Queries have finite concurrent routes and timeouts; late results cannot claim a replacement route. Host lookups coalesce until the native provider actually settles, and configuration/defaults/provider failure messages stay private. No additional migration is required.

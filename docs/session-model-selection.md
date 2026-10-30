@@ -23,6 +23,8 @@ Host 和手机同时协商 `command.relay.v1`、`session.model.select.v1` 后，
 ## 授权与去重
 
 ticket 和当前 grant 都必须显式包含 `session.model.select`，目标会话或其工作区必须在范围内。
+共同[命令准入期限检查](command-admission-expiry.md)在资源锁等待后与提交前重新核对 grant
+到期时间，模型选择不能凭等待前仍有效的授权继续准入。
 owner / operator 可以被授予该动作，viewer 不允许；普通读、聊天、中断和管理权限均不隐含它。
 迁移不会扩大现有 grant 或 ticket。新绑定产生的 owner grant 包含新动作；已有安装须由合格
 管理者显式调整授权，再取得新 ticket。每次提交，包括相同请求重试，都重新核对当前账号、
