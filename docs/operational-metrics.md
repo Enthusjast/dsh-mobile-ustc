@@ -49,7 +49,11 @@ REMOTE_METRICS_LISTEN_ADDR=127.0.0.1:9090 go run ./cmd/remote
 
 角色只取 installation / device / other；结果、错误分类、worker 和 topic 均映射到固定词表。未知字符串归为 other，不创建动态标签。另有官方 Go runtime / process collector 的资源指标；没有导出环境变量或启动参数。
 
-每条等待队列仍受 16 条 × 64 KiB 的既有限制，writer 另持有最多一条。队列统计不包含 TLS / TCP 缓冲或对端积压。取消一次已经入队的等待，不会从队列中移除或证明未发送：字节必须保持到实际 writer 取出，或连接退出后离开当前连接集合。这与原命令未知结果的处理一致。
+普通等待队列保留 16 条 × 64 KiB 的限制；[控制通知优先队列](relay-control-priority.md)另有
+8 帧、合计 128 KiB 预算。现有排队消息数和字节合计两条队列，writer 另持有最多一条。
+队列统计不包含 TLS / TCP 缓冲或对端积压。取消一次已经入队的等待，不会移除帧或证明未发送；
+字节保持到实际 writer 取出，或连接停止时释放两条等待队列。inflight 仍等待当前写入结束后
+归零。这与原命令未知结果的处理一致。
 
 frame 指项目协议的完整 WebSocket message，不是底层线缆分片；包含握手、心跳与控制消息。installation 入站与 device 出站可分别观察主机输出和手机扇出，但不能推算 DSH 合并前的原始事件数或纯正文速率。`command_forward_duration_seconds` 不含命令最初的持久登记，也不含原生入队 / 执行或模型 / 人工等待；不把它写成完整命令耗时。
 

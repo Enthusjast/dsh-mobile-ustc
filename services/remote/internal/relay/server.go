@@ -99,6 +99,9 @@ type liveConnection struct {
 	runtimeEpoch           string
 	capabilities           map[string]struct{}
 	sendQueue              chan outboundFrame
+	controlQueue           chan outboundFrame
+	queueWake              chan struct{}
+	controlQueuedBytes     int64
 	done                   chan struct{}
 	stopOnce               sync.Once
 	metrics                *observability.Metrics
@@ -127,6 +130,7 @@ type liveConnection struct {
 }
 
 type outboundFrame struct {
+	control     bool
 	body        []byte
 	result      chan error
 	beforeWrite func() error
@@ -292,42 +296,42 @@ func (server *Server) capabilities() []string {
 }
 
 func (live *liveConnection) writeLoop() {
+	burst := 0
 	for {
-		select {
-		case <-live.done:
+		frame, ok := live.nextFrame(&burst)
+		if !ok {
 			return
-		case frame := <-live.sendQueue:
-			live.queueMu.Lock()
-			live.queuedMessages--
-			live.queuedBytes -= int64(len(frame.body))
-			live.inflightBytes = int64(len(frame.body))
-			live.queueMu.Unlock()
-			live.metrics.Dequeued(live.peer.role, time.Since(frame.queuedAt))
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			var err error
-			if frame.beforeWrite != nil {
-				err = frame.beforeWrite()
-			}
-			if err == nil {
-				err = live.conn.Write(ctx, websocket.MessageText, frame.body)
-			}
-			cancel()
-			live.queueMu.Lock()
-			live.inflightBytes = 0
-			live.queueMu.Unlock()
-			live.metrics.Written(live.peer.role, len(frame.body), time.Since(frame.queuedAt), err)
-			frame.result <- err
-			if err != nil {
-				_ = live.conn.CloseNow()
-				live.stop()
-				return
-			}
+		}
+		live.metrics.Dequeued(live.peer.role, time.Since(frame.queuedAt))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var err error
+		if frame.beforeWrite != nil {
+			err = frame.beforeWrite()
+		}
+		if err == nil {
+			err = live.conn.Write(ctx, websocket.MessageText, frame.body)
+		}
+		cancel()
+		live.queueMu.Lock()
+		live.inflightBytes = 0
+		live.queueMu.Unlock()
+		live.metrics.Written(live.peer.role, len(frame.body), time.Since(frame.queuedAt), err)
+		frame.result <- err
+		if err != nil {
+			_ = live.conn.CloseNow()
+			live.stop()
+			return
 		}
 	}
 }
 
 func (live *liveConnection) stop() {
-	live.stopOnce.Do(func() { close(live.done) })
+	live.stopOnce.Do(func() {
+		live.queueMu.Lock()
+		defer live.queueMu.Unlock()
+		close(live.done)
+		live.clearQueuedFramesLocked()
+	})
 }
 
 func (live *liveConnection) sendJSON(ctx context.Context, value any) error {
@@ -359,28 +363,18 @@ func (live *liveConnection) sendJSONBeforeWrite(ctx context.Context, value any, 
 		live.metrics.RejectedSend(live.peer.role, "too_large")
 		return errors.New("relay: outgoing frame exceeds limit")
 	}
-	frame := outboundFrame{body: data, result: make(chan error, 1), beforeWrite: beforeWrite, queuedAt: time.Now()}
-	// Account admission before the writer can account its dequeue. This lock
-	// covers only a nonblocking channel operation, never socket I/O or binding.
-	live.queueMu.Lock()
-	select {
-	case <-live.done:
-		live.queueMu.Unlock()
-		live.metrics.RejectedSend(live.peer.role, "closed")
-		return net.ErrClosed
-	case <-ctx.Done():
-		live.queueMu.Unlock()
-		live.metrics.RejectedSend(live.peer.role, "cancelled")
-		return ctx.Err()
-	case live.sendQueue <- frame:
-		live.queuedMessages++
-		live.queuedBytes += int64(len(data))
-		live.queueMu.Unlock()
-	default:
-		live.queueMu.Unlock()
-		live.metrics.RejectedSend(live.peer.role, "full")
-		return errRelayQueueFull
+	frame := outboundFrame{body: data, control: priorityControlFrame(data), result: make(chan error, 1), beforeWrite: beforeWrite, queuedAt: time.Now()}
+	if err := live.queueFrame(ctx, frame); err != nil {
+		reason := "full"
+		if errors.Is(err, net.ErrClosed) {
+			reason = "closed"
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			reason = "cancelled"
+		}
+		live.metrics.RejectedSend(live.peer.role, reason)
+		return err
 	}
+
 	select {
 	case err := <-frame.result:
 		return err
@@ -528,7 +522,7 @@ func (server *Server) registerConnection(connection *websocket.Conn, identity pe
 		server.mu.Unlock()
 		return nil, false
 	}
-	live := &liveConnection{conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, 16), done: make(chan struct{}), metrics: server.metrics}
+	live := &liveConnection{conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, ordinaryQueueFrames), controlQueue: make(chan outboundFrame, controlQueueFrames), queueWake: make(chan struct{}, 1), done: make(chan struct{}), metrics: server.metrics}
 	server.active.Add(1)
 	server.connections[connection] = live
 	server.mu.Unlock()
