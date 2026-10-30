@@ -151,3 +151,10 @@ native listeners. The parent DSH host and Agent remain available. Explicit
 reload with a new account lifetime rechecks binding and starts a new epoch;
 transport reconnect alone keeps the ordinary existing runtime. See the
 [account lifecycle boundary](../../docs/host-relay-lifecycle.md).
+
+Runtime retirement also cancels the lifetime shared by native command admission,
+followers and timed-question claims. Commands recheck cancellation after asynchronous
+session/model/activity inspection and immediately before native mutations; a late
+lookup cannot authorize new work. Known native completions still retain their
+durable results under the existing journal rules, rather than being relabeled as
+unexecuted because their caller disconnected.

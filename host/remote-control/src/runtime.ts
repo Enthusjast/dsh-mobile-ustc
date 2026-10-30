@@ -24,6 +24,7 @@ export class ProbeRuntime {
   private readonly commands = new Map<string, { digest: string; result: Promise<unknown> }>()
   private readonly serial = new Map<string, Promise<unknown>>()
   private closed = false
+  private readonly lifetime = new AbortController()
 
   constructor(readonly client: DshClient, private readonly interactions: InteractionRouter, private readonly journal: CommandJournal = new MemoryCommandJournal(client.runtimeId), readonly epoch = randomUUID()) {
     this.files = new NativeFileRegistry(client, epoch)
@@ -47,18 +48,20 @@ export class ProbeRuntime {
 
   private async execute(command: Command, signal: AbortSignal, owner: CommandOwner, observe: CommandStateObserver | undefined, reconciliation: boolean): Promise<Frame> {
     this.check(command)
+    signal = AbortSignal.any([signal, this.lifetime.signal])
     signal.throwIfAborted()
     const report = async (state: CommandState, result?: unknown) => {
       try { await observe?.(state, result) } catch { /* Receipts are best effort; the durable local journal remains authoritative. */ }
     }
     const run = async (recoveringDispatch = false) => {
       this.check(command)
+      signal.throwIfAborted()
       switch (command.type) {
         case 'session.list': return this.client.list(signal)
-        case 'model.catalog': return this.client.modelCatalog()
+        case 'model.catalog': return this.client.modelCatalog(signal)
         case 'session.create': return 'workspace_id' in command.payload
           ? this.client.createRemote(command.payload.workspace_id, command.payload.preset, signal)
-          : this.client.create(command.payload.workspace, command.payload.preset)
+          : this.client.create(command.payload.workspace, command.payload.preset, signal)
         case 'session.page': return this.sync.page(command, signal)
         case 'interaction.list': return this.interactions.list()
         case 'interaction.answer': {
@@ -67,8 +70,8 @@ export class ProbeRuntime {
             answers: answer.answers.map(item => ({ id: item.id, selected: item.selected, ...(item.custom === undefined ? {} : { custom: item.custom }) })),
           })
         }
-        case 'session.cancel': return this.client.cancel(await this.client.resolve(command.session_id, signal))
-        case 'session.archive': return this.client.archive(await this.client.resolve(command.session_id, signal), command.payload.archived, command.payload.stop_activity)
+        case 'session.cancel': return this.client.cancel(await this.client.resolve(command.session_id, signal), signal)
+        case 'session.archive': return this.client.archive(await this.client.resolve(command.session_id, signal), command.payload.archived, command.payload.stop_activity, signal)
         case 'question.answer': return this.interactions.answerQuestion(command.session_id, command.payload.question_id, {
           answers: command.payload.answers.map(item => ({ id: item.id, selected: item.selected, ...(item.custom === undefined ? {} : { custom: item.custom }) })),
         })
@@ -85,7 +88,7 @@ export class ProbeRuntime {
             provider: command.payload.provider,
             model: command.payload.model,
             ...(command.payload.reasoning_effort === undefined ? {} : { reasoning_effort: command.payload.reasoning_effort }),
-          })
+          }, signal)
         }
         case 'message.submit': {
           const id = await this.client.resolve(command.session_id, signal)
@@ -207,13 +210,21 @@ export class ProbeRuntime {
 
   follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal) {
     this.check(command)
-    return this.sync.follow(command, signal)
+    return this.sync.follow(command, AbortSignal.any([signal, this.lifetime.signal]))
   }
 
   claimQuestion(sessionId: string, questionId: string, signal: AbortSignal) {
     if (this.closed) throw new ProbeError('runtime.offline')
-    return this.interactions.timed.claim(sessionId, questionId, signal)
+    return this.interactions.timed.claim(sessionId, questionId, AbortSignal.any([signal, this.lifetime.signal]))
   }
 
-  close(): void { this.closed = true; void this.exports.close(); this.files.close(); this.interactions.close() }
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.lifetime.abort()
+    // The plugin's asynchronous teardown separately awaits export cleanup.
+    void this.exports.close().catch(() => {})
+    this.files.close()
+    this.interactions.close()
+  }
 }

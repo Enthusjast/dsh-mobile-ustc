@@ -63,13 +63,16 @@ export class DshClient {
   creationOptions() { return configuredCreationOptions(this.workspaces, this.presets) }
 
   async list(signal: AbortSignal) {
+    signal.throwIfAborted()
     const { items } = await this.controller.list({}, signal)
+    signal.throwIfAborted()
     const allowed = items.filter(item => item.cwd !== undefined && this.workspaces.some(w => w.cwd === item.cwd))
     // Child sessions require a verified parent address and cannot be independently taken over.
     const roots = []
     const ids = new Map<string, string>()
     for (const item of allowed) {
       const inspection = await this.controller.inspect(item.sessionId, signal)
+      signal.throwIfAborted()
       if (inspection.meta.parentSession !== undefined || inspection.meta.origin === 'subagent') continue
       const id = mobileSessionId(this.runtimeId, item.sessionId)
       ids.set(id, item.sessionId)
@@ -180,6 +183,7 @@ export class DshClient {
   async resolve(id: string, signal: AbortSignal): Promise<SessionId> {
     // Refresh every operation so a prior list cannot keep a removed resource accessible.
     await this.list(signal)
+    signal.throwIfAborted()
     const nativeId = this.ids.get(id)
     if (nativeId === undefined) throw new ProbeError('session.not_found')
     return SessionId(nativeId)
@@ -279,10 +283,11 @@ export class DshClient {
     return sessionAttachmentSource(this.ctx, event, index, signal, guard)
   }
 
-  async create(workspace: string, preset: string) {
+  async create(workspace: string, preset: string, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const allowed = this.workspaces.find(item => item.id === workspace)
     if (allowed === undefined || !this.presets.includes(preset)) throw new ProbeError('access.denied')
-    const result = await this.observations.measure('create', () => this.controller.create({ cwd: allowed.cwd, agentPreset: preset }))
+    const result = await this.observations.measure('create', () => this.controller.create({ cwd: allowed.cwd, agentPreset: preset }), undefined, signal)
     const id = SessionId(result.sessionId)
     const mobile = mobileSessionId(this.runtimeId, result.sessionId)
     this.ids.set(mobile, String(id))
@@ -293,7 +298,7 @@ export class DshClient {
     const matches = this.workspaces.filter(item => item.remoteId === workspaceId)
     if (matches.length !== 1) throw new ProbeError('access.denied')
     signal.throwIfAborted()
-    const result = await this.create(matches[0]!.id, preset)
+    const result = await this.create(matches[0]!.id, preset, signal)
     if (result.checkpoint.state !== 'persisted') return result
     const nativeId = this.ids.get(result.session_id)
     if (!nativeId) throw new ProbeError('session.not_found')
@@ -303,8 +308,10 @@ export class DshClient {
     return { ...result, catalog_item: item }
   }
 
-  async modelCatalog() {
+  async modelCatalog(signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const catalog = await this.controller.modelCatalog()
+    signal?.throwIfAborted()
     return {
       default: catalog.default,
       groups: catalog.groups.map(group => ({
@@ -318,9 +325,12 @@ export class DshClient {
     }
   }
 
-  async selectModel(id: SessionId, selection: { provider: string; model: string; reasoning_effort?: string }) {
+  async selectModel(id: SessionId, selection: { provider: string; model: string; reasoning_effort?: string }, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     this.requireUnarchived(id)
     const catalog = await this.controller.modelCatalog()
+    signal?.throwIfAborted()
+    this.requireUnarchived(id)
     const model = catalog.groups.find(group => group.id === selection.provider)?.models.find(item => item.id === selection.model)
     if (model === undefined || (selection.reasoning_effort !== undefined
       && !model.reasoning?.efforts.some(item => item.id === selection.reasoning_effort))) throw new ProbeError('model.not_available')
@@ -337,6 +347,7 @@ export class DshClient {
     content: string | readonly DshPromptPart[],
     signal: AbortSignal,
   ) {
+    signal.throwIfAborted()
     this.requireUnarchived(id)
     // Native requestId is namespaced away from other desktop/remote input channels.
     const blocks = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : content
@@ -368,7 +379,10 @@ export class DshClient {
     return { native_accepted: true, checkpoint }
   }
 
-  cancel(id: SessionId) { return this.controller.cancel({ sessionId: id }) }
+  cancel(id: SessionId, signal?: AbortSignal) {
+    signal?.throwIfAborted()
+    return this.controller.cancel({ sessionId: id })
+  }
 
   async uploadFile(sessionId: string, manifest: FileManifest, source: AsyncIterable<Uint8Array>, signal: AbortSignal) {
     try {
@@ -394,7 +408,8 @@ export class DshClient {
     if (this.isArchived(id)) throw new ProbeError('session.archived')
   }
 
-  async archive(id: SessionId, archived: boolean, stopActivity: boolean) {
+  async archive(id: SessionId, archived: boolean, stopActivity: boolean, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     if (!archived && stopActivity) throw new ProbeError('protocol.invalid')
     try {
       // The running DSH can load its own copy of the workspace package.
@@ -403,8 +418,10 @@ export class DshClient {
       // without classifying arbitrary post-write errors by their shape.
       if (archived && !stopActivity && !this.isArchived(id)) {
         const activity = await this.ctx.waterfall('workspace/session-activity', { sessionId: id }, () => Promise.resolve([]))
+        signal?.throwIfAborted()
         if (activity.length > 0) throw new ProbeError('session.active')
       }
+      signal?.throwIfAborted()
       if (archived) await this.ctx.workspaceRegistry.archiveSession(id, { stopActivity })
       else await this.ctx.workspaceRegistry.unarchiveSession(id)
     } catch (error) {
