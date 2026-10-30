@@ -34,6 +34,7 @@ type Repository interface {
 	CurrentDevice(context.Context, store.UserIdentity, string) (store.CurrentDevice, error)
 	ListDevices(context.Context, store.UserIdentity, string, string, int, string) (store.DeviceDirectory, error)
 	ListInstallations(context.Context, store.UserIdentity, string, string, int, string) (store.InstallationDirectory, error)
+	ListRuntimeGrants(context.Context, store.UserIdentity, string, string, string, int, string) (store.RuntimeGrantDirectory, error)
 	RevokeInstallation(context.Context, store.UserIdentity, string, string, string) error
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
 	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
@@ -204,6 +205,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}", api.protected(http.HandlerFunc(api.sessionTarget)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}/question-answers/{request_id}", api.protected(http.HandlerFunc(api.questionAnswerStatus)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}/read-access", api.protected(http.HandlerFunc(api.sessionReadAccess)))
+	mux.Handle("GET /v1/runtimes/{id}/grants", api.protected(http.HandlerFunc(api.listRuntimeGrants)))
 	mux.Handle("PUT /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.putRuntimeGrant)))
 	mux.Handle("DELETE /v1/runtimes/{id}/grants/{user_id}", api.protected(http.HandlerFunc(api.revokeRuntimeGrant)))
 	mux.Handle("POST /v1/realtime/tickets", api.protected(http.HandlerFunc(api.issueRealtimeTicket)))
@@ -835,6 +837,8 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrDeviceDirectoryInvalid):
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 	case errors.Is(err, store.ErrInstallationManagementInvalid):
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+	case errors.Is(err, store.ErrGrantDirectoryInvalid):
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrGrantNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")

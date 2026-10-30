@@ -1,5 +1,7 @@
 # Remote service foundation
 
+Current organization admins and runtime owners with `grant.manage` can inspect the [runtime grant directory](../../docs/runtime-grant-directory.md) through bounded phone-authenticated pages. Every page rechecks the current account, device, membership, profile and management authority; expired/revoked records remain visible only to an eligible manager. The directory uses the existing grant primary key and requires no new migration.
+
 Registered phones can [discover and revoke installations](../../docs/installation-management.md) through current installation-owner or organization-admin authority. Revocation retires all profiles/credentials of that installation, publishes durable runtime invalidations, and preserves other installations on the same host. Apply migration 034 before enabling this entry.
 
 The [own-device directory](../../docs/device-directory.md) exposes bounded, current-key-authorized metadata through `GET /v1/devices`, independently of runtime grants. It supports finding another owned device before using the existing transactional revocation endpoint; migration 033 adds its paging index.

@@ -343,6 +343,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   deviceValidator.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   const validateDevices = deviceValidator.compile({ $ref: '#/components/schemas/DeviceDirectoryResponse', components: deviceContract.components })
   const validateInstallations = deviceValidator.compile({ $ref: '#/components/schemas/InstallationDirectoryResponse', components: deviceContract.components })
+  const validateGrants = deviceValidator.compile({ $ref: '#/components/schemas/RuntimeGrantDirectoryResponse', components: deviceContract.components })
   assert.deepEqual((await ownerPhone('GET', '/v1/installations')).items, [])
   await owner('GET', '/v1/installations', undefined, 403)
   const listedDevices: Array<{ device_id: string; state: string; is_current: boolean }> = []
@@ -549,6 +550,20 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(manageable.items[0].owner_user_id, ownerId); assert.equal(manageable.items[0].state, 'active')
   assert.deepEqual((await phone('GET', '/v1/installations')).items, [])
   await phone('DELETE', `/v1/installations/${listedInstallationId}`, undefined, 403)
+  const grantPath = `/v1/runtimes/${enrollment.runtime_id}/grants`
+  const runtimeGrants: Array<{ user_id: string; role: string; state: string; scope: { actions: string[] } }> = []
+  let grantPage = await ownerPhone('GET', `${grantPath}?limit=1`)
+  for (;;) {
+    assert.equal(validateGrants({ ok: true, data: grantPage }), true, JSON.stringify(validateGrants.errors))
+    assert.equal(grantPage.runtime_id, enrollment.runtime_id)
+    runtimeGrants.push(...grantPage.items)
+    if (grantPage.next_cursor === null) break
+    grantPage = await ownerPhone('GET', `${grantPath}?limit=1&cursor=${encodeURIComponent(grantPage.next_cursor)}`)
+  }
+  assert.deepEqual(runtimeGrants.map(item => item.user_id).sort(), [ownerId, phoneUserId].sort())
+  assert.ok(runtimeGrants.every(item => item.role === 'owner' && item.state === 'active' && item.scope.actions.includes('grant.manage')))
+  await owner('GET', grantPath, undefined, 403)
+  await outsider('GET', grantPath, undefined, 403)
   const credentialOptions: HostRestCredentialOptions = { origin, identity: hostIdentity, installationId: persistedInstallationId,
     publicJwk: installationKey.jwk as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
     signer: hostSigner,
@@ -1236,6 +1251,11 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
   t.diagnostic('Normal Host runtime question metadata reached PostgreSQL without a timed-session phone subscription; fresh resubscription found the same continued native question and admitted one late answer. Full database dump excluded question and answer bodies.')
+  const grantsAfterRevocation = await ownerPhone('GET', grantPath)
+  assert.equal(validateGrants({ ok: true, data: grantsAfterRevocation }), true, JSON.stringify(validateGrants.errors))
+  assert.equal(grantsAfterRevocation.items.find((item: any) => item.user_id === phoneUserId)?.state, 'revoked')
+  await phone('GET', grantPath, undefined, 403)
+  t.diagnostic('The current owner phone paged the runtime grant directory; its full owner scope matched the contract. Host/outsider clients were denied, revocation remained discoverable to the surviving owner and removed the revoked manager from directory access.')
   t.diagnostic('The normal plugin negotiated signed approval: current Bash context, invalid-proof nonconsumption, phone allow/reject/cancel, one actual execution, duplicate decision reconciliation and durable native result reporting passed through the real Go service.')
   // Both management paths must retire a credential that is still within its TTL.
   const cachedDigest = createHash('sha256').update(replayCredentialSecret).digest('hex')

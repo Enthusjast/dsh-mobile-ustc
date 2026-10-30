@@ -446,6 +446,59 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		}
 		repo.deviceDirectoryErr = nil
 	})
+	t.Run("runtime grant directory binds the current manager phone and target", func(t *testing.T) {
+		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
+		repo.activeDeviceErr = nil
+		repo.grantDirectory = store.RuntimeGrantDirectory{RuntimeID: "55555555-5555-4555-8555-555555555555", Items: []store.RuntimeGrantSummary{{UserID: "22222222-2222-4222-8222-222222222222", Role: "owner", Version: 1, State: "active"}}}
+		nonce := ""
+		sequence := 0
+		send := func(token, path string, body ...any) *httptest.ResponseRecorder {
+			sequence++
+			uri := "https://api.example.edu/v1/runtimes/55555555-5555-4555-8555-555555555555/grants" + path
+			response := sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("grant-directory-proof-%04d", sequence), nonce, body...)
+			nonce = response.Header().Get("DPoP-Nonce")
+			if response.Code == 401 {
+				sequence++
+				response = sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("grant-directory-proof-%04d", sequence), nonce, body...)
+				nonce = response.Header().Get("DPoP-Nonce")
+			}
+			return response
+		}
+		response := send(access, "?limit=2&cursor=opaque")
+		if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || repo.grantDirectoryIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.grantDirectoryDevice != deviceID || repo.grantDirectoryJKT != proofJKT || repo.grantDirectoryRuntime != "55555555-5555-4555-8555-555555555555" || repo.grantDirectoryLimit != 2 || repo.grantDirectoryCursor != "opaque" {
+			t.Fatal("directory lost its authenticated caller", response.Code)
+		}
+		if response := send(access, ""); response.Code != 200 || repo.grantDirectoryLimit != 50 || repo.grantDirectoryCursor != "" {
+			t.Fatal("default paging failed", response.Code)
+		}
+		before := repo.grantDirectoryCalls
+		if response := send(access, "", map[string]string{"user_id": "attacker"}); response.Code != 400 || repo.grantDirectoryCalls != before {
+			t.Fatal("GET body reached directory repository", response.Code)
+		}
+		for _, query := range []string{"?user_id=attacker", "?device_id=attacker", "?limit=0", "?limit=101", "?limit=01", "?limit=2&limit=3", "?cursor=", "?x=%zz"} {
+			if response := send(access, query); response.Code != 400 || repo.grantDirectoryCalls != before {
+				t.Fatal("invalid directory selectors reached repository", response.Code)
+			}
+		}
+		if response := send(hostAccess, ""); response.Code != 403 || repo.grantDirectoryCalls != before {
+			t.Fatal("host client enumerated runtime grants", response.Code)
+		}
+		repo.activeDeviceErr = store.ErrDeviceNotFound
+		if response := send(access, ""); response.Code != 403 || repo.grantDirectoryCalls != before {
+			t.Fatal("unregistered or revoked key enumerated devices", response.Code)
+		}
+		repo.activeDeviceErr = nil
+		for _, failure := range []struct {
+			err    error
+			status int
+		}{{store.ErrAccessDenied, 403}, {store.ErrGrantDirectoryInvalid, 400}, {store.ErrDatabaseUnavailable, 503}} {
+			repo.grantDirectoryErr = failure.err
+			if response := send(access, ""); response.Code != failure.status || strings.Contains(response.Body.String(), "grant_version") {
+				t.Fatal("directory failure disclosed records", response.Code)
+			}
+		}
+		repo.grantDirectoryErr = nil
+	})
 	t.Run("installation management derives its current phone and rejects selectors", func(t *testing.T) {
 		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
 		repo.activeDeviceErr = nil

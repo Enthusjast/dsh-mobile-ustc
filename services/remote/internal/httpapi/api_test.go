@@ -14,6 +14,15 @@ import (
 )
 
 type fakeRepository struct {
+	grantDirectory          store.RuntimeGrantDirectory
+	grantDirectoryErr       error
+	grantDirectoryCalls     int
+	grantDirectoryIdentity  store.UserIdentity
+	grantDirectoryDevice    string
+	grantDirectoryJKT       string
+	grantDirectoryRuntime   string
+	grantDirectoryLimit     int
+	grantDirectoryCursor    string
 	readyError              error
 	account                 store.AccountIdentity
 	accountErr              error
@@ -131,6 +140,13 @@ func (fake *fakeRepository) ListDevices(_ context.Context, identity store.UserId
 	fake.deviceDirectoryLimit = limit
 	fake.deviceDirectoryCursor = cursor
 	return fake.deviceDirectory, fake.deviceDirectoryErr
+}
+
+func (fake *fakeRepository) ListRuntimeGrants(_ context.Context, identity store.UserIdentity, deviceID, jkt, runtimeID string, limit int, cursor string) (store.RuntimeGrantDirectory, error) {
+	fake.grantDirectoryCalls++
+	fake.grantDirectoryIdentity, fake.grantDirectoryDevice, fake.grantDirectoryJKT = identity, deviceID, jkt
+	fake.grantDirectoryRuntime, fake.grantDirectoryLimit, fake.grantDirectoryCursor = runtimeID, limit, cursor
+	return fake.grantDirectory, fake.grantDirectoryErr
 }
 
 func (fake *fakeRepository) ListInstallations(_ context.Context, identity store.UserIdentity, deviceID, jkt string, limit int, cursor string) (store.InstallationDirectory, error) {
