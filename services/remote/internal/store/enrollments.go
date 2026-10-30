@@ -330,7 +330,7 @@ func (postgres *Postgres) CreateEnrollment(ctx context.Context, input Enrollment
 	}
 	var runtimeAlreadyExists bool
 	if err := transaction.QueryRowContext(ctx, `
-		select exists(select 1 from runtimes where installation_id = $1 and profile_ref = $2)`,
+		select exists(select 1 from runtimes where installation_id = $1 and profile_ref = $2 and revoked_at is null)`,
 		installationID, input.ProfileRef).Scan(&runtimeAlreadyExists); err != nil {
 		return EnrollmentCreated{}, ErrDatabaseUnavailable
 	}

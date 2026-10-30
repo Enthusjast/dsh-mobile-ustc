@@ -1359,6 +1359,27 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.equal(validateInstallationRuntimes({ ok: true, data: retiredProfiles }), true, JSON.stringify(validateInstallationRuntimes.errors))
   assert.equal(retiredProfiles.items.find((item: any) => item.runtime_id === profileReceipt.details.runtime_id)?.state, 'revoked')
   assert.equal(retiredProfiles.items.find((item: any) => item.runtime_id === enrollment.runtime_id)?.state, 'active')
+  // The same local profile name can be bound again, but only with a new request,
+  // new runtime identity and fresh confirmations. Historical UUIDs stay retired.
+  const replacementAttempt = enrollmentClient.prepare({ organizationId: orgId, hostId: enrollment.host_id, alias: 'DSH integration',
+    profileRef: 'retirement-fixture', dshVersion: '0.2.1-rc.2', applicationVersion: 'fixture', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: [] })
+  t.after(() => replacementAttempt.destroy())
+  const replacementReceipt = await enrollmentClient.create(replacementAttempt, AbortSignal.timeout(5000))
+  assert.equal(replacementReceipt.details.installation_id, listedInstallationId)
+  assert.notEqual(replacementReceipt.details.runtime_id, profileReceipt.details.runtime_id)
+  assert.equal(replacementReceipt.details.state, 'pending')
+  assert.equal(query(`select count(*) from runtime_grants where runtime_id='${replacementReceipt.details.runtime_id}'`), '0')
+  assert.equal((await ownerPhone('GET', installationRuntimePath)).items.find((item: any) => item.runtime_id === replacementReceipt.details.runtime_id)?.state, 'pending')
+  assert.equal((await ownerPhone('GET', '/v1/runtimes')).items.some((item: any) => item.id === replacementReceipt.details.runtime_id), false)
+  await ownerPhone('POST', `/v1/enrollments/${replacementReceipt.details.enrollment_id}/confirm`, { code: replacementAttempt.code })
+  await enrollmentClient.confirm(replacementAttempt, replacementReceipt, review => review.confirmed_user?.user_id === ownerId, AbortSignal.timeout(5000))
+  assert.deepEqual(await ownerPhone('DELETE', retireProfilePath), { revoked: true })
+  const replacedProfiles = await ownerPhone('GET', installationRuntimePath)
+  assert.equal(validateInstallationRuntimes({ ok: true, data: replacedProfiles }), true, JSON.stringify(validateInstallationRuntimes.errors))
+  assert.equal(replacedProfiles.items.find((item: any) => item.runtime_id === profileReceipt.details.runtime_id)?.state, 'revoked')
+  assert.equal(replacedProfiles.items.find((item: any) => item.runtime_id === replacementReceipt.details.runtime_id)?.state, 'active')
+  assert.equal((await ownerPhone('GET', '/v1/runtimes')).items.some((item: any) => item.id === replacementReceipt.details.runtime_id), true)
+  assert.equal(query(`select count(*) from runtime_grants where runtime_id='${profileReceipt.details.runtime_id}' and revoked_at is null`), '0')
   assert.equal(query(`select revoked_at is null from installations where id='${listedInstallationId}'`), 't')
   assert.equal(query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`), nativeConnectionBefore)
   const ownerReader = await connectPhone(ownerPhone, ownerDevice.device_id, ownerPhoneKey)
@@ -1366,6 +1387,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   ownerReader.send({ v: 1, type: 'session.subscribe', request_id: ownerReadRequest, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 5 } })
   await ownerReader.wait(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
   t.diagnostic('The installation owner paged both profiles and retired the fixture sibling through the scoped API. Exact retry wrote one audit, every relay acknowledged, and the same real DSH Host connection served a new owner-phone native snapshot afterward. The shared installation and primary profile stayed active.')
+  t.diagnostic('The retired fixture profile name was enrolled again under the same installation with a fresh runtime UUID and no inherited grants. Both confirmations activated the replacement; a delayed DELETE for the historical UUID left it active and preserved the primary real DSH connection.')
   if (process.env.REMOTE_TEST_DATABASE_OUTAGE === '1') {
     try {
       assert.ok(crossNode && phoneService, 'database outage requires two owned relay processes')
