@@ -1,5 +1,7 @@
 # Remote service foundation
 
+Pending enrollment confirmations [recheck their pairing deadline after database waits](../../docs/enrollment-expiry.md), including initial grant/audit writes before commit. Expired attempts cannot activate a profile or retain success evidence; approved historical retries remain available. No migration is required.
+
 After migration 036, an active installation can [enroll a retired profile name again](../../docs/installation-profile-management.md#撤销后重新登记) with new runtime/workspace UUIDs and fresh dual confirmation. Historical authority stays revoked; unrevoked names remain reserved. Schema rollback refuses historical duplicates without deleting records.
 
 Realtime ticket admission [rechecks grant/ticket expiry after transaction waits](../../docs/realtime-ticket-expiry.md), including the audit-to-commit boundary. Expired attempts roll back issuance/consumption and success audits. Established sockets keep their separate negotiated lifetime while current grant expiry is still enforced. No schema migration is required.

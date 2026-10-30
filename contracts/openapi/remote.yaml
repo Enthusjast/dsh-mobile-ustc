@@ -281,7 +281,7 @@ paths:
             schema: { $ref: '#/components/schemas/EnrollmentCodeRequest' }
       responses:
         '200':
-          description: Phone user confirmation; the enrollment stays pending until the host owner confirms with the installation key.
+          description: Phone user confirmation; the enrollment stays pending until the host owner confirms with the installation key. Pending confirmations recheck pairing expiry after authority locks and before commit; late attempts cannot retain confirmation or success evidence. Approved historical retries do not renew or reuse the pairing deadline.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:
@@ -293,7 +293,7 @@ paths:
         '503': { $ref: '#/components/responses/Error' }
   /v1/enrollments/{id}/host-confirm:
     post:
-      description: Host-client-only local confirmation after phone confirmation. The DPoP key must match the installation, and confirmed_user_id must match the identity reviewed by the host.
+      description: Host-client-only local confirmation after phone confirmation. The DPoP key must match the installation, and confirmed_user_id must match the identity reviewed by the host. Pending confirmations recheck pairing expiry after authority locks and phone-key validation, and again after initial grant/audit writes before commit. Expired attempts roll back all new confirmation authority; approved historical retries remain reconciliation only.
       parameters:
         - $ref: '#/components/parameters/UUID'
       requestBody:

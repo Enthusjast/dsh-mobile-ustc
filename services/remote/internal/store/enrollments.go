@@ -130,7 +130,6 @@ type enrollmentRow struct {
 	State                         string
 	CodeHash                      []byte
 	ExpiresAt                     time.Time
-	Expired                       bool
 	UserConfirmedBy               sql.NullString
 	UserConfirmedAt               sql.NullTime
 	UserConfirmedDeviceID         sql.NullString
@@ -571,7 +570,11 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 	if row.State == "denied" || row.State == "cancelled" || row.State == "expired" {
 		return EnrollmentConfirmation{}, ErrEnrollmentInvalid
 	}
-	if row.Expired {
+	err = checkPendingEnrollmentDeadline(ctx, transaction, row.ExpiresAt)
+	if err != nil && !errors.Is(err, ErrEnrollmentInvalid) {
+		return EnrollmentConfirmation{}, err
+	}
+	if errors.Is(err, ErrEnrollmentInvalid) {
 		if _, err := transaction.ExecContext(ctx, `update enrollments set state = 'expired' where id = $1`, row.ID); err != nil {
 			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 		}
@@ -631,6 +634,10 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 		if err != nil {
 			return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 		}
+	}
+	// The confirming phone's key lock above can also outlast the pairing code.
+	if err := checkPendingEnrollmentDeadline(ctx, transaction, row.ExpiresAt); err != nil {
+		return EnrollmentConfirmation{}, err
 	}
 	changed := false
 	if hostConfirmation && !row.HostConfirmedAt.Valid {
@@ -754,6 +761,11 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 			}
 		}
 	}
+	// Audit, outbox and initial grant writes may wait too. Expiry rolls all of
+	// them back rather than committing authority from an expired pairing code.
+	if err := checkPendingEnrollmentDeadline(ctx, transaction, row.ExpiresAt); err != nil {
+		return EnrollmentConfirmation{}, err
+	}
 	if err := transaction.Commit(); err != nil {
 		return EnrollmentConfirmation{}, ErrDatabaseUnavailable
 	}
@@ -761,11 +773,25 @@ func (postgres *Postgres) confirmEnrollment(ctx context.Context, identity UserId
 	return enrollmentConfirmation(row), nil
 }
 
+// Call only for a pending confirmation after locking its authoritative rows.
+// A projection computed by the locking SELECT can be evaluated before its wait.
+// Approved historical retries use their independent current-authority checks.
+func checkPendingEnrollmentDeadline(ctx context.Context, transaction *sql.Tx, expires time.Time) error {
+	var expired bool
+	if err := transaction.QueryRowContext(ctx, `select $1::timestamptz <= clock_timestamp()`, expires).Scan(&expired); err != nil {
+		return ErrDatabaseUnavailable
+	}
+	if expired {
+		return ErrEnrollmentInvalid
+	}
+	return nil
+}
+
 func loadEnrollmentForUpdate(ctx context.Context, transaction *sql.Tx, enrollmentID string) (enrollmentRow, error) {
 	var row enrollmentRow
 	err := transaction.QueryRowContext(ctx, `
 		select e.id::text, e.host_id::text, e.installation_id::text, e.runtime_id::text,
-		       e.requested_by::text, h.org_id::text, e.state, e.code_hash, e.expires_at <= clock_timestamp(),
+		       e.requested_by::text, h.org_id::text, e.state, e.code_hash,
 	       e.expires_at, e.user_confirmed_by::text, e.user_confirmed_at, e.user_confirmed_device_id::text, e.user_confirmed_device_key_version, e.host_confirmed_at,
 	       h.state, i.revoked_at, r.revoked_at, i.owner_user_id::text, i.public_key_thumbprint
 		from enrollments e
@@ -775,7 +801,7 @@ func loadEnrollmentForUpdate(ctx context.Context, transaction *sql.Tx, enrollmen
 		where e.id = $1
 		for update of e, h, i, r`, enrollmentID).Scan(
 		&row.ID, &row.HostID, &row.InstallationID, &row.RuntimeID, &row.RequestedBy, &row.OrgID,
-		&row.State, &row.CodeHash, &row.Expired, &row.ExpiresAt, &row.UserConfirmedBy,
+		&row.State, &row.CodeHash, &row.ExpiresAt, &row.UserConfirmedBy,
 		&row.UserConfirmedAt, &row.UserConfirmedDeviceID, &row.UserConfirmedDeviceKeyVersion, &row.HostConfirmedAt,
 		&row.HostState, &row.InstallationRevoked, &row.RuntimeRevoked, &row.InstallationOwnerID, &row.InstallationKeyJKT)
 	return row, err
