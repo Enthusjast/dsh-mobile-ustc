@@ -48,7 +48,7 @@ class ChatReadingTest {
 
     @Test fun incomingMessagesDoNotInterruptHistoryAndLatestButtonReturnsToBottom() {
         val current = mutableStateOf(state(transcript(0, 40)))
-        rule.setContent { DshTheme { SessionsScreen(current.value, {}, {}, {}, {}, {}) } }
+        rule.setContent { DshTheme { SessionsScreen(current.value, {}, {}, {}, {}) } }
         val image = rule.onRoot().captureToImage().asAndroidBitmap()
         val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.filesDir, "ui-navigation-fixtures").apply { mkdirs() }
         File(directory, "chat-reading.png").outputStream().use { check(image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) }
@@ -73,7 +73,7 @@ class ChatReadingTest {
 
     @Test fun earlierRecordsDoNotMoveTheCurrentMessageAnchor() {
         val current = mutableStateOf(state(transcript(20, 40)))
-        rule.setContent { DshTheme { SessionsScreen(current.value, {}, {}, {}, {}, {}) } }
+        rule.setContent { DshTheme { SessionsScreen(current.value, {}, {}, {}, {}) } }
         rule.onNodeWithTag("chat-list").performScrollToNode(hasText("message 25"))
         rule.onNodeWithText("message 25").assertIsDisplayed()
         rule.runOnIdle { current.value = state(transcript(0, 40)) }

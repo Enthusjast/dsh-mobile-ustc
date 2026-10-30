@@ -113,13 +113,22 @@ private fun QuestionForm(view: PresentedQuestion, canAnswer: Boolean, submitting
     }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-            Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    QuestionKindLabel(batch)
-                    TextButton(onClose, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.question_close)) }
-                }
+            Column(Modifier.fillMaxSize()) {
+                cn.edu.ustc.dsh.ui.DshTopBar(
+                    title = stringResource(when {
+                        plan -> R.string.question_kind_plan
+                        batch.kind == QuestionKind.TIMED -> R.string.question_kind_timed
+                        else -> R.string.question_kind_ordinary
+                    }),
+                    subtitle = if (batch.kind == QuestionKind.TIMED && plan) stringResource(R.string.question_kind_timed) else null,
+                    navigationIcon = { IconButton(onClose, Modifier.heightIn(min = 48.dp)) {
+                        Icon(androidx.compose.ui.res.painterResource(R.drawable.ic_back), stringResource(R.string.question_close))
+                    } },
+                )
                 HorizontalDivider()
-                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
+                Column(Modifier.weight(1f).fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
+                    .imePadding().verticalScroll(rememberScrollState()).padding(cn.edu.ustc.dsh.ui.DshSpacing.page),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (plan) Text(stringResource(R.string.question_plan_not_approval), style = MaterialTheme.typography.bodyMedium)
                     QuestionStatus(view)

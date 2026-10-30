@@ -8,4 +8,6 @@
     <string name="directory_recent">最近访问</string>
     <string name="directory_recent_scope">仅记录本次使用中已打开的会话；入口以当前运行环境的目录和读取授权重新核对。</string>
     <string name="directory_organization">组织 %1$s</string>
+    <string name="directory_scope_short">当前电脑 · 授权范围内</string>
+    <string name="directory_scope_help">范围说明</string>
 </resources>

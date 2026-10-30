@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
@@ -18,14 +19,17 @@ internal fun AppUpdatesScreen(state: AppUpdateUiState, check: () -> Unit, downlo
     var confirmCleanup by remember(state.viewId) { mutableStateOf<String?>(null) }
     LaunchedEffect(state.cleanupToken, state.canCleanup) { if (!state.canCleanup || confirmCleanup != state.cleanupToken) confirmCleanup = null }
     val enabled = !state.busy && !state.launchPending
-    Scaffold { insets ->
+    Scaffold(topBar = {
+        cn.edu.ustc.dsh.ui.DshTopBar(
+            title = stringResource(R.string.settings_updates),
+            subtitle = if (state.installedVersion == null) stringResource(R.string.flow_update_version_unknown, BuildConfig.VERSION_NAME) else stringResource(R.string.flow_update_current_version, BuildConfig.VERSION_NAME, state.installedVersion.toString()),
+            navigationIcon = { IconButton(back, Modifier.heightIn(min = 48.dp)) {
+                Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_update_back))
+            } },
+        )
+    }) { insets ->
         Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
-            LazyColumn(Modifier.widthIn(max = 600.dp).fillMaxWidth(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                item("heading") {
-                    TextButton(back, Modifier.heightIn(min = 48.dp)) { Text("返回") }
-                    Text("应用更新", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
-                    Text(if (state.installedVersion == null) stringResource(R.string.flow_update_version_unknown, BuildConfig.VERSION_NAME) else "当前版本 ${BuildConfig.VERSION_NAME}（${state.installedVersion}）", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+            LazyColumn(Modifier.widthIn(max = 720.dp).fillMaxWidth(), contentPadding = PaddingValues(cn.edu.ustc.dsh.ui.DshSpacing.page), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 item("stage") {
                     Text(stringResource(when (state.phase) {
                         AppUpdatePhase.AVAILABLE, AppUpdatePhase.DOWNLOADING, AppUpdatePhase.VERIFYING, AppUpdatePhase.REPREPARE -> R.string.flow_update_step_prepare

@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
@@ -27,12 +28,17 @@ internal fun NotificationsScreen(state: NotificationUiState, refresh: () -> Unit
     inbox: () -> Unit, more: () -> Unit, open: (String, String?) -> Unit, back: () -> Unit) {
     val context = LocalContext.current
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
-    Scaffold { insets ->
+    Scaffold(topBar = {
+        cn.edu.ustc.dsh.ui.DshTopBar(
+            title = stringResource(R.string.settings_notifications),
+            navigationIcon = { IconButton(back, Modifier.heightIn(min = 48.dp)) {
+                Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_notifications_back))
+            } },
+        )
+    }) { insets ->
     Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
-    LazyColumn(Modifier.widthIn(max = 600.dp).fillMaxWidth().padding(horizontal = 20.dp), contentPadding = PaddingValues(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyColumn(Modifier.widthIn(max = 720.dp).fillMaxWidth().padding(horizontal = cn.edu.ustc.dsh.ui.DshSpacing.page), contentPadding = PaddingValues(vertical = cn.edu.ustc.dsh.ui.DshSpacing.page), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item("heading") {
-            TextButton(back, Modifier.heightIn(min = 48.dp)) { Text("返回") }
-            Text("通知与待核对提醒", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
             Text("默认隐藏正文、参数和主机别名。打开提醒后重新核对当前状态。")
             Text(stringResource(R.string.flow_notifications_foreground), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

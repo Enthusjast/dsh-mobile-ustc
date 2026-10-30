@@ -53,4 +53,12 @@
     <string name="flow_update_version_unknown">当前版本 %1$s（版本编号尚未核验）</string>
     <string name="flow_update_not_installed">下载完成或安装包校验通过，都不等于更新已安装。只有核对实际安装版本后才能确认结果。</string>
     <string name="flow_update_no_notes">此发行未提供更新说明。</string>
+    <string name="flow_binding_title">绑定电脑</string>
+    <string name="flow_binding_account">当前账号：%1$s</string>
+    <string name="flow_binding_back">返回电脑列表</string>
+    <string name="flow_creation_title">创建会话</string>
+    <string name="flow_creation_back">返回会话目录</string>
+    <string name="flow_notifications_back">返回设置</string>
+    <string name="flow_update_back">返回设置</string>
+    <string name="flow_update_current_version">当前版本 %1$s（%2$s）</string>
 </resources>

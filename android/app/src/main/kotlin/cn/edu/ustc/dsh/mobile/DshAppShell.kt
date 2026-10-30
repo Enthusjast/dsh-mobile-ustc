@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
@@ -197,6 +198,7 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
     val recent = if (query.isEmpty()) navigation.recentSession(state, rows) else null
     var searchOpen by remember(navigation.directoryRuntimeId) { mutableStateOf(navigation.directoryQuery.isNotEmpty()) }
     var choosingComputer by remember { mutableStateOf(false) }
+    var explainingScope by remember { mutableStateOf(false) }
     val searchAvailable = runtime != null && !state.loadingSessions && state.sessionError == null
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -222,7 +224,13 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
                     }
                     ShellIcon(R.drawable.ic_chevron)
                 }
-                Text(stringResource(R.string.session_scope), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.directory_scope_short), Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton({ explainingScope = true }, Modifier.heightIn(min = 48.dp)) {
+                        Text(stringResource(R.string.directory_scope_help))
+                    }
+                }
                 if (!searchOpen || !searchAvailable) TextButton({ searchOpen = true }, enabled = searchAvailable, modifier = Modifier.heightIn(min = 48.dp).testTag("directory-open-search")) {
                     Text(stringResource(R.string.directory_search_label))
                 }
@@ -275,8 +283,6 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
                     }
                     ShellIcon(R.drawable.ic_chevron)
                 }
-                Text(stringResource(R.string.directory_recent_scope), style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             items(matches, key = { it.id }) { session ->
                 SessionListItem(session, stableLabel(session.id, rows) { it.id }, runtime.access?.let(session::viewScope) != null) {
@@ -287,6 +293,18 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
             }
         }
     }
+    if (explainingScope) AlertDialog(
+        onDismissRequest = { explainingScope = false },
+        title = { Text(stringResource(R.string.directory_scope_help)) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(stringResource(R.string.session_scope))
+                Text(stringResource(R.string.directory_search_scope))
+                Text(stringResource(R.string.directory_recent_scope))
+            }
+        },
+        confirmButton = { TextButton({ explainingScope = false }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.action_close)) } },
+    )
     if (choosingComputer) AlertDialog(
         onDismissRequest = { choosingComputer = false },
         title = { Text(stringResource(R.string.session_select_computer)) },
@@ -320,14 +338,25 @@ private fun SessionListItem(session: SessionDirectoryEntry, label: String, canRe
         headlineContent = { Text(stringResource(R.string.session_short_title, label)) },
         supportingContent = {
             Column(verticalArrangement = Arrangement.spacedBy(DshSpacing.extraSmall)) {
-                Text(stringResource(when (session.state) {
-                    "running" -> R.string.session_running
-                    "archived" -> R.string.session_archived
-                    "unavailable" -> R.string.session_unavailable
-                    else -> R.string.session_available
-                }))
-                session.workspaceId?.let { Text(stringResource(R.string.session_workspace, "${it.take(8)}…${it.takeLast(4)}")) }
-                Text(stringResource(R.string.session_updated, updated), style = MaterialTheme.typography.bodyMedium)
+                Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.small) {
+                    Text(stringResource(when (session.state) {
+                        "running" -> R.string.session_running
+                        "archived" -> R.string.session_archived
+                        "unavailable" -> R.string.session_unavailable
+                        else -> R.string.session_available
+                    }), Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.labelMedium)
+                }
+                val wide = LocalConfiguration.current.screenWidthDp >= 400
+                val workspace = session.workspaceId?.let { stringResource(R.string.session_workspace, "${it.take(8)}…${it.takeLast(4)}") }
+                if (wide) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        workspace?.let { Text(it, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall) }
+                        Text(stringResource(R.string.session_updated, updated), style = MaterialTheme.typography.bodySmall)
+                    }
+                } else Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    workspace?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    Text(stringResource(R.string.session_updated, updated), style = MaterialTheme.typography.bodySmall)
+                }
                 if (!canRead) Text(stringResource(R.string.session_directory_only))
             }
         },

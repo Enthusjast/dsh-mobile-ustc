@@ -49,8 +49,7 @@ class NotificationsScreenTest {
         rule.onNodeWithText(foreground).performScrollTo().assertIsDisplayed()
         rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("核对通道状态"))
         rule.onNodeWithText("核对通道状态").performScrollTo().assertHeightIsAtLeast(48.dp).performClick()
-        rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("返回"))
-        rule.onNodeWithText("返回").performScrollTo().assertHeightIsAtLeast(48.dp).performClick()
+        rule.onNodeWithContentDescription("返回设置").assertHeightIsAtLeast(48.dp).performClick()
         rule.runOnIdle { assertEquals(1, refreshes); assertEquals(1, backs) }
     }
 }

@@ -59,7 +59,7 @@ class SessionArchiveTest {
         val state = HomeState(HomePhase.READY, runtimes = listOf(RuntimeRow(id, id, "0.2.1-rc.2", "电脑夹具", access)), selectedRuntimeId = id, selectedSessionId = id, sessions = listOf(session),
             reader = SessionReadState(SessionReadPhase.READY, runtimeEpoch = epoch), outbox = CommandOutboxState(listOf(record), true, canArchive = true))
         var result: Triple<String, Boolean, Boolean>? = null
-        rule.setContent { DshTheme { SessionsScreen(state, {}, {}, {}, {}, {}, onArchive = { e, a, s -> result = Triple(e, a, s) }) } }
+        rule.setContent { DshTheme { SessionsScreen(state, {}, {}, {}, {}, onArchive = { e, a, s -> result = Triple(e, a, s) }) } }
         rule.onNodeWithText("消息内容").assertDoesNotExist()
         rule.onNodeWithText("会话详情").performClick()
         rule.onNodeWithText("已归档，仍可读取历史").performScrollTo().assertIsDisplayed()

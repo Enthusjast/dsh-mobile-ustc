@@ -44,7 +44,7 @@ class HostBindingScreenTest {
             val density = LocalDensity.current
             clipboard = LocalClipboardManager.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, 2f)) {
-                DshTheme(darkTheme = true) { Box(Modifier.width(320.dp)) { HostBindingScreen(HostBindingState(HostBindingPhase.REVIEW, id, public), "fixture-account", { _, _ -> }, {}, { confirmations++ }, {}, {}, {}, {}) } }
+                DshTheme(darkTheme = true) { Box(Modifier.width(320.dp)) { HostBindingScreen(HostBindingState(HostBindingPhase.REVIEW, id, public), "fixture-account", { _, _ -> }, {}, { confirmations++ }, {}, {}, {}) } }
             }
         }
         rule.onNodeWithText("确认绑定这台电脑").performScrollTo().assertIsNotEnabled()
@@ -58,7 +58,7 @@ class HostBindingScreenTest {
     }
     @Test fun capabilityCodeIsNeverRestoredFromSavedInstanceState() {
         val restore = StateRestorationTester(rule)
-        restore.setContent { DshTheme { HostBindingScreen(HostBindingState(id = id), "fixture-account", { _, _ -> }, {}, {}, {}, {}, {}, {}) } }
+        restore.setContent { DshTheme { HostBindingScreen(HostBindingState(id = id), "fixture-account", { _, _ -> }, {}, {}, {}, {}, {}) } }
         rule.onNodeWithText("核对电脑信息").performScrollTo().assertIsNotEnabled()
         rule.onNodeWithText("电脑显示的绑定码").performScrollTo().performTextInput(code)
         rule.onNodeWithText("核对电脑信息").performScrollTo().assertIsEnabled()
@@ -68,7 +68,7 @@ class HostBindingScreenTest {
     }
     @Test fun unknownConfirmationExposesAStatusReadAndNeverAnotherConfirmationButton() {
         var queries = 0
-        rule.setContent { DshTheme { HostBindingScreen(HostBindingState(HostBindingPhase.UNKNOWN, id, details(), "network.unavailable"), "fixture-account", { _, _ -> }, {}, {}, { queries++ }, {}, {}, {}) } }
+        rule.setContent { DshTheme { HostBindingScreen(HostBindingState(HostBindingPhase.UNKNOWN, id, details(), "network.unavailable"), "fixture-account", { _, _ -> }, {}, {}, { queries++ }, {}, {}) } }
         rule.onNodeWithText("绑定结果待核对").assertIsDisplayed()
         rule.onNodeWithText("确认绑定这台电脑").assertDoesNotExist()
         rule.onNodeWithText("查询绑定状态").performScrollTo().performClick()
@@ -76,7 +76,7 @@ class HostBindingScreenTest {
     }
     @Test fun unknownWithoutReviewFactsRetainsTheOriginalPublicIdentifierWithoutASecretForm() {
         var queries = 0
-        rule.setContent { DshTheme { HostBindingScreen(HostBindingState(HostBindingPhase.UNKNOWN, id), "fixture-account", { _, _ -> }, {}, {}, { queries++ }, {}, {}, {}) } }
+        rule.setContent { DshTheme { HostBindingScreen(HostBindingState(HostBindingPhase.UNKNOWN, id), "fixture-account", { _, _ -> }, {}, {}, { queries++ }, {}, {}) } }
         rule.onNodeWithText(id).performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("绑定申请编号").assertDoesNotExist()
         rule.onNodeWithText("电脑显示的绑定码").assertDoesNotExist()
@@ -86,7 +86,7 @@ class HostBindingScreenTest {
     }
     @Test fun alreadyConfirmedRequestsCanBeQueriedWithOnlyTheirPublicIdentifier() {
         var queried: String? = null; var previews = 0
-        rule.setContent { DshTheme { HostBindingScreen(HostBindingState(id = id), "fixture-account", { _, _ -> previews++ }, { queried = it }, {}, {}, {}, {}, {}) } }
+        rule.setContent { DshTheme { HostBindingScreen(HostBindingState(id = id), "fixture-account", { _, _ -> previews++ }, { queried = it }, {}, {}, {}, {}) } }
         rule.onNodeWithText("核对电脑信息").performScrollTo().assertIsNotEnabled()
         rule.onNodeWithText("仅查询已确认申请").performScrollTo().assertIsEnabled().performClick()
         rule.runOnIdle { assertEquals(id, queried); assertEquals(0, previews) }
@@ -99,11 +99,11 @@ class HostBindingScreenTest {
         rule.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density * 0.7f, 1.8f)) {
-                DshTheme(darkTheme = false) { HostBindingScreen(HostBindingState(HostBindingPhase.UNKNOWN, id, public), "fixture-account", { _, _ -> }, {}, {}, { queries++ }, {}, { backs++ }, {}) }
+                DshTheme(darkTheme = false) { HostBindingScreen(HostBindingState(HostBindingPhase.UNKNOWN, id, public), "fixture-account", { _, _ -> }, {}, {}, { queries++ }, {}, { backs++ }) }
             }
         }
         rule.onNodeWithText("查询绑定状态").performScrollTo().assertIsEnabled().performClick()
-        rule.onNodeWithText("返回电脑列表").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("返回电脑列表").performClick()
         rule.runOnIdle { assertEquals(1, queries); assertEquals(1, backs) }
         // Export only synthetic public UI state; the live activity remains secure.
         val bitmap = rule.onRoot().captureToImage().asAndroidBitmap()

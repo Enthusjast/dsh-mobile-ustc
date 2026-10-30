@@ -51,7 +51,7 @@ class UploadsPanelTest {
     @Test fun readyFileOnlyMessagesUseTheExistingComposerWithoutInventingText() {
         var sent: Triple<String, String, Boolean>? = null
         rule.setContent { DshTheme {
-            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, {}, { mode, text, online -> sent = Triple(mode, text, online) })
+            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, { mode, text, online -> sent = Triple(mode, text, online) })
         } }
         rule.onNodeWithText("已选择 1 个附件，发送时仍需电脑确认。").assertExists()
         rule.onNodeWithContentDescription("发送").assertIsEnabled().performClick()
@@ -121,5 +121,22 @@ class UploadsPanelTest {
         rule.onNodeWithText("上传结果待核对；不会自动创建新上传。").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("重选原文件").performScrollTo().assertIsEnabled()
         rule.onAllNodes(isToggleable()).assertCountEquals(0)
+    }
+
+    @Test fun attachmentStripKeepsFullNamesReachableAndRemovalDistinctFromDetails() {
+        var toggled: String? = null
+        rule.setContent { DshTheme {
+            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, onToggleFile = { toggled = it })
+        } }
+        rule.onAllNodesWithText("附件详情").onFirst().performClick()
+        rule.onAllNodesWithText("附件详情").assertCountEquals(2)
+        rule.onAllNodesWithText("研究资料.txt").assertCountEquals(2)
+        rule.onNodeWithText("关闭").performClick()
+        rule.onAllNodesWithText("研究资料.txt").assertCountEquals(1)
+        rule.onAllNodesWithText("移出").onFirst().performClick()
+        rule.runOnIdle { assertEquals(id, toggled) }
+        rule.onNodeWithText("查看附件").performClick()
+        rule.onNodeWithText("会话附件").assertIsDisplayed()
+        rule.onNodeWithContentDescription("返回消息").assertIsDisplayed()
     }
 }

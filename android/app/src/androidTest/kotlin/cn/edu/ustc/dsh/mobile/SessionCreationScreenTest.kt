@@ -43,14 +43,14 @@ class SessionCreationScreenTest {
     }
     @Test fun onlyExplicitAdvertisedWorkspaceAndPresetChoicesCanCreate() {
         var submitted: Triple<String,String,String>?=null
-        rule.setContent { DshTheme {SessionCreationScreen(state(),{w,p,e->submitted=Triple(w,p,e)},{},{},{},{},{},{})} }
+        rule.setContent { DshTheme {SessionCreationScreen(state(),{w,p,e->submitted=Triple(w,p,e)},{},{},{},{},{})} }
         rule.onNodeWithText("创建新会话").performScrollTo().assertIsNotEnabled()
         select();rule.onNodeWithText("创建新会话").performScrollTo().assertIsEnabled().performClick()
         rule.runOnIdle {assertEquals(Triple(workspace,"standard",epoch),submitted)}
     }
     @Test fun unsubmittedChoicesDoNotSurviveSavedInstanceStateRestore() {
         val restoration=StateRestorationTester(rule)
-        restoration.setContent {DshTheme {SessionCreationScreen(state(),{_,_,_->},{},{},{},{},{},{})}}
+        restoration.setContent {DshTheme {SessionCreationScreen(state(),{_,_,_->},{},{},{},{},{})}}
         select();rule.onNodeWithText("创建新会话").assertIsEnabled()
         restoration.emulateSavedInstanceStateRestore()
         rule.onNodeWithText("创建新会话").performScrollTo().assertIsNotEnabled()
@@ -62,7 +62,7 @@ class SessionCreationScreenTest {
         rule.setContent {
             val density=LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density,2f)) {
-                DshTheme { Box(Modifier.width(320.dp)) { SessionCreationScreen(state(listOf(unknown)),{_,_,_->submitted++},{},{queries++},{},{},{},{}) } }
+                DshTheme { Box(Modifier.width(320.dp)) { SessionCreationScreen(state(listOf(unknown)),{_,_,_->submitted++},{},{queries++},{},{},{}) } }
             }
         }
         rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("创建结果待确认"))
@@ -81,7 +81,7 @@ class SessionCreationScreenTest {
         val intent=CommandIntent.createSession(id,id,workspace,"standard",epoch)
         val settled=CommandEvolution.receipt(CommandEvolution.begin(CommandEvolution.created(intent,0),1),CommandReceipt(id,workspace,intent.digest,RemoteCommandState.SETTLED,"2026-10-25T00:00:00Z",workspaceId=workspace))
         var opened: String?=null
-        rule.setContent {DshTheme {SessionCreationScreen(state(listOf(settled)),{_,_,_->},{},{},{},{opened=it},{},{})}}
+        rule.setContent {DshTheme {SessionCreationScreen(state(listOf(settled)),{_,_,_->},{},{},{},{opened=it},{})}}
         rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("会话已创建"))
         rule.onNodeWithText("会话已创建").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("读取已创建的会话").performScrollTo().performClick()

@@ -156,4 +156,23 @@ class ApprovalReviewScreenTest {
         rule.onNodeWithText("拒绝并确认身份").performScrollTo().assertIsNotEnabled()
         rule.onNodeWithText("重新验证学校登录").assertExists()
     }
+
+    @Test fun fieldDirectoryAndUnreviewedJumpNavigateWithoutAcknowledgingAnyPage() {
+        val fixture = ApprovalUiFixture("x".repeat(17_000) + "UNREVIEWED_SUFFIX")
+        content(fixture.state())
+        rule.onNodeWithText("已核对 0 /", substring = true).assertExists()
+        rule.onNodeWithText("定位未核对页").performScrollTo().performClick()
+        rule.onNodeWithText("仅本次允许并确认身份").performScrollTo().assertIsNotEnabled()
+        rule.onNodeWithText("字段目录").performScrollTo().performClick()
+        rule.onNodeWithText("完整上下文字段").assertIsDisplayed()
+        rule.onNodeWithText("完整参数").performClick()
+        rule.onNodeWithText("已核对 0 /", substring = true).assertExists()
+        rule.onNodeWithText("仅本次允许并确认身份").performScrollTo().assertIsNotEnabled()
+    }
+    @Test fun appBarBackLeavesTheUnsignedDecision() {
+        val fixture = ApprovalUiFixture(); var backs = 0
+        rule.setContent { DshTheme { ApprovalReviewScreen(fixture.state(), { backs++ }, {}, { _, _ -> }, { _, _ -> }, {}, {}, {}, {}) } }
+        rule.onNodeWithContentDescription("返回会话").performClick()
+        rule.runOnIdle { assertEquals(1, backs) }
+    }
 }

@@ -8,7 +8,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
@@ -80,6 +83,8 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
     var retired by remember(reviewKey) { mutableStateOf(false) }
     var retry by remember(reviewKey, valid) { mutableStateOf(false) }
     var discard by remember(reviewKey, valid) { mutableStateOf(false) }
+    var fieldsOpen by remember(reviewKey) { mutableStateOf(false) }
+    LaunchedEffect(reviewKey, rawView) { fieldsOpen = false }
     val ready = valid && !retired && !busy
     val labels = approvalProjectionLabels()
     val computed by produceState<ProjectedApproval?>(initialValue = null, body, labels, rawView) {
@@ -91,6 +96,9 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
     val projection = computed?.takeIf { it.context === body && it.raw == rawView }?.result
     val parts = projection?.pages.orEmpty()
     val allReviewed = projection?.completelyReviewed(reviewed) == true
+    // Navigation only: every root field already covered by the validated projection.
+    val fields = projection?.coverage?.filter { it.parent == 0 && it.key != null }.orEmpty()
+    val nextUnreviewed = parts.indices.firstOrNull { it !in reviewed }
     val scroll = rememberScrollState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, reviewKey, valid) {
@@ -105,22 +113,23 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
     LaunchedEffect(reviewKey, page, rawView) { scroll.scrollTo(0) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val actionsHeight = maxHeight * 0.45f
-        Scaffold(bottomBar = {
+        Scaffold(topBar = {
+            cn.edu.ustc.dsh.ui.DshTopBar(
+                title = stringResource(R.string.approval_ux_title),
+                subtitle = approvalVisibleText(runtime?.hostAlias ?: stringResource(R.string.approval_ux_current_host)),
+                navigationIcon = { IconButton(onBack, Modifier.heightIn(min = 48.dp)) {
+                    Icon(painterResource(R.drawable.ic_back), stringResource(R.string.approval_ux_back))
+                } },
+            )
+        }, bottomBar = {
             Surface(tonalElevation = 3.dp) {
                 Column(
                     Modifier.fillMaxWidth().heightIn(max = actionsHeight).navigationBarsPadding()
                         .verticalScroll(rememberScrollState()).padding(16.dp).testTag("approval-final-actions"),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    if (body != null) {
-                        Text(stringResource(R.string.approval_ux_progress, reviewed.size, parts.size), style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(acknowledged, enabled = ready && allReviewed, role = Role.Checkbox) { acknowledged = it },
-                            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(acknowledged, null, enabled = ready && allReviewed)
-                            Text(stringResource(R.string.approval_ux_consent), modifier = Modifier.weight(1f).padding(vertical = 8.dp))
-                        }
-                    }
+                    if (body != null) Text(stringResource(R.string.approval_ux_progress, reviewed.size, parts.size), style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     if (original == null) {
                         Button({
                             if (ready && allReviewed && acknowledged && body?.current(System.currentTimeMillis()) == true)
@@ -143,7 +152,6 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
             }
         }) { insets ->
             Column(Modifier.fillMaxSize().padding(insets).verticalScroll(scroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text(stringResource(R.string.approval_ux_title), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
                 Text(approvalVisibleText(runtime?.hostAlias ?: stringResource(R.string.approval_ux_current_host)), style = MaterialTheme.typography.titleMedium)
                 SelectionContainer {
                     Text(stringResource(R.string.approval_ux_source, runtime?.hostId.orEmpty(), state.selectedRuntimeId.orEmpty(), state.selectedSessionId.orEmpty()), style = MaterialTheme.typography.bodySmall)
@@ -180,6 +188,15 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
                     }
                     Text(stringResource(R.string.approval_ux_switch_warning), style = MaterialTheme.typography.bodySmall)
                     Text(stringResource(R.string.approval_ux_page, page + 1, parts.size), style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!rawView && fields.isNotEmpty()) TextButton({ fieldsOpen = true }, Modifier.heightIn(min = 48.dp)) {
+                            Text(stringResource(R.string.approval_ux_field_directory))
+                        }
+                        TextButton({ if (nextUnreviewed != null) page = nextUnreviewed }, Modifier.heightIn(min = 48.dp),
+                            enabled = ready && nextUnreviewed != null) {
+                            Text(stringResource(if (nextUnreviewed == null) R.string.approval_ux_all_reviewed else R.string.approval_ux_find_unreviewed))
+                        }
+                    }
                     Text(stringResource(R.string.approval_ux_escapes), style = MaterialTheme.typography.bodySmall)
                     SelectionContainer {
                         Text(parts[page], fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("approval-reading-page"))
@@ -188,8 +205,19 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
                         Text(stringResource(if (page in reviewed) R.string.approval_ux_page_reviewed else R.string.approval_ux_acknowledge_page))
                     }
                     // Stack controls: both labels remain readable at 320dp and font scale 2.
-                    OutlinedButton({ page-- }, enabled = page > 0 && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_previous)) }
-                    OutlinedButton({ page++ }, enabled = page + 1 < parts.size && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_next)) }
+                    val rowPaging = LocalConfiguration.current.screenWidthDp >= 400 && LocalDensity.current.fontScale <= 1.3f
+                    if (rowPaging) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton({ page-- }, enabled = page > 0 && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_previous)) }
+                        OutlinedButton({ page++ }, enabled = page + 1 < parts.size && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_next)) }
+                    } else {
+                        OutlinedButton({ page-- }, enabled = page > 0 && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_previous)) }
+                        OutlinedButton({ page++ }, enabled = page + 1 < parts.size && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_next)) }
+                    }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(acknowledged, enabled = ready && allReviewed, role = Role.Checkbox) { acknowledged = it },
+                        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(acknowledged, null, enabled = ready && allReviewed)
+                        Text(stringResource(R.string.approval_ux_consent), modifier = Modifier.weight(1f).padding(vertical = 8.dp))
+                    }
                     if (body.root.array("resources").isEmpty()) Text(stringResource(R.string.approval_ux_empty_resources), style = MaterialTheme.typography.bodySmall)
                 }
                 original?.let {
@@ -206,6 +234,27 @@ fun ApprovalReviewScreen(state: HomeState, onBack: () -> Unit, onDetails: (Strin
             }
         }
     }
+    if (fieldsOpen) AlertDialog(
+        onDismissRequest = { fieldsOpen = false },
+        title = { Text(stringResource(R.string.approval_ux_fields_title)) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                fields.forEach { field ->
+                    val key = field.key ?: return@forEach
+                    val label = labels.fields[key]
+                    val last = field.pages.last
+                    TextButton({ page = field.pages.first; fieldsOpen = false }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                            if (label != null) Text(label)
+                            Text(key, style = MaterialTheme.typography.bodySmall)
+                            Text(stringResource(R.string.approval_ux_field_pages, field.pages.first + 1, last + 1), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton({ fieldsOpen = false }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.approval_ux_close_field_directory)) } },
+    )
     if (retry && ready && handle != null && original != null) AlertDialog(onDismissRequest = { retry = false }, title = { Text(stringResource(R.string.approval_ux_retry_title)) },
         text = { Text(stringResource(R.string.approval_ux_retry_message)) },
         confirmButton = { TextButton({

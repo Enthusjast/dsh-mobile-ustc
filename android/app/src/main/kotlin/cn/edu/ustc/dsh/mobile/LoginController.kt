@@ -1097,14 +1097,21 @@ class LoginController internal constructor(private val context: Context, private
         }
     }
     fun cancelSession(expectedEpoch: String) {
-        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.submitting) return
         val commands = reader?.commands ?: return
         if (reader?.state?.value?.runtimeEpoch != expectedEpoch) return
         val stamp = generation; val view = navigationGeneration
-        commandJob = scope.launch { try { commands.cancel(expectedEpoch) } catch (error: Exception) {
-            if (error is CancellationException) throw error
-            if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = "command.cancel_unconfirmed")
-        } }
+        // The fence covers the window before the original intent is durably saved.
+        mutable.value = mutable.value.copy(submitting = true, commandError = null)
+        commandJob = scope.launch {
+            try { commands.cancel(expectedEpoch) }
+            catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = "command.cancel_unconfirmed")
+            } finally {
+                if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(submitting = false)
+            }
+        }
     }
     fun archiveSession(expectedEpoch: String, archived: Boolean, stopActivity: Boolean) {
         if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.submitting) return

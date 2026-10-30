@@ -79,4 +79,17 @@ class ChatDeliveryTest {
         until("local exit") { owner.state.value.phase == HomePhase.SIGNED_OUT }
         assertFalse(File(instrumentation.targetContext.noBackupFilesDir, "mobile-data/$scopeHash").exists())
     }
+
+    @Test fun aRepeatedInterruptionIsFencedBeforeTheOriginalRequestIsSaved() {
+        val owner = controller!!; val test = fixture!!; open()
+        val epoch = owner.state.value.reader!!.runtimeEpoch!!
+        main { owner.cancelSession(epoch); owner.cancelSession(epoch) }
+        until("one settled interruption request") {
+            owner.state.value.outbox?.records?.filter { it.intent.kind == CommandKind.CANCEL }?.singleOrNull()?.remote == RemoteCommandState.SETTLED
+        }
+        assertEquals(1, test.commandWrites.get())
+        until("busy fence released") { !owner.state.value.submitting }
+        assertEquals(1, owner.state.value.outbox!!.records.count { it.intent.kind == CommandKind.CANCEL })
+        assertEquals(epoch, owner.state.value.outbox!!.records.single { it.intent.kind == CommandKind.CANCEL }.intent.epoch)
+    }
 }

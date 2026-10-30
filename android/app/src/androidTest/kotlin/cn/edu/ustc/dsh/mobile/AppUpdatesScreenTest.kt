@@ -90,7 +90,7 @@ class AppUpdatesScreenTest {
             }
         }
         rule.onNodeWithText("核对安装结果").performScrollTo().assertIsDisplayed().performClick()
-        rule.onNodeWithText("返回").performScrollTo().assertIsDisplayed().performClick()
+        rule.onNodeWithContentDescription("返回设置").assertIsDisplayed().performClick()
         rule.runOnIdle { assertEquals(1, reads); assertEquals(1, backs) }
         rule.onNodeWithText("打开系统安装确认").assertDoesNotExist()
     }

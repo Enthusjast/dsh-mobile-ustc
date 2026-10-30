@@ -12,6 +12,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.semantics.*
@@ -28,17 +29,19 @@ import java.time.format.DateTimeFormatter
 
 @Composable
 fun HostBindingScreen(state: HostBindingState, subject: String, onPreview: (String, String) -> Unit, onQuery: (String) -> Unit,
-    onConfirm: () -> Unit, onRefresh: () -> Unit, onEnter: () -> Unit, onBack: () -> Unit, onExit: () -> Unit) {
-    Scaffold { insets ->
+    onConfirm: () -> Unit, onRefresh: () -> Unit, onEnter: () -> Unit, onBack: () -> Unit) {
+    Scaffold(topBar = {
+        cn.edu.ustc.dsh.ui.DshTopBar(
+            title = stringResource(R.string.flow_binding_title),
+            subtitle = stringResource(R.string.flow_binding_account, subject),
+            navigationIcon = { IconButton(onBack, Modifier.heightIn(min = 48.dp)) {
+                Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_binding_back))
+            } },
+        )
+    }) { insets ->
         Box(Modifier.fillMaxSize().padding(insets).imePadding(), contentAlignment = Alignment.TopCenter) {
-            Column(Modifier.widthIn(max = 720.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                Column(Modifier.fillMaxWidth()) {
-                    TextButton(onBack, Modifier.heightIn(min = 48.dp)) { Text("返回电脑列表") }
-                    TextButton(onExit, Modifier.heightIn(min = 48.dp)) { Text("退出本机登录") }
-                }
-                Text("绑定电脑", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
-                Text("当前账号：$subject", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.widthIn(max = 720.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(cn.edu.ustc.dsh.ui.DshSpacing.page),
+                verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(stringResource(when (state.phase) {
                     HostBindingPhase.ENTER -> R.string.flow_binding_step_input
                     HostBindingPhase.LOADING, HostBindingPhase.REVIEW -> R.string.flow_binding_step_review

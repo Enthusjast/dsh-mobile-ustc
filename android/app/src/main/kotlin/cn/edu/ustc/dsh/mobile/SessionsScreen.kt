@@ -8,6 +8,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -22,6 +23,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.edu.ustc.dsh.network.*
 import cn.edu.ustc.dsh.session.*
@@ -29,8 +31,12 @@ import cn.edu.ustc.dsh.command.*
 import cn.edu.ustc.dsh.protocol.*
 import kotlinx.coroutines.launch
 
+/** Detail groups are presentation only; each is rendered at most once. */
+private enum class ChatDetailSection { DEFAULT, COMMANDS, UPLOADS }
+private enum class ChatDetailGroup { ARCHIVE, APPROVALS, UPLOADS, EXPORTS, EXPORT_STATUS, COMMANDS, CANCEL }
+
 @Composable
-fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit, onExit: () -> Unit,
+fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, onOlder: () -> Unit, onRetry: () -> Unit,
     onSubmit: (String, String, Boolean) -> Unit = { _, _, _ -> }, onSendPending: (String) -> Unit = {}, onQueryCommands: () -> Unit = {}, onCancelSession: (String) -> Unit = {},
     onAnswer: (QuestionHandle,QuestionAnswers)->Unit={_,_->},onClaim: (QuestionHandle)->Unit={},onRelease: (QuestionHandle)->Unit={},onRefreshQuestions: ()->Unit={},
     onApproval: (String) -> Unit = {}, onApprovalQuery: () -> Unit = {}, onArchive: (String, Boolean, Boolean) -> Unit = { _, _, _ -> },
@@ -44,9 +50,13 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
     val archived = state.sessions.firstOrNull { it.id == opened }?.state == "archived"
     val canCompose = !archived && state.outbox != null && runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("message.submit", "command.status")) == true
     var showDetails by remember(opened) { mutableStateOf(false) }
+    var detailSection by remember(opened) { mutableStateOf(ChatDetailSection.DEFAULT) }
+    var detailRequestId by remember(opened) { mutableStateOf<String?>(null) }
+    var cancelConfirmEpoch by remember(opened) { mutableStateOf<String?>(null) }
     val keyboard = LocalSoftwareKeyboardController.current
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    val returnFromChat: () -> Unit = { if (imeVisible) keyboard?.hide() else if (showDetails) showDetails = false else onBack() }
+    val leaveDetails = { showDetails = false; detailSection = ChatDetailSection.DEFAULT; detailRequestId = null }
+    val returnFromChat: () -> Unit = { if (imeVisible) keyboard?.hide() else if (showDetails) leaveDetails() else onBack() }
     BackHandler(enabled = showDetails) { returnFromChat() }
     val chatListState = rememberLazyListState()
     val detailsListState = rememberLazyListState()
@@ -57,9 +67,31 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
     var followLatest by remember(opened) { mutableStateOf(readingPosition?.following ?: true) }
     var newMessages by remember(opened) { mutableStateOf(false) }
     var lastMessageKey by remember(opened) { mutableStateOf<String?>(null) }
-    var lastMessageLength by remember(opened) { mutableIntStateOf(-1) }
+    var lastMessageLength by remember { mutableIntStateOf(-1) }
     var requestedBoundary by remember(opened) { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
+    val cancelEpoch = read.runtimeEpoch
+    val canCancel = !archived && read.phase == SessionReadPhase.READY && transcript?.taskRunning == true && cancelEpoch != null &&
+        runtime?.access?.let { grant ->
+            grant.canRead() && grant.role in setOf("operator", "owner") &&
+                grant.scope?.actions?.containsAll(setOf("session.cancel", "command.status")) == true
+        } == true && state.outbox?.connected == true && !state.submitting
+    val pendingCancel = cancelEpoch?.let { epoch ->
+        state.outbox?.records?.firstOrNull {
+            it.intent.runtimeId == state.selectedRuntimeId && it.intent.sessionId == opened && it.intent.isCurrentCancel(epoch) &&
+                it.remote !in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)
+        }
+    }
+    val summary = state.outbox?.let { selectChatDeliveryRecord(it.records, state.selectedRuntimeId.orEmpty(), opened) }
+    val footerError = state.commandError ?: state.outbox?.error
+    val hasOperationFooter = summary != null || footerError != null || canCancel || pendingCancel != null
+    val openDetails: (ChatDetailSection, String?) -> Unit = { section, request ->
+        detailSection = section
+        detailRequestId = request
+        showDetails = true
+        scope.launch { detailsListState.scrollToItem(0) }
+    }
+    LaunchedEffect(canCancel) { if (!canCancel) cancelConfirmEpoch = null }
     val currentTranscript by rememberUpdatedState(transcript)
     val currentRead by rememberUpdatedState(read)
     val currentOnOlder by rememberUpdatedState(onOlder)
@@ -91,7 +123,8 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
             val restoreIndex = if (!initialized && readingPosition?.following == false) transcript.items.indexOfFirst { it.id == readingPosition.key } else -1
             if (restoreIndex >= 0) {
                 withFrameNanos { }
-                val trailing = 1 + if (transcript.taskRunning && read.phase == SessionReadPhase.READY) 1 else 0
+                // Trailing decoration must include the optional operation footer.
+                val trailing = 1 + (if (transcript.taskRunning && read.phase == SessionReadPhase.READY) 1 else 0) + (if (hasOperationFooter) 1 else 0)
                 val index = listState.layoutInfo.totalItemsCount - trailing - transcript.items.size + restoreIndex
                 if (index >= 0) listState.scrollToItem(index, readingPosition!!.offset)
                 initialized = true
@@ -137,7 +170,7 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                         Icon(painterResource(R.drawable.ic_back), contentDescription = stringResource(if (showDetails) R.string.chat_messages else if (state.knownTarget != null) R.string.chat_back_reminders else R.string.chat_back))
                     }
                 },
-                actions = { if (!showDetails) TextButton({ showDetails = true }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_details)) } },
+                actions = { if (!showDetails) TextButton({ openDetails(ChatDetailSection.DEFAULT, null) }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_details)) } },
             )
         },
         bottomBar = {
@@ -150,7 +183,8 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                     }
                 }
                 if (canCompose) SessionComposer(state, onSubmit, text, mode, { text = it }, { mode = it },
-                    onAttach = { onPickFile(null, text, mode) }, onRemove = onToggleFile)
+                    onAttach = { onPickFile(null, text, mode) }, onRemove = onToggleFile,
+                    onViewAttachments = { openDetails(ChatDetailSection.UPLOADS, null) })
             }
         },
     ) { insets ->
@@ -186,14 +220,19 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                     if (!showDetails && read.phase == SessionReadPhase.READY && !archived && focusedQuestion != null) item("question:${focusedQuestion.handle.kind}:${focusedQuestion.batch.id}") {
                         QuestionCard(focusedQuestion, read.questions.canAnswer, state.submitting, state.outbox?.records ?: emptyList(), onAnswer, onClaim, onRelease, onRefreshQuestions, onQueryCommands)
                     }
-                    if (showDetails && (archived || runtime?.access?.scope?.actions?.contains("session.archive") == true)) item("archive-session") {
-                        key(opened) {
-                        SessionArchiveActions(archived, read.runtimeEpoch, read.phase == SessionReadPhase.READY && state.outbox?.canArchive == true && !state.submitting,
-                            runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("session.archive", "command.status")) == true,
-                            onArchive, onRefresh)
+
+                    fun LazyListScope.archiveGroup() {
+                        if (!showDetails || !(archived || runtime?.access?.scope?.actions?.contains("session.archive") == true)) return
+                        item("archive-session") {
+                            key(opened) {
+                                SessionArchiveActions(archived, read.runtimeEpoch, read.phase == SessionReadPhase.READY && state.outbox?.canArchive == true && !state.submitting,
+                                    runtime?.access?.role in setOf("operator", "owner") && runtime?.access?.scope?.actions?.containsAll(setOf("session.archive", "command.status")) == true,
+                                    onArchive, onRefresh)
+                            }
                         }
                     }
-                    state.approvals?.takeIf { !archived && runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true }?.let { approvals ->
+                    fun LazyListScope.approvalGroup() {
+                        val approvals = state.approvals?.takeIf { !archived && runtime?.access?.role == "owner" && runtime.access.scope?.actions?.containsAll(setOf("session.read", "approval.decide")) == true } ?: return
                         approvals.error?.let { code -> item("approval-error") { Text(approvalErrorText(code), color = MaterialTheme.colorScheme.error) } }
                         val pending = approvals.view.items.filter { it.canReview || it.handle != null || it.remainingMillis > 0 && it.status.state in setOf(ApprovalRemoteState.PENDING, ApprovalRemoteState.DECISION_RECEIVED) }
                         if (!showDetails) items(pending, key = { "approval:${it.status.id}" }) { view ->
@@ -215,37 +254,57 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                             } }
                         }
                     }
-                    if(!showDetails && read.phase==SessionReadPhase.READY && !archived) {
-                        items(read.questions.items.filter { it.batch.id != focusedQuestion?.batch?.id },key={"question:${it.handle.kind}:${it.batch.id}"}) {question->
-                            QuestionCard(question,read.questions.canAnswer,state.submitting,state.outbox?.records ?: emptyList(),onAnswer,onClaim,onRelease,onRefreshQuestions,onQueryCommands)
+                    fun LazyListScope.uploadsGroup() {
+                        if (!showDetails) return
+                        val files = state.uploads?.takeIf { !archived && canCompose }
+                        if (files == null) {
+                            if (detailSection == ChatDetailSection.UPLOADS) item("uploads-unavailable") {
+                                Text(stringResource(R.string.chat_attachments_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            return
                         }
-                        read.questions.error?.let {code->item("question-error") {Text(commandErrorText(code),color=MaterialTheme.colorScheme.error)}}
-                    }
-                    state.uploads?.takeIf { showDetails && !archived && canCompose }?.let { files -> item("uploads") {
-                        UploadsPanel(files, state.outbox?.canAttachFiles == true && read.phase == SessionReadPhase.READY,
-                            { id -> onPickFile(id, text, mode) }, onToggleFile, onQueryFile, onRemoveFile, onCancelFile)
-                    } }
-                    state.exports?.takeIf { showDetails }?.let { exports -> item("exports") { ExportsPanel(exports, onBrowseExports, onExport, onQueryExports, onCancelExport, onRemoveExport, onSaveExport, state.exportSaving || state.exportSavePicker != null) } }
-                    if (showDetails && (state.exportSaving || state.exportSaved || state.exportSaveError != null)) item("export-save-status") {
-                        if (state.exportSaving) {
-                            Text("正在下载并核对文件 · ${state.exportBytes} 字节", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                            TextButton(onCancelExportSave, Modifier.heightIn(min = 48.dp)) { Text("取消保存") }
+                        item("uploads") {
+                            UploadsPanel(files, state.outbox?.canAttachFiles == true && read.phase == SessionReadPhase.READY,
+                                { id -> onPickFile(id, text, mode) }, onToggleFile, onQueryFile, onRemoveFile, onCancelFile)
                         }
-                        if (state.exportSaved) Text("文件已保存，回读校验通过。", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                        state.exportSaveError?.let { Text(exportErrorText(it), color = MaterialTheme.colorScheme.error) }
                     }
-                    state.commandError?.let { error -> item("command-error") { Text(commandErrorText(error), color = MaterialTheme.colorScheme.error) } }
-                    state.outbox?.let { outbox ->
+                    fun LazyListScope.exportsGroup() {
+                        if (!showDetails) return
+                        state.exports?.let { exports -> item("exports") { ExportsPanel(exports, onBrowseExports, onExport, onQueryExports, onCancelExport, onRemoveExport, onSaveExport, state.exportSaving || state.exportSavePicker != null) } }
+                    }
+                    fun LazyListScope.exportStatusGroup() {
+                        if (!showDetails || !(state.exportSaving || state.exportSaved || state.exportSaveError != null)) return
+                        item("export-save-status") {
+                            if (state.exportSaving) {
+                                Text("正在下载并核对文件 · ${state.exportBytes} 字节", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                                TextButton(onCancelExportSave, Modifier.heightIn(min = 48.dp)) { Text("取消保存") }
+                            }
+                            if (state.exportSaved) Text("文件已保存，回读校验通过。", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                            state.exportSaveError?.let { Text(exportErrorText(it), color = MaterialTheme.colorScheme.error) }
+                        }
+                    }
+                    fun LazyListScope.commandGroup() {
+                        state.commandError?.let { error -> item("command-error") { Text(commandErrorText(error), color = MaterialTheme.colorScheme.error) } }
+                        val outbox = state.outbox ?: return
                         outbox.error?.let { error -> item("outbox-error") { Text(commandErrorText(error), color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) } }
-                        if (showDetails && outbox.records.isNotEmpty()) item("outbox-heading") {
+                        if (!showDetails) return
+                        val target = detailRequestId.takeIf { detailSection == ChatDetailSection.COMMANDS }
+                        val ordered = outbox.records.sortedWith(
+                            compareBy<PendingCommand> { if (target != null && it.intent.requestId == target) 0 else 1 }
+                                .thenByDescending { it.createdAt }.thenByDescending { it.intent.requestId })
+                        if (ordered.isEmpty()) item("outbox-empty") { Text(stringResource(R.string.chat_no_delivery_records), style = MaterialTheme.typography.bodySmall) }
+                        else item("outbox-heading") {
                             Text("本机发送记录", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
                             Text("入队确认不代表任务完成。连接恢复后会先核对原请求状态。", style = MaterialTheme.typography.bodySmall)
                             OutlinedButton(onQueryCommands, Modifier.heightIn(min = 48.dp)) { Text("核对发送状态") }
                         }
-                        if (showDetails) items(outbox.records, key = { "command:${it.intent.requestId}" }) { record ->
+                        items(ordered, key = { "command:${it.intent.requestId}" }) { record ->
                             OutlinedCard(Modifier.fillMaxWidth()) {
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text(commandLabel(record), style = MaterialTheme.typography.titleSmall)
+                                    Text(stringResource(commandLabel(record)), style = MaterialTheme.typography.titleSmall)
+                                    if (record.intent.kind == CommandKind.MESSAGE && record.remote == RemoteCommandState.SETTLED) {
+                                        Text(stringResource(R.string.chat_delivery_settled_note), style = MaterialTheme.typography.bodySmall)
+                                    }
                                     SelectionContainer { Text(stringResource(R.string.chat_original_request, record.intent.requestId), style = MaterialTheme.typography.bodySmall) }
                                     Text(stringResource(when {
                                         record.attempts == 0L -> R.string.chat_local_only
@@ -254,6 +313,9 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                                         record.everAgentQueued -> R.string.chat_queued_not_finished
                                         else -> R.string.chat_original_reconcile
                                     }), style = MaterialTheme.typography.bodySmall)
+                                    if (needsDeliveryReconciliation(record) && record.remote != RemoteCommandState.OUTCOME_UNKNOWN) {
+                                        Text(stringResource(R.string.chat_original_reconcile), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                                    }
                                     if (record.intent.kind == CommandKind.ARCHIVE) {
                                         val archiveIntent = (record.intent.payload["archived"] as JsonBoolean).value
                                         Text(if (archiveIntent) "归档会话" else "恢复会话")
@@ -280,14 +342,42 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                             }
                         }
                     }
-                    val cancelEpoch = read.runtimeEpoch
-                    if (showDetails && !archived && read.phase == SessionReadPhase.READY && transcript?.taskRunning == true && cancelEpoch != null && runtime?.access?.scope?.actions?.containsAll(setOf("session.cancel", "command.status")) == true) item("cancel-task") {
-                        var confirm by remember(cancelEpoch) { mutableStateOf(false) }
-                        OutlinedButton({ confirm = true }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("中断当前任务") }
-                        if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("中断电脑上的当前任务？") },
-                            text = { Text("这不会清空已排队的消息。后续任务是否继续，以电脑端状态为准。") },
-                            confirmButton = { TextButton({ confirm = false; onCancelSession(cancelEpoch) }) { Text("确认中断") } },
-                            dismissButton = { TextButton({ confirm = false }) { Text("继续运行") } })
+                    fun LazyListScope.cancelGroup() {
+                        if (!showDetails || !(canCancel || pendingCancel != null)) return
+                        item("cancel-task") {
+                            if (pendingCancel != null) {
+                                Text(stringResource(R.string.chat_cancel_pending), style = MaterialTheme.typography.titleSmall)
+                                SelectionContainer { Text(stringResource(R.string.chat_original_request, pendingCancel.intent.requestId), style = MaterialTheme.typography.bodySmall) }
+                            }
+                            if (canCancel && cancelEpoch != null) {
+                                OutlinedButton({ cancelConfirmEpoch = cancelEpoch }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("中断当前任务") }
+                            }
+                        }
+                    }
+
+                    if (showDetails) {
+                        val order = when (detailSection) {
+                            ChatDetailSection.DEFAULT -> listOf(ChatDetailGroup.ARCHIVE, ChatDetailGroup.APPROVALS, ChatDetailGroup.UPLOADS, ChatDetailGroup.EXPORTS, ChatDetailGroup.EXPORT_STATUS, ChatDetailGroup.COMMANDS, ChatDetailGroup.CANCEL)
+                            ChatDetailSection.COMMANDS -> listOf(ChatDetailGroup.COMMANDS, ChatDetailGroup.ARCHIVE, ChatDetailGroup.APPROVALS, ChatDetailGroup.UPLOADS, ChatDetailGroup.EXPORTS, ChatDetailGroup.EXPORT_STATUS, ChatDetailGroup.CANCEL)
+                            ChatDetailSection.UPLOADS -> listOf(ChatDetailGroup.UPLOADS, ChatDetailGroup.ARCHIVE, ChatDetailGroup.APPROVALS, ChatDetailGroup.EXPORTS, ChatDetailGroup.EXPORT_STATUS, ChatDetailGroup.COMMANDS, ChatDetailGroup.CANCEL)
+                        }
+                        for (group in order) when (group) {
+                            ChatDetailGroup.ARCHIVE -> archiveGroup()
+                            ChatDetailGroup.APPROVALS -> approvalGroup()
+                            ChatDetailGroup.UPLOADS -> uploadsGroup()
+                            ChatDetailGroup.EXPORTS -> exportsGroup()
+                            ChatDetailGroup.EXPORT_STATUS -> exportStatusGroup()
+                            ChatDetailGroup.COMMANDS -> commandGroup()
+                            ChatDetailGroup.CANCEL -> cancelGroup()
+                        }
+                    } else {
+                        approvalGroup()
+                        if (read.phase == SessionReadPhase.READY && !archived) {
+                            items(read.questions.items.filter { it.batch.id != focusedQuestion?.batch?.id },key={"question:${it.handle.kind}:${it.batch.id}"}) {question->
+                                QuestionCard(question,read.questions.canAnswer,state.submitting,state.outbox?.records ?: emptyList(),onAnswer,onClaim,onRelease,onRefreshQuestions,onQueryCommands)
+                            }
+                            read.questions.error?.let {code->item("question-error") {Text(commandErrorText(code),color=MaterialTheme.colorScheme.error)}}
+                        }
                     }
                     if (!showDetails && transcript != null) {
                         if (transcript.hasMore && read.phase == SessionReadPhase.READY) item("older") {
@@ -298,6 +388,12 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
                         if (transcript.items.isEmpty() && read.phase == SessionReadPhase.READY) item("empty-session") { Text("会话还没有消息。") }
                         items(transcript.items, key = { it.id }) { entry -> ConversationBubble(entry) }
                         if (transcript.taskRunning && read.phase == SessionReadPhase.READY) item("running") { Text("电脑上的任务仍在进行。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                    if (!showDetails && hasOperationFooter) item("chat-operation-footer") {
+                        ChatOperationFooter(summary, footerError, canCancel, pendingCancel,
+                            onViewDelivery = { openDetails(ChatDetailSection.COMMANDS, summary?.intent?.requestId) },
+                            onViewCancel = { openDetails(ChatDetailSection.COMMANDS, pendingCancel?.intent?.requestId) },
+                            onCancel = { if (canCancel && cancelEpoch != null) cancelConfirmEpoch = cancelEpoch })
                     }
                     if (!showDetails) item("conversation-end") { Spacer(Modifier.height(1.dp)) }
             }
@@ -314,6 +410,41 @@ fun SessionsScreen(state: HomeState, onBack: () -> Unit, onRefresh: () -> Unit, 
             }
         }
     }
+    val confirmEpoch = cancelConfirmEpoch
+    if (confirmEpoch != null && canCancel && confirmEpoch == cancelEpoch) AlertDialog(
+        onDismissRequest = { cancelConfirmEpoch = null }, title = { Text("中断电脑上的当前任务？") },
+        text = { Text("这不会清空已排队的消息。后续任务是否继续，以电脑端状态为准。") },
+        confirmButton = { TextButton({
+            val epoch = cancelEpoch
+            cancelConfirmEpoch = null
+            if (epoch != null && epoch == confirmEpoch && canCancel) onCancelSession(epoch)
+        }) { Text("确认中断") } },
+        dismissButton = { TextButton({ cancelConfirmEpoch = null }) { Text("继续运行") } })
+}
+
+@Composable
+private fun ChatOperationFooter(summary: PendingCommand?, error: String?, canCancel: Boolean, pendingCancel: PendingCommand?,
+    onViewDelivery: () -> Unit, onViewCancel: () -> Unit, onCancel: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (summary != null) {
+                Text(stringResource(R.string.chat_footer_title), style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
+                Text(stringResource(commandLabel(summary)), style = MaterialTheme.typography.bodyMedium)
+                SelectionContainer { Text(stringResource(R.string.chat_original_request, summary.intent.requestId), style = MaterialTheme.typography.bodySmall) }
+                if (summary.intent.kind == CommandKind.MESSAGE && summary.remote == RemoteCommandState.SETTLED) {
+                    Text(stringResource(R.string.chat_delivery_settled_note), style = MaterialTheme.typography.bodySmall)
+                }
+                TextButton(onViewDelivery, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_view_delivery)) }
+            }
+            if (error != null) Text(commandErrorText(error), color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            if (pendingCancel != null) {
+                Text(stringResource(R.string.chat_cancel_pending), style = MaterialTheme.typography.bodyMedium)
+                TextButton(onViewCancel, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_view_cancel_original)) }
+            }
+            if (canCancel) OutlinedButton(onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("中断当前任务") }
+        }
+    }
 }
 
 @Composable
@@ -321,7 +452,7 @@ private fun ConversationBubble(item: ConversationItem) {
     val user = item.role == ConversationRole.USER
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
         Surface(Modifier.widthIn(max = 640.dp).fillMaxWidth(if (user) 0.94f else 1f), color = if (user) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(when (item.role) { ConversationRole.USER -> "你"; ConversationRole.ASSISTANT -> "助手"; ConversationRole.TOOL -> "工具"; ConversationRole.NOTICE -> "状态" }, style = MaterialTheme.typography.labelLarge)
                 for ((index, block) in item.blocks.withIndex()) key(index) {
                     when (block.kind) {
@@ -331,13 +462,38 @@ private fun ConversationBubble(item: ConversationItem) {
                             TextButton({ expanded = !expanded }, Modifier.heightIn(min = 48.dp)) { Text(if (expanded) "收起思考过程" else "查看思考过程") }
                             if (expanded) RichMessageText(block.text)
                         }
-                        BlockKind.TOOL -> Text(if (block.name.isEmpty()) "正在准备工具调用" else "工具调用：${block.name}")
+                        BlockKind.TOOL -> ToolCallRecord(item.id, index, block, item.live)
                         BlockKind.OTHER -> Text("此内容请在电脑端查看。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
                 if (item.live) Text("正在回复…", style = MaterialTheme.typography.labelMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                 else if (item.interrupted) Text("此次回复未完成。", style = MaterialTheme.typography.labelMedium)
                 if (!item.persisted && !item.live) Text("尚未确认保存", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/** Only fields already present in the validated display record; never a completion claim. */
+@Composable
+private fun ToolCallRecord(itemId: String, index: Int, block: DisplayBlock, live: Boolean) {
+    var expanded by remember(itemId, index) { mutableStateOf(false) }
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(if (block.name.isEmpty()) R.string.chat_tool_info else R.string.chat_tool_record), style = MaterialTheme.typography.labelLarge)
+            if (block.name.isNotEmpty()) Text(block.name, style = MaterialTheme.typography.titleSmall)
+            if (live && !block.complete) Text(stringResource(R.string.chat_tool_receiving), style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            TextButton({ expanded = !expanded }, Modifier.heightIn(min = 48.dp)) {
+                Text(stringResource(if (expanded) R.string.chat_hide_call else R.string.chat_show_call))
+            }
+            if (expanded) {
+                SelectionContainer {
+                    Text(stringResource(if (block.callId.isEmpty()) R.string.chat_no_call_id else R.string.chat_call_id, block.callId),
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                if (block.text.isNotEmpty()) RichMessageText(block.text, 4 * 1024)
+                else Text(stringResource(R.string.chat_no_tool_detail), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -354,6 +510,7 @@ private fun ReadingText(text: String, initial: Int = 16 * 1024) {
 private fun SessionComposer(
     state: HomeState, onSubmit: (String, String, Boolean) -> Unit, text: String, mode: String,
     onText: (String) -> Unit, onMode: (String) -> Unit, onAttach: () -> Unit, onRemove: (String) -> Unit,
+    onViewAttachments: () -> Unit,
 ) {
     val placeholder = "11111111-1111-4111-8111-111111111111"
     val selected = state.uploads?.let { uploads -> uploads.selected.mapNotNull { id -> uploads.rows.firstOrNull { it.stored.intent.requestId == id } } } ?: emptyList()
@@ -364,6 +521,7 @@ private fun SessionComposer(
     val online = state.outbox?.connected == true && state.reader?.phase == SessionReadPhase.READY
     var menu by remember { mutableStateOf(false) }
     var explainAttachments by remember { mutableStateOf(false) }
+    var attachmentDetail by remember { mutableStateOf<Pair<String, Long?>?>(null) }
     val attachmentAvailable = online && state.outbox?.canAttachFiles == true && state.uploads != null
     Surface(tonalElevation = 3.dp, modifier = Modifier.testTag("message-composer")) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(horizontal = 8.dp, vertical = 4.dp)) {
@@ -371,8 +529,8 @@ private fun SessionComposer(
                 Box {
                     TextButton({ menu = true }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(if (mode == "queue") R.string.chat_queue else R.string.chat_steer)) }
                     DropdownMenu(menu, { menu = false }) {
-                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_queue)) }, onClick = { menu = false; onMode("queue") })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_steer)) }, onClick = { menu = false; onMode("steer") })
+                        DropdownMenuItem(text = { Column { Text(stringResource(R.string.chat_queue)); Text(stringResource(R.string.chat_queue_desc), style = MaterialTheme.typography.bodySmall) } }, onClick = { menu = false; onMode("queue") })
+                        DropdownMenuItem(text = { Column { Text(stringResource(R.string.chat_steer)); Text(stringResource(R.string.chat_steer_desc), style = MaterialTheme.typography.bodySmall) } }, onClick = { menu = false; onMode("steer") })
                     }
                 }
                 Spacer(Modifier.weight(1f))
@@ -382,14 +540,31 @@ private fun SessionComposer(
             }
             if (selected.isNotEmpty()) {
                 Text(stringResource(R.string.chat_attachment_count, attachments.size), style = MaterialTheme.typography.bodySmall)
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     selected.forEach { upload ->
                         val name = upload.stored.intent.manifest.name
-                        TextButton({ onRemove(upload.stored.intent.requestId) }, Modifier.heightIn(min = 48.dp)) {
-                            Text(stringResource(R.string.chat_remove_selection, name))
+                        val size = upload.stored.intent.manifest.sizeBytes
+                        Column(Modifier.widthIn(max = 240.dp)) {
+                            Text(name, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(fileSizeText(size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row {
+                                TextButton({ onRemove(upload.stored.intent.requestId) }, Modifier.heightIn(min = 48.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                    Text(stringResource(R.string.chat_remove_attachment), modifier = Modifier.semantics {
+                                        contentDescription = upload.stored.intent.manifest.name
+                                    })
+                                }
+                                TextButton({ attachmentDetail = name to size }, Modifier.heightIn(min = 48.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                    Text(stringResource(R.string.chat_attachment_detail), modifier = Modifier.semantics {
+                                        contentDescription = upload.stored.intent.manifest.name
+                                    })
+                                }
+                            }
                         }
                     }
                 }
+                TextButton(onViewAttachments, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_view_attachments)) }
             }
             val inputLabel = stringResource(R.string.chat_input)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -400,25 +575,28 @@ private fun SessionComposer(
                     Icon(painterResource(R.drawable.ic_send), contentDescription = stringResource(if (state.submitting) R.string.chat_saving else if (online) R.string.chat_send else R.string.chat_save_pending))
                 }
             }
+            if (state.submitting) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Text(stringResource(R.string.chat_saving_request), style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            }
             if (!attachmentsReady) Text(stringResource(R.string.chat_attachment_not_ready), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (text.isNotBlank() && !textValid) Text(stringResource(R.string.chat_invalid), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (!online) Text(stringResource(R.string.chat_offline), style = MaterialTheme.typography.bodySmall)
         }
     }
+    attachmentDetail?.let { (name, size) ->
+        AlertDialog(onDismissRequest = { attachmentDetail = null }, title = { Text(stringResource(R.string.chat_attachment_detail)) },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SelectionContainer { Text(name) }
+                Text(fileSizeText(size), style = MaterialTheme.typography.bodySmall)
+            } },
+            confirmButton = { TextButton({ attachmentDetail = null }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.action_close)) } })
+    }
     if (explainAttachments) AlertDialog(onDismissRequest = { explainAttachments = false },
         title = { Text(stringResource(R.string.chat_attach_unavailable)) },
         text = { Text(stringResource(R.string.chat_attach_unavailable_reason)) },
         confirmButton = { TextButton({ explainAttachments = false }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.chat_link_cancel)) } })
-}
-private fun commandLabel(record: PendingCommand): String = when {
-    record.delivery == CommandDelivery.PENDING -> "手机待发送"
-    record.remote == RemoteCommandState.RECEIVED -> "中继已接收，尚未确认主机保存"
-    record.remote == RemoteCommandState.HOST_ACCEPTED -> "主机已保存"
-    record.remote == RemoteCommandState.DISPATCHING -> if (record.intent.kind == CommandKind.ARCHIVE) "主机已保存，正在更改归档状态" else "主机已保存，正在交给 Agent"
-    record.remote in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED) -> if(record.intent.kind==CommandKind.TIMED_QUESTION) "后续答复已入队" else "Agent 已入队"
-    record.remote == RemoteCommandState.SETTLED -> if (record.intent.kind == CommandKind.ARCHIVE) (if ((record.intent.payload["archived"] as JsonBoolean).value) "归档操作已确认" else "恢复操作已确认") else if (record.intent.kind == CommandKind.CANCEL) "中断请求已确认" else if(record.intent.kind.question) "答复已确认" else "命令已完成"
-    record.remote == RemoteCommandState.REJECTED -> "主机拒绝了此命令"
-    else -> "结果待确认"
 }
 private fun commandErrorText(code: String) = when (code) {
     "data.locked", "data.lock_required" -> "请解锁设备并设置安全锁屏后，再使用本机发送记录。"
@@ -435,5 +613,6 @@ private fun commandErrorText(code: String) = when (code) {
     "question.invalid_answer" -> "请按当前问题的选项和要求填写完整答复。"
     "question.reconcile_required" -> "这个问题已有答复请求，请先核对原请求的结果。"
     "question.claim_limit","rate.limited" -> "当前等待请求较多，请结束已有答复或刷新提问状态后重试。"
+    "command.cancel_unconfirmed" -> "尚未核对中断请求结果，请查询原请求状态；不会自动重复中断。"
     else -> if (code.startsWith("file.")) fileErrorText(code) else "暂时无法处理此发送操作，请先核对发送状态。"
 }

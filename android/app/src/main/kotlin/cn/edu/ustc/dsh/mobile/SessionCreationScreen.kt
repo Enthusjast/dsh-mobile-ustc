@@ -4,9 +4,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
 import cn.edu.ustc.dsh.command.*
@@ -15,7 +17,7 @@ import cn.edu.ustc.dsh.protocol.*
 
 @Composable
 fun SessionCreationScreen(state: HomeState, onCreate: (String,String,String)->Unit, onRefresh: ()->Unit, onQuery: ()->Unit,
-    onSendPending: (String)->Unit, onOpen: (String)->Unit, onBack: ()->Unit, onExit: ()->Unit) {
+    onSendPending: (String)->Unit, onOpen: (String)->Unit, onBack: ()->Unit) {
     val creation=state.creation ?: SessionCreationState()
     val choices=creation.options
     val runtime=state.runtimes.firstOrNull { it.id==state.selectedRuntimeId }
@@ -30,16 +32,19 @@ fun SessionCreationScreen(state: HomeState, onCreate: (String,String,String)->Un
     val valid=creation.phase==SessionCreationPhase.READY && creation.outbox.connected && selected!=null && preset in choices.presets && !state.submitting
     val unresolved=creation.outbox.records.any { it.intent.workspaceId==workspace && it.remote !in setOf(RemoteCommandState.SETTLED,RemoteCommandState.REJECTED) }
     val submit={ val id=workspace; val configuration=preset; val epoch=choices?.epoch; if(valid && id!=null && configuration!=null && epoch!=null) onCreate(id,configuration,epoch) }
-    Scaffold { insets ->
-        LazyColumn(Modifier.fillMaxSize().padding(insets).imePadding(),contentPadding=PaddingValues(24.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
+    Scaffold(topBar = {
+        cn.edu.ustc.dsh.ui.DshTopBar(
+            title = stringResource(R.string.flow_creation_title),
+            subtitle = runtime?.hostAlias ?: stringResource(R.string.chat_authorized_computer),
+            navigationIcon = { IconButton(onBack, Modifier.heightIn(min = 48.dp)) {
+                Icon(painterResource(R.drawable.ic_back), stringResource(R.string.flow_creation_back))
+            } },
+        )
+    }) { insets ->
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        LazyColumn(Modifier.widthIn(max = 720.dp).fillMaxSize().padding(insets).imePadding(),contentPadding=PaddingValues(cn.edu.ustc.dsh.ui.DshSpacing.page),verticalArrangement=Arrangement.spacedBy(16.dp)) {
             item("header") {
-                Column(Modifier.fillMaxWidth()) {
-                    TextButton(onBack,Modifier.heightIn(min=48.dp)) { Text("返回") }
-                    TextButton(onExit,Modifier.heightIn(min=48.dp)) { Text("退出本机登录") }
-                }
-                Text("创建会话",style=MaterialTheme.typography.headlineSmall,modifier=Modifier.semantics { heading() })
                 Text(stringResource(R.string.flow_creation_context), style=MaterialTheme.typography.titleSmall)
-                Text(runtime?.hostAlias ?: "已授权的电脑",style=MaterialTheme.typography.titleMedium)
                 Text(stringResource(R.string.flow_creation_intro))
             }
             item("connection") {
@@ -143,6 +148,7 @@ fun SessionCreationScreen(state: HomeState, onCreate: (String,String,String)->Un
                     }
                 }
             }
+        }
         }
     }
 }

@@ -187,7 +187,7 @@ class QuestionCardTest {
         rule.onNodeWithText("已核对以上完整计划").performScrollTo().performClick()
         rule.onNodeWithText("A", substring = false).performScrollTo().performClick()
         rule.onNodeWithText("补充或自定义答复：choice").performScrollTo().performTextInput("UNSENT")
-        rule.onNodeWithText("关闭答复表单").performClick()
+        rule.onNodeWithContentDescription("关闭答复表单").performClick()
         rule.onNodeWithText("查看并答复").performClick()
         rule.onNodeWithText("UNSENT").assertDoesNotExist()
         rule.onNodeWithText("已核对以上完整计划").performScrollTo().assertIsOff()

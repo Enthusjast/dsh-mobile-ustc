@@ -187,7 +187,7 @@ class HomeNavigationTest {
         val requests = fixture!!.sessionRequests.get()
         listAction("settings-list", R.string.settings_notifications).performClick()
         until("notification settings child") { controller!!.state.value.notificationSettings }
-        rule.onNodeWithText("返回").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("返回设置").performClick()
         until("page back closes notification child") { !controller!!.state.value.notificationSettings }
         tab(R.string.nav_settings).assertIsSelected()
         listAction("settings-list", R.string.settings_notifications).performClick()
@@ -198,7 +198,7 @@ class HomeNavigationTest {
 
         listAction("settings-list", R.string.settings_updates).performClick()
         until("app update settings child") { controller!!.state.value.appUpdateSettings }
-        rule.onNodeWithText("返回").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("返回设置").performClick()
         until("page back closes update child") { !controller!!.state.value.appUpdateSettings }
         tab(R.string.nav_settings).assertIsSelected()
         listAction("settings-list", R.string.settings_updates).performClick()

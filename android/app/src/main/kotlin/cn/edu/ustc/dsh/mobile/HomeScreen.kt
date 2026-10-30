@@ -110,10 +110,10 @@ private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () 
     } else if (bindingState != null) {
         BackHandler(onBack = { if (imeVisible) keyboard?.hide() else model.closeBinding() })
         HostBindingScreen(bindingState, state.subject, model::previewBinding, model::queryBinding, model::confirmBinding, model::refreshBinding, model::enterAnotherBinding,
-            { if (imeVisible) keyboard?.hide() else model.closeBinding() }, onCancel)
+            { if (imeVisible) keyboard?.hide() else model.closeBinding() })
     } else if (state.creation != null) {
         BackHandler(onBack = back)
-        SessionCreationScreen(state, model::createSession, model::refreshCreationOptions, model::queryCreation, model::sendPendingCreation, model::openCreatedSession, back, onCancel)
+        SessionCreationScreen(state, model::createSession, model::refreshCreationOptions, model::queryCreation, model::sendPendingCreation, model::openCreatedSession, back)
     } else if (state.selectedSessionId != null) {
         BackHandler(onBack = back)
         key(state.selectedRuntimeId, state.selectedSessionId) {
@@ -124,7 +124,7 @@ private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () 
                     readingPositions[resource] = it
                 }
             }
-            SessionsScreen(state, back, model::refreshSessions, model::loadOlder, model::retryRead, onCancel,
+            SessionsScreen(state, back, model::refreshSessions, model::loadOlder, model::retryRead,
                 model::submitMessage, model::sendPending, model::queryCommands, model::cancelSession, model::answerQuestion, model::claimQuestion, model::releaseQuestion, model::refreshQuestions,
                 model::reviewApproval, model::queryApprovals, model::archiveSession,
                 model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload,
