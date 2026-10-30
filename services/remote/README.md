@@ -1,5 +1,7 @@
 # Remote service foundation
 
+Realtime ticket admission [rechecks grant/ticket expiry after transaction waits](../../docs/realtime-ticket-expiry.md), including the audit-to-commit boundary. Expired attempts roll back issuance/consumption and success audits. Established sockets keep their separate negotiated lifetime while current grant expiry is still enforced. No schema migration is required.
+
 The phone-bound [host and runtime directories](../../docs/resource-directories.md) provide stable UUID paging through `/v1/host-directory` and `/v1/runtime-directory`. Every page rechecks current device, membership and grant visibility; hosts are deduplicated across visible profiles. The original full lists share the visibility predicate, and no new migration is needed.
 
 `GET /v1/approvals/{id}` provides [HTTP-only approval status reconciliation](../../docs/approval-http-status.md) for current registered phones with the same owner/read/approval resource policy as WSS. Status remains available with no live socket or online Host; details and execution still require their existing separate authorization. It reads bound metadata without a new migration or signing operation.

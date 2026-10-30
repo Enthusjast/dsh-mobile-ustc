@@ -687,7 +687,7 @@ paths:
             schema: { $ref: '#/components/schemas/RealtimeTicketRequest' }
       responses:
         '201':
-          description: Issues a 30-second one-use ticket bound to the active device key version, runtime grant version, and requested scope. Only the ticket hash is stored.
+          description: Issues a 30-second one-use ticket bound to the active device key version, runtime grant version, and requested scope. Only the ticket hash is stored. Database wall-clock checks after authority/resource waits and before the commit decision reject expired grants or newly expired tickets, rolling back the ticket and success audit. Handshake preparation/consumption recheck grant and ticket deadlines; established sockets retain their separate negotiated lifetime and current-grant checks.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:

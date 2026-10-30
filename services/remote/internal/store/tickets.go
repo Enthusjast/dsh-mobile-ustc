@@ -91,7 +91,7 @@ func (postgres *Postgres) issueRealtimeTicketOnce(ctx context.Context, identity 
 	err = transaction.QueryRowContext(ctx, `
 		select role, scope, grant_version from runtime_grants
 		where runtime_id = $1 and user_id = $2 and revoked_at is null
-		  and (expires_at is null or expires_at > now())
+		  and (expires_at is null or expires_at > clock_timestamp())
 		for share`, runtimeID, userID).Scan(&role, &grantScopeJSON, &grantVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RealtimeTicket{}, ErrAccessDenied
@@ -111,6 +111,12 @@ func (postgres *Postgres) issueRealtimeTicketOnce(ctx context.Context, identity 
 		return RealtimeTicket{}, ErrAccessDenied
 	}
 	if err := validateGrantResources(ctx, transaction, runtimeID, scope); err != nil {
+		return RealtimeTicket{}, err
+	}
+	if err := checkRealtimeGrantTime(ctx, transaction, userID, runtimeID, grantVersion, nil); err != nil {
+		if errors.Is(err, ErrTicketInvalid) {
+			return RealtimeTicket{}, ErrAccessDenied
+		}
 		return RealtimeTicket{}, err
 	}
 	secret := make([]byte, 32)
@@ -138,6 +144,12 @@ func (postgres *Postgres) issueRealtimeTicketOnce(ctx context.Context, identity 
 		insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, action, result, metadata)
 		values ($1, 'device', $2::uuid::text, $2, $3, 'realtime.ticket.issue', 'success', $4::jsonb)`, orgID, deviceID, runtimeID, string(metadata)); err != nil {
 		return RealtimeTicket{}, transactionFailure(err)
+	}
+	if err := checkRealtimeGrantTime(ctx, transaction, userID, runtimeID, grantVersion, &expiresAt); err != nil {
+		if errors.Is(err, ErrTicketInvalid) {
+			return RealtimeTicket{}, ErrAccessDenied
+		}
+		return RealtimeTicket{}, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return RealtimeTicket{}, transactionFailure(err)
@@ -223,6 +235,9 @@ func (postgres *Postgres) consumeRealtimeTicketOnce(ctx context.Context, token s
 		values ('device', $1::uuid::text, $1, $2, 'realtime.ticket.consume', 'success', $3::jsonb)`, redemption.DeviceID, redemption.RuntimeID, string(metadata)); err != nil {
 		return TicketRedemption{}, transactionFailure(err)
 	}
+	if err := checkRealtimeGrantTime(ctx, transaction, redemption.UserID, redemption.RuntimeID, redemption.GrantVersion, &redemption.ExpiresAt); err != nil {
+		return TicketRedemption{}, err
+	}
 	if err := transaction.Commit(); err != nil {
 		return TicketRedemption{}, transactionFailure(err)
 	}
@@ -265,6 +280,10 @@ func (postgres *Postgres) ValidateRealtimeLease(ctx context.Context, ticket Tick
 		if errors.Is(err, ErrGrantInvalid) || errors.Is(err, ErrAccessDenied) {
 			return ErrTicketInvalid
 		}
+		return err
+	}
+	// Admission-ticket expiry is not the established socket's negotiated lease.
+	if err := checkRealtimeGrantTime(ctx, transaction, ticket.UserID, ticket.RuntimeID, ticket.GrantVersion, nil); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -312,7 +331,7 @@ func loadRealtimeTicket(ctx context.Context, transaction *sql.Tx, digest []byte,
 		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
 		where u.id = $1 and u.status = 'active' and g.revoked_at is null
-		  and (g.expires_at is null or g.expires_at > now())
+		  and (g.expires_at is null or g.expires_at > clock_timestamp())
 		  and d.key_version = $5 and d.proof_key_thumbprint = $6
 		for share of u, d, m, h, i, r, g`,
 		redemption.UserID, redemption.DeviceID, redemption.RuntimeID, redemption.GrantVersion,
@@ -334,5 +353,28 @@ func loadRealtimeTicket(ctx context.Context, transaction *sql.Tx, digest []byte,
 		}
 		return TicketRedemption{}, err
 	}
+	if err := checkRealtimeGrantTime(ctx, transaction, redemption.UserID, redemption.RuntimeID, redemption.GrantVersion, &redemption.ExpiresAt); err != nil {
+		return TicketRedemption{}, err
+	}
 	return redemption, nil
+}
+
+// Call only after current authority rows have been locked. Their data remains
+// stable, but expiry can pass during a runtime/resource/audit lock wait. Use the
+// database wall clock, not the transaction-start timestamp, at the decision point.
+func checkRealtimeGrantTime(ctx context.Context, tx *sql.Tx, userID, runtimeID string, version int64, ticketExpiry *time.Time) error {
+	var grantExpiry sql.NullTime
+	var now time.Time
+	err := tx.QueryRowContext(ctx, `select expires_at,clock_timestamp() from runtime_grants
+	 where user_id=$1 and runtime_id=$2 and grant_version=$3 and revoked_at is null`, userID, runtimeID, version).Scan(&grantExpiry, &now)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTicketInvalid
+	}
+	if err != nil {
+		return transactionFailure(err)
+	}
+	if grantExpiry.Valid && !grantExpiry.Time.After(now) || ticketExpiry != nil && !ticketExpiry.After(now) {
+		return ErrTicketInvalid
+	}
+	return nil
 }
