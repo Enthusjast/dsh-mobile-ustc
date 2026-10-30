@@ -524,7 +524,7 @@ paths:
         '503': { $ref: '#/components/responses/Error' }
   /v1/runtimes/{id}/grants/{user_id}:
     put:
-      description: Revalidate and lock the active account, registered phone and current DPoP proof key inside the grant transaction, including exact retries. Accepts no query selectors. Confirmed database aborts may retry the whole transaction with current authorization; uncertain commits are not replayed automatically.
+      description: Revalidate and lock the active account, registered phone and current DPoP proof key inside the grant transaction, including exact retries. Recheck the original manager grant expiry and requested target expiry against the database wall clock after target locking and before the commit decision; expiry rolls back the entire transaction. Current organization-admin authority is independent of an owner grant expiry. Accepts no query selectors. Confirmed database aborts may retry the whole transaction with current authorization; uncertain commits are not replayed automatically.
       parameters:
         - $ref: '#/components/parameters/UUID'
         - name: user_id
@@ -557,7 +557,7 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '200':
-          description: Grant revocation is idempotent and transactionally records audit and outbox events. Every attempt revalidates and locks the current registered phone and proof key. No query selectors or body are accepted. Device revocation completed before authorization prevents this write; an earlier valid grant commit remains independent of later device revocation.
+          description: Grant revocation is idempotent and transactionally records audit and outbox events. Every attempt revalidates and locks the current registered phone and proof key and rechecks original manager expiry against the database wall clock after target locking and before the commit decision. No query selectors or body are accepted. Device revocation completed before authorization prevents this write; an earlier valid grant commit remains independent of later device revocation.
           headers:
             DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
           content:

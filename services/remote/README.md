@@ -2,6 +2,8 @@
 
 Runtime grant PUT/DELETE now [revalidate and lock the current phone proof inside the transaction](../../docs/runtime-grant-writes.md), including idempotent retries. Bounded SERIALIZABLE retries recheck authority after confirmed aborts; device revocation and grant writes cannot use an earlier middleware lookup as lasting authority. These routes reject query selectors, and DELETE rejects a body.
 
+Grant writes also recheck the original management expiry and any requested grant expiry against the database wall clock after target locking and immediately before the commit decision. Lock or audit waits cannot preserve expired owner authority through a transaction-start timestamp; current organization-admin authority and legitimate self-removal remain supported.
+
 Current organization admins and runtime owners with `grant.manage` can inspect the [runtime grant directory](../../docs/runtime-grant-directory.md) through bounded phone-authenticated pages. Every page rechecks the current account, device, membership, profile and management authority; expired/revoked records remain visible only to an eligible manager. The directory uses the existing grant primary key and requires no new migration.
 
 Registered phones can [discover and revoke installations](../../docs/installation-management.md) through current installation-owner or organization-admin authority. Revocation retires all profiles/credentials of that installation, publishes durable runtime invalidations, and preserves other installations on the same host. Apply migration 034 before enabling this entry.
