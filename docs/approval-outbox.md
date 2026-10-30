@@ -1,5 +1,11 @@
 # Durable host approval result reports
 
+The [real DSH/database outage drill](database-outage-drill.md) reads only local
+journal metadata to verify an invalidated unspent permission and a completed spent
+execution both remain pending while the Relay/database cannot acknowledge them.
+After restart, matching durable server results clear those flags; body markers and
+resource audit counts verify that reconciliation does not execute either tool again.
+
 The private command/approval SQLite database now uses schema 3. Version-one command journals and version-two approval journals migrate after the existing encryption-key check. Context/decision encryption, AAD, nonce/execution tombstones and one-use execution semantics remain intact. An older reader that only understands schema 2 refuses the newer database.
 
 Each approval carries a remote-registration fact, a pending-report flag and a retry deadline. Receiving a matching `approval.registered` status records only that the control plane knows the binding; it never approves a native invocation. A verified/admitted signed decision also establishes that fact, including when the registration acknowledgement races the decision. Existing decided version-two records enter the report queue during migration so their execution history is retained. Legacy unacknowledged pending records remain local audit history and never acquire authority.

@@ -35,10 +35,13 @@ class LocalModel extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
-    const signedApproval = ['ALLOW', 'REJECT', 'CANCEL', 'REVOKE'].find(mode => userText.includes(`REMOTE_APPROVAL_${mode}`) && !this.signedApprovalsIssued.has(mode))
+    const signedApproval = ['ALLOW', 'REJECT', 'CANCEL', 'REVOKE', 'DBRUN', 'DBBLOCK'].find(mode => userText.includes(`REMOTE_APPROVAL_${mode}`) && !this.signedApprovalsIssued.has(mode))
     if (signedApproval) {
       this.signedApprovalsIssued.add(signedApproval)
-      const args = JSON.stringify({ description: `Signed approval ${signedApproval.toLowerCase()} fixture`, command: `printf authorized >> approval-${signedApproval.toLowerCase()}.txt` })
+      const command = signedApproval === 'DBRUN'
+        ? 'printf started >> approval-dbrun-started.txt; while [ ! -f approval-dbrun-release ]; do sleep 0.05; done; printf authorized >> approval-dbrun.txt'
+        : `printf authorized >> approval-${signedApproval.toLowerCase()}.txt`
+      const args = JSON.stringify({ description: `Signed approval ${signedApproval.toLowerCase()} fixture`, command })
       const id = randomUUID()
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index: 0, id, name: 'bash', argumentsDelta: args }

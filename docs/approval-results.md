@@ -1,5 +1,13 @@
 # Approval details access and host results
 
+The [bounded database outage drill](database-outage-drill.md) also runs two real
+npm DSH Bash approvals. An approved, unspent invocation becomes invalidated before
+its ordinary permit expires; a separately consumed invocation completes once while
+disconnected and retains its durable succeeded fact. After relay restart, both facts
+reconcile through the new Host connection with one matching resource audit each,
+their original allow decisions, and fingerprinted acknowledgements. Current phone
+status reads succeed, while old-connection details remain unavailable.
+
 Approval details and result metadata now have explicit current-owner read checks. `ApprovalControl.AuthorizeView` requires both `approval.decide` and `session.read` in the admitted ticket and current owner grant, matching device/proof key/grant versions, active user/membership/host/installation/runtime and the exact original live connection/session/workspace. A read-only socket cannot inherit approval access from another socket's wider grant. `ListPending` returns at most 64 live, unexpired references and independently authorizes each item; it returns no parameters. `AuthorizeStatus` applies the same current owner/action/resource checks to stored metadata, including after host disconnection. Full details still require the original online host. Moving a session does not transfer an old workspace's approval body to a newly scoped reader.
 
 Migration 007 adds a host journal state, fixed execution-outcome enum and service receipt time. These are metadata facts, not callbacks or executable permissions. Host `approved` leaves the service at `decision_received`. Host `consumed` marks an already spent permission as `allowed`, without claiming native tool success, and prevents further lease issuance. Only host `settled` carries `succeeded`, `failed` or `cancelled`. Both successful and failed tool results retain the signed approval's allow decision; a failed native tool is not relabeled as a user rejection.

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto'
 import { once } from 'node:events'
+import { DatabaseSync } from 'node:sqlite'
 import { lstat, mkdir, mkdtemp, readFile, writeFile, unlink, rename } from 'node:fs/promises'
 import { createServer, request } from 'node:http'
 import { createServer as createTCPServer } from 'node:net'
@@ -610,6 +611,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     "process.stdout.write(fs.readFileSync(path).toString('base64')+'\\n')", '',
   ].join('\n'), { mode: 0o700 })
   const accountRetireFile = join(root, 'retire-host-account.json'), accountRetireReport = join(root, 'retired-native-state.json')
+  const blockedApprovalHeld = join(workspace, 'approval-dbblock-held'), runningApprovalRelease = join(workspace, 'approval-dbrun-release')
   const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
   const checkpointFailureSecret = `PRIVATE_CHECKPOINT_FAILURE_${randomUUID()}`
   await writeFile(wrapper, [
@@ -631,7 +633,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     "const plugin=bindingStore?createEnrolledRemoteControlPlugin({client:enrollmentClient,binding:bindingStore,credentials:credentialProvider,profileRef:'e2e'},signed,journalProtector):createRemoteControlPlugin(credentialProvider,signed,journalProtector)",
     `function watchAccountRetirement(ctx){let checking=false,ended=false;const timer=setInterval(async()=>{if(checking||ended)return;checking=true;try{const input=JSON.parse(await readFile(${JSON.stringify(accountRetireFile)},'utf8'));ended=true;clearInterval(timer);const agent=ctx.agents.get(input.native_id);owner.abort();await new Promise(resolve=>setImmediate(resolve));const persisted=agent?await ctx.sessions.flush(agent.session):false;await writeFile(${JSON.stringify(accountRetireReport)},JSON.stringify({same_agent:!!agent&&ctx.agents.get(input.native_id)===agent,persisted:!!persisted}),{mode:0o600})}catch(error){if(error.code!=='ENOENT'){ended=true;clearInterval(timer)}}finally{checking=false}},25);timer.unref();return()=>{ended=true;clearInterval(timer)}}`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>watchAccountRetirement(ctx));ctx.effect(()=>()=>{owner.abort();bindingStore?.close();enrollmentClient?.close();credentialProvider.close();resourceAccount.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>watchAccountRetirement(ctx));ctx.effect(()=>()=>{owner.abort();bindingStore?.close();enrollmentClient?.close();credentialProvider.close();resourceAccount.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&(exec.arguments.command.includes('approval-revoke.txt')||exec.arguments.command.includes('approval-dbblock.txt'))){await writeFile(exec.arguments.command.includes('approval-dbblock.txt')?${JSON.stringify(blockedApprovalHeld)}:${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -1324,107 +1326,184 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await ownerReader.wait(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
   t.diagnostic('The installation owner paged both profiles and retired the fixture sibling through the scoped API. Exact retry wrote one audit, every relay acknowledged, and the same real DSH Host connection served a new owner-phone native snapshot afterward. The shared installation and primary profile stayed active.')
   if (process.env.REMOTE_TEST_DATABASE_OUTAGE === '1') {
-    assert.ok(crossNode && phoneService, 'database outage requires two owned relay processes')
-    const marker = `DATABASE_OUTAGE_NATIVE_${randomUUID()}`, requestId = randomUUID()
-    const admittedFrom = ownerReader.frames.length
-    const outageCommand = { v: 1, type: 'message.submit', request_id: requestId, runtime_id: enrollment.runtime_id,
-      session_id: sessionId, payload: { mode: 'queue', content: [{ type: 'text', text: marker }] } }
-    assert.equal(validate(outageCommand), true, JSON.stringify(validate.errors))
-    ownerReader.send(outageCommand)
-    await ownerReader.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', admittedFrom)
-    assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
-    const nativeBefore = query(`select dsh_session_id from sessions where id='${sessionId}'`)
-    const hostConnectionBefore = query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`)
-    const generationsBefore = query(`select string_agg(generation::text,',' order by node_id) from control_consumers where node_id in ('${nodeIDs[0]}','${nodeIDs[1]}')`)
-    const ticketCountBefore = query(`select count(*) from realtime_tickets where device_id='${ownerDevice.device_id}' and runtime_id='${enrollment.runtime_id}'`)
-    // Prepare a real, valid identity/proof nonce before removing database authority.
-    const accessIssued = now()
-    const outageAccess = jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
-      iss: issuer, sub: 'owner', aud: 'urn:dsh-e2e', client_id: 'fixture-phone', jti: randomUUID(), iat: accessIssued, exp: accessIssued + 300,
-      scope: 'remote.access', cnf: { jkt: ownerPhoneKey.jkt }, auth_time: accessIssued - 2, acr: 'urn:fixture:verified', amr: ['otp'],
-    })
-    const requestTicket = (nonce: string) => fetch(phoneOrigin + '/v1/realtime/tickets', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(1500),
-      headers: { authorization: `DPoP ${outageAccess}`, 'content-type': 'application/json', dpop: jws(ownerPhoneKey.privateKey, { typ: 'dpop+jwt', alg: 'ES256', jwk: ownerPhoneKey.jwk }, {
-        htm: 'POST', htu: origin + '/v1/realtime/tickets', ath: hash(outageAccess), jti: randomUUID(), iat: now(), nonce,
-      }) }, body: JSON.stringify({ runtime_id: enrollment.runtime_id, scope }) })
-    const challenge = await requestTicket('')
-    assert.equal(challenge.status, 401); await challenge.arrayBuffer()
-    const nonce = challenge.headers.get('dpop-nonce'); assert.ok(nonce)
-    const beforeClose = ownerReader.frames.length
-    const started = Date.now()
-    let closureMillis = 0
-    serviceFaultExpected = phoneFaultExpected = true
-    await withIsolatedDatabaseOutage({ cluster, database, psql }, async () => {
-      let admissionStatus: number | undefined
-      try { const response = await requestTicket(nonce); admissionStatus = response.status; await response.arrayBuffer().catch(() => {}) }
-      catch {} // A stopped listener is also failed-closed admission.
-      assert.ok(admissionStatus === undefined || admissionStatus === 503, 'database outage did not fail the valid ticket request as unavailable')
-      await until(async () => ownerReader.closed ? true : undefined, 'old phone closed without database authority', 5000)
-      closureMillis = Date.now() - started
-      assert.ok(closureMillis < 5000, 'database failure exceeded the five-second phone closure boundary')
-      for (const process of [service, phoneService!]) {
-        let timer: NodeJS.Timeout | undefined
-        try {
-          const [code, signal] = await Promise.race([process.exited, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('relay did not stop after database authority loss')), 7000) })])
-          assert.equal(code, 1, 'relay did not report database authority failure')
-          assert.equal(signal, null, 'relay needed an external kill instead of failed-closed shutdown')
-        } finally { if (timer) clearTimeout(timer) }
+    try {
+      assert.ok(crossNode && phoneService, 'database outage requires two owned relay processes')
+      const localApprovalFact = (approvalId: string) => {
+        const database = new DatabaseSync(join(root, 'journal', 'commands.sqlite'), { readOnly: true })
+        try { const row = database.prepare('select state,outcome,report_pending from approval_records where approval_id=?').get(approvalId); assert.ok(row); return { ...row } as { state: string; outcome: string | null; report_pending: number } }
+        finally { database.close() }
       }
-      const notice = ownerReader.frames.findIndex((frame, index) => index >= beforeClose && frame.type === 'access.revoked')
-      if (notice >= 0) assert.equal(ownerReader.frames.slice(notice + 1).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false)
-      dsh.check()
+      const subscribeApprovals = randomUUID()
+      ownerReader.send({ v: 1, type: 'approval.subscribe', request_id: subscribeApprovals, runtime_id: enrollment.runtime_id, payload: {} })
+      await ownerReader.wait(frame => frame.type === 'approval.snapshot' && frame.request_id === subscribeApprovals)
+      const approveOutageTool = async (mode: 'DBRUN' | 'DBBLOCK', targetSession: string) => {
+        const from = ownerReader.frames.length, marker = `REMOTE_APPROVAL_${mode}_${randomUUID()}`, promptId = randomUUID()
+        ownerReader.send({ v: 1, type: 'message.submit', request_id: promptId, runtime_id: enrollment.runtime_id, session_id: targetSession,
+          payload: { mode: 'queue', content: [{ type: 'text', text: marker }] } })
+        const pending = await ownerReader.wait(frame => frame.type === 'approval.reference' && frame.session_id === targetSession && frame.payload.status.state === 'pending', from)
+        const approvalId = pending.payload.status.approval_id, detailsId = randomUUID()
+        ownerReader.send({ v: 1, type: 'approval.details.get', request_id: detailsId, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+          session_id: targetSession, payload: { approval_id: approvalId } })
+        const context = (await ownerReader.wait(frame => frame.type === 'approval.details' && frame.request_id === detailsId, from)).payload.context as ApprovalContext
+        const decision: ApprovalDecision = { domain: 'dsh-mobile-ustc/approval-decision/v1', protocol_version: 1, host_id: context.host_id, installation_id: context.installation_id,
+          runtime_id: context.runtime_id, runtime_epoch: context.runtime_epoch, session_id: context.session_id, approval_id: context.approval_id, execution_id: context.execution_id,
+          binding_sha256: approvalBinding(context).sha256, decision: 'allow_once', user_id: ownerId, device_id: ownerDevice.device_id, key_version: ownerDevice.key_version,
+          policy_version: context.policy_version, nonce: context.nonce, issued_at: new Date().toISOString(), expires_at: context.expires_at }
+        const proof = await new CompactSign(canonicalObject(decision)).setProtectedHeader({ alg: 'ES256', kid: approvalKeyID(ownerDevice.device_id, ownerDevice.key_version), typ: APPROVAL_JWS_TYPE }).sign(ownerApprovalKey.privateKey)
+        const connection = ownerReader.frames.find(frame => frame.type === 'hello.ok').payload.connection_id
+        assert.equal((await ownerPhone('POST', `/v1/approvals/${approvalId}/decisions`, { connection_id: connection, decision_jws: proof })).delivery, 'forwarded')
+        return { approvalId, context, marker, promptId }
+      }
+      const runningCreated = await command('session.create', { workspace_id: primaryWorkspace, preset: 'standard' })
+      const runningSessionId = runningCreated.payload.session_id as string
+      await until(async () => query(`select workspace_id::text from sessions where id='${runningSessionId}' and state='available'`) === primaryWorkspace ? true : undefined, 'new native session catalog accepted by the Relay')
+      const runningApproval = await approveOutageTool('DBRUN', runningSessionId)
+      await until(async () => { try { return (await readFile(join(workspace, 'approval-dbrun-started.txt'), 'utf8')) === 'started' ? true : undefined } catch { return undefined } }, 'approved native Bash entered its body')
+      await until(async () => query(`select host_state from approvals where id='${runningApproval.approvalId}'`) === 'consumed' ? true : undefined, 'server observed the spent native permit')
+      assert.equal(localApprovalFact(runningApproval.approvalId).state, 'consumed')
+      const marker = `DATABASE_OUTAGE_NATIVE_${randomUUID()}`, requestId = randomUUID()
+      const admittedFrom = ownerReader.frames.length
+      const outageCommand = { v: 1, type: 'message.submit', request_id: requestId, runtime_id: enrollment.runtime_id,
+        session_id: sessionId, payload: { mode: 'queue', content: [{ type: 'text', text: marker }] } }
+      assert.equal(validate(outageCommand), true, JSON.stringify(validate.errors))
+      ownerReader.send(outageCommand)
+      await ownerReader.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', admittedFrom)
+      assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
+      const nativeBefore = query(`select dsh_session_id from sessions where id='${sessionId}'`)
+      const hostConnectionBefore = query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`)
+      const generationsBefore = query(`select string_agg(generation::text,',' order by node_id) from control_consumers where node_id in ('${nodeIDs[0]}','${nodeIDs[1]}')`)
+      const ticketCountBefore = query(`select count(*) from realtime_tickets where device_id='${ownerDevice.device_id}' and runtime_id='${enrollment.runtime_id}'`)
+      // Prepare a real, valid identity/proof nonce before removing database authority.
+      const accessIssued = now()
+      const outageAccess = jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
+        iss: issuer, sub: 'owner', aud: 'urn:dsh-e2e', client_id: 'fixture-phone', jti: randomUUID(), iat: accessIssued, exp: accessIssued + 300,
+        scope: 'remote.access', cnf: { jkt: ownerPhoneKey.jkt }, auth_time: accessIssued - 2, acr: 'urn:fixture:verified', amr: ['otp'],
+      })
+      const requestTicket = (nonce: string) => fetch(phoneOrigin + '/v1/realtime/tickets', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(1500),
+        headers: { authorization: `DPoP ${outageAccess}`, 'content-type': 'application/json', dpop: jws(ownerPhoneKey.privateKey, { typ: 'dpop+jwt', alg: 'ES256', jwk: ownerPhoneKey.jwk }, {
+          htm: 'POST', htu: origin + '/v1/realtime/tickets', ath: hash(outageAccess), jti: randomUUID(), iat: now(), nonce,
+        }) }, body: JSON.stringify({ runtime_id: enrollment.runtime_id, scope }) })
+      const challenge = await requestTicket('')
+      assert.equal(challenge.status, 401); await challenge.arrayBuffer()
+      const nonce = challenge.headers.get('dpop-nonce'); assert.ok(nonce)
+      const blockedApproval = await approveOutageTool('DBBLOCK', sessionId)
+      await until(async () => { try { await readFile(blockedApprovalHeld); return true } catch { return undefined } }, 'approved native Bash held after guard but before its body')
+      const blockedLeaseExpiry = Date.parse(query(`select metadata->>'expires_at' from audit_log where action='approval.authorization.prepare' and metadata->>'approval_id'='${blockedApproval.approvalId}' order by id desc limit 1`))
+      assert.ok(blockedLeaseExpiry > Date.now(), 'blocked approval fixture lost its ordinary three-second permit before the fault')
+      assert.equal(localApprovalFact(blockedApproval.approvalId).state, 'approved')
+      await assert.rejects(readFile(join(workspace, 'approval-dbblock.txt')), { code: 'ENOENT' })
+      const beforeClose = ownerReader.frames.length
+      const started = Date.now()
+      let closureMillis = 0, blockedInvalidationMillis = 0
+      serviceFaultExpected = phoneFaultExpected = true
+      await withIsolatedDatabaseOutage({ cluster, database, psql }, async () => {
+        let admissionStatus: number | undefined
+        try { const response = await requestTicket(nonce); admissionStatus = response.status; await response.arrayBuffer().catch(() => {}) }
+        catch {} // A stopped listener is also failed-closed admission.
+        assert.ok(admissionStatus === undefined || admissionStatus === 503, 'database outage did not fail the valid ticket request as unavailable')
+        await until(async () => ownerReader.closed ? true : undefined, 'old phone closed without database authority', 5000)
+        closureMillis = Date.now() - started
+        assert.ok(closureMillis < 5000, 'database failure exceeded the five-second phone closure boundary')
+        for (const process of [service, phoneService!]) {
+          let timer: NodeJS.Timeout | undefined
+          try {
+            const [code, signal] = await Promise.race([process.exited, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('relay did not stop after database authority loss')), 7000) })])
+            assert.equal(code, 1, 'relay did not report database authority failure')
+            assert.equal(signal, null, 'relay needed an external kill instead of failed-closed shutdown')
+          } finally { if (timer) clearTimeout(timer) }
+        }
+        await until(async () => localApprovalFact(blockedApproval.approvalId).state === 'invalidated' ? true : undefined, 'unspent permit invalidated in the durable Host journal', 2500)
+        blockedInvalidationMillis = Date.now() - started
+        assert.ok(Date.now() < blockedLeaseExpiry, 'unspent permit waited for expiry instead of losing connection authority')
+        assert.equal(localApprovalFact(blockedApproval.approvalId).report_pending, 1)
+        await assert.rejects(readFile(join(workspace, 'approval-dbblock.txt')), { code: 'ENOENT' })
+        // This body already spent its permission before the outage. Let the real
+        // Bash finish while no relay can acknowledge its durable result.
+        await writeFile(runningApprovalRelease, 'release', { mode: 0o600 })
+        await until(async () => localApprovalFact(runningApproval.approvalId).state === 'settled' ? true : undefined, 'spent native tool settled durably while the database was unavailable', 5000)
+        assert.deepEqual(localApprovalFact(runningApproval.approvalId), { state: 'settled', outcome: 'succeeded', report_pending: 1 })
+        assert.equal(await readFile(join(workspace, 'approval-dbrun.txt'), 'utf8'), 'authorized')
+        const notice = ownerReader.frames.findIndex((frame, index) => index >= beforeClose && frame.type === 'access.revoked')
+        if (notice >= 0) assert.equal(ownerReader.frames.slice(notice + 1).some(frame => ['session.event', 'assistant.chunk'].includes(frame.type)), false)
+        dsh.check()
+        assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch)
+      })
+      const outageMillis = Date.now() - started
+      assert.equal(query(`select count(*) from realtime_tickets where device_id='${ownerDevice.device_id}' and runtime_id='${enrollment.runtime_id}'`), ticketCountBefore,
+        'outage minted a ticket without current database authority')
+      assert.equal(query(`select state from commands where request_id='${requestId}' and device_id='${ownerDevice.device_id}'`), 'agent_queued')
+      assert.equal(query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`), hostConnectionBefore, 'fault fixture lost the stale Host ownership record')
+      assert.equal(query(`select execution_outcome is null from approvals where id='${runningApproval.approvalId}'`), 't', 'server invented the offline native outcome before its report')
+      // Wait for actual persisted leases; do not delete routes/consumers or forge expiry.
+      await until(async () => query(`select count(*)=2 and bool_and(lease_until<=clock_timestamp()) from control_consumers where node_id in ('${nodeIDs[0]}','${nodeIDs[1]}')`) === 't' ? true : undefined,
+        'natural old relay ownership expiry', 12000)
+      service = await startProcess(serviceBin, [], serviceEnv); serviceFaultExpected = false
+      phoneService = await startProcess(serviceBin, [], phoneServiceEnv); phoneFaultExpected = false
+      await until(async () => {
+        service.check(); phoneService!.check()
+        try {
+          const responses = await Promise.all([origin, phoneOrigin].map(url => fetch(url + '/readyz', { signal: AbortSignal.timeout(500) })))
+          const ready = responses.every(response => response.status === 204)
+          await Promise.all(responses.map(response => response.arrayBuffer()))
+          return ready ? true : undefined
+        } catch { return undefined }
+      }, 'restarted relay readiness', 10000)
+      assert.notEqual(query(`select string_agg(generation::text,',' order by node_id) from control_consumers where node_id in ('${nodeIDs[0]}','${nodeIDs[1]}')`), generationsBefore)
+      await until(async () => { dsh.check(); const connection = query(`select coalesce(connection_id::text,'') from runtimes where id='${enrollment.runtime_id}'`); return connection && connection !== hostConnectionBefore ? true : undefined },
+        'same native Host reconnected after database recovery', 20000)
       assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch)
-    })
-    const outageMillis = Date.now() - started
-    assert.equal(query(`select count(*) from realtime_tickets where device_id='${ownerDevice.device_id}' and runtime_id='${enrollment.runtime_id}'`), ticketCountBefore,
-      'outage minted a ticket without current database authority')
-    assert.equal(query(`select state from commands where request_id='${requestId}' and device_id='${ownerDevice.device_id}'`), 'agent_queued')
-    assert.equal(query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`), hostConnectionBefore, 'fault fixture lost the stale Host ownership record')
-    // Wait for actual persisted leases; do not delete routes/consumers or forge expiry.
-    await until(async () => query(`select count(*)=2 and bool_and(lease_until<=clock_timestamp()) from control_consumers where node_id in ('${nodeIDs[0]}','${nodeIDs[1]}')`) === 't' ? true : undefined,
-      'natural old relay ownership expiry', 12000)
-    service = await startProcess(serviceBin, [], serviceEnv); serviceFaultExpected = false
-    phoneService = await startProcess(serviceBin, [], phoneServiceEnv); phoneFaultExpected = false
-    await until(async () => {
-      service.check(); phoneService!.check()
-      try {
-        const responses = await Promise.all([origin, phoneOrigin].map(url => fetch(url + '/readyz', { signal: AbortSignal.timeout(500) })))
-        const ready = responses.every(response => response.status === 204)
-        await Promise.all(responses.map(response => response.arrayBuffer()))
-        return ready ? true : undefined
-      } catch { return undefined }
-    }, 'restarted relay readiness', 10000)
-    assert.notEqual(query(`select string_agg(generation::text,',' order by node_id) from control_consumers where node_id in ('${nodeIDs[0]}','${nodeIDs[1]}')`), generationsBefore)
-    await until(async () => { dsh.check(); const connection = query(`select coalesce(connection_id::text,'') from runtimes where id='${enrollment.runtime_id}'`); return connection && connection !== hostConnectionBefore ? true : undefined },
-      'same native Host reconnected after database recovery', 20000)
-    assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch)
-    assert.equal(query(`select dsh_session_id from sessions where id='${sessionId}'`), nativeBefore)
-    await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
-    const reconnected = await connectPhone(ownerPhone, ownerDevice.device_id, ownerPhoneKey)
-    const subscribe = { v: 1, type: 'session.subscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 100 } }
-    reconnected.send(subscribe)
-    const snapshot = await reconnected.wait(frame => frame.type === 'session.snapshot' && frame.request_id === subscribe.request_id)
-    const oldSnapshot = ownerReader.frames.find(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
-    assert.notEqual(snapshot.subscription_id, oldSnapshot.subscription_id); assert.notEqual(snapshot.sync_id, oldSnapshot.sync_id)
-    assert.equal(snapshot.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1,
-      'database outage replayed or lost a durably accepted native message')
-    const retryFrom = reconnected.frames.length
-    reconnected.send(outageCommand)
-    await reconnected.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', retryFrom)
-    assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
-    reconnected.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
-      session_id: sessionId, subscription_id: snapshot.subscription_id, payload: {} })
-    await reconnected.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === snapshot.subscription_id, retryFrom)
-    const nextSubscribe = { ...subscribe, request_id: randomUUID() }
-    reconnected.send(nextSubscribe)
-    const snapshots = await reconnected.wait(frame => frame.type === 'session.snapshot' && frame.request_id === nextSubscribe.request_id, retryFrom)
-    assert.notEqual(snapshots.subscription_id, snapshot.subscription_id)
-    assert.equal(snapshots.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1,
-      'explicit original-ID reconciliation duplicated a native message after recovery')
-    const recoveredDump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-    assert.equal(recoveredDump.includes(marker), false, 'database fault recovery persisted a native command body')
-    t.diagnostic(`An isolated database connection outage stopped both production relays and closed the old phone; the phone closed in ${closureMillis} ms and database connections were re-enabled after ${outageMillis} ms. Fresh-handshake recovery and original-ID reconciliation completed in ${Date.now() - started} ms. After actual ownership lease expiry, explicit relay restart and new Host/phone handshakes retained the DSH epoch/native session, one durable user message and the original agent_queued command. No route/lease edits or automatic command replay were used.`)
-    return
+      assert.equal(query(`select dsh_session_id from sessions where id='${sessionId}'`), nativeBefore)
+      await until(async () => query(`select host_state='invalidated' and decision='allow_once' from approvals where id='${blockedApproval.approvalId}'`) === 't' &&
+        query(`select host_state='settled' and execution_outcome='succeeded' and decision='allow_once' from approvals where id='${runningApproval.approvalId}'`) === 't' ? true : undefined,
+        'reconnected Host reconciled unspent invalidation and spent execution outcome', 10000)
+      await until(async () => localApprovalFact(blockedApproval.approvalId).report_pending === 0 && localApprovalFact(runningApproval.approvalId).report_pending === 0 ? true : undefined,
+        'matching server acknowledgements cleared both durable pending facts')
+      assert.equal(query(`select count(*) from audit_log where action='approval.result' and metadata->>'approval_id'='${runningApproval.approvalId}' and metadata->>'host_state'='settled'`), '1')
+      assert.equal(query(`select count(*) from audit_log where action='approval.result' and metadata->>'approval_id'='${blockedApproval.approvalId}' and metadata->>'host_state'='invalidated'`), '1')
+      assert.equal(await readFile(join(workspace, 'approval-dbrun-started.txt'), 'utf8'), 'started', 'spent native Bash was executed more than once')
+      assert.equal(await readFile(join(workspace, 'approval-dbrun.txt'), 'utf8'), 'authorized')
+      await assert.rejects(readFile(join(workspace, 'approval-dbblock.txt')), { code: 'ENOENT' })
+      await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
+      const reconnected = await connectPhone(ownerPhone, ownerDevice.device_id, ownerPhoneKey)
+      for (const item of [{ id: blockedApproval.approvalId, state: 'invalidated', host: 'invalidated' }, { id: runningApproval.approvalId, state: 'allowed', host: 'settled' }]) {
+        const statusId = randomUUID()
+        reconnected.send({ v: 1, type: 'approval.status.get', request_id: statusId, runtime_id: enrollment.runtime_id, payload: { approval_id: item.id } })
+        const status = (await reconnected.wait(frame => frame.type === 'approval.reference' && frame.request_id === statusId)).payload.status
+        assert.equal(status.state, item.state); assert.equal(status.host_state, item.host); assert.equal(status.decision, 'allow_once')
+        if (item.host === 'settled') assert.equal(status.execution_outcome, 'succeeded')
+      }
+      const oldDetails = randomUUID()
+      reconnected.send({ v: 1, type: 'approval.details.get', request_id: oldDetails, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+        session_id: sessionId, payload: { approval_id: blockedApproval.approvalId } })
+      await reconnected.wait(frame => frame.type === 'error' && frame.request_id === oldDetails && frame.payload.code === 'access.denied')
+
+      const subscribe = { v: 1, type: 'session.subscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 100 } }
+      reconnected.send(subscribe)
+      const snapshot = await reconnected.wait(frame => frame.type === 'session.snapshot' && frame.request_id === subscribe.request_id)
+      const oldSnapshot = ownerReader.frames.find(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
+      assert.notEqual(snapshot.subscription_id, oldSnapshot.subscription_id); assert.notEqual(snapshot.sync_id, oldSnapshot.sync_id)
+      assert.equal(snapshot.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1,
+        'database outage replayed or lost a durably accepted native message')
+      const retryFrom = reconnected.frames.length
+      reconnected.send(outageCommand)
+      await reconnected.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', retryFrom)
+      assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
+      reconnected.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+        session_id: sessionId, subscription_id: snapshot.subscription_id, payload: {} })
+      await reconnected.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === snapshot.subscription_id, retryFrom)
+      const nextSubscribe = { ...subscribe, request_id: randomUUID() }
+      reconnected.send(nextSubscribe)
+      const snapshots = await reconnected.wait(frame => frame.type === 'session.snapshot' && frame.request_id === nextSubscribe.request_id, retryFrom)
+      assert.notEqual(snapshots.subscription_id, snapshot.subscription_id)
+      assert.equal(snapshots.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1,
+        'explicit original-ID reconciliation duplicated a native message after recovery')
+      const recoveredDump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+      for (const secret of [marker, blockedApproval.marker, runningApproval.marker, (blockedApproval.context.arguments as { command: string }).command, (runningApproval.context.arguments as { command: string }).command])
+        assert.equal(recoveredDump.includes(secret), false, 'database fault recovery persisted a native command body or full tool arguments')
+      t.diagnostic(`During database authority loss, the unspent approved Bash was durably invalidated after ${blockedInvalidationMillis} ms and before its ordinary three-second permit expired; its body never ran. A separately consumed Bash completed once while disconnected, retained an unacknowledged succeeded fact and reconciled it once after restart; exact server acknowledgements cleared both Host reports.`)
+      t.diagnostic(`An isolated database connection outage stopped both production relays and closed the old phone; the phone closed in ${closureMillis} ms and database connections were re-enabled after ${outageMillis} ms. Fresh-handshake recovery and original-ID reconciliation completed in ${Date.now() - started} ms. After actual ownership lease expiry, explicit relay restart and new Host/phone handshakes retained the DSH epoch/native session, one durable user message and the original agent_queued command. No route/lease edits or automatic command replay were used.`)
+      return
+    } finally { await writeFile(runningApprovalRelease, 'release').catch(() => {}) }
   }
   if (process.env.REMOTE_TEST_HOST_ACCOUNT_RETIRE === '1') {
     const nativeId = query(`select dsh_session_id from sessions where id='${sessionId}'`)
