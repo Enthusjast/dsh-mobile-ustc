@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 
 import { isIP } from 'node:net'
 import { z } from 'zod'
 import { parseSigningObject } from './canonical.js'
-import type { HostResourceAccessProvider, HostResourceIdentity, HostResourceRequest } from './host-credentials.js'
+import { hostEnrollmentOwnerBinding, type HostResourceAccessProvider, type HostResourceIdentity, type HostResourceRequest } from './host-credentials.js'
 import type { HostHandshakeSigner } from './relay-client.js'
 
 type Code = 'invalid_config' | 'cancelled' | 'identity_changed' | 'expired' | 'proof_invalid' | 'denied' | 'conflict' | 'unavailable' | 'response_invalid' | 'review_required' | 'declined' | 'outcome_unknown' | 'busy'
@@ -85,8 +85,7 @@ export class HostEnrollmentTransport {
       if (new Set(scopes).size !== scopes.length || scopes.some(scope => /\s/.test(scope)) ||
           typeof options.signer?.sign !== 'function' || typeof options.account?.acquire !== 'function' || !(options.account.signal instanceof AbortSignal)) throw enrollmentError('invalid_config')
       this.#scopes = Object.freeze(scopes)
-      this.binding = createHash('sha256').update(JSON.stringify({ purpose: 'dsh-host-enrollment-intent-v1', origin: this.origin,
-        identity: this.identity, thumbprint: this.thumbprint, requiredScopes: this.#scopes })).digest('hex')
+      this.binding = hostEnrollmentOwnerBinding(this.origin, this.identity, this.thumbprint, this.#scopes)
       this.#signer = Object.freeze({ sign: options.signer.sign.bind(options.signer) })
       this.#account = Object.freeze({ signal: options.account.signal, acquire: options.account.acquire.bind(options.account) })
       this.#request = Object.freeze({ ...this.identity, origin: this.origin, proofKeyThumbprint: this.thumbprint, requiredScopes: this.#scopes })

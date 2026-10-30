@@ -15,6 +15,7 @@ import { RelayExports } from './relay-exports.js'
 import { PinnedExportSource } from './file-export-source.js'
 import { RelayQuestionReferences } from './relay-question-references.js'
 import type { JournalKeyProtector } from './journal-key-protection.js'
+import { HostEnrolledRuntimeError, verifyEnrolledHostRuntime, type HostEnrolledRuntimeOptions } from './host-enrolled-runtime.js'
 export type { HostConnectionCredential, HostCredentialProvider, HostHandshakeSigner } from './relay-client.js'
 export { HostRestCredentialProvider, HostCredentialError } from './host-credentials.js'
 export type { HostResourceIdentity, HostResourceAccess, HostResourceRequest, HostResourceAccessProvider, HostRestCredentialOptions } from './host-credentials.js'
@@ -40,6 +41,8 @@ export { LinuxSecretServiceInstallationSigner } from './secret-service-installat
 export type { LinuxSecretServiceInstallationSignerOptions } from './secret-service-installation-signer.js'
 export { LinuxInstallationKeyStore, LinuxInstallationKeyError } from './linux-installation-key.js'
 export type { LinuxInstallationKeyOptions, LinuxInstallationIdentity } from './linux-installation-key.js'
+export { HostEnrolledRuntimeError } from './host-enrolled-runtime.js'
+export type { HostEnrolledRuntimeOptions } from './host-enrolled-runtime.js'
 
 export const name = 'ustc-remote-control'
 export const inject = ['sessionController', 'sessions', 'agents', 'tools', 'approval', 'userQuestions', 'sessionProjections', 'workspaceRegistry', 'fileUploads', 'attachments', 'fs']
@@ -75,12 +78,20 @@ export const Config: z<Config> = z.object({
 
 /** Opt-in M0 integration into the current Cordis profile; no default export. */
 export async function apply(ctx: Context, config: Config = {}, credentials?: HostCredentialProvider, signedOptions?: SignedApprovalOptions, journalKeyProtector?: JournalKeyProtector): Promise<void> {
+  return await applyInternal(ctx, config, credentials, signedOptions, journalKeyProtector)
+}
+
+async function applyInternal(ctx: Context, config: Config, credentials?: HostCredentialProvider, signedOptions?: SignedApprovalOptions,
+  journalKeyProtector?: JournalKeyProtector, enrollment?: HostEnrolledRuntimeOptions): Promise<void> {
   if (!config.enabled) return
   const options = Config(config)
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.runtimeId!)) {
     throw new Error('remote-control requires a stable per-profile runtimeId UUID')
   }
-  const workspaces = options.workspaces!
+  // Hold a private snapshot while asynchronous account and key checks run.
+  const workspaces = options.workspaces!.map(workspace => ({ ...workspace,
+    ...(workspace.exportRoots ? { exportRoots: workspace.exportRoots.map(root => ({ ...root })) } : {}) }))
+  const presets = [...options.presets!]
   if (options.relayUrl && (!credentials || !options.applicationVersion)) {
     throw new Error('remote-control Relay requires an external host credential provider and applicationVersion')
   }
@@ -101,7 +112,7 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
     }
     return false
   }
-  const client = new DshClient(ctx, options.runtimeId!, workspaces, options.presets!)
+  const client = new DshClient(ctx, options.runtimeId!, workspaces, presets)
   const keyOpen = new AbortController()
   const ownerFiber = ctx.fiber
   ctx.on('internal/plugin', fiber => { if (fiber === ownerFiber && fiber.uid === null) keyOpen.abort() }, { global: true })
@@ -115,6 +126,12 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
     if (credentialSignal.aborted) cancelled()
   }
   const startup = ctx.effect(async () => {
+    if (enrollment) {
+      if (!signedOptions || !journalKeyProtector) throw new HostEnrolledRuntimeError('host.enrolled_runtime.invalid_config')
+      await verifyEnrolledHostRuntime(enrollment, { runtimeId: options.runtimeId!, workspaces,
+        requireProtectedJournalKey: options.requireProtectedJournalKey === true }, signedOptions, keyOpen.signal)
+      if (keyOpen.signal.aborted) throw new HostEnrolledRuntimeError('host.enrolled_runtime.cancelled')
+    }
     const journalPath = options.commandJournalPath || defaultCommandJournalPath(options.runtimeId!)
     const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!, journalKeyProtector ? { protector: journalKeyProtector, signal: keyOpen.signal } : {})
     let runtime: ProbeRuntime | undefined
@@ -171,5 +188,31 @@ export function createRemoteControlPlugin(credentials: HostCredentialProvider, s
     name,
     inject: signedOptions && !signedOptions.workingDirectory ? [...inject, 'workingDirectory'] : inject,
     apply(ctx: Context, config: Config = {}) { return apply(ctx, config, credentials, signedOptions, journalKeyProtector) },
+  }
+}
+
+/** Build a Relay plugin that rechecks the approved installation and workspace mapping before startup. */
+export function createEnrolledRemoteControlPlugin(enrollment: HostEnrolledRuntimeOptions, signedOptions: SignedApprovalOptions,
+  journalKeyProtector: JournalKeyProtector) {
+  if (!enrollment || !(enrollment.client?.signal instanceof AbortSignal) || !(enrollment.binding?.signal instanceof AbortSignal) ||
+      !(enrollment.credentials?.signal instanceof AbortSignal) || !signedOptions || !Array.isArray(signedOptions.authorities) ||
+      !signedOptions.requiredAssurance || !journalKeyProtector || typeof journalKeyProtector.wrap !== 'function' ||
+      typeof journalKeyProtector.unwrap !== 'function') throw new HostEnrolledRuntimeError('host.enrolled_runtime.invalid_config')
+  const checked = { client: enrollment.client, binding: enrollment.binding, credentials: enrollment.credentials, profileRef: enrollment.profileRef }
+  const signed: SignedApprovalOptions = { ...signedOptions, requiredAssurance: { ...signedOptions.requiredAssurance },
+    authorities: signedOptions.authorities.map(authority => ({ ...authority, public_jwk: { ...authority.public_jwk } })) }
+  const lifetime = AbortSignal.any([checked.client.signal, checked.binding.signal, checked.credentials.signal])
+  const credentials: HostCredentialProvider = Object.freeze({ origin: checked.credentials.origin, signal: lifetime,
+    async acquire(signal: AbortSignal) {
+      if (!(signal instanceof AbortSignal) || signal.aborted || lifetime.aborted) throw new HostEnrolledRuntimeError('host.enrolled_runtime.cancelled')
+      const combined = AbortSignal.any([signal, lifetime])
+      const result = await checked.credentials.acquire(combined)
+      if (combined.aborted) throw new HostEnrolledRuntimeError('host.enrolled_runtime.cancelled')
+      return result
+    } })
+  return {
+    name,
+    inject: signed.workingDirectory ? inject : [...inject, 'workingDirectory'],
+    apply(ctx: Context, config: Config = {}) { return applyInternal(ctx, config, credentials, signed, journalKeyProtector, checked) },
   }
 }

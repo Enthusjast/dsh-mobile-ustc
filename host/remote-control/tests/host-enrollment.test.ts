@@ -11,7 +11,9 @@ import { join, resolve } from 'node:path'
 import { inspect } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { canonicalObject } from '../src/canonical.js'
-import { captureEnrollmentBinding, HostEnrollmentClient, type HostEnrollmentBinding, type HostEnrollmentOptions } from '../src/host-enrollment.js'
+import { HostRestCredentialProvider } from '../src/host-credentials.js'
+import { HostEnrolledRuntimeError, verifyEnrolledHostRuntime } from '../src/host-enrolled-runtime.js'
+import { captureEnrollmentBinding, enrollmentRecoveryBinding, HostEnrollmentClient, type HostEnrollmentBinding, type HostEnrollmentOptions } from '../src/host-enrollment.js'
 import { HostEnrollmentRecoveryError, HostEnrollmentRecoveryStore, seal } from '../src/host-enrollment-recovery.js'
 import { HostEnrollmentBindingError, HostEnrollmentBindingStore } from '../src/host-enrollment-binding.js'
 import { HostLocalEnrollmentError, runHostEnrollmentOnTerminal } from '../src/host-local-enrollment.js'
@@ -19,6 +21,8 @@ import { HostTerminalEnrollmentWorkflow, HostTerminalEnrollmentWorkflowError } f
 import { HostEnrollmentError } from '../src/host-enrollment-transport.js'
 import type { HostResourceAccess } from '../src/host-credentials.js'
 import { protectorFrom, type JournalKeyProtector } from '../src/journal-key-protection.js'
+import { createEnrolledRemoteControlPlugin } from '../src/index.js'
+import { host as dshHost } from './harness.js'
 
 const expected = { issuer: 'https://id.example.edu', subject: 'fixture-owner', audience: 'urn:fixture-host', clientId: 'fixture-host' }
 const organization = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -35,6 +39,7 @@ const nonce = () => randomBytes(32).toString('base64url')
 const valid = (code: string) => (cause: unknown) => cause instanceof HostEnrollmentError && cause.code === `host.enrollment.${code}`
 const bindingError = (code: string) => (cause: unknown) => cause instanceof HostEnrollmentBindingError && cause.code === `host.enrollment_binding.${code}`
 const workflowError = (code: string) => (cause: unknown) => cause instanceof HostTerminalEnrollmentWorkflowError && cause.code === `host.terminal_enrollment.${code}`
+const runtimeError = (code: string) => (cause: unknown) => cause instanceof HostEnrolledRuntimeError && cause.code === `host.enrolled_runtime.${code}`
 const send = (response: ServerResponse, status: number, body: unknown, next: string) => {
   response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'dpop-nonce': next })
   response.end(JSON.stringify(body))
@@ -638,6 +643,120 @@ test('terminal workflow refuses missing recovery and conflicting pointers before
   assert.equal(f.counts().reviews, reviews)
   assert.equal(f.counts().confirmedCount, 0)
   first.destroy(); second.destroy()
+})
+
+test('enrolled runtime admits only the verified account, profile and workspace mappings', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrolled-runtime-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const credentials = new HostRestCredentialProvider({ ...f.options, installationId: installation })
+  t.after(() => { credentials.close(); recovery.close(); binding.close() })
+  assert.equal(enrollmentRecoveryBinding(f.client), createHash('sha256').update(JSON.stringify({ purpose: 'dsh-host-enrollment-intent-v1',
+    origin: f.options.origin, identity: expected, thumbprint: f.account.proofKeyThumbprint, requiredScopes: ['remote.access'] })).digest('hex'))
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  const pendingWorkspace = receipt.details.workspaces.find(item => item.reference === 'a-workspace')!
+  const pendingGuard = { client: f.client, binding, credentials, profileRef: 'profile' }
+  const pendingLocal = { runtimeId: runtime, requireProtectedJournalKey: true,
+    workspaces: [{ id: pendingWorkspace.reference, remoteId: pendingWorkspace.workspace_id, cwd: join(root, 'project') }] }
+  const pendingSigned = { hostId: host, installationId: installation }
+  await assert.rejects(verifyEnrolledHostRuntime(pendingGuard, pendingLocal, pendingSigned, AbortSignal.timeout(5_000)), runtimeError('unavailable'))
+  await binding.reserve(attempt, receipt, AbortSignal.timeout(5_000))
+  await assert.rejects(verifyEnrolledHostRuntime(pendingGuard, pendingLocal, pendingSigned, AbortSignal.timeout(5_000)), runtimeError('unavailable'))
+  f.state.phoneConfirmed = true
+  const approved = await binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000))
+  const first = approved.workspaces.find(item => item.reference === 'a-workspace')!, second = approved.workspaces.find(item => item.reference === 'z-workspace')!
+  const guard = { client: f.client, binding, credentials, profileRef: 'profile' }
+  const local = { runtimeId: runtime, requireProtectedJournalKey: true, workspaces: [{ id: first.reference, remoteId: first.workspaceId, cwd: join(root, 'project') }] }
+  const signed = { hostId: host, installationId: installation }, signal = AbortSignal.timeout(5_000)
+  await verifyEnrolledHostRuntime(guard, local, signed, signal)
+  await verifyEnrolledHostRuntime(guard, { ...local, workspaces: [...local.workspaces, { id: second.reference, remoteId: second.workspaceId, cwd: join(root, 'other') }] }, signed, signal)
+  for (const changed of [
+    { ...local, runtimeId: randomUUID() },
+    { ...local, workspaces: [{ ...local.workspaces[0]!, id: 'unregistered' }] },
+    { ...local, workspaces: [{ ...local.workspaces[0]!, remoteId: second.workspaceId }] },
+    { ...local, workspaces: [{ ...local.workspaces[0]!, cwd: 'relative/path' }] },
+    { ...local, workspaces: [...local.workspaces, { ...local.workspaces[0]! }] },
+    { ...local, workspaces: [...local.workspaces, { id: second.reference, remoteId: second.workspaceId, cwd: join(root, 'project', '..', 'project') }] },
+  ]) await assert.rejects(verifyEnrolledHostRuntime(guard, changed, signed, signal), runtimeError('identity_changed'))
+  await assert.rejects(verifyEnrolledHostRuntime(guard, { ...local, requireProtectedJournalKey: false }, signed, signal), runtimeError('invalid_config'))
+  await assert.rejects(verifyEnrolledHostRuntime({ ...guard, profileRef: 'another-profile' }, local, signed, signal), runtimeError('identity_changed'))
+  await assert.rejects(verifyEnrolledHostRuntime(guard, local, { ...signed, hostId: randomUUID() }, signal), runtimeError('identity_changed'))
+  await assert.rejects(verifyEnrolledHostRuntime(guard, local, { ...signed, installationId: randomUUID() }, signal), runtimeError('identity_changed'))
+  const wrongInstallation = new HostRestCredentialProvider({ ...f.options, installationId: randomUUID() })
+  const otherClient = new HostEnrollmentClient({ ...f.options, identity: { ...expected, subject: 'other-owner' } })
+  const unrelatedKey = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey.export({ format: 'jwk' }) as HostEnrollmentOptions['publicJwk']
+  const wrongKey = new HostRestCredentialProvider({ ...f.options, publicJwk: unrelatedKey, installationId: installation })
+  const wrongOrigin = new HostRestCredentialProvider({ ...f.options, origin: 'http://127.0.0.1:1', installationId: installation })
+  const wrongScopes = new HostRestCredentialProvider({ ...f.options, requiredScopes: ['another.scope'], installationId: installation })
+  t.after(() => { wrongInstallation.close(); otherClient.close(); wrongKey.close(); wrongOrigin.close(); wrongScopes.close() })
+  await assert.rejects(verifyEnrolledHostRuntime({ ...guard, credentials: wrongInstallation }, local, signed, signal), runtimeError('identity_changed'))
+  await assert.rejects(verifyEnrolledHostRuntime({ ...guard, client: otherClient }, local, signed, signal), runtimeError('identity_changed'))
+  const reviewsBeforeMismatches = f.counts().reviews
+  for (const wrong of [wrongKey, wrongOrigin, wrongScopes]) {
+    await assert.rejects(verifyEnrolledHostRuntime({ ...guard, credentials: wrong }, local, signed, signal), runtimeError('identity_changed'))
+  }
+  assert.equal(f.counts().reviews, reviewsBeforeMismatches)
+  const forgedStore = { signal: binding.signal, async open() { return { ...approved } } } as unknown as HostEnrollmentBindingStore
+  await assert.rejects(verifyEnrolledHostRuntime({ ...guard, binding: forgedStore }, local, signed, signal), runtimeError('identity_changed'))
+  f.state.denyReview = true
+  await assert.rejects(verifyEnrolledHostRuntime(guard, local, signed, signal), runtimeError('unavailable'))
+  assert.equal(f.requests.filter(item => item.path.includes('host-credentials')).length, 0)
+  attempt.destroy()
+})
+
+test('enrolled plugin rejects a wrong workspace before opening its journal or endpoint', { skip: process.platform !== 'linux', timeout: 15_000 }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrolled-plugin-reject-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const credentials = new HostRestCredentialProvider({ ...f.options, installationId: installation })
+  t.after(() => { credentials.close(); recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  const approved = await binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000))
+  const h = await dshHost({ probe: false })
+  const signed = { hostId: host, installationId: installation, policyVersion: 7, requiredAssurance: { profile: 'fixture/verified', max_auth_age_seconds: 60 }, authorities: [] }
+  const plugin = createEnrolledRemoteControlPlugin({ client: f.client, binding, credentials, profileRef: 'profile' }, signed, protector)
+  const journal = join(h.directory, 'guarded', 'commands.sqlite')
+  try {
+    const fiber = h.ctx.plugin(plugin, { enabled: true, runtimeId: runtime, relayUrl: f.options.origin, applicationVersion: 'fixture', socketPath: h.socketPath,
+      commandJournalPath: journal, requireProtectedJournalKey: true, workspaces: [{ id: 'a-workspace', cwd: h.cwd, remoteId: approved.workspaces.find(item => item.reference === 'z-workspace')!.workspaceId }], presets: ['fixture'] })
+    await assert.rejects(fiber.await(), runtimeError('identity_changed'))
+    for (const path of [journal, `${journal}.wrapped-key`, h.socketPath]) await assert.rejects(lstat(path), error => (error as NodeJS.ErrnoException).code === 'ENOENT')
+    await fiber.dispose()
+  } finally { attempt.destroy(); await h.close() }
+})
+
+test('disposing an enrolled plugin cancels an in-flight binding review without opening local state', { skip: process.platform !== 'linux', timeout: 15_000 }, async t => {
+  const f = await fixture(t), root = await mkdtemp(join(tmpdir(), 'dsh-enrolled-plugin-cancel-')), master = randomBytes(32)
+  t.after(async () => { master.fill(0); await rm(root, { recursive: true, force: true }) })
+  const protector = recoveryProtector(master), recovery = new HostEnrollmentRecoveryStore({ path: join(root, 'pending.bin'), client: f.client, protector })
+  const binding = new HostEnrollmentBindingStore({ path: join(root, 'binding.bin'), client: f.client, protector })
+  const credentials = new HostRestCredentialProvider({ ...f.options, installationId: installation })
+  t.after(() => { credentials.close(); recovery.close(); binding.close() })
+  const attempt = f.prepare(), receipt = await recovery.create(attempt, AbortSignal.timeout(5_000))
+  f.state.phoneConfirmed = true
+  const approved = await binding.confirm(recovery, attempt, receipt, () => true, AbortSignal.timeout(5_000))
+  const h = await dshHost({ probe: false }), journal = join(h.directory, 'cancelled', 'commands.sqlite')
+  const signed = { hostId: host, installationId: installation, policyVersion: 7, requiredAssurance: { profile: 'fixture/verified', max_auth_age_seconds: 60 }, authorities: [] }
+  const plugin = createEnrolledRemoteControlPlugin({ client: f.client, binding, credentials, profileRef: 'profile' }, signed, protector)
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  f.state.holdReview = true; f.state.onReview = () => entered()
+  try {
+    const fiber = h.ctx.plugin(plugin, { enabled: true, runtimeId: runtime, relayUrl: f.options.origin, applicationVersion: 'fixture', socketPath: h.socketPath,
+      commandJournalPath: journal, requireProtectedJournalKey: true, workspaces: [{ id: 'a-workspace', cwd: h.cwd, remoteId: approved.workspaces.find(item => item.reference === 'a-workspace')!.workspaceId }], presets: ['fixture'] })
+    const completion = fiber.await(); void completion.catch(() => {})
+    await started
+    let timer: NodeJS.Timeout | undefined
+    try { await Promise.race([fiber.dispose(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('disposal waited for enrollment review')), 1_000) })]) }
+    finally { if (timer) clearTimeout(timer) }
+    await assert.rejects(completion, runtimeError('cancelled'))
+    for (const path of [journal, `${journal}.wrapped-key`, h.socketPath]) await assert.rejects(lstat(path), error => (error as NodeJS.ErrnoException).code === 'ENOENT')
+    f.state.onReview = undefined
+    assert.ok(await binding.open(AbortSignal.timeout(5_000)))
+  } finally { attempt.destroy(); await h.close() }
 })
 
 test('binding pointer reconciles a lost confirmation without the expired pairing attempt', { skip: process.platform !== 'linux' }, async t => {

@@ -31,6 +31,9 @@ import { hostCredentials } from './os-key-store.js'
 export const { name, inject, apply } = createRemoteControlPlugin(hostCredentials)
 ```
 
+Linux 的已登记发行集成可使用 [createEnrolledRemoteControlPlugin](../../docs/host-enrolled-runtime.md)，
+在启动前在线核对绑定、安装身份和工作区映射，并要求签名审批及受保护日志密钥。
+
 主插件配置中的 `relayUrl` 可用 HTTPS/WSS 地址；仅回环地址允许明文 HTTP/WS。Relay 连接和本机调试入口共用同一个 `ProbeRuntime`、命令日志与 DSH Agent。安装 credential 获取、OIDC/DPoP 调用及 OS 密钥库适配由宿主集成提供，尚未接入 TokenWorks 发行包。
 
 Windows 的 `socketPath` 形如 `\\.\pipe\dsh-mobile-ustc-<runtimeId>`。Node IPC server 将 `readableAll` 和 `writableAll` 都设为 false。当前 Linux DSH CLI 集成测试覆盖 Unix socket；命名管道访问 ACL 还需在 Windows 的 DSH CLI 测试中验收。

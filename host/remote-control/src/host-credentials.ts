@@ -51,6 +51,22 @@ export interface HostRestCredentialOptions {
   allowLoopbackHttp?: boolean
 }
 
+type RestCredentialOwner = Readonly<{ binding: string; installationId: string }>
+const restCredentialOwners = new WeakMap<HostRestCredentialProvider, RestCredentialOwner>()
+
+/** @internal Stable owner binding shared with the protected enrollment stores. */
+export function hostEnrollmentOwnerBinding(origin: string, identity: HostResourceIdentity, thumbprint: string, scopes: readonly string[]): string {
+  return createHash('sha256').update(JSON.stringify({ purpose: 'dsh-host-enrollment-intent-v1', origin, identity,
+    thumbprint, requiredScopes: scopes })).digest('hex')
+}
+
+/** @internal A descriptor is available only for an initialized REST provider. */
+export function hostRestCredentialOwner(provider: HostRestCredentialProvider): RestCredentialOwner {
+  const owner = restCredentialOwners.get(provider)
+  if (!owner || provider.signal.aborted) throw error('invalid_config')
+  return owner
+}
+
 type Code = 'invalid_config' | 'cancelled' | 'identity_changed' | 'expired' | 'proof_invalid' | 'denied' | 'unavailable' | 'response_invalid'
 export class HostCredentialError extends Error {
   readonly code: `host.credentials.${Code}`
@@ -133,6 +149,8 @@ export class HostRestCredentialProvider implements HostCredentialProvider {
         signer: Object.freeze({ sign: options.signer.sign.bind(options.signer) }), account: Object.freeze({ signal: options.account.signal, acquire: options.account.acquire.bind(options.account) }), requiredScopes: Object.freeze(scopes) }
       this.#request = Object.freeze({ ...expected, origin: this.origin, proofKeyThumbprint: this.#thumbprint, requiredScopes: this.#options.requiredScopes })
       this.signal = AbortSignal.any([this.#closed.signal, options.account.signal])
+      restCredentialOwners.set(this, Object.freeze({ binding: hostEnrollmentOwnerBinding(this.origin, expected, this.#thumbprint, scopes),
+        installationId: options.installationId }))
       this.signal.addEventListener('abort', () => { this.#cache = undefined; this.#nonce = ''; this.#flight?.cancel.abort() }, { once: true })
       Object.freeze(this)
     } catch { throw error('invalid_config') }
