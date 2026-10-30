@@ -399,6 +399,62 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 			t.Fatal("known-resource routes did not select their own operations")
 		}
 	})
+	t.Run("bounded host and runtime directories bind the current phone", func(t *testing.T) {
+		sequence := 0
+		for _, path := range []string{"/v1/host-directory", "/v1/runtime-directory"} {
+			api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
+			repo.activeDeviceErr = nil
+			repo.hostPage = store.HostDirectory{Items: []store.Host{{ID: "11111111-1111-4111-8111-111111111111", Alias: "Current host", State: "active"}}}
+			repo.runtimePage = store.RuntimeDirectory{Items: []store.Runtime{}}
+			nonce := ""
+			send := func(token, query string, body ...any) *httptest.ResponseRecorder {
+				sequence++
+				uri := "https://api.example.edu" + path + query
+				response := sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("resource-page-proof-%04d", sequence), nonce, body...)
+				nonce = response.Header().Get("DPoP-Nonce")
+				if response.Code == 401 {
+					sequence++
+					response = sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("resource-page-proof-%04d", sequence), nonce, body...)
+					nonce = response.Header().Get("DPoP-Nonce")
+				}
+				return response
+			}
+			response := send(access, "?limit=2&cursor=opaque")
+			if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || repo.resourcePageIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.resourcePageDevice != deviceID || repo.resourcePageProof != proofJKT || repo.resourcePageLimit != 2 || repo.resourcePageCursor != "opaque" {
+				t.Fatal("directory lost current actor/page selectors", path, response.Code)
+			}
+			if response := send(access, ""); response.Code != 200 || repo.resourcePageLimit != 50 || repo.resourcePageCursor != "" {
+				t.Fatal("default page failed", path, response.Code)
+			}
+			before := repo.resourcePageCalls
+			for _, query := range []string{"?user_id=attacker", "?device_id=attacker", "?limit=0", "?limit=101", "?limit=01", "?limit=2&limit=3", "?cursor=", "?x=%zz"} {
+				if response := send(access, query); response.Code != 400 || repo.resourcePageCalls != before {
+					t.Fatal("invalid selectors reached directory", path, response.Code)
+				}
+			}
+			if response := send(access, "", map[string]string{"role": "owner"}); response.Code != 400 || repo.resourcePageCalls != before {
+				t.Fatal("GET body reached directory", path, response.Code)
+			}
+			if response := send(hostAccess, ""); response.Code != 403 || repo.resourcePageCalls != before {
+				t.Fatal("Host client reached phone directory", path, response.Code)
+			}
+			repo.activeDeviceErr = store.ErrDeviceNotFound
+			if response := send(access, ""); response.Code != 403 || repo.resourcePageCalls != before {
+				t.Fatal("inactive device enumerated resources", path, response.Code)
+			}
+			repo.activeDeviceErr = nil
+			for _, failure := range []struct {
+				err    error
+				status int
+			}{{store.ErrAccessDenied, 403}, {store.ErrResourceDirectoryInvalid, 400}, {store.ErrDatabaseUnavailable, 503}} {
+				repo.resourcePageErr = failure.err
+				if response := send(access, ""); response.Code != failure.status || strings.Contains(response.Body.String(), "next_cursor") {
+					t.Fatal("directory failure disclosed data", path, response.Code)
+				}
+			}
+			repo.resourcePageErr = nil
+		}
+	})
 	t.Run("own device directory derives identity and rejects caller selectors", func(t *testing.T) {
 		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
 		repo.activeDeviceErr = nil

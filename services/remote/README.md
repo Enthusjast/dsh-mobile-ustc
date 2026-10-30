@@ -1,5 +1,7 @@
 # Remote service foundation
 
+The phone-bound [host and runtime directories](../../docs/resource-directories.md) provide stable UUID paging through `/v1/host-directory` and `/v1/runtime-directory`. Every page rechecks current device, membership and grant visibility; hosts are deduplicated across visible profiles. The original full lists share the visibility predicate, and no new migration is needed.
+
 `GET /v1/approvals/{id}` provides [HTTP-only approval status reconciliation](../../docs/approval-http-status.md) for current registered phones with the same owner/read/approval resource policy as WSS. Status remains available with no live socket or online Host; details and execution still require their existing separate authorization. It reads bound metadata without a new migration or signing operation.
 
 The opt-in [database outage drill](../../docs/database-outage-drill.md) removes connectivity to the exact owned test database, verifies both production relays fail closed, then explicitly restarts them after natural ownership expiry. The real npm DSH Host retains its native session/epoch and reconciles one accepted command without replay; this is a bounded local failure sample, not target-load or backup-restore acceptance.

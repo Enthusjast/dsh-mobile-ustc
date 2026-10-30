@@ -248,17 +248,7 @@ func (postgres *Postgres) ListHosts(ctx context.Context, identity UserIdentity) 
 		join runtimes r on r.installation_id = i.id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id
 		where u.issuer = $1 and u.subject = $2 and u.status = 'active'
-		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > now())
-		  and (
-		      g.scope->'actions' ? 'host.list'
-		      or (g.scope->'actions' ? 'session.list' and exists (
-		          select 1 from sessions s
-		          where s.runtime_id = r.id and (
-		              coalesce(g.scope->'sessions', '[]'::jsonb) @> jsonb_build_array(s.id::text)
-		              or (s.workspace_id is not null and coalesce(g.scope->'workspaces', '[]'::jsonb) @> jsonb_build_array(s.workspace_id::text))
-		          )
-		      ))
-	  )
+		  and `+runtimeDirectoryEligibilitySQL+`
 		order by h.alias, h.id::text`, identity.Issuer, identity.Subject)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
@@ -291,17 +281,7 @@ func (postgres *Postgres) ListRuntimes(ctx context.Context, identity UserIdentit
 		join runtimes r on r.installation_id = i.id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id
 		where u.issuer = $1 and u.subject = $2 and u.status = 'active'
-		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > now())
-		  and (
-		      g.scope->'actions' ? 'host.list'
-		      or (g.scope->'actions' ? 'session.list' and exists (
-		          select 1 from sessions s
-		          where s.runtime_id = r.id and (
-		              coalesce(g.scope->'sessions', '[]'::jsonb) @> jsonb_build_array(s.id::text)
-		              or (s.workspace_id is not null and coalesce(g.scope->'workspaces', '[]'::jsonb) @> jsonb_build_array(s.workspace_id::text))
-		          )
-		      ))
-	  )
+		  and `+runtimeDirectoryEligibilitySQL+`
 		order by h.id::text, r.id::text`, identity.Issuer, identity.Subject)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable

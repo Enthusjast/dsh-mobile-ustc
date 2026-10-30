@@ -68,6 +68,8 @@ type Repository interface {
 	AuthorizeRealtimeQuestion(context.Context, store.TicketRedemption, string) error
 	InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error)
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
+	HostDirectory(context.Context, store.UserIdentity, string, string, int, string) (store.HostDirectory, error)
+	RuntimeDirectory(context.Context, store.UserIdentity, string, string, int, string) (store.RuntimeDirectory, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
 	SessionDirectory(context.Context, store.UserIdentity, string, string, string, int, string) (store.SessionDirectory, error)
@@ -206,6 +208,8 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.Handle("POST /v1/host-credentials", api.hostAuthenticated(http.HandlerFunc(api.exchangeHostCredential)))
 	mux.Handle("DELETE /v1/devices/{id}", api.protected(http.HandlerFunc(api.revokeDevice)))
 	mux.Handle("GET /v1/hosts", api.protected(http.HandlerFunc(api.listHosts)))
+	mux.Handle("GET /v1/host-directory", api.protected(http.HandlerFunc(api.hostDirectory)))
+	mux.Handle("GET /v1/runtime-directory", api.protected(http.HandlerFunc(api.runtimeDirectory)))
 	mux.Handle("GET /v1/runtimes", api.protected(http.HandlerFunc(api.listRuntimes)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions", api.protected(http.HandlerFunc(api.listSessions)))
 	mux.Handle("GET /v1/runtimes/{id}/session-directory", api.protected(http.HandlerFunc(api.sessionDirectory)))
@@ -849,6 +853,8 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrGrantDirectoryInvalid):
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 	case errors.Is(err, store.ErrSessionDirectoryInvalid):
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+	case errors.Is(err, store.ErrResourceDirectoryInvalid):
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrGrantNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")

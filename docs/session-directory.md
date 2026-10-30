@@ -1,5 +1,8 @@
 # 有界会话目录
 
+主机与 profile 的发现可先使用[主机/runtime 分页目录](resource-directories.md)，再按已获授权的
+runtime 逐页读取本会话目录。两层都检查当前权限，外层目录不补授会话内容访问权。
+
 `GET /v1/runtimes/{id}/session-directory` 分页返回指定 runtime 中当前可枚举的会话元数据。
 它供会话较多时逐页发现资源，不读取正文或原生日志，也不签发连接凭据。
 

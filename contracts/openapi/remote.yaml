@@ -386,6 +386,50 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { description: APK release publication is not configured. }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/host-directory:
+    get:
+      description: Bounded hosts discovery for the current active registered phone and DPoP key. Every page rechecks account, organization, approved runtime and current grants. Eligibility matches the existing full directories - explicit host.list, or session.list with at least one scoped session. Read permission or organization-admin role alone does not grant enumeration. No query selectors except limit/cursor and no body.
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: cursor
+          schema: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        '200':
+          description: Current authorized metadata in stable ascending UUID order. Cursors bind account, proof key and directory purpose but carry no authority or historical snapshot. An eligible account with no visible resources receives an empty page. Metadata is not a credential or proof of online status.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostDirectoryResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/runtime-directory:
+    get:
+      description: Bounded runtimes discovery for the current active registered phone and DPoP key. Every page rechecks account, organization, approved runtime and current grants. Eligibility matches the existing full directories - explicit host.list, or session.list with at least one scoped session. Read permission or organization-admin role alone does not grant enumeration. No query selectors except limit/cursor and no body.
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: cursor
+          schema: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        '200':
+          description: Current authorized metadata in stable ascending UUID order. Cursors bind account, proof key and directory purpose but carry no authority or historical snapshot. An eligible account with no visible resources receives an empty page. Metadata is not a credential or proof of online status.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuntimeDirectoryResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/hosts:
     get:
       responses:
@@ -1871,6 +1915,38 @@ components:
             expires_at: { type: string, format: date-time }
             host_confirmed: { type: boolean }
             user_confirmed: { type: boolean }
+    HostDirectoryResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [items, next_cursor]
+          properties:
+            next_cursor: { type: [string, 'null'], maxLength: 1024 }
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Host' }
+    RuntimeDirectoryResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [items, next_cursor]
+          properties:
+            next_cursor: { type: [string, 'null'], maxLength: 1024 }
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Runtime' }
     Host:
       type: object
       additionalProperties: false

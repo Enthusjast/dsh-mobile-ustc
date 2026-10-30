@@ -14,6 +14,16 @@ import (
 )
 
 type fakeRepository struct {
+	hostPage             store.HostDirectory
+	runtimePage          store.RuntimeDirectory
+	resourcePageErr      error
+	resourcePageCalls    int
+	resourcePageIdentity store.UserIdentity
+	resourcePageDevice   string
+	resourcePageProof    string
+	resourcePageLimit    int
+	resourcePageCursor   string
+
 	phoneApproval         store.ApprovalStatus
 	phoneApprovalErr      error
 	phoneApprovalCalls    int
@@ -325,6 +335,19 @@ func (fake *fakeRepository) RecordRealtimeCommandReceipt(context.Context, store.
 func (fake *fakeRepository) MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error) {
 	return store.CommandStatus{}, nil
 }
+func (fake *fakeRepository) HostDirectory(_ context.Context, identity store.UserIdentity, device, proof string, limit int, cursor string) (store.HostDirectory, error) {
+	fake.resourcePageCalls++
+	fake.resourcePageIdentity, fake.resourcePageDevice, fake.resourcePageProof = identity, device, proof
+	fake.resourcePageLimit, fake.resourcePageCursor = limit, cursor
+	return fake.hostPage, fake.resourcePageErr
+}
+func (fake *fakeRepository) RuntimeDirectory(_ context.Context, identity store.UserIdentity, device, proof string, limit int, cursor string) (store.RuntimeDirectory, error) {
+	fake.resourcePageCalls++
+	fake.resourcePageIdentity, fake.resourcePageDevice, fake.resourcePageProof = identity, device, proof
+	fake.resourcePageLimit, fake.resourcePageCursor = limit, cursor
+	return fake.runtimePage, fake.resourcePageErr
+}
+
 func (fake *fakeRepository) ListHosts(context.Context, store.UserIdentity) ([]store.Host, error) {
 	fake.listCalls++
 	return []store.Host{}, nil

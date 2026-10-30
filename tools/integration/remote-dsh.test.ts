@@ -348,6 +348,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   deviceValidator.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   const validateDevices = deviceValidator.compile({ $ref: '#/components/schemas/DeviceDirectoryResponse', components: deviceContract.components })
   const validateInstallations = deviceValidator.compile({ $ref: '#/components/schemas/InstallationDirectoryResponse', components: deviceContract.components })
+  const validateHostDirectory = deviceValidator.compile({ $ref: '#/components/schemas/HostDirectoryResponse', components: deviceContract.components })
+  const validateRuntimeDirectory = deviceValidator.compile({ $ref: '#/components/schemas/RuntimeDirectoryResponse', components: deviceContract.components })
   const validateApprovalStatus = deviceValidator.compile({ $ref: '#/components/schemas/ApprovalStatusResponse', components: deviceContract.components })
   const validateSessionDirectory = deviceValidator.compile({ $ref: '#/components/schemas/SessionDirectoryResponse', components: deviceContract.components })
   const validateInstallationRuntimes = deviceValidator.compile({ $ref: '#/components/schemas/InstallationRuntimeDirectoryResponse', components: deviceContract.components })
@@ -1320,6 +1322,32 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.deepEqual(profileIds.sort(), [enrollment.runtime_id, profileReceipt.details.runtime_id].sort())
   await owner('GET', installationRuntimePath, undefined, 403)
   await phone('GET', installationRuntimePath, undefined, 403)
+  const pagedDirectory = async (path: string, validate: (value: unknown) => boolean) => {
+    const items: any[] = []
+    let page = await ownerPhone('GET', `${path}?limit=1`)
+    const firstCursor = page.next_cursor as string | null
+    for (;;) {
+      assert.equal(validate({ ok: true, data: page }), true, `invalid ${path} page`)
+      items.push(...page.items)
+      if (page.next_cursor === null) break
+      assert.ok(items.length < 100, 'fixture resource paging did not terminate')
+      page = await ownerPhone('GET', `${path}?limit=1&cursor=${encodeURIComponent(page.next_cursor)}`)
+    }
+    return { items, firstCursor }
+  }
+  const visibleHosts = await pagedDirectory('/v1/host-directory', validateHostDirectory)
+  const visibleRuntimes = await pagedDirectory('/v1/runtime-directory', validateRuntimeDirectory)
+  assert.deepEqual(visibleHosts.items.map(item => item.id).sort(), (await ownerPhone('GET', '/v1/hosts')).items.map((item: any) => item.id).sort())
+  assert.deepEqual(visibleRuntimes.items.map(item => item.id).sort(), (await ownerPhone('GET', '/v1/runtimes')).items.map((item: any) => item.id).sort())
+  assert.equal(visibleHosts.items.length, 1, 'two profiles duplicated their shared host')
+  assert.equal(visibleRuntimes.items.length, 2)
+  assert.ok(visibleRuntimes.items.every(item => item.access.role === 'owner' && item.access.scope.actions.includes('grant.manage')))
+  assert.ok(visibleRuntimes.firstCursor)
+  await ownerPhone('GET', `/v1/host-directory?cursor=${encodeURIComponent(visibleRuntimes.firstCursor)}`, undefined, 400)
+  assert.deepEqual((await phone('GET', '/v1/runtime-directory')).items, [])
+  await owner('GET', '/v1/host-directory', undefined, 403)
+  await ownerPhone('GET', `/v1/runtime-directory?user_id=${outsiderId}`, undefined, 400)
+  t.diagnostic('Current-key host/runtime pages matched the existing visible sets, deduplicated the shared host and exposed only the owner current grant snapshots. A revoked runtime manager saw an empty resource directory, Host OAuth clients were denied and cursor purposes could not be exchanged.')
   const nativeConnectionBefore = query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`)
   const retireProfilePath = `${installationRuntimePath}/${profileReceipt.details.runtime_id}`
   assert.deepEqual(await ownerPhone('DELETE', retireProfilePath), { revoked: true })
