@@ -27,7 +27,7 @@ var ErrConflict = errors.New("cold archive: conflicting artifact")
 var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var keyID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 var digest = regexp.MustCompile(`^[0-9a-f]{64}$`)
-var topics = map[string]bool{"device.revoked": true, "runtime_grant.updated": true, "runtime_grant.revoked": true, "approval.pending": true, "approval.decided": true, "approval.ended": true, "approval.result": true, "approval.authorization.prepared": true, "approval.device.revoked": true}
+var topics = map[string]bool{"device.revoked": true, "runtime.revoked": true, "runtime_grant.updated": true, "runtime_grant.revoked": true, "approval.pending": true, "approval.decided": true, "approval.ended": true, "approval.result": true, "approval.authorization.prepared": true, "approval.device.revoked": true}
 
 func UUID(value string) bool  { return uuid.MatchString(value) }
 func KeyID(value string) bool { return keyID.MatchString(value) }

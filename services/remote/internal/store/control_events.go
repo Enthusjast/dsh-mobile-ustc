@@ -26,7 +26,7 @@ func (postgres *Postgres) PendingControlEvents(ctx context.Context, limit int) (
 	}
 	rows, err := postgres.DB.QueryContext(ctx, `
 		select id::text, topic, payload, created_at from control_outbox
-		where published_at is null and database_epoch=(select epoch from remote_recovery_state where slot=1 and phase='ready') and topic in ('device.revoked', 'runtime_grant.updated', 'runtime_grant.revoked',
+		where published_at is null and database_epoch=(select epoch from remote_recovery_state where slot=1 and phase='ready') and topic in ('device.revoked','runtime.revoked', 'runtime_grant.updated', 'runtime_grant.revoked',
 		    'approval.pending', 'approval.decided', 'approval.ended', 'approval.result', 'approval.authorization.prepared', 'approval.device.revoked')
 		order by created_at, id limit $1`, limit)
 	if err != nil {
@@ -56,7 +56,11 @@ func readControlEvents(rows *sql.Rows) ([]ControlEvent, error) {
 		}
 		event.DeviceID, event.RuntimeID, event.UserID, event.GrantVersion = payload.DeviceID, payload.RuntimeID, payload.UserID, payload.GrantVersion
 		event.ApprovalID = payload.ApprovalID
-		if event.Topic == "approval.device.revoked" {
+		if event.Topic == "runtime.revoked" {
+			if !grantUUIDPattern.MatchString(event.RuntimeID) {
+				return nil, ErrGrantInvalid
+			}
+		} else if event.Topic == "approval.device.revoked" {
 			if !grantUUIDPattern.MatchString(event.RuntimeID) || !grantUUIDPattern.MatchString(event.DeviceID) {
 				return nil, ErrGrantInvalid
 			}

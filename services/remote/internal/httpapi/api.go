@@ -33,6 +33,8 @@ type Repository interface {
 	AppReleaseAccess(context.Context, store.UserIdentity, string, string, string, time.Time) (string, error)
 	CurrentDevice(context.Context, store.UserIdentity, string) (store.CurrentDevice, error)
 	ListDevices(context.Context, store.UserIdentity, string, string, int, string) (store.DeviceDirectory, error)
+	ListInstallations(context.Context, store.UserIdentity, string, string, int, string) (store.InstallationDirectory, error)
+	RevokeInstallation(context.Context, store.UserIdentity, string, string, string) error
 	ActiveDevice(context.Context, store.UserIdentity, string) (string, error)
 	CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error)
 	GetEnrollment(context.Context, store.UserIdentity, string) (store.EnrollmentInfo, error)
@@ -184,6 +186,8 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	}
 	mux.Handle("POST /v1/devices", api.phoneAuthenticated(http.HandlerFunc(api.registerDevice)))
 	mux.Handle("GET /v1/devices", api.protected(http.HandlerFunc(api.listDevices)))
+	mux.Handle("GET /v1/installations", api.protected(http.HandlerFunc(api.listInstallations)))
+	mux.Handle("DELETE /v1/installations/{id}", api.protected(http.HandlerFunc(api.revokeInstallation)))
 	mux.Handle("GET /v1/devices/current", api.phoneAuthenticated(http.HandlerFunc(api.currentDevice)))
 	mux.Handle("POST /v1/enrollments", api.hostAuthenticated(http.HandlerFunc(api.createEnrollment)))
 	mux.Handle("GET /v1/enrollments/{id}", api.authenticated(http.HandlerFunc(api.getEnrollment)))
@@ -829,6 +833,8 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrDeviceRegistrationConflict):
 		writeError(response, http.StatusConflict, "device.registration_conflict")
 	case errors.Is(err, store.ErrDeviceDirectoryInvalid):
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+	case errors.Is(err, store.ErrInstallationManagementInvalid):
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrGrantNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")

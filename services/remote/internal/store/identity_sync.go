@@ -332,6 +332,7 @@ func (postgres *Postgres) applyIdentitySnapshotOnce(ctx context.Context, input I
 		{"device_events", `insert into control_outbox(topic,payload) select 'device.revoked',jsonb_build_object('device_id',id::text) from pg_temp.remote_identity_devices`},
 		{"approval_events", `insert into control_outbox(org_id,topic,payload) select distinct h.org_id,'approval.device.revoked',jsonb_build_object('runtime_id',a.runtime_id::text,'device_id',a.decided_device_id::text) from approvals a join runtimes r on r.id=a.runtime_id join installations i on i.id=r.installation_id join hosts h on h.id=i.host_id where a.metadata_version=1 and a.decided_device_id in(select id from pg_temp.remote_identity_devices) and a.decision='allow_once' and a.state='decision_received' and a.expires_at>clock_timestamp() and a.decision_expires_at>clock_timestamp()`},
 		{"grant_events", `insert into control_outbox(org_id,topic,payload) select org_id,'runtime_grant.revoked',jsonb_build_object('runtime_id',runtime_id::text,'user_id',user_id::text,'grant_version',grant_version) from pg_temp.remote_identity_grants`},
+		{"runtime_events", `insert into control_outbox(org_id,topic,payload) select retired.org_id,'runtime.revoked',jsonb_build_object('runtime_id',r.id::text) from runtimes r join pg_temp.remote_identity_retired_installations retired on retired.id=r.installation_id`},
 	} {
 		if err = apply(operation.name, operation.query); err != nil {
 			return IdentitySyncRun{}, err

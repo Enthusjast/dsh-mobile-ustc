@@ -18,7 +18,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path, help="Fresh log path inside repository .local")
     parser.add_argument("--renewal", action="store_true", help="Also wait for the normal five-minute Host credential expiry and reconnection")
+    parser.add_argument("--installation-revoke", action="store_true", help="Retire the normal DSH installation through its registered owner-phone API")
     options = parser.parse_args()
+    if options.renewal and options.installation_revoke:
+        parser.error("renewal and installation revocation select separate composition runs")
     repo = Path(__file__).resolve().parents[2]
     output = options.output.resolve()
     local = (repo / ".local").resolve()
@@ -40,6 +43,8 @@ def main():
         command = [sys.executable, str(repo / "tools/integration/run_remote_dsh.py"), "--cross-node", "--dsh-only"]
         if options.renewal:
             command.append("--host-renewal")
+        if options.installation_revoke:
+            command.append("--installation-revoke")
         child = subprocess.Popen(command,
                                  cwd=repo, env=environment, stdin=slave, stdout=log, stderr=log,
                                  preexec_fn=controlling_terminal, pass_fds=(slave,))

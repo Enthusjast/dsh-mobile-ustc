@@ -446,6 +446,76 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		}
 		repo.deviceDirectoryErr = nil
 	})
+	t.Run("installation management derives its current phone and rejects selectors", func(t *testing.T) {
+		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
+		repo.activeDeviceErr = nil
+		target := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+		repo.installationDirectory = store.InstallationDirectory{Items: []store.InstallationSummary{{ID: target, HostID: "11111111-1111-4111-8111-111111111111", OrganizationID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", HostAlias: "Private host metadata", OwnerUserID: "22222222-2222-4222-8222-222222222222", IsOwner: true, KeyVersion: 1, State: "active", CreatedAt: now}}}
+		nonce := ""
+		sequence := 0
+		send := func(token, method, path string, body ...any) *httptest.ResponseRecorder {
+			sequence++
+			uri := "https://api.example.edu/v1/installations" + path
+			response := sendDPoPRequest(t, api, token, proofKey, proofJWK, method, uri, fmt.Sprintf("installation-proof-%04d", sequence), nonce, body...)
+			nonce = response.Header().Get("DPoP-Nonce")
+			if response.Code == 401 {
+				sequence++
+				response = sendDPoPRequest(t, api, token, proofKey, proofJWK, method, uri, fmt.Sprintf("installation-proof-%04d", sequence), nonce, body...)
+				nonce = response.Header().Get("DPoP-Nonce")
+			}
+			return response
+		}
+		if response := send(access, http.MethodGet, "?limit=2&cursor=opaque"); response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || repo.installationIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.installationDevice != deviceID || repo.installationJKT != proofJKT || repo.installationLimit != 2 || repo.installationCursor != "opaque" {
+			t.Fatal("directory lost its authenticated caller", response.Code)
+		}
+		if response := send(access, http.MethodDelete, "/"+target); response.Code != 200 || repo.installationTarget != target || repo.installationDevice != deviceID || repo.installationJKT != proofJKT {
+			t.Fatal("revocation lost its authenticated caller", response.Code)
+		}
+		before := repo.installationCalls + repo.installationRevokes
+		for _, query := range []string{"?user_id=attacker", "?limit=0", "?limit=101", "?limit=2&limit=3", "?cursor="} {
+			if response := send(access, http.MethodGet, query); response.Code != 400 || repo.installationCalls+repo.installationRevokes != before {
+				t.Fatal("invalid directory query reached repository", response.Code)
+			}
+		}
+		for _, path := range []string{"/invalid", "/" + target + "?user_id=attacker"} {
+			if response := send(access, http.MethodDelete, path); response.Code != 400 || repo.installationCalls+repo.installationRevokes != before {
+				t.Fatal("invalid installation target reached repository", response.Code)
+			}
+		}
+		if response := send(access, http.MethodDelete, "/"+target, map[string]bool{"revoked": true}); response.Code != 400 || repo.installationCalls+repo.installationRevokes != before {
+			t.Fatal("installation revoke accepted a body", response.Code)
+		}
+		for _, method := range []string{http.MethodGet, http.MethodDelete} {
+			path := ""
+			if method == http.MethodDelete {
+				path = "/" + target
+			}
+			if response := send(hostAccess, method, path); response.Code != 403 || repo.installationCalls+repo.installationRevokes != before {
+				t.Fatal("host client reached phone management", response.Code)
+			}
+		}
+		repo.activeDeviceErr = store.ErrDeviceNotFound
+		if response := send(access, http.MethodDelete, "/"+target); response.Code != 403 || repo.installationCalls+repo.installationRevokes != before {
+			t.Fatal("revoked current phone managed installation", response.Code)
+		}
+		repo.activeDeviceErr = nil
+		for _, failure := range []struct {
+			err    error
+			status int
+		}{{store.ErrAccessDenied, 403}, {store.ErrInstallationManagementInvalid, 400}, {store.ErrDatabaseUnavailable, 503}} {
+			repo.installationErr = failure.err
+			for _, method := range []string{http.MethodGet, http.MethodDelete} {
+				path := ""
+				if method == http.MethodDelete {
+					path = "/" + target
+				}
+				if response := send(access, method, path); response.Code != failure.status || strings.Contains(response.Body.String(), "Private host metadata") {
+					t.Fatal("failed installation lookup exposed metadata", response.Code)
+				}
+			}
+		}
+		repo.installationErr = nil
+	})
 	t.Run("APK release selection binds current organization and phone proof", func(t *testing.T) {
 		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}, Releases: releaseCatalog(t)})
 		repo.releaseUser = "22222222-2222-4222-8222-222222222222"

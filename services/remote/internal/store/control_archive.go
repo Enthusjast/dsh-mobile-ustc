@@ -94,7 +94,7 @@ func (postgres *Postgres) ArchiveControlEvents(ctx context.Context, input Contro
 	// namespace. A released recovery is the sole basis for retiring old epochs.
 	err = tx.QueryRowContext(ctx, `with candidates as materialized (
 	 select e.* from control_outbox e
-	 where e.created_at<=$3 and e.topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked','approval.pending','approval.decided',
+	 where e.created_at<=$3 and e.topic in ('device.revoked','runtime.revoked','runtime_grant.updated','runtime_grant.revoked','approval.pending','approval.decided',
 	   'approval.ended','approval.result','approval.authorization.prepared','approval.device.revoked')
 	 and case when e.database_epoch=$2::uuid then
 	   e.published_at is not null and e.published_at<=$3 and not exists(

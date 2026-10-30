@@ -10,6 +10,22 @@ import (
 )
 
 func (server *Server) ApplyControlEvent(ctx context.Context, event store.ControlEvent) error {
+	if event.Topic == "runtime.revoked" {
+		if !uuidPattern.MatchString(event.RuntimeID) {
+			return store.ErrGrantInvalid
+		}
+		server.mu.Lock()
+		connections := []*liveConnection{}
+		for _, live := range server.connections {
+			if live.connectionID != "" && !live.closing && live.runtimeID == event.RuntimeID {
+				live.closing = true
+				connections = append(connections, live)
+			}
+		}
+		server.mu.Unlock()
+		server.closeRevokedConnections(ctx, connections, "access.revoked")
+		return nil
+	}
 	if event.Topic == "approval.device.revoked" {
 		return server.invalidateHostApprovals(ctx, event)
 	}

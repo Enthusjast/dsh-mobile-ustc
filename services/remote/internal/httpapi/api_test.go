@@ -32,6 +32,16 @@ type fakeRepository struct {
 	deviceDirectoryJKT      string
 	deviceDirectoryLimit    int
 	deviceDirectoryCursor   string
+	installationDirectory   store.InstallationDirectory
+	installationErr         error
+	installationCalls       int
+	installationIdentity    store.UserIdentity
+	installationDevice      string
+	installationJKT         string
+	installationLimit       int
+	installationCursor      string
+	installationTarget      string
+	installationRevokes     int
 	listCalls               int
 	activeDeviceID          string
 	activeDeviceErr         error
@@ -121,6 +131,24 @@ func (fake *fakeRepository) ListDevices(_ context.Context, identity store.UserId
 	fake.deviceDirectoryLimit = limit
 	fake.deviceDirectoryCursor = cursor
 	return fake.deviceDirectory, fake.deviceDirectoryErr
+}
+
+func (fake *fakeRepository) ListInstallations(_ context.Context, identity store.UserIdentity, deviceID, jkt string, limit int, cursor string) (store.InstallationDirectory, error) {
+	fake.installationCalls++
+	fake.installationIdentity = identity
+	fake.installationDevice = deviceID
+	fake.installationJKT = jkt
+	fake.installationLimit = limit
+	fake.installationCursor = cursor
+	return fake.installationDirectory, fake.installationErr
+}
+func (fake *fakeRepository) RevokeInstallation(_ context.Context, identity store.UserIdentity, deviceID, jkt, target string) error {
+	fake.installationRevokes++
+	fake.installationIdentity = identity
+	fake.installationDevice = deviceID
+	fake.installationJKT = jkt
+	fake.installationTarget = target
+	return fake.installationErr
 }
 func (fake *fakeRepository) CreateEnrollment(context.Context, store.EnrollmentInput) (store.EnrollmentCreated, error) {
 	fake.enrollmentCalls++
@@ -326,14 +354,14 @@ func TestProtectedRoutesRejectAnonymousRequestsBeforeDatabaseAccess(t *testing.T
 	}
 	repo := &fakeRepository{}
 	handler := New(repo, identity)
-	for _, target := range []string{"/v1/me", "/v1/devices", "/v1/devices/current", "/v1/hosts", "/v1/runtimes", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions/55555555-5555-4555-8555-555555555555/read-access"} {
+	for _, target := range []string{"/v1/me", "/v1/devices", "/v1/devices/current", "/v1/installations", "/v1/hosts", "/v1/runtimes", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions", "/v1/runtimes/44444444-4444-4444-8444-444444444444/sessions/55555555-5555-4555-8555-555555555555/read-access"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("anonymous GET %s status = %d, want 401", target, response.Code)
 		}
 	}
-	if repo.listCalls != 0 || repo.accountCalls != 0 || repo.currentDeviceCalls != 0 || repo.cacheAccessCalls != 0 || repo.deviceDirectoryCalls != 0 {
+	if repo.listCalls != 0 || repo.accountCalls != 0 || repo.currentDeviceCalls != 0 || repo.cacheAccessCalls != 0 || repo.deviceDirectoryCalls != 0 || repo.installationCalls != 0 {
 		t.Fatal("unauthenticated route accessed the repository")
 	}
 }

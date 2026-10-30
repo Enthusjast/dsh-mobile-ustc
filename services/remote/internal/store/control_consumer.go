@@ -176,7 +176,7 @@ func (consumer *ControlConsumer) PendingControlEvents(ctx context.Context, limit
 	}
 	rows, err := transaction.QueryContext(ctx, `select event.id::text,event.topic,event.payload,event.created_at from control_outbox event
 		where event.database_epoch=$4 and event.producer_xid>=pg_snapshot_xmin($2::pg_snapshot) and not pg_visible_in_snapshot(event.producer_xid,$2::pg_snapshot)
-          and event.topic in ('device.revoked','runtime_grant.updated','runtime_grant.revoked','approval.pending','approval.decided','approval.ended','approval.result','approval.authorization.prepared','approval.device.revoked')
+          and event.topic in ('device.revoked','runtime.revoked','runtime_grant.updated','runtime_grant.revoked','approval.pending','approval.decided','approval.ended','approval.result','approval.authorization.prepared','approval.device.revoked')
           and not exists(select 1 from control_event_acks ack where ack.node_id=$1 and ack.event_id=event.id)
 		order by event.created_at,event.id limit $3`, consumer.node, coverage, limit, consumer.databaseEpoch)
 	if err != nil {

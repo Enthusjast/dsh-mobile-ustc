@@ -307,7 +307,7 @@ func (m *Metrics) ControlEvent(topic, result string, created time.Time) {
 	if m == nil {
 		return
 	}
-	topic = fixed(topic, "device.revoked", "runtime_grant.updated", "runtime_grant.revoked", "approval.pending", "approval.decided",
+	topic = fixed(topic, "device.revoked", "runtime.revoked", "runtime_grant.updated", "runtime_grant.revoked", "approval.pending", "approval.decided",
 		"approval.ended", "approval.result", "approval.authorization.prepared", "approval.device.revoked")
 	result = fixed(result, "published", "apply_error", "ack_error")
 	m.controlEvents.WithLabelValues(topic, result).Inc()
