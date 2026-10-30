@@ -17,6 +17,9 @@ const messageContent = z.array(z.discriminatedUnion('type', [textContent, fileCo
   const files = items.filter(item => item.type === 'file').map(item => item.file_id)
   return new Set(files).size === files.length
 })
+export const modelSelectionPayload = z.strictObject({
+  provider: z.string().min(1).max(128), model: z.string().min(1).max(128), reasoning_effort: z.string().min(1).max(64).optional(),
+})
 export const archivePayload = z.discriminatedUnion('archived', [
   z.strictObject({ archived: z.literal(true), stop_activity: z.boolean() }),
   z.strictObject({ archived: z.literal(false), stop_activity: z.literal(false) }),
@@ -38,9 +41,7 @@ export const Command = z.discriminatedUnion('type', [
   sessionCommand('session.archive', archivePayload),
   sessionCommand('question.answer', questionAnswerPayload),
   sessionCommand('question.timed.answer', questionAnswerPayload),
-  sessionCommand('session.model.select', z.strictObject({
-    provider: z.string().min(1).max(128), model: z.string().min(1).max(128), reasoning_effort: z.string().min(1).max(64).optional(),
-  })),
+  sessionCommand('session.model.select', modelSelectionPayload),
   sessionCommand('session.subscribe', z.strictObject({ max_messages: z.int().min(1).max(100).default(30) })),
   sessionCommand('session.page', z.strictObject({
     sync_id: uuid, through_seq: z.int().min(-1), before_seq: z.int().min(0), max_messages: z.int().min(1).max(100).default(30),

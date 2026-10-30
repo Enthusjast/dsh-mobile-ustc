@@ -38,6 +38,8 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
     '../../../contracts/ws/v1/golden/question-claim-closed.json',
     '../../../contracts/ws/v1/golden/question-release.json',
     '../../../contracts/ws/v1/golden/question-released.json',
+    '../../../contracts/ws/v1/golden/session-model-select.json',
+    '../../../contracts/ws/v1/golden/session-model-select.forwarded.json',
     '../../../contracts/ws/v1/golden/session-create.json',
     '../../../contracts/ws/v1/golden/session-create-options.publish.json',
     '../../../contracts/ws/v1/golden/session-create-options.get.json',
@@ -84,6 +86,10 @@ test('WSS relay schema accepts command, catalog and scoped session-read goldens'
   assert.equal(forwarded.payload_sha256, digest)
   const cancel = await load('../../../contracts/ws/v1/golden/session-cancel.forwarded.json') as Record<string, unknown>
   assert.equal(cancel.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: cancel.type, runtime_epoch: cancel.runtime_epoch, session_id: cancel.session_id, payload: {} }))).digest('hex'))
+  const modelSelection = await load('../../../contracts/ws/v1/golden/session-model-select.forwarded.json') as Record<string, unknown>
+  assert.equal(modelSelection.payload_sha256, createHash('sha256').update(JSON.stringify(canonicalValue({ type: modelSelection.type, runtime_epoch: modelSelection.runtime_epoch, session_id: modelSelection.session_id, payload: modelSelection.payload }))).digest('hex'))
+  assert.equal(validate({ ...modelSelection, payload: { provider: 'fixture', model: 'fixture', api_key: 'forbidden' } }), false)
+  assert.equal(validate({ ...modelSelection, payload: { provider: 'fixture', model: 'fixture', reasoning_effort: null } }), false)
   const deviceCancel = await load('../../../contracts/ws/v1/golden/session-cancel.json') as Record<string, unknown>
   const { runtime_epoch: _epoch, ...missingEpoch } = deviceCancel
   assert.equal(validate(missingEpoch), false)

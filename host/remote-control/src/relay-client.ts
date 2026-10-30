@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import type { CommandOwner, CommandState } from './command-journal.js'
 import type { SessionCatalogChange, SessionCatalogItem } from './dsh-client.js'
-import { archivePayload, parseCommand, ProbeError, type Command } from './protocol.js'
+import { archivePayload, modelSelectionPayload, parseCommand, ProbeError, type Command } from './protocol.js'
 import type { CommandStateObserver } from './runtime.js'
 import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
 import { questionAnswerPayload } from './questions.js'
@@ -26,7 +26,7 @@ const MAX_BUFFERED_BYTES = 512 * 1024
 const PROTOCOL = 'dsh.remote.v1'
 const PROOF_TYPE = 'dsh-relay-handshake-proof+jwt'
 const AUDIENCE = 'urn:dsh-mobile-ustc:realtime'
-const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'] as const
+const capabilities = ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.model.select.v1', 'session.read.v1'] as const
 const requiredCapabilities = ['command.relay.v1', 'connection.heartbeat.v1'] as const
 const uuid = z.uuid()
 const nonEmptyText = z.string().min(1).max(32_768).regex(/\S/).refine(text => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text))
@@ -93,13 +93,14 @@ const submitSchema = z.strictObject({
 const cancelSchema = submitSchema.extend({ type: z.literal('session.cancel'), payload: z.strictObject({}) })
 const reconcileSchema = submitSchema.extend({ type: z.literal('message.files.reconcile'),
   payload: submitSchema.shape.payload.refine(payload => payload.content.some(part => part.type === 'file')) })
+const modelSelectionSchema = submitSchema.extend({ type: z.literal('session.model.select'), payload: modelSelectionPayload })
 const archiveSchema = submitSchema.extend({ type: z.literal('session.archive'), payload: archivePayload })
 const questionSchema = submitSchema.extend({ type: z.literal('question.answer'), payload: questionAnswerPayload })
 const timedQuestionSchema = submitSchema.extend({ type: z.literal('question.timed.answer'), payload: questionAnswerPayload })
 const createSchema = submitSchema.omit({ session_id: true }).extend({
   type: z.literal('session.create'), payload: z.strictObject({ workspace_id: uuid, preset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/) }),
 })
-const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, reconcileSchema, cancelSchema, archiveSchema, createSchema, questionSchema, timedQuestionSchema])
+const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, reconcileSchema, cancelSchema, archiveSchema, modelSelectionSchema, createSchema, questionSchema, timedQuestionSchema])
 type ForwardedCommand = z.infer<typeof forwardedCommandSchema>
 const catalogItemSchema = z.strictObject({
   session_id: uuid,
@@ -376,6 +377,8 @@ function parseForwarded(data: unknown, runtimeId: string, runtimeEpoch: string):
   if (!parsed.success || parsed.data.runtime_id !== runtimeId || parsed.data.runtime_epoch !== runtimeEpoch
     || (parsed.data.type === 'session.cancel'
       ? relayCancelDigest(parsed.data.session_id, parsed.data.runtime_epoch)
+      : parsed.data.type === 'session.model.select'
+        ? relayModelSelectionDigest(parsed.data.session_id, parsed.data.runtime_epoch, parsed.data.payload)
       : parsed.data.type === 'session.archive'
         ? relayArchiveDigest(parsed.data.session_id, parsed.data.runtime_epoch, parsed.data.payload)
       : parsed.data.type === 'question.answer'
@@ -712,6 +715,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         if (forwarded.type === 'message.submit' && forwarded.payload.content.some(part => part.type === 'file')
           && (!files || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.cancel' && !ack.data.payload.capabilities.includes('session.cancel.v1')) throw new ProbeError('protocol.unsupported')
+        if (forwarded.type === 'session.model.select' && !ack.data.payload.capabilities.includes('session.model.select.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.archive' && !ack.data.payload.capabilities.includes('session.archive.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.create' && !ack.data.payload.capabilities.includes('session.create.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'question.answer' && !ack.data.payload.capabilities.includes('question.blocking.v1')) throw new ProbeError('protocol.unsupported')
@@ -870,4 +874,8 @@ export function relayQuestionDigest(sessionId: string, runtimeEpoch: string, pay
 
 export function relayTimedQuestionDigest(sessionId: string, runtimeEpoch: string, payload: z.infer<typeof questionAnswerPayload>): string {
   return createHash('sha256').update(JSON.stringify(jcs({ type: 'question.timed.answer', runtime_epoch: runtimeEpoch, session_id: sessionId, payload }))).digest('hex')
+}
+
+export function relayModelSelectionDigest(sessionId: string, runtimeEpoch: string, payload: z.infer<typeof modelSelectionPayload>): string {
+  return createHash('sha256').update(JSON.stringify(jcs({ type: 'session.model.select', runtime_epoch: runtimeEpoch, session_id: sessionId, payload }))).digest('hex')
 }

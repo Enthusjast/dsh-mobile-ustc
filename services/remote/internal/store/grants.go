@@ -34,11 +34,11 @@ var roleActions = map[string]map[string]struct{}{
 	"viewer": actionSet("host.list", "session.list", "session.read", "command.status"),
 	"operator": actionSet(
 		"host.list", "session.list", "session.read", "command.status", "session.create", "message.submit",
-		"session.cancel", "session.archive", "approval.decide", "question.answer", "file.upload", "file.download",
+		"session.cancel", "session.archive", "session.model.select", "approval.decide", "question.answer", "file.upload", "file.download",
 	),
 	"owner": actionSet(
 		"host.list", "session.list", "session.read", "command.status", "session.create", "message.submit",
-		"session.cancel", "session.archive", "approval.decide", "question.answer", "file.upload", "file.download", "grant.manage",
+		"session.cancel", "session.archive", "session.model.select", "approval.decide", "question.answer", "file.upload", "file.download", "grant.manage",
 	),
 }
 
@@ -97,7 +97,7 @@ func NormalizeTicketScope(role string, scope GrantScope) (GrantScope, error) {
 	if role == "owner" {
 		allowedActions = actionSet(
 			"host.list", "session.list", "session.read", "command.status", "session.create", "message.submit",
-			"session.cancel", "session.archive", "approval.decide", "question.answer", "file.upload", "file.download",
+			"session.cancel", "session.archive", "session.model.select", "approval.decide", "question.answer", "file.upload", "file.download",
 		)
 	}
 	if len(scope.Actions) == 0 || len(scope.Actions) > len(allowedActions) || len(scope.Workspaces) > 256 || len(scope.Sessions) > 256 {

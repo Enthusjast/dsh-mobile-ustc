@@ -54,7 +54,7 @@ func (postgres *Postgres) RecordRealtimeCommand(ctx context.Context, ticket Tick
 // admission runs under the same permission, command and resource locks as the
 // command insertion. Failure rolls back both the command and its file claims.
 func (postgres *Postgres) recordRealtimeCommand(ctx context.Context, ticket TicketRedemption, commandType, requestID, sessionID, payloadSHA256 string, admission func(context.Context, *sql.Tx, CommandStatus) error) (CommandStatus, error) {
-	if commandType != "message.submit" && commandType != "session.cancel" && commandType != "session.archive" && commandType != "question.answer" {
+	if commandType != "message.submit" && commandType != "session.cancel" && commandType != "session.archive" && commandType != "session.model.select" && commandType != "question.answer" {
 		return CommandStatus{}, ErrGrantInvalid
 	}
 	if !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) ||

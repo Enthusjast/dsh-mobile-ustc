@@ -615,6 +615,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   ].join('\n'), { mode: 0o700 })
   const accountRetireFile = join(root, 'retire-host-account.json'), accountRetireReport = join(root, 'retired-native-state.json')
   const blockedApprovalHeld = join(workspace, 'approval-dbblock-held'), runningApprovalRelease = join(workspace, 'approval-dbrun-release')
+  const modelSelectionReport = join(root, 'native-model-selections.json')
   const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
   const checkpointFailureSecret = `PRIVATE_CHECKPOINT_FAILURE_${randomUUID()}`
   await writeFile(wrapper, [
@@ -635,8 +636,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     `const signed={hostId:${JSON.stringify(persistedHostId)},installationId:${JSON.stringify(persistedInstallationId)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)}`,
     "const plugin=bindingStore?createEnrolledRemoteControlPlugin({client:enrollmentClient,binding:bindingStore,credentials:credentialProvider,profileRef:'e2e'},signed,journalProtector):createRemoteControlPlugin(credentialProvider,signed,journalProtector)",
     `function watchAccountRetirement(ctx){let checking=false,ended=false;const timer=setInterval(async()=>{if(checking||ended)return;checking=true;try{const input=JSON.parse(await readFile(${JSON.stringify(accountRetireFile)},'utf8'));ended=true;clearInterval(timer);const agent=ctx.agents.get(input.native_id);owner.abort();await new Promise(resolve=>setImmediate(resolve));const persisted=agent?await ctx.sessions.flush(agent.session):false;await writeFile(${JSON.stringify(accountRetireReport)},JSON.stringify({same_agent:!!agent&&ctx.agents.get(input.native_id)===agent,persisted:!!persisted}),{mode:0o600})}catch(error){if(error.code!=='ENOENT'){ended=true;clearInterval(timer)}}finally{checking=false}},25);timer.unref();return()=>{ended=true;clearInterval(timer)}}`,
+    `function observeModelSelections(ctx){let calls=0;const controller=ctx.sessionController,original=controller.selectModel.bind(controller);controller.selectModel=async input=>{const value=await original(input);await writeFile(${JSON.stringify(modelSelectionReport)},JSON.stringify({calls:++calls,selected:value.selected}),{mode:0o600});return value};return()=>{controller.selectModel=original}}`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>watchAccountRetirement(ctx));ctx.effect(()=>()=>{owner.abort();bindingStore?.close();enrollmentClient?.close();credentialProvider.close();resourceAccount.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&(exec.arguments.command.includes('approval-revoke.txt')||exec.arguments.command.includes('approval-dbblock.txt'))){await writeFile(exec.arguments.command.includes('approval-dbblock.txt')?${JSON.stringify(blockedApprovalHeld)}:${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>observeModelSelections(ctx));ctx.effect(()=>watchAccountRetirement(ctx));ctx.effect(()=>()=>{owner.abort();bindingStore?.close();enrollmentClient?.close();credentialProvider.close();resourceAccount.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&(exec.arguments.command.includes('approval-revoke.txt')||exec.arguments.command.includes('approval-dbblock.txt'))){await writeFile(exec.arguments.command.includes('approval-dbblock.txt')?${JSON.stringify(blockedApprovalHeld)}:${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -777,7 +779,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   const beforeCreate = (await command('session.list', {})).payload.items.length
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
-  const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.archive', 'session.cancel', 'session.create', 'session.read'], workspaces: [primaryWorkspace], sessions: [] }
+  const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.archive', 'session.cancel', 'session.create', 'session.model.select', 'session.read'], workspaces: [primaryWorkspace], sessions: [] }
   await outsider('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
   const ticket = await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
   const schema = JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8'))
@@ -790,7 +792,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const collector = new FrameCollector(socket, value => validate(value) || validateApproval(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['approval.signed.v1', 'command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.create.v1', 'session.read.v1']
+    const caps = ['approval.signed.v1', 'command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.create.v1', 'session.model.select.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -833,6 +835,23 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const sessionId = created.session_id
   assert.match(sessionId, /^[0-9a-f-]{36}$/)
   assert.equal((await command('session.list', {})).payload.items.length, beforeCreate + 1)
+  const selectionRequest = randomUUID()
+  const modelSelection = { v: 1, type: 'session.model.select', request_id: selectionRequest, runtime_id: enrollment.runtime_id,
+    runtime_epoch: probe.runtime_epoch, session_id: sessionId, payload: { provider: 'dsh-m0-test', model: 'offline' } }
+  mobile.send(modelSelection)
+  for (const state of ['received', 'host_accepted', 'dispatching', 'settled'])
+    await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === selectionRequest && frame.payload.state === state)
+  const selectionRetryFrom = mobile.frames.length
+  mobile.send(modelSelection)
+  await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === selectionRequest && frame.payload.state === 'settled', selectionRetryFrom)
+  mobile.send({ ...modelSelection, payload: { ...modelSelection.payload, model: 'different' } })
+  await mobile.wait(frame => frame.type === 'error' && frame.request_id === selectionRequest && frame.payload.code === 'command.request_conflict')
+  const unavailableModelRequest = randomUUID()
+  mobile.send({ ...modelSelection, request_id: unavailableModelRequest, payload: { ...modelSelection.payload, model: 'unavailable' } })
+  await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === unavailableModelRequest && frame.payload.state === 'rejected')
+  assert.equal(query(`select action from commands where request_id='${selectionRequest}'`), 'session.model.select')
+  assert.equal(query(`select count(*) from audit_log where action='command.receipt' and metadata->>'request_id'='${selectionRequest}' and metadata->>'state'='settled'`), '1')
+  t.diagnostic('The current phone selected an available native DSH model through explicit session.model.select authority and the new capability. Its original request settled once after checkpoint; a matching retry stayed settled, changed content conflicted, and a missing catalog model was rejected without closing the Host.')
   const creationRetryFrom = mobile.frames.length
   mobile.send(creation)
   assert.equal((await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === creationId && frame.payload.state === 'settled', creationRetryFrom)).session_id, sessionId)
@@ -890,6 +909,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const replacementRequest = subscribe()
   const replacement = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === replacementRequest)
   assert.notEqual(replacement.sync_id, opening.sync_id)
+  assert.deepEqual(JSON.parse(await readFile(modelSelectionReport, 'utf8')), { calls: 1, selected: { provider: 'dsh-m0-test', model: 'offline' } }, 'selection retry reentered the real native controller')
   assert.ok(replacement.payload.cursor >= settled.payload.native_seq)
   assert.equal(replacement.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1, 'retry duplicated the native DSH message')
   const pageRequest = randomUUID()

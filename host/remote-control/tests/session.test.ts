@@ -79,7 +79,7 @@ test('model catalog only exposes and selects models already registered on the de
     const catalog = await client.modelCatalog()
     assert.ok(catalog.groups.some(group => group.id === 'fixture' && group.models.some(model => model.id === 'fixture')))
     assert.deepEqual(await client.selectModel(native, { provider: 'fixture', model: 'fixture' }), {
-      selected: { provider: 'fixture', model: 'fixture' },
+      selected: { provider: 'fixture', model: 'fixture' }, checkpoint: { state: 'persisted', through_seq: 0 },
     })
     await assert.rejects(client.selectModel(native, { provider: 'not-configured', model: 'arbitrary' }), /model.not_available/)
     await assert.rejects(client.selectModel(native, { provider: 'fixture', model: 'fixture', reasoning_effort: 'arbitrary' }), /model.not_available/)

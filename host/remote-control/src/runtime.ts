@@ -166,7 +166,7 @@ export class ProbeRuntime {
           try {
             const value = await run(recoveringDispatch)
             const lateAnswer = command.type === 'question.timed.answer' && value !== null && typeof value === 'object' && 'delivery' in value && value.delivery === 'late_message'
-            const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create' || lateAnswer
+            const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create' || command.type === 'session.model.select' || lateAnswer
             if (checkpointRequired && value !== null && typeof value === 'object'
               && 'checkpoint' in value && value.checkpoint !== null && typeof value.checkpoint === 'object'
               && 'state' in value.checkpoint && value.checkpoint.state !== 'persisted') {

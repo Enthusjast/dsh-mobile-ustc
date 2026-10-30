@@ -62,11 +62,11 @@ function canonicalValue(value: unknown): unknown {
   return Object.fromEntries(Object.keys(object).sort().map(key => [key, canonicalValue(object[key])]))
 }
 
-/** Message retries survive epochs; remote creation/cancellation stay bound to the original runtime. */
+/** Message retries survive epochs; remote control mutations stay bound to the original runtime. */
 export function commandDigest(command: Command): string {
   const body = {
     type: command.type,
-    ...(command.type === 'session.cancel' || command.type === 'session.archive' || command.type === 'question.answer' || command.type === 'question.timed.answer' || (command.type === 'session.create' && 'workspace_id' in command.payload)
+    ...(command.type === 'session.cancel' || command.type === 'session.archive' || command.type === 'session.model.select' || command.type === 'question.answer' || command.type === 'question.timed.answer' || (command.type === 'session.create' && 'workspace_id' in command.payload)
       ? { runtime_epoch: command.runtime_epoch } : {}),
     ...('session_id' in command ? { session_id: command.session_id } : {}),
     payload: command.payload,

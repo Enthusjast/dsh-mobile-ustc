@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { readFileSync } from 'node:fs'
-import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, relayCreateDigest, startHostRelay } from '../src/relay-client.js'
+import { hostHelloDigest, relayPayloadDigest, relayCancelDigest, relayArchiveDigest, relayCreateDigest, relayModelSelectionDigest, startHostRelay } from '../src/relay-client.js'
 import { mobileSessionId, type SessionCatalogChange } from '../src/dsh-client.js'
 
 const ws = createRequire(import.meta.url)('ws') as { WebSocketServer: new (options: object) => any }
@@ -112,7 +112,7 @@ test('Relay host client proves the installation key and routes only digest-match
           socket.send(JSON.stringify({ v: 1, type: 'hello.ok', payload: {
             role: 'host', connection_id: connectionId, installation_id: installationId,
             runtime_id: runtimeId, runtime_epoch: runtimeEpoch, protocol_version: 1, protocols: [1],
-            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.read.v1'], server_time: new Date().toISOString(),
+            capabilities: ['command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.model.select.v1', 'session.read.v1'], server_time: new Date().toISOString(),
             heartbeat_seconds: 20, max_frame_bytes: 65_536, lease_expires_at: new Date(Date.now() + 299_000).toISOString(),
           } }))
           resolve()
@@ -210,9 +210,15 @@ test('Relay host client proves the installation key and routes only digest-match
     assert.equal(created.payload.created_session.state, 'archived')
     assert.equal(created.session_id, catalog[0]!.session_id)
 
+    const modelId = 'bbbbbbbb-4444-4444-8444-444444444444'
+    const selection = { provider: 'fixture', model: 'fixture' }
+    relaySocket.send(JSON.stringify({ ...forwarded, type: 'session.model.select', request_id: modelId, payload: selection, payload_sha256: relayModelSelectionDigest(sessionId, runtimeEpoch, selection) }))
+    await waitFor(() => routed.length === 5)
+    assert.deepEqual(routed[4]?.command, { v: 0, type: 'session.model.select', request_id: modelId, runtime_epoch: runtimeEpoch, session_id: sessionId, payload: selection })
+
     relaySocket.send(JSON.stringify({ ...forwarded, payload_sha256: createHash('sha256').update('tampered').digest('hex') }))
     await waitFor(() => relaySocket.readyState !== 1)
-    assert.equal(routed.length, 4)
+    assert.equal(routed.length, 5)
   } finally {
     await relay.close()
   }

@@ -92,3 +92,6 @@ histogram_quantile(0.95, sum by (le, operation, result) (rate(dsh_remote_command
 
 后续[当前数据库未知积压](unknown-results-metrics.md)通过有期限后台快照提供可下降的数量，
 包含保留的历史/恢复未知行。失败保留旧值并报告新鲜度；它不从转换计数相减，不代替逐项对账。
+
+`session.model.select` 是[模型选择命令](session-model-selection.md)的固定动作标签。
+其 `settled` 在原生会话检查点完成后产生；provider、model 和 reasoning 标识不进入指标标签。

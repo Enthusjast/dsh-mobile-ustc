@@ -720,7 +720,7 @@ paths:
         Devices may send a v=1 `message.submit` frame with request_id, runtime_id, session_id, and
         payload {mode: queue|steer, content: [{type: text, text: ...}]}. Text content is bounded to
         32,768 Unicode characters per block and 16 blocks per frame; the complete UTF-8 frame is
-        limited to 64 KiB. Both peers may additionally negotiate `session.cancel.v1` for an
+        limited to 64 KiB. Both peers may additionally negotiate `session.model.select.v1` for epoch-bound model selection with explicit session.model.select permission; provider/model/optional reasoning_effort are checked against the current native catalog and success waits for its checkpoint. Both peers may additionally negotiate `session.cancel.v1` for an
         epoch-bound `session.cancel` with an empty payload and explicit session.cancel action.
         Negotiating `session.create.v1` allows `session.create` with the current runtime_epoch and
         payload {workspace_id, preset}, before a session UUID exists. It requires session.create
@@ -1650,9 +1650,9 @@ components:
         actions:
           type: array
           uniqueItems: true
-          maxItems: 13
+          maxItems: 14
           items:
-            enum: [host.list, session.list, session.read, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download, grant.manage]
+            enum: [host.list, session.list, session.read, command.status, session.create, message.submit, session.cancel, session.archive, session.model.select, approval.decide, question.answer, file.upload, file.download, grant.manage]
         workspaces:
           type: array
           uniqueItems: true
@@ -1704,9 +1704,9 @@ components:
           type: array
           minItems: 1
           uniqueItems: true
-          maxItems: 11
+          maxItems: 13
           items:
-            enum: [host.list, session.list, session.read, command.status, session.create, message.submit, session.cancel, session.archive, approval.decide, question.answer, file.upload, file.download]
+            enum: [host.list, session.list, session.read, command.status, session.create, message.submit, session.cancel, session.archive, session.model.select, approval.decide, question.answer, file.upload, file.download]
         workspaces:
           type: array
           uniqueItems: true

@@ -334,10 +334,11 @@ export class DshClient {
     const model = catalog.groups.find(group => group.id === selection.provider)?.models.find(item => item.id === selection.model)
     if (model === undefined || (selection.reasoning_effort !== undefined
       && !model.reasoning?.efforts.some(item => item.id === selection.reasoning_effort))) throw new ProbeError('model.not_available')
-    return this.controller.selectModel({
+    const selected = await this.controller.selectModel({
       sessionId: id, provider: selection.provider, model: selection.model,
       ...(selection.reasoning_effort === undefined ? {} : { reasoningEffort: selection.reasoning_effort }),
     })
+    return { ...selected, checkpoint: await this.checkpoint(id) }
   }
 
   async prompt(

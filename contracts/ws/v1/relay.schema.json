@@ -21,6 +21,8 @@
     { "$ref": "#/$defs/fileMessageReconcileToHost" },
     { "$ref": "#/$defs/sessionCancel" },
     { "$ref": "#/$defs/sessionCancelToHost" },
+    { "$ref": "#/$defs/sessionModelSelect" },
+    { "$ref": "#/$defs/sessionModelSelectToHost" },
     { "$ref": "#/$defs/sessionArchive" },
     { "$ref": "#/$defs/sessionArchiveToHost" },
     { "$ref": "#/$defs/questionAnswer" },
@@ -635,6 +637,115 @@
         "runtime_epoch": { "$ref": "#/$defs/uuid" }, "session_id": { "$ref": "#/$defs/uuid" },
         "user_id": { "$ref": "#/$defs/uuid" }, "device_id": { "$ref": "#/$defs/uuid" },
         "payload_sha256": { "$ref": "#/$defs/sha256" }, "payload": { "type": "object", "maxProperties": 0 }
+      }
+    },
+    "modelSelectionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "sessionModelSelect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.model.select"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/modelSelectionPayload"
+        }
+      }
+    },
+    "sessionModelSelectToHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "payload",
+        "user_id",
+        "device_id",
+        "payload_sha256"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.model.select"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/modelSelectionPayload"
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "archivePayload": {
