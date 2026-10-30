@@ -43,6 +43,10 @@ type routingFixture struct {
 }
 
 func newRoutingFixture(t *testing.T, count, maxProxies int, commandPolicies ...store.CommandRateLimits) *routingFixture {
+	return newRoutingFixtureWithConnections(t, count, maxProxies, nil, commandPolicies...)
+}
+
+func newRoutingFixtureWithConnections(t *testing.T, count, maxProxies int, connectionPolicy *store.ConnectionLimits, commandPolicies ...store.CommandRateLimits) *routingFixture {
 	t.Helper()
 	binary := os.Getenv("REMOTE_TEST_SERVICE_BIN")
 	if binary == "" {
@@ -75,6 +79,14 @@ func newRoutingFixture(t *testing.T, count, maxProxies int, commandPolicies ...s
 			t.Fatal(err)
 		}
 		commandPolicyFile = write("command-limits.json", raw)
+	}
+	connectionPolicyFile := ""
+	if connectionPolicy != nil {
+		raw, err := json.Marshal(connectionPolicy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connectionPolicyFile = write("connection-limits.json", raw)
 	}
 	write("relay-ca.pem", fixture.ca.PEM)
 	issuerKey, err := newCapacityKey()
@@ -165,7 +177,7 @@ func newRoutingFixture(t *testing.T, count, maxProxies int, commandPolicies ...s
 	}
 	for _, name := range []string{"a", "b"} {
 		node := fixture.nodes[name]
-		environment := []string{"PATH=" + os.Getenv("PATH"), "SSL_CERT_FILE=" + ca, "REMOTE_ISSUER=" + issuer, "REMOTE_AUDIENCE=urn:routing", "REMOTE_JWKS_URL=" + ingress.URL + "/fixture/jwks", "REMOTE_CLIENT_IDS=routing-host,routing-phone", "REMOTE_HOST_CLIENT_IDS=routing-host", "REMOTE_REQUIRED_SCOPES=remote.access", "REMOTE_PUBLIC_ORIGIN=" + ingress.URL, "REMOTE_DATABASE_URL=" + dsn, "REMOTE_LISTEN_ADDR=" + node.address, "REMOTE_RELAY_NODE_ID=" + node.id, "REMOTE_RELAY_CONFIG_FILE=" + node.config, "REMOTE_METRICS_LISTEN_ADDR=" + strings.TrimPrefix(node.metrics, "http://"), "REMOTE_COMMAND_LIMITS_FILE=" + commandPolicyFile}
+		environment := []string{"PATH=" + os.Getenv("PATH"), "SSL_CERT_FILE=" + ca, "REMOTE_ISSUER=" + issuer, "REMOTE_AUDIENCE=urn:routing", "REMOTE_JWKS_URL=" + ingress.URL + "/fixture/jwks", "REMOTE_CLIENT_IDS=routing-host,routing-phone", "REMOTE_HOST_CLIENT_IDS=routing-host", "REMOTE_REQUIRED_SCOPES=remote.access", "REMOTE_PUBLIC_ORIGIN=" + ingress.URL, "REMOTE_DATABASE_URL=" + dsn, "REMOTE_LISTEN_ADDR=" + node.address, "REMOTE_RELAY_NODE_ID=" + node.id, "REMOTE_RELAY_CONFIG_FILE=" + node.config, "REMOTE_METRICS_LISTEN_ADDR=" + strings.TrimPrefix(node.metrics, "http://"), "REMOTE_COMMAND_LIMITS_FILE=" + commandPolicyFile, "REMOTE_CONNECTION_LIMITS_FILE=" + connectionPolicyFile}
 		node.process = startSharedProofProcess(t, ctx, binary, environment, filepath.Join(directory, name+".log"))
 		if err := capacityWait(ctx, 8*time.Second, func() (bool, error) {
 			client := *fixture.clients[name]

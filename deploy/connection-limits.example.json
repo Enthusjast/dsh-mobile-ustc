@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "total": 12000,
+  "user": 256,
+  "device": 64,
+  "installation": 128,
+  "pending_handshakes": 256
+}

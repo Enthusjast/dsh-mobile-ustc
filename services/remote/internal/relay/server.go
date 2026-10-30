@@ -42,6 +42,7 @@ const (
 	commandsPerSecond           = 20
 	maxSessionCatalogBytes      = 8 << 20
 	maxSessionCatalogBytesTotal = 64 << 20
+	defaultPendingHandshakes    = 256
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -68,7 +69,13 @@ type Repository interface {
 	InvalidRealtimeConnectionLeases(context.Context, []store.RealtimeConnectionLease) ([]string, error)
 }
 
+type sharedConnectionSlots interface {
+	ClaimDeviceConnection(context.Context, store.TicketRedemption, string, time.Time) error
+	ReleaseDeviceConnection(context.Context, string) error
+}
+
 type Server struct {
+	pendingHandshakes    int
 	database             Repository
 	mu                   sync.Mutex
 	connections          map[*websocket.Conn]*liveConnection
@@ -95,6 +102,7 @@ type liveConnection struct {
 	closeTransport         func() error
 	peer                   peer
 	connectionID           string
+	quotaConnectionID      string
 	runtimeID              string
 	runtimeEpoch           string
 	capabilities           map[string]struct{}
@@ -502,7 +510,7 @@ func (server *Server) serveConnection(response http.ResponseWriter, request *htt
 	transportClose := forceTransportCloser(upgraded.transport)
 	live, registered := server.registerConnection(connection, peer, transportClose)
 	if !registered {
-		closePolicy(connection, "server draining", transportClose)
+		closePolicy(connection, "connection admission unavailable", transportClose)
 		_ = connection.CloseNow()
 		return
 	}
@@ -516,12 +524,37 @@ func (server *Server) serveConnection(response http.ResponseWriter, request *htt
 	server.runHandshake(request.Context(), live)
 }
 
+func (server *Server) ConfigurePendingHandshakes(limit int) error {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if limit < 1 || limit > 4096 || len(server.connections) != 0 {
+		return store.ErrDatabaseConfig
+	}
+	server.pendingHandshakes = limit
+	return nil
+}
+
 func (server *Server) registerConnection(connection *websocket.Conn, identity peer, closeTransport func() error) (*liveConnection, bool) {
 	server.mu.Lock()
 	if server.draining {
 		server.mu.Unlock()
 		return nil, false
 	}
+	limit := server.pendingHandshakes
+	if limit == 0 {
+		limit = defaultPendingHandshakes
+	}
+	pending := 0
+	for _, live := range server.connections {
+		if live.connectionID == "" {
+			pending++
+		}
+	}
+	if pending >= limit {
+		server.mu.Unlock()
+		return nil, false
+	}
+
 	live := &liveConnection{conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, ordinaryQueueFrames), controlQueue: make(chan outboundFrame, controlQueueFrames), queueWake: make(chan struct{}, 1), done: make(chan struct{}), metrics: server.metrics}
 	server.active.Add(1)
 	server.connections[connection] = live
@@ -535,6 +568,12 @@ func (server *Server) unregisterConnection(live *liveConnection) {
 		server.exports.closeConnection(live)
 	}
 	server.closeConnectionSubscriptions(live)
+	if quota, ok := server.database.(sharedConnectionSlots); ok && live.quotaConnectionID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = quota.ReleaseDeviceConnection(ctx, live.quotaConnectionID)
+		cancel()
+	}
+
 	if server.approvals != nil {
 		server.approvals.closeConnection(live)
 	}
@@ -773,6 +812,20 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 		return
 	}
 	leaseExpiresAt := time.Now().UTC().Add(deviceConnectionLife)
+	if quota, ok := server.database.(sharedConnectionSlots); ok {
+		live.quotaConnectionID = connectionID
+		if err := quota.ClaimDeviceConnection(parent, redemption, connectionID, leaseExpiresAt); err != nil {
+			code := "internal"
+			if errors.Is(err, store.ErrConnectionLimit) {
+				code = "rate.limited"
+			} else if errors.Is(err, store.ErrAccessDenied) {
+				code = "access.denied"
+			}
+			server.sendProtocolError(parent, live, code, nil)
+			server.closePolicy(live, "connection quota unavailable")
+			return
+		}
+	}
 	leaseCtx, cancel := context.WithDeadline(parent, leaseExpiresAt)
 	defer cancel()
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
@@ -872,12 +925,15 @@ func (server *Server) finishHostHandshake(parent context.Context, live *liveConn
 		return
 	}
 	registered, err := server.database.AttachRuntimeConnection(parent, store.RuntimeConnectionInput{
-		InstallationID: peer.installation.InstallationID, KeyVersion: peer.installation.KeyVersion, RuntimeID: hello.RuntimeID,
+		InstallationID: peer.installation.InstallationID, KeyVersion: peer.installation.KeyVersion, RuntimeID: hello.RuntimeID, CredentialExpiresAt: peer.installation.ExpiresAt,
 		RuntimeEpoch: hello.RuntimeEpoch, ConnectionID: connectionID,
 		DSHVersion: hello.DSHVersion, ApplicationVersion: hello.ApplicationVersion,
 		PluginVersion: hello.PluginVersion, ProtocolVersion: hello.ProtocolVersion,
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrConnectionLimit) {
+			server.sendProtocolError(parent, live, "rate.limited", nil)
+		}
 		server.closePolicy(live, "handshake rejected")
 		return
 	}

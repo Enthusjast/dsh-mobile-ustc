@@ -30,6 +30,8 @@ func main() {
 			operation = func() error { return runArchiveCommand(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "command-limits" {
 			operation = func() error { return runCommandRateCommand(os.Args[2:], os.Stdout) }
+		} else if os.Args[1] == "connection-limits" {
+			operation = func() error { return runConnectionLimitDescription(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "identities" {
 			operation = func() error { return runIdentityCommand(os.Args[2:], os.Stdout) }
 		} else {
@@ -49,6 +51,10 @@ func run() error {
 		return err
 	}
 	commandLimits, err := loadCommandRateLimits(os.Getenv("REMOTE_COMMAND_LIMITS_FILE"))
+	if err != nil {
+		return err
+	}
+	connectionLimits, err := loadConnectionLimits(os.Getenv("REMOTE_CONNECTION_LIMITS_FILE"))
 	if err != nil {
 		return err
 	}
@@ -171,6 +177,9 @@ func run() error {
 	if err := database.ConfigureCommandRateLimits(context.Background(), commandLimits); err != nil {
 		return errCommandRateConfiguration
 	}
+	if err := database.ConfigureConnectionLimits(context.Background(), connectionLimits); err != nil {
+		return errConnectionLimitConfiguration
+	}
 	origin := ""
 	if relayConfig != nil {
 		origin = relayConfig.Origin
@@ -180,6 +189,9 @@ func run() error {
 		return errors.New("remote relay directory is unavailable")
 	}
 	handler := httpapi.New(directory, verifier, apiConfig)
+	if err := handler.ConfigurePendingHandshakes(connectionLimits.PendingHandshakes); err != nil {
+		return errConnectionLimitConfiguration
+	}
 	routingConfig := relay.RoutingConfig{Directory: directory}
 	if relayConfig != nil {
 		routingConfig.ClientTLS, routingConfig.MaxProxyConnections = relayConfig.clientTLS, relayConfig.MaxProxyConnections

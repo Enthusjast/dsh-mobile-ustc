@@ -117,6 +117,10 @@ func (handler *Handler) RevalidateConnections(ctx context.Context) error {
 	return handler.realtime.RevalidateConnections(ctx)
 }
 
+func (handler *Handler) ConfigurePendingHandshakes(limit int) error {
+	return handler.realtime.ConfigurePendingHandshakes(limit)
+}
+
 func (handler *Handler) ConfigureRouting(config relay.RoutingConfig) error {
 	return handler.realtime.ConfigureRouting(config)
 }

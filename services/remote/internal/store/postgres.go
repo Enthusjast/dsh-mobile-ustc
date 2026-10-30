@@ -24,14 +24,15 @@ var ErrDeviceNotFound = errors.New("store: device not found")
 
 // Postgres owns a bounded database/sql pool over the pinned pgx driver.
 type Postgres struct {
-	DB            *sql.DB
-	admissionOnce sync.Once
-	admission     chan struct{}
-	commands      commandObservation
-	commandRates  commandRateState
-	approvals     approvalObservation
-	files         fileObservation
-	push          pushObservation
+	DB               *sql.DB
+	admissionOnce    sync.Once
+	admission        chan struct{}
+	commands         commandObservation
+	commandRates     commandRateState
+	connectionLimits connectionLimitState
+	approvals        approvalObservation
+	files            fileObservation
+	push             pushObservation
 }
 
 const DefaultSerializableAdmissions = 4

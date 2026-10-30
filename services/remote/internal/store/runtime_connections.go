@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -13,15 +14,16 @@ var ErrRuntimeConnectionStale = errors.New("store: runtime connection is stale")
 var ErrRuntimeProtocolUnsupported = errors.New("store: runtime protocol is unsupported")
 
 type RuntimeConnectionInput struct {
-	InstallationID     string
-	KeyVersion         int64
-	RuntimeID          string
-	RuntimeEpoch       string
-	ConnectionID       string
-	DSHVersion         string
-	ApplicationVersion string
-	PluginVersion      string
-	ProtocolVersion    int
+	CredentialExpiresAt time.Time
+	InstallationID      string
+	KeyVersion          int64
+	RuntimeID           string
+	RuntimeEpoch        string
+	ConnectionID        string
+	DSHVersion          string
+	ApplicationVersion  string
+	PluginVersion       string
+	ProtocolVersion     int
 }
 
 type RuntimeConnection struct {
@@ -41,6 +43,9 @@ func (postgres *Postgres) attachRuntimeConnectionOnce(ctx context.Context, input
 }
 
 func (postgres *Postgres) attachRuntimeConnectionOwned(ctx context.Context, input RuntimeConnectionInput, directory *RelayDirectory) (RuntimeConnection, error) {
+	if directory == nil && (postgres.connectionLimits.limits != nil || postgres.connectionLimits.err != nil) {
+		return RuntimeConnection{}, ErrDatabaseConfig
+	}
 	input.DSHVersion = strings.TrimSpace(input.DSHVersion)
 	input.ApplicationVersion = strings.TrimSpace(input.ApplicationVersion)
 	input.PluginVersion = strings.TrimSpace(input.PluginVersion)
@@ -64,6 +69,11 @@ func (postgres *Postgres) attachRuntimeConnectionOwned(ctx context.Context, inpu
 			return RuntimeConnection{}, err
 		}
 	}
+	if directory != nil {
+		if err := postgres.lockConnectionCapacity(ctx, transaction); err != nil {
+			return RuntimeConnection{}, err
+		}
+	}
 	var protocolVersion int
 	var orgID string
 	err = transaction.QueryRowContext(ctx, `
@@ -79,8 +89,24 @@ func (postgres *Postgres) attachRuntimeConnectionOwned(ctx context.Context, inpu
 	if err != nil {
 		return RuntimeConnection{}, transactionFailure(err)
 	}
+	if !input.CredentialExpiresAt.IsZero() {
+		if err := checkRuntimeCredentialTime(ctx, transaction, input.CredentialExpiresAt); err != nil {
+			return RuntimeConnection{}, err
+		}
+	}
 	if protocolVersion != input.ProtocolVersion {
 		return RuntimeConnection{}, ErrRuntimeProtocolUnsupported
+	}
+	if directory != nil && postgres.connectionLimits.limits != nil {
+		var owner string
+		if err := transaction.QueryRowContext(ctx, `select u.id::text from installations i join users u on u.id=i.owner_user_id and u.status='active' join hosts h on h.id=i.host_id join org_memberships m on m.org_id=h.org_id and m.user_id=u.id where i.id=$1 for share of u,m`, input.InstallationID).Scan(&owner); errors.Is(err, sql.ErrNoRows) {
+			return RuntimeConnection{}, ErrHostCredentialInvalid
+		} else if err != nil {
+			return RuntimeConnection{}, transactionFailure(err)
+		}
+		if err := postgres.checkConnectionCapacity(ctx, transaction, owner, "", input.InstallationID, input.RuntimeID); err != nil {
+			return RuntimeConnection{}, err
+		}
 	}
 	if _, err := transaction.ExecContext(ctx, `
 		update runtimes
@@ -117,6 +143,11 @@ func (postgres *Postgres) attachRuntimeConnectionOwned(ctx context.Context, inpu
 		values ($1, 'installation', $2, $3, 'host.runtime.connect', 'success', $4::jsonb)`,
 		orgID, input.InstallationID, input.RuntimeID, string(metadata)); err != nil {
 		return RuntimeConnection{}, transactionFailure(err)
+	}
+	if !input.CredentialExpiresAt.IsZero() {
+		if err := checkRuntimeCredentialTime(ctx, transaction, input.CredentialExpiresAt); err != nil {
+			return RuntimeConnection{}, err
+		}
 	}
 	if err := transaction.Commit(); err != nil {
 		return RuntimeConnection{}, transactionFailure(err)
@@ -205,5 +236,16 @@ func (postgres *Postgres) detachRuntimeConnectionOwned(ctx context.Context, inst
 		return ErrDatabaseUnavailable
 	}
 	postgres.observeEndedApprovals("connection", ended)
+	return nil
+}
+
+func checkRuntimeCredentialTime(ctx context.Context, tx *sql.Tx, expires time.Time) error {
+	var live bool
+	if err := tx.QueryRowContext(ctx, `select $1::timestamptz>clock_timestamp()`, expires).Scan(&live); err != nil {
+		return transactionFailure(err)
+	}
+	if !live {
+		return ErrHostCredentialInvalid
+	}
 	return nil
 }
