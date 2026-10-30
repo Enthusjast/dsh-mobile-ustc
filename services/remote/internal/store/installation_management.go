@@ -123,12 +123,12 @@ func (postgres *Postgres) RevokeInstallation(ctx context.Context, identity UserI
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	_, err := retrySerializable(ctx, func() (bool, error) {
-		return postgres.revokeInstallationOnce(ctx, identity, deviceID, proofJKT, installationID)
+		return postgres.revokeInstallationOnce(ctx, identity, deviceID, proofJKT, installationID, "")
 	})
 	return err
 }
 
-func (postgres *Postgres) revokeInstallationOnce(ctx context.Context, identity UserIdentity, deviceID, proofJKT, installationID string) (bool, error) {
+func (postgres *Postgres) revokeInstallationOnce(ctx context.Context, identity UserIdentity, deviceID, proofJKT, installationID, runtimeID string) (bool, error) {
 	// The installation lock fences enrollment, grants and credential minting.
 	// Fresh statement snapshots include anything committed while waiting for it.
 	tx, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -154,10 +154,18 @@ func (postgres *Postgres) revokeInstallationOnce(ctx context.Context, identity U
 	}
 	var hostID, orgID string
 	var revoked *time.Time
-	err = tx.QueryRowContext(ctx, `select h.id::text,h.org_id::text,i.revoked_at from installations i join hosts h on h.id=i.host_id
-	 join org_memberships m on m.org_id=h.org_id and m.user_id=$2
-	 where i.id=$1 and (i.owner_user_id=$2 or m.role='admin')
-	 for update of i,h for share of m /* installation_revoke_fence */`, installationID, actor).Scan(&hostID, &orgID, &revoked)
+	if runtimeID == "" {
+		err = tx.QueryRowContext(ctx, `select h.id::text,h.org_id::text,i.revoked_at from installations i join hosts h on h.id=i.host_id
+		 join org_memberships m on m.org_id=h.org_id and m.user_id=$2
+		 where i.id=$1 and (i.owner_user_id=$2 or m.role='admin')
+		 for update of i,h for share of m /* installation_revoke_fence */`, installationID, actor).Scan(&hostID, &orgID, &revoked)
+	} else {
+		err = tx.QueryRowContext(ctx, `select h.id::text,h.org_id::text,r.revoked_at
+		 from runtimes r join installations i on i.id=r.installation_id join hosts h on h.id=i.host_id
+		 join org_memberships m on m.org_id=h.org_id and m.user_id=$2
+		 where i.id=$1 and r.id=$3 and (i.owner_user_id=$2 or m.role='admin')
+		 for update of i,h,r for share of m /* profile_revoke_fence */`, installationID, actor, runtimeID).Scan(&hostID, &orgID, &revoked)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, ErrAccessDenied
 	}
@@ -167,34 +175,49 @@ func (postgres *Postgres) revokeInstallationOnce(ctx context.Context, identity U
 	if revoked != nil {
 		return true, nil
 	}
-	queries := []string{
-		`update installations set revoked_at=clock_timestamp() where id=$1`,
-		`update runtimes set revoked_at=coalesce(revoked_at,clock_timestamp()) where installation_id=$1`,
-		`update host_connection_credentials set revoked_at=clock_timestamp() where installation_id=$1 and revoked_at is null`,
-		`update installation_challenges set consumed_at=clock_timestamp() where installation_id=$1 and consumed_at is null`,
-		`update realtime_tickets set consumed_at=clock_timestamp() where consumed_at is null and runtime_id in(select id from runtimes where installation_id=$1)`,
-		`update enrollments set state='cancelled',decided_at=clock_timestamp() where installation_id=$1 and state in('pending','user_confirmed')`,
-		`update sessions set state='unavailable',updated_at=clock_timestamp() where runtime_id in(select id from runtimes where installation_id=$1) and state in('available','running')`,
-		`update file_handoffs set state='invalidated',staged_name=null,ended_at=clock_timestamp() where runtime_id in(select id from runtimes where installation_id=$1) and state in('offered','downloading','staged')`,
+	var target any
+	if runtimeID != "" {
+		target = runtimeID
+	} else {
+		for _, query := range []string{
+			`update installations set revoked_at=clock_timestamp() where id=$1`,
+			`update host_connection_credentials set revoked_at=clock_timestamp() where installation_id=$1 and revoked_at is null`,
+			`update installation_challenges set consumed_at=clock_timestamp() where installation_id=$1 and consumed_at is null`,
+		} {
+			if _, err = tx.ExecContext(ctx, query, installationID); err != nil {
+				return false, transactionFailure(err)
+			}
+		}
 	}
-	for _, query := range queries {
-		if _, err = tx.ExecContext(ctx, query, installationID); err != nil {
+	for _, query := range []string{
+		`update runtimes set revoked_at=coalesce(revoked_at,clock_timestamp()) where installation_id=$1 and ($2::uuid is null or id=$2)`,
+		`update realtime_tickets set consumed_at=clock_timestamp() where consumed_at is null and runtime_id in(select id from runtimes where installation_id=$1 and ($2::uuid is null or id=$2))`,
+		`update enrollments set state='cancelled',decided_at=clock_timestamp() where installation_id=$1 and ($2::uuid is null or runtime_id=$2) and state in('pending','user_confirmed')`,
+		`update sessions set state='unavailable',updated_at=clock_timestamp() where runtime_id in(select id from runtimes where installation_id=$1 and ($2::uuid is null or id=$2)) and state in('available','running')`,
+		`update file_handoffs set state='invalidated',staged_name=null,ended_at=clock_timestamp() where runtime_id in(select id from runtimes where installation_id=$1 and ($2::uuid is null or id=$2)) and state in('offered','downloading','staged')`,
+	} {
+		if _, err = tx.ExecContext(ctx, query, installationID, target); err != nil {
 			return false, transactionFailure(err)
 		}
 	}
 	_, err = tx.ExecContext(ctx, `with retired as(
 	 update runtime_grants g set revoked_at=clock_timestamp(),grant_version=g.grant_version+1 from runtimes r
-	 where r.id=g.runtime_id and r.installation_id=$1 and g.revoked_at is null returning g.runtime_id,g.user_id,g.grant_version),
+	 where r.id=g.runtime_id and r.installation_id=$1 and ($5::uuid is null or r.id=$5) and g.revoked_at is null returning g.runtime_id,g.user_id,g.grant_version),
 	 notified as(insert into control_outbox(org_id,topic,payload) select $2::uuid,'runtime_grant.revoked',jsonb_build_object('runtime_id',runtime_id::text,'user_id',user_id::text,'grant_version',grant_version) from retired returning id)
 	 insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,action,result,metadata)
-	 select $2::uuid,'user',$3::text,$4::uuid,runtime_id,'runtime_grant.revoke','success',jsonb_build_object('installation_id',$1::uuid::text,'user_id',user_id::text,'grant_version',grant_version) from retired`, installationID, orgID, actor, deviceID)
+	 select $2::uuid,'user',$3::text,$4::uuid,runtime_id,'runtime_grant.revoke','success',jsonb_build_object('installation_id',$1::uuid::text,'user_id',user_id::text,'grant_version',grant_version) from retired`, installationID, orgID, actor, deviceID, target)
 	if err != nil {
 		return false, transactionFailure(err)
 	}
-	if _, err = tx.ExecContext(ctx, `insert into control_outbox(org_id,topic,payload) select $2::uuid,'runtime.revoked',jsonb_build_object('runtime_id',id::text) from runtimes where installation_id=$1`, installationID, orgID); err != nil {
+	if _, err = tx.ExecContext(ctx, `insert into control_outbox(org_id,topic,payload) select $2::uuid,'runtime.revoked',jsonb_build_object('runtime_id',id::text) from runtimes where installation_id=$1 and ($3::uuid is null or id=$3)`, installationID, orgID, target); err != nil {
 		return false, transactionFailure(err)
 	}
-	if _, err = tx.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,action,result,metadata) values($1,'user',$2,$3,'installation.revoke','success',jsonb_build_object('installation_id',$4::uuid::text,'host_id',$5::uuid::text))`, orgID, actor, deviceID, installationID, hostID); err != nil {
+	action := "installation.revoke"
+	if runtimeID != "" {
+		action = "runtime.revoke"
+	}
+	if _, err = tx.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,action,result,metadata)
+	 values($1,'user',$2,$3,$7,$6,'success',jsonb_build_object('installation_id',$4::uuid::text,'host_id',$5::uuid::text))`, orgID, actor, deviceID, installationID, hostID, action, target); err != nil {
 		return false, transactionFailure(err)
 	}
 	if err = tx.Commit(); err != nil {

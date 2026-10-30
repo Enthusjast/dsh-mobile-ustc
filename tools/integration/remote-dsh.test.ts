@@ -336,13 +336,14 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   } })
   const siblingDevice = await register(siblingPhone, siblingKey, siblingApprovalKey, 'phone')
   await register(outsider, outsiderKey, outsiderApprovalKey, 'outsider')
-  await register(ownerPhone, ownerPhoneKey, ownerApprovalKey, 'owner')
+  const ownerDevice = await register(ownerPhone, ownerPhoneKey, ownerApprovalKey, 'owner')
   const deviceContract = parseYaml(await readFile('contracts/openapi/remote.yaml', 'utf8'))
   const deviceValidator = new Ajv2020({ strict: false })
   deviceValidator.addFormat('date-time', value => Number.isFinite(Date.parse(value)))
   deviceValidator.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   const validateDevices = deviceValidator.compile({ $ref: '#/components/schemas/DeviceDirectoryResponse', components: deviceContract.components })
   const validateInstallations = deviceValidator.compile({ $ref: '#/components/schemas/InstallationDirectoryResponse', components: deviceContract.components })
+  const validateInstallationRuntimes = deviceValidator.compile({ $ref: '#/components/schemas/InstallationRuntimeDirectoryResponse', components: deviceContract.components })
   const validateGrants = deviceValidator.compile({ $ref: '#/components/schemas/RuntimeGrantDirectoryResponse', components: deviceContract.components })
   assert.deepEqual((await ownerPhone('GET', '/v1/installations')).items, [])
   await owner('GET', '/v1/installations', undefined, 403)
@@ -1257,6 +1258,45 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await phone('GET', grantPath, undefined, 403)
   t.diagnostic('The current owner phone paged the runtime grant directory; its full owner scope matched the contract. Host/outsider clients were denied, revocation remained discoverable to the surviving owner and removed the revoked manager from directory access.')
   t.diagnostic('The normal plugin negotiated signed approval: current Bash context, invalid-proof nonconsumption, phone allow/reject/cancel, one actual execution, duplicate decision reconciliation and durable native result reporting passed through the real Go service.')
+  // Enroll a second profile under the same installation through normal dual
+  // confirmation. Its metadata is a fixture; the surviving primary Host is real DSH.
+  const profileAttempt = enrollmentClient.prepare({ organizationId: orgId, hostId: enrollment.host_id, alias: 'DSH integration',
+    profileRef: 'retirement-fixture', dshVersion: '0.2.1-rc.2', applicationVersion: 'fixture', pluginVersion: '0.0.1', protocolVersion: 1, workspaceRefs: [] })
+  t.after(() => profileAttempt.destroy())
+  const profileReceipt = await enrollmentClient.create(profileAttempt, AbortSignal.timeout(5000))
+  await ownerPhone('POST', `/v1/enrollments/${profileReceipt.details.enrollment_id}/confirm`, { code: profileAttempt.code })
+  await enrollmentClient.confirm(profileAttempt, profileReceipt, review => review.confirmed_user?.user_id === ownerId, AbortSignal.timeout(5000))
+  assert.equal(profileReceipt.details.installation_id, listedInstallationId)
+  const installationRuntimePath = `/v1/installations/${listedInstallationId}/runtimes`
+  const profileIds: string[] = []
+  let profilePage = await ownerPhone('GET', `${installationRuntimePath}?limit=1`)
+  for (;;) {
+    assert.equal(validateInstallationRuntimes({ ok: true, data: profilePage }), true, JSON.stringify(validateInstallationRuntimes.errors))
+    profileIds.push(...profilePage.items.map((item: any) => item.runtime_id))
+    if (profilePage.next_cursor === null) break
+    profilePage = await ownerPhone('GET', `${installationRuntimePath}?limit=1&cursor=${encodeURIComponent(profilePage.next_cursor)}`)
+  }
+  assert.deepEqual(profileIds.sort(), [enrollment.runtime_id, profileReceipt.details.runtime_id].sort())
+  await owner('GET', installationRuntimePath, undefined, 403)
+  await phone('GET', installationRuntimePath, undefined, 403)
+  const nativeConnectionBefore = query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`)
+  const retireProfilePath = `${installationRuntimePath}/${profileReceipt.details.runtime_id}`
+  assert.deepEqual(await ownerPhone('DELETE', retireProfilePath), { revoked: true })
+  assert.deepEqual(await ownerPhone('DELETE', retireProfilePath), { revoked: true })
+  assert.equal(query(`select count(*) from audit_log where action='runtime.revoke' and runtime_id='${profileReceipt.details.runtime_id}'`), '1')
+  await until(async () => Number(query(`select count(*) from control_event_acks a join control_outbox e on e.id=a.event_id where e.topic='runtime.revoked' and e.payload->>'runtime_id'='${profileReceipt.details.runtime_id}'`)) >= (crossNode ? 2 : 1) ? true : undefined,
+    'single-profile retirement acknowledged on every relay node')
+  const retiredProfiles = await ownerPhone('GET', installationRuntimePath)
+  assert.equal(validateInstallationRuntimes({ ok: true, data: retiredProfiles }), true, JSON.stringify(validateInstallationRuntimes.errors))
+  assert.equal(retiredProfiles.items.find((item: any) => item.runtime_id === profileReceipt.details.runtime_id)?.state, 'revoked')
+  assert.equal(retiredProfiles.items.find((item: any) => item.runtime_id === enrollment.runtime_id)?.state, 'active')
+  assert.equal(query(`select revoked_at is null from installations where id='${listedInstallationId}'`), 't')
+  assert.equal(query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`), nativeConnectionBefore)
+  const ownerReader = await connectPhone(ownerPhone, ownerDevice.device_id, ownerPhoneKey)
+  const ownerReadRequest = randomUUID()
+  ownerReader.send({ v: 1, type: 'session.subscribe', request_id: ownerReadRequest, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 5 } })
+  await ownerReader.wait(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
+  t.diagnostic('The installation owner paged both profiles and retired the fixture sibling through the scoped API. Exact retry wrote one audit, every relay acknowledged, and the same real DSH Host connection served a new owner-phone native snapshot afterward. The shared installation and primary profile stayed active.')
   // Both management paths must retire a credential that is still within its TTL.
   const cachedDigest = createHash('sha256').update(replayCredentialSecret).digest('hex')
   assert.equal(query(`select expires_at>clock_timestamp() from host_connection_credentials where token_sha256=decode('${cachedDigest}','hex')`), 't',
@@ -1286,7 +1326,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   await until(async () => query(`select connection_id is null from runtimes where id='${enrollment.runtime_id}'`) === 't' ? true : undefined,
     'revoked Host connection detached', 5000)
-  await until(async () => Number(query(`select count(*) from control_event_acks a join control_outbox e on e.id=a.event_id where e.topic='runtime.revoked'`)) >= (crossNode ? 2 : 1) ? true : undefined,
+  await until(async () => Number(query(`select count(*) from control_event_acks a join control_outbox e on e.id=a.event_id where e.topic='runtime.revoked' and e.payload->>'runtime_id'='${enrollment.runtime_id}'`)) >= (crossNode ? 2 : 1) ? true : undefined,
     'runtime retirement acknowledged on every relay node')
   if (bindingStore) await assert.rejects(bindingStore.open(AbortSignal.timeout(5000)), cause =>
     cause instanceof hostPackage.HostEnrollmentError && cause.code === 'host.enrollment.denied')

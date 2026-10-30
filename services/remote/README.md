@@ -1,5 +1,7 @@
 # Remote service foundation
 
+Installation owners and current organization admins can [page and retire individual profiles](../../docs/installation-profile-management.md) under `/v1/installations/{id}/runtimes`. Per-profile retirement preserves sibling profiles and the shared installation credentials, while current runtime checks prevent reconnecting the retired profile. It reuses migration 034 and the durable runtime invalidation path.
+
 Runtime grant PUT/DELETE now [revalidate and lock the current phone proof inside the transaction](../../docs/runtime-grant-writes.md), including idempotent retries. Bounded SERIALIZABLE retries recheck authority after confirmed aborts; device revocation and grant writes cannot use an earlier middleware lookup as lasting authority. These routes reject query selectors, and DELETE rejects a body.
 
 Grant writes also recheck the original management expiry and any requested grant expiry against the database wall clock after target locking and immediately before the commit decision. Lock or audit waits cannot preserve expired owner authority through a transaction-start timestamp; current organization-admin authority and legitimate self-removal remain supported.

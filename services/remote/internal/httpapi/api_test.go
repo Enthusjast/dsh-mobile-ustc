@@ -14,6 +14,11 @@ import (
 )
 
 type fakeRepository struct {
+	installationRuntimes       store.InstallationRuntimeDirectory
+	installationRuntimeTarget  string
+	installationRuntimeCalls   int
+	installationRuntimeRevokes int
+
 	grantWriteCalls         int
 	grantWriteIdentity      store.UserIdentity
 	grantWriteDevice        string
@@ -154,6 +159,19 @@ func (fake *fakeRepository) ListRuntimeGrants(_ context.Context, identity store.
 	fake.grantDirectoryIdentity, fake.grantDirectoryDevice, fake.grantDirectoryJKT = identity, deviceID, jkt
 	fake.grantDirectoryRuntime, fake.grantDirectoryLimit, fake.grantDirectoryCursor = runtimeID, limit, cursor
 	return fake.grantDirectory, fake.grantDirectoryErr
+}
+
+func (fake *fakeRepository) ListInstallationRuntimes(_ context.Context, identity store.UserIdentity, deviceID, jkt, installationID string, limit int, cursor string) (store.InstallationRuntimeDirectory, error) {
+	fake.installationRuntimeCalls++
+	fake.installationIdentity, fake.installationDevice, fake.installationJKT = identity, deviceID, jkt
+	fake.installationTarget, fake.installationLimit, fake.installationCursor = installationID, limit, cursor
+	return fake.installationRuntimes, fake.installationErr
+}
+func (fake *fakeRepository) RevokeInstallationRuntime(_ context.Context, identity store.UserIdentity, deviceID, jkt, installationID, runtimeID string) error {
+	fake.installationRuntimeRevokes++
+	fake.installationIdentity, fake.installationDevice, fake.installationJKT = identity, deviceID, jkt
+	fake.installationTarget, fake.installationRuntimeTarget = installationID, runtimeID
+	return fake.installationErr
 }
 
 func (fake *fakeRepository) ListInstallations(_ context.Context, identity store.UserIdentity, deviceID, jkt string, limit int, cursor string) (store.InstallationDirectory, error) {

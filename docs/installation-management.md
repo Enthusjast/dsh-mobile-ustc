@@ -3,6 +3,8 @@
 手机可通过 `GET /v1/installations` 发现可管理的主机安装，再显式调用
 `DELETE /v1/installations/{id}` 处理主机遗失、重装或安装密钥丢失。它管理的是某 OS 用户下的
 一次安装身份，撤销会覆盖该安装的全部 profile；同一物理主机的其他安装保持原状态。
+如只停用一个 profile，可使用[安装下的 runtime 目录及单项撤销](installation-profile-management.md)，
+保留安装密钥及其余 profile；两者使用相同的安装管理权限边界。
 
 两条路由都要求当前活跃账号、已登记且未撤销的手机 DPoP 密钥，以及目标组织的当前成员关系。
 目标必须由当前账号拥有，或当前成员关系的角色为 `admin`。普通 runtime owner grant 不会
