@@ -343,6 +343,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   deviceValidator.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   const validateDevices = deviceValidator.compile({ $ref: '#/components/schemas/DeviceDirectoryResponse', components: deviceContract.components })
   const validateInstallations = deviceValidator.compile({ $ref: '#/components/schemas/InstallationDirectoryResponse', components: deviceContract.components })
+  const validateSessionDirectory = deviceValidator.compile({ $ref: '#/components/schemas/SessionDirectoryResponse', components: deviceContract.components })
   const validateInstallationRuntimes = deviceValidator.compile({ $ref: '#/components/schemas/InstallationRuntimeDirectoryResponse', components: deviceContract.components })
   const validateGrants = deviceValidator.compile({ $ref: '#/components/schemas/RuntimeGrantDirectoryResponse', components: deviceContract.components })
   assert.deepEqual((await ownerPhone('GET', '/v1/installations')).items, [])
@@ -1254,6 +1255,25 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
   t.diagnostic('Native timed-question foreground claim/answer, release, retired-ID denial, unattended continuation and durable late-message admission passed through Go Relay.')
   t.diagnostic('Normal Host runtime question metadata reached PostgreSQL without a timed-session phone subscription; fresh resubscription found the same continued native question and admitted one late answer. Full database dump excluded question and answer bodies.')
+  const sessionDirectoryPath = `/v1/runtimes/${enrollment.runtime_id}/session-directory`
+  const visibleSessionIds: string[] = []
+  let sessionDirectoryPage = await ownerPhone('GET', `${sessionDirectoryPath}?limit=1`)
+  for (;;) {
+    assert.equal(validateSessionDirectory({ ok: true, data: sessionDirectoryPage }), true, JSON.stringify(validateSessionDirectory.errors))
+    assert.equal(sessionDirectoryPage.runtime_id, enrollment.runtime_id)
+    visibleSessionIds.push(...sessionDirectoryPage.items.map((item: any) => item.session_id))
+    if (sessionDirectoryPage.next_cursor === null) break
+    assert.ok(visibleSessionIds.length < 100, 'fixture session paging did not terminate')
+    sessionDirectoryPage = await ownerPhone('GET', `${sessionDirectoryPath}?limit=1&cursor=${encodeURIComponent(sessionDirectoryPage.next_cursor)}`)
+  }
+  assert.ok(visibleSessionIds.includes(sessionId))
+  const legacySessions = (await ownerPhone('GET', `/v1/runtimes/${enrollment.runtime_id}/sessions`)).items
+  assert.deepEqual([...visibleSessionIds].sort(), legacySessions.map((item: any) => item.session_id).sort())
+  assert.equal(new Set(visibleSessionIds).size, visibleSessionIds.length)
+  await owner('GET', sessionDirectoryPath, undefined, 403)
+  await phone('GET', sessionDirectoryPath, undefined, 403)
+  await ownerPhone('GET', `${sessionDirectoryPath}?device_id=${ownerDevice.device_id}`, undefined, 400)
+  t.diagnostic('The surviving owner phone paged the current DSH session directory with schema validation and no duplicate UUIDs; its complete visible set matched the existing directory. Host clients, a revoked manager and caller device selectors were denied.')
   const grantsAfterRevocation = await ownerPhone('GET', grantPath)
   assert.equal(validateGrants({ ok: true, data: grantsAfterRevocation }), true, JSON.stringify(validateGrants.errors))
   assert.equal(grantsAfterRevocation.items.find((item: any) => item.user_id === phoneUserId)?.state, 'revoked')

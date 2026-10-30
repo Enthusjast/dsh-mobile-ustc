@@ -434,6 +434,29 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/runtimes/{id}/session-directory:
+    get:
+      description: Bounded session metadata directory for a registered phone with current session.list authority. Each page verifies the active account, device/proof key, organization, approved runtime and current grant in the same statement snapshot as the scoped results. Session read or host list authority alone does not confer enumeration. Unknown query selectors and GET bodies are rejected.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: cursor
+          schema: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        '200':
+          description: Metadata in ascending session UUID order, including scoped archived/unavailable rows. Stable ordering is independent of activity updates. Cursors bind account, proof key and runtime but grant no authority or historical snapshot. This directory neither reads content nor grants a realtime ticket.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionDirectoryResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/runtimes/{id}/sessions:
     get:
       parameters:
@@ -1894,6 +1917,23 @@ components:
             grant_version: { type: integer, minimum: 1, maximum: 9007199254740991 }
             scope: { $ref: '#/components/schemas/GrantScope' }
             expires_at: { type: string, format: date-time }
+    SessionDirectoryResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [runtime_id, items, next_cursor]
+          properties:
+            runtime_id: { type: string, format: uuid }
+            next_cursor: { type: [string, 'null'], maxLength: 1024 }
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Session' }
     Session:
       type: object
       additionalProperties: false

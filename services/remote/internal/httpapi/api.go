@@ -70,6 +70,7 @@ type Repository interface {
 	ListHosts(context.Context, store.UserIdentity) ([]store.Host, error)
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
+	SessionDirectory(context.Context, store.UserIdentity, string, string, string, int, string) (store.SessionDirectory, error)
 	SessionCacheReadAccess(context.Context, store.UserIdentity, string, string, string, string, time.Time) (store.SessionReadAccess, error)
 	SessionReadTarget(context.Context, store.UserIdentity, string, string, string, string, time.Time) (store.SessionTarget, error)
 	QuestionAnswerStatus(context.Context, store.UserIdentity, string, string, string, string, string, time.Time) (store.CommandStatus, error)
@@ -206,6 +207,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	mux.Handle("GET /v1/hosts", api.protected(http.HandlerFunc(api.listHosts)))
 	mux.Handle("GET /v1/runtimes", api.protected(http.HandlerFunc(api.listRuntimes)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions", api.protected(http.HandlerFunc(api.listSessions)))
+	mux.Handle("GET /v1/runtimes/{id}/session-directory", api.protected(http.HandlerFunc(api.sessionDirectory)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}", api.protected(http.HandlerFunc(api.sessionTarget)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}/question-answers/{request_id}", api.protected(http.HandlerFunc(api.questionAnswerStatus)))
 	mux.Handle("GET /v1/runtimes/{id}/sessions/{session_id}/read-access", api.protected(http.HandlerFunc(api.sessionReadAccess)))
@@ -843,6 +845,8 @@ func (api *API) writeStoreError(response http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrInstallationManagementInvalid):
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 	case errors.Is(err, store.ErrGrantDirectoryInvalid):
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+	case errors.Is(err, store.ErrSessionDirectoryInvalid):
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 	case errors.Is(err, store.ErrAccessDenied), errors.Is(err, store.ErrGrantNotFound):
 		writeError(response, http.StatusForbidden, "access.denied")

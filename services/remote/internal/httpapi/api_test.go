@@ -14,6 +14,16 @@ import (
 )
 
 type fakeRepository struct {
+	sessionDirectory         store.SessionDirectory
+	sessionDirectoryErr      error
+	sessionDirectoryCalls    int
+	sessionDirectoryIdentity store.UserIdentity
+	sessionDirectoryDevice   string
+	sessionDirectoryJKT      string
+	sessionDirectoryRuntime  string
+	sessionDirectoryLimit    int
+	sessionDirectoryCursor   string
+
 	installationRuntimes       store.InstallationRuntimeDirectory
 	installationRuntimeTarget  string
 	installationRuntimeCalls   int
@@ -314,6 +324,13 @@ func (fake *fakeRepository) ListHosts(context.Context, store.UserIdentity) ([]st
 func (fake *fakeRepository) ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error) {
 	return []store.Runtime{}, nil
 }
+func (fake *fakeRepository) SessionDirectory(_ context.Context, identity store.UserIdentity, device, proof, runtime string, limit int, cursor string) (store.SessionDirectory, error) {
+	fake.sessionDirectoryCalls++
+	fake.sessionDirectoryIdentity, fake.sessionDirectoryDevice, fake.sessionDirectoryJKT = identity, device, proof
+	fake.sessionDirectoryRuntime, fake.sessionDirectoryLimit, fake.sessionDirectoryCursor = runtime, limit, cursor
+	return fake.sessionDirectory, fake.sessionDirectoryErr
+}
+
 func (fake *fakeRepository) ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error) {
 	return []store.Session{}, nil
 }
