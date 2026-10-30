@@ -348,6 +348,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   deviceValidator.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   const validateDevices = deviceValidator.compile({ $ref: '#/components/schemas/DeviceDirectoryResponse', components: deviceContract.components })
   const validateInstallations = deviceValidator.compile({ $ref: '#/components/schemas/InstallationDirectoryResponse', components: deviceContract.components })
+  const validateApprovalStatus = deviceValidator.compile({ $ref: '#/components/schemas/ApprovalStatusResponse', components: deviceContract.components })
   const validateSessionDirectory = deviceValidator.compile({ $ref: '#/components/schemas/SessionDirectoryResponse', components: deviceContract.components })
   const validateInstallationRuntimes = deviceValidator.compile({ $ref: '#/components/schemas/InstallationRuntimeDirectoryResponse', components: deviceContract.components })
   const validateGrants = deviceValidator.compile({ $ref: '#/components/schemas/RuntimeGrantDirectoryResponse', components: deviceContract.components })
@@ -1111,12 +1112,20 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await until(async()=>query(`select state from question_references where id='${backgroundQuestion}'`)==='ended'?true:undefined,'answered background question ended')
 
   const approvalSecrets: string[] = []
+  const approvalStatusIds: string[] = []
   for (const choice of ['ALLOW', 'REJECT', 'CANCEL'] as const) {
     const from = mobile.frames.length, promptID = randomUUID(), approvalMarker = `REMOTE_APPROVAL_${choice}_${randomUUID()}`
     approvalSecrets.push(approvalMarker)
     mobile.send({ ...submit, request_id: promptID, payload: { mode: 'queue', content: [{ type: 'text', text: approvalMarker }] } })
     const pending = await mobile.wait(frame => frame.type === 'approval.reference' && frame.session_id === sessionId && frame.payload.status.state === 'pending', from)
     const approvalID = pending.payload.status.approval_id
+    approvalStatusIds.push(approvalID)
+    const pendingStatus = await ownerPhone('GET', `/v1/approvals/${approvalID}`)
+    assert.equal(validateApprovalStatus({ ok: true, data: pendingStatus }), true, JSON.stringify(validateApprovalStatus.errors))
+    assert.equal(pendingStatus.state, 'pending'); assert.equal(pendingStatus.binding_sha256, pending.payload.status.binding_sha256)
+    await owner('GET', `/v1/approvals/${approvalID}`, undefined, 403)
+    await outsider('GET', `/v1/approvals/${approvalID}`, undefined, 403)
+    await ownerPhone('GET', `/v1/approvals/${approvalID}?connection_id=caller`, undefined, 400)
     const detailsID = randomUUID()
     mobile.send({ v: 1, type: 'approval.details.get', request_id: detailsID, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: sessionId, payload: { approval_id: approvalID } })
     const detail = await mobile.wait(frame => frame.type === 'approval.details' && frame.request_id === detailsID, from)
@@ -1162,6 +1171,10 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
         assert.equal(await readFile(sentinel, 'utf8'), 'authorized')
       } else await assert.rejects(readFile(sentinel), { code: 'ENOENT' })
     }
+    const finalStatus = await ownerPhone('GET', `/v1/approvals/${approvalID}`)
+    assert.equal(validateApprovalStatus({ ok: true, data: finalStatus }), true, JSON.stringify(validateApprovalStatus.errors))
+    assert.equal(finalStatus.host_state, choice === 'ALLOW' ? 'settled' : choice === 'REJECT' ? 'denied' : 'cancelled')
+    if (choice === 'ALLOW') assert.equal(finalStatus.execution_outcome, 'succeeded')
     await mobile.wait(frame => frame.type === 'session.event' && frame.session_id === sessionId && frame.payload.type === 'turn/end', from)
     await until(async () => query(`select count(*) from audit_log where action='approval.result' and metadata->>'approval_id'='${approvalID}'`) !== '0' ? true : undefined, 'native approval result audit')
   }
@@ -1464,12 +1477,19 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
       assert.equal(await readFile(join(workspace, 'approval-dbrun.txt'), 'utf8'), 'authorized')
       await assert.rejects(readFile(join(workspace, 'approval-dbblock.txt')), { code: 'ENOENT' })
       await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
+      const recoveredApprovalStatuses = new Map<string, any>()
+      for (const id of [blockedApproval.approvalId, runningApproval.approvalId]) {
+        const status = await ownerPhone('GET', `/v1/approvals/${id}`)
+        assert.equal(validateApprovalStatus({ ok: true, data: status }), true, JSON.stringify(validateApprovalStatus.errors))
+        recoveredApprovalStatuses.set(id, status)
+      }
       const reconnected = await connectPhone(ownerPhone, ownerDevice.device_id, ownerPhoneKey)
       for (const item of [{ id: blockedApproval.approvalId, state: 'invalidated', host: 'invalidated' }, { id: runningApproval.approvalId, state: 'allowed', host: 'settled' }]) {
         const statusId = randomUUID()
         reconnected.send({ v: 1, type: 'approval.status.get', request_id: statusId, runtime_id: enrollment.runtime_id, payload: { approval_id: item.id } })
         const status = (await reconnected.wait(frame => frame.type === 'approval.reference' && frame.request_id === statusId)).payload.status
         assert.equal(status.state, item.state); assert.equal(status.host_state, item.host); assert.equal(status.decision, 'allow_once')
+        assert.deepEqual(status, recoveredApprovalStatuses.get(item.id), 'HTTP and WSS recovery status differed')
         if (item.host === 'settled') assert.equal(status.execution_outcome, 'succeeded')
       }
       const oldDetails = randomUUID()
@@ -1516,6 +1536,15 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
       'account-retired Host detached', 5000)
     const native = await until(async () => { try { return JSON.parse(await readFile(accountRetireReport, 'utf8')) } catch { return undefined } }, 'native DSH persistence after account retirement', 5000)
     assert.deepEqual(native, { same_agent: true, persisted: true })
+    ownerReader.socket.terminate()
+    await until(async () => ownerReader.closed ? true : undefined, 'owner status read has no surviving WSS connection')
+    for (const id of approvalStatusIds) {
+      const status = await ownerPhone('GET', `/v1/approvals/${id}`)
+      assert.equal(validateApprovalStatus({ ok: true, data: status }), true, JSON.stringify(validateApprovalStatus.errors))
+      assert.ok(['settled', 'denied', 'cancelled'].includes(status.host_state))
+    }
+    t.diagnostic('With the normal Host detached and the owner phone socket closed, HTTP alone returned the recorded native approval outcomes under current owner/read/approval authority; no ticket or execution permit was needed.')
+
     assert.equal(query(`select status from users where id='${ownerId}'`), 'active')
     assert.equal(query(`select revoked_at is null from installations where id='${listedInstallationId}'`), 't')
     assert.equal((await ownerPhone('GET', installationRuntimePath)).items.find((item: any) => item.runtime_id === enrollment.runtime_id)?.state, 'active')

@@ -1,5 +1,9 @@
 # Approval details access and host results
 
+Registered phones can also [read known status over HTTP](approval-http-status.md)
+without a live socket or online Host. This uses the same current-owner read policy
+as WSS status, returns metadata only, and does not issue execution authority.
+
 The [bounded database outage drill](database-outage-drill.md) also runs two real
 npm DSH Bash approvals. An approved, unspent invocation becomes invalidated before
 its ordinary permit expires; a separately consumed invocation completes once while

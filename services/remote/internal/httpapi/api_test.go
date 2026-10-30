@@ -14,6 +14,14 @@ import (
 )
 
 type fakeRepository struct {
+	phoneApproval         store.ApprovalStatus
+	phoneApprovalErr      error
+	phoneApprovalCalls    int
+	phoneApprovalIdentity store.UserIdentity
+	phoneApprovalDevice   string
+	phoneApprovalJKT      string
+	phoneApprovalID       string
+
 	sessionDirectory         store.SessionDirectory
 	sessionDirectoryErr      error
 	sessionDirectoryCalls    int
@@ -329,6 +337,12 @@ func (fake *fakeRepository) SessionDirectory(_ context.Context, identity store.U
 	fake.sessionDirectoryIdentity, fake.sessionDirectoryDevice, fake.sessionDirectoryJKT = identity, device, proof
 	fake.sessionDirectoryRuntime, fake.sessionDirectoryLimit, fake.sessionDirectoryCursor = runtime, limit, cursor
 	return fake.sessionDirectory, fake.sessionDirectoryErr
+}
+
+func (fake *fakeRepository) PhoneApprovalStatus(_ context.Context, identity store.UserIdentity, device, proof, id string) (store.ApprovalStatus, error) {
+	fake.phoneApprovalCalls++
+	fake.phoneApprovalIdentity, fake.phoneApprovalDevice, fake.phoneApprovalJKT, fake.phoneApprovalID = identity, device, proof, id
+	return fake.phoneApproval, fake.phoneApprovalErr
 }
 
 func (fake *fakeRepository) ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error) {

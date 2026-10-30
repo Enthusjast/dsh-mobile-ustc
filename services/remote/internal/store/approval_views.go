@@ -21,12 +21,17 @@ func (control *ApprovalControl) AuthorizeStatus(ctx context.Context, ticket Tick
 	return control.authorizeRead(ctx, ticket, approvalID, false)
 }
 
-func (control *ApprovalControl) authorizeRead(ctx context.Context, ticket TicketRedemption, approvalID string, details bool) (ApprovalStatus, error) {
+func validApprovalRead(ticket TicketRedemption, approvalID string) bool {
 	if !grantUUIDPattern.MatchString(approvalID) || !grantUUIDPattern.MatchString(ticket.UserID) || !grantUUIDPattern.MatchString(ticket.DeviceID) || !grantUUIDPattern.MatchString(ticket.RuntimeID) ||
 		ticket.DeviceKeyVersion < 1 || ticket.GrantVersion < 1 || !slices.Contains(ticket.Scope.Actions, "approval.decide") || !slices.Contains(ticket.Scope.Actions, "session.read") {
-		return ApprovalStatus{}, ErrAccessDenied
+		return false
 	}
-	if _, err := NormalizeTicketScope("owner", ticket.Scope); err != nil {
+	_, err := NormalizeTicketScope("owner", ticket.Scope)
+	return err == nil
+}
+
+func (control *ApprovalControl) authorizeRead(ctx context.Context, ticket TicketRedemption, approvalID string, details bool) (ApprovalStatus, error) {
+	if !validApprovalRead(ticket, approvalID) {
 		return ApprovalStatus{}, ErrAccessDenied
 	}
 	ctx, cancel := context.WithTimeout(ctx, approvalAdmissionTimeout)
@@ -36,11 +41,27 @@ func (control *ApprovalControl) authorizeRead(ctx context.Context, ticket Ticket
 		return ApprovalStatus{}, ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
+	status, err := authorizeApprovalRead(ctx, transaction, ticket, approvalID, details)
+	if err != nil {
+		return ApprovalStatus{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return ApprovalStatus{}, ErrDatabaseUnavailable
+	}
+	return status, nil
+}
+
+// Shared current-owner read policy for both admitted WSS scopes and HTTP proof
+// resolution. Callers own the transaction and commit only after these checks.
+func authorizeApprovalRead(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, approvalID string, details bool) (ApprovalStatus, error) {
+	if !validApprovalRead(ticket, approvalID) {
+		return ApprovalStatus{}, ErrAccessDenied
+	}
 	var scopeJSON []byte
 	var workspace sql.NullString
 	var sessionID string
 	var grantExpiry sql.NullTime
-	err = transaction.QueryRowContext(ctx, `
+	err := transaction.QueryRowContext(ctx, `
 		select g.scope, a.workspace_id::text, s.id::text, g.expires_at
 		from approvals a
 		join sessions s on s.id = a.session_id and s.runtime_id = a.runtime_id
@@ -85,9 +106,6 @@ func (control *ApprovalControl) authorizeRead(ctx context.Context, ticket Ticket
 	}
 	if grantExpiry.Valid && !grantExpiry.Time.After(now) {
 		return ApprovalStatus{}, ErrAccessDenied
-	}
-	if err := transaction.Commit(); err != nil {
-		return ApprovalStatus{}, ErrDatabaseUnavailable
 	}
 	return status, nil
 }

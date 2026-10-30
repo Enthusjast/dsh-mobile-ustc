@@ -558,6 +558,57 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		}
 		repo.grantDirectoryErr = nil
 	})
+	t.Run("HTTP approval metadata binds the current phone without a socket", func(t *testing.T) {
+		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
+		repo.activeDeviceErr = nil
+		const id = "66666666-6666-4666-8666-666666666666"
+		repo.phoneApproval = store.ApprovalStatus{ApprovalID: id, RuntimeID: "55555555-5555-4555-8555-555555555555", RuntimeEpoch: "eeeeeeee-1111-4111-8111-111111111111", SessionID: "99999999-9999-4999-8999-999999999999", ExecutionID: "88888888-8888-4888-8888-888888888888", BindingSHA256: strings.Repeat("a", 64), State: "pending", ExpiresAt: now.Add(time.Minute)}
+		nonce := ""
+		sequence := 0
+		send := func(token, path string, body ...any) *httptest.ResponseRecorder {
+			sequence++
+			uri := "https://api.example.edu/v1/approvals/" + path
+			response := sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("approval-status-proof-%04d", sequence), nonce, body...)
+			nonce = response.Header().Get("DPoP-Nonce")
+			if response.Code == 401 {
+				sequence++
+				response = sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("approval-status-proof-%04d", sequence), nonce, body...)
+				nonce = response.Header().Get("DPoP-Nonce")
+			}
+			return response
+		}
+		response := send(access, id)
+		if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || repo.phoneApprovalIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.phoneApprovalDevice != deviceID || repo.phoneApprovalJKT != proofJKT || repo.phoneApprovalID != id {
+			t.Fatal("approval metadata lost its current HTTP actor", response.Code)
+		}
+		before := repo.phoneApprovalCalls
+		for _, path := range []string{"invalid", id + "?user_id=attacker", id + "?connection_id=attacker", id + "?device_id=attacker"} {
+			if response := send(access, path); response.Code != 400 || repo.phoneApprovalCalls != before {
+				t.Fatal("caller approval selectors reached store", response.Code)
+			}
+		}
+		if response := send(access, id, map[string]string{"runtime_id": "attacker"}); response.Code != 400 || repo.phoneApprovalCalls != before {
+			t.Fatal("approval GET accepted a body", response.Code)
+		}
+		if response := send(hostAccess, id); response.Code != 403 || repo.phoneApprovalCalls != before {
+			t.Fatal("Host client read phone approval metadata", response.Code)
+		}
+		repo.activeDeviceErr = store.ErrDeviceNotFound
+		if response := send(access, id); response.Code != 403 || repo.phoneApprovalCalls != before {
+			t.Fatal("unregistered phone read approval metadata", response.Code)
+		}
+		repo.activeDeviceErr = nil
+		for _, failure := range []struct {
+			err    error
+			status int
+		}{{store.ErrAccessDenied, 403}, {store.ErrApprovalInvalid, 400}, {store.ErrDatabaseUnavailable, 503}} {
+			repo.phoneApprovalErr = failure.err
+			if response := send(access, id); response.Code != failure.status || strings.Contains(response.Body.String(), "binding_sha256") {
+				t.Fatal("failed status read disclosed a result", response.Code)
+			}
+		}
+		repo.phoneApprovalErr = nil
+	})
 	t.Run("session directory binds its phone and resource before bounded paging", func(t *testing.T) {
 		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
 		repo.activeDeviceErr = nil

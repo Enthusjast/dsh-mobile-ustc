@@ -71,6 +71,7 @@ type Repository interface {
 	ListRuntimes(context.Context, store.UserIdentity) ([]store.Runtime, error)
 	ListSessions(context.Context, store.UserIdentity, string) ([]store.Session, error)
 	SessionDirectory(context.Context, store.UserIdentity, string, string, string, int, string) (store.SessionDirectory, error)
+	PhoneApprovalStatus(context.Context, store.UserIdentity, string, string, string) (store.ApprovalStatus, error)
 	SessionCacheReadAccess(context.Context, store.UserIdentity, string, string, string, string, time.Time) (store.SessionReadAccess, error)
 	SessionReadTarget(context.Context, store.UserIdentity, string, string, string, string, time.Time) (store.SessionTarget, error)
 	QuestionAnswerStatus(context.Context, store.UserIdentity, string, string, string, string, string, time.Time) (store.CommandStatus, error)
@@ -228,6 +229,7 @@ func New(database Repository, identity *auth.Authenticator, configs ...Config) *
 	if len(approvalConfig) > 0 && approvalConfig[0].Control != nil && approvalConfig[0].Leases != nil {
 		mux.Handle("POST /v1/approvals/{id}/decisions", api.protected(http.HandlerFunc(api.decideApproval)))
 	}
+	mux.Handle("GET /v1/approvals/{id}", api.protected(http.HandlerFunc(api.approvalStatus)))
 	mux.Handle("GET /v1/commands/{id}", api.protected(http.HandlerFunc(api.commandStatus)))
 	if len(configs) > 0 && configs[0].Push != nil {
 		api.push = configs[0].Push

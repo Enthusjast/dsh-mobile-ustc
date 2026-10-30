@@ -729,6 +729,23 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /v1/approvals/{id}:
+    get:
+      description: Read known approval status metadata without a live WSS connection or online Host. Requires an active registered phone, current DPoP key, organization membership and runtime owner grant with approval.decide plus session.read covering the original approval session/workspace. Uses the same locked current-owner policy as WSS status reads. Organization admin or installation ownership alone does not grant access. No query selectors or body. This endpoint returns no context/parameters, signs no permit, and does not enable decision submission when signed approval configuration is disabled.
+      parameters:
+        - $ref: '#/components/parameters/UUID'
+      responses:
+        '200':
+          description: Persisted approval metadata, including disconnected or terminal outcomes. A known allow or consumed state is not native execution success. Metadata can be read independently of the optional signing configuration; every decision or execution still requires its own current authorization.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalStatusResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/approvals/{id}/decisions:
     post:
       description: Available only when REMOTE_APPROVAL_POLICY_FILE enables the signed approval service. A fresh JWT/DPoP request is bound to a live mobile WSS connection and that socket's exact owner/read/approval scope. The service retrieves the immutable context from the current host, verifies assurance and the phone JWS, commits the decision, and independently signs a short host authorization lease. A persisted acceptance or forwarded frame is not tool execution.
@@ -1320,6 +1337,13 @@ components:
           required: [file]
           properties:
             file: { $ref: '#/components/schemas/FileStatus' }
+    ApprovalStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data: { $ref: '#/components/schemas/ApprovalStatus' }
     ApprovalStatus:
       type: object
       additionalProperties: false

@@ -8,7 +8,24 @@ import (
 	"time"
 
 	"dsh-mobile-ustc/services/remote/internal/auth"
+	"dsh-mobile-ustc/services/remote/internal/store"
 )
+
+func (api *API) approvalStatus(response http.ResponseWriter, request *http.Request) {
+	id := request.PathValue("id")
+	if !uuidPattern.MatchString(id) || request.URL.RawQuery != "" || request.ContentLength != 0 || len(request.TransferEncoding) != 0 {
+		writeError(response, http.StatusBadRequest, "protocol.invalid")
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	device, _ := request.Context().Value(deviceContextKey{}).(string)
+	status, err := api.database.PhoneApprovalStatus(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, device, principal.ProofKeyJKT, id)
+	if err != nil {
+		api.writeStoreError(response, err)
+		return
+	}
+	writeData(response, http.StatusOK, status)
+}
 
 type approvalDecisionRequest struct {
 	ConnectionID string `json:"connection_id"`

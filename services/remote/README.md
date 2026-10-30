@@ -1,5 +1,7 @@
 # Remote service foundation
 
+`GET /v1/approvals/{id}` provides [HTTP-only approval status reconciliation](../../docs/approval-http-status.md) for current registered phones with the same owner/read/approval resource policy as WSS. Status remains available with no live socket or online Host; details and execution still require their existing separate authorization. It reads bound metadata without a new migration or signing operation.
+
 The opt-in [database outage drill](../../docs/database-outage-drill.md) removes connectivity to the exact owned test database, verifies both production relays fail closed, then explicitly restarts them after natural ownership expiry. The real npm DSH Host retains its native session/epoch and reconciles one accepted command without replay; this is a bounded local failure sample, not target-load or backup-restore acceptance.
 
 The phone-authenticated [bounded session directory](../../docs/session-directory.md) pages metadata through `GET /v1/runtimes/{id}/session-directory`, with current device/grant/resource checks on every page and stable UUID ordering. Apply migration 035 for its `(runtime_id,id)` index. Existing full-list clients retain their current route and need separate paging adoption.
