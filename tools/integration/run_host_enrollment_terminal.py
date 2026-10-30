@@ -17,6 +17,7 @@ import time
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path, help="Fresh log path inside repository .local")
+    parser.add_argument("--renewal", action="store_true", help="Also wait for the normal five-minute Host credential expiry and reconnection")
     options = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     output = options.output.resolve()
@@ -36,11 +37,14 @@ def main():
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
     with os.fdopen(log_fd, "wb") as log:
-        child = subprocess.Popen([sys.executable, str(repo / "tools/integration/run_remote_dsh.py"), "--cross-node", "--dsh-only"],
+        command = [sys.executable, str(repo / "tools/integration/run_remote_dsh.py"), "--cross-node", "--dsh-only"]
+        if options.renewal:
+            command.append("--host-renewal")
+        child = subprocess.Popen(command,
                                  cwd=repo, env=environment, stdin=slave, stdout=log, stderr=log,
                                  preexec_fn=controlling_terminal, pass_fds=(slave,))
         os.close(slave)
-        captured, answered, deadline = bytearray(), False, time.monotonic() + 90
+        captured, answered, deadline = bytearray(), False, time.monotonic() + (480 if options.renewal else 90)
         try:
             while child.poll() is None and time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)

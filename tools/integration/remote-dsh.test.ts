@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto'
 import { once } from 'node:events'
-import { lstat, mkdir, mkdtemp, readFile, writeFile, unlink } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, writeFile, unlink, rename } from 'node:fs/promises'
 import { createServer, request } from 'node:http'
 import { createServer as createTCPServer } from 'node:net'
 import { createRequire } from 'node:module'
@@ -120,7 +120,7 @@ class FrameCollector {
   }
 }
 
-test('real Go service and npm DSH share authorized sessions through PostgreSQL and signed peers', { timeout: 90_000 }, async t => {
+test('real Go service and npm DSH share authorized sessions through PostgreSQL and signed peers', { timeout: process.env.REMOTE_TEST_HOST_RENEWAL === '1' ? 420_000 : 90_000 }, async t => {
   const cluster = process.env.REMOTE_TEST_CLUSTER_ROOT
   const database = process.env.REMOTE_TEST_DATABASE_URL
   const psql = process.env.REMOTE_TEST_PSQL
@@ -272,13 +272,14 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
 
   const client = (subject: string, clientId: string, proofKey: ReturnType<typeof key>) => {
-    const token = jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
-      iss: issuer, sub: subject, aud: 'urn:dsh-e2e', client_id: clientId, jti: randomUUID(), iat: now(), exp: now() + 300,
-      scope: 'remote.access', cnf: { jkt: proofKey.jkt },
-      auth_time: now() - 2, acr: 'urn:fixture:verified', amr: ['otp'],
-    })
     let nonce = ''
     return async (method: string, path: string, body?: object | ((proofJTI: string) => object), expected = 200) => {
+      // This local issuer supplies a current fixture identity per operation.
+      // Production acquisition and refresh remain owned by the login adapter.
+      const token = jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
+        iss: issuer, sub: subject, aud: 'urn:dsh-e2e', client_id: clientId, jti: randomUUID(), iat: now(), exp: now() + 300,
+        scope: 'remote.access', cnf: { jkt: proofKey.jkt }, auth_time: now() - 2, acr: 'urn:fixture:verified', amr: ['otp'],
+      })
       for (let attempt = 0; attempt < 2; attempt++) {
         const proofJTI = randomUUID()
         const proof = jws(proofKey.privateKey, { typ: 'dpop+jwt', alg: 'ES256', jwk: proofKey.jwk }, {
@@ -350,15 +351,18 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic('Configured APK metadata selected the supported newer fixture under the current registered phone and organization before any runtime grant; current/newer clients, foreign organization, host client and caller device selectors were fenced. No APK bytes or installation were involved.')
   // The local issuer supplies a test token. The exported Host adapter verifies
   // its signature and binding before enrollment or credential acquisition.
-  const hostAccessIssued = now()
-  const hostAccess: HostResourceAccess = {
-    issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host', tokenType: 'DPoP',
-    proofKeyThumbprint: installationKey.jkt, expiresAt: (hostAccessIssued + 300) * 1000, scopes: ['remote.access'],
-    token: jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
-      iss: issuer, sub: 'owner', aud: 'urn:dsh-e2e', client_id: 'fixture-host', jti: randomUUID(), iat: hostAccessIssued, exp: hostAccessIssued + 300,
-      scope: 'remote.access', cnf: { jkt: installationKey.jkt },
-    }),
+  const issueHostAccess = (): HostResourceAccess => {
+    const hostAccessIssued = now()
+    return {
+      issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host', tokenType: 'DPoP',
+      proofKeyThumbprint: installationKey.jkt, expiresAt: (hostAccessIssued + 300) * 1000, scopes: ['remote.access'],
+      token: jws(signingKey.privateKey, { alg: 'ES256', typ: 'at+jwt', kid: 'integration-key' }, {
+        iss: issuer, sub: 'owner', aud: 'urn:dsh-e2e', client_id: 'fixture-host', jti: randomUUID(), iat: hostAccessIssued, exp: hostAccessIssued + 300,
+        scope: 'remote.access', cnf: { jkt: installationKey.jkt },
+      }),
+    }
   }
+  const hostAccess = issueHostAccess(), hostResourceSecrets = [hostAccess.token]
   const hostIdentity = { issuer, subject: 'owner', audience: 'urn:dsh-e2e', clientId: 'fixture-host' }
   const resourceLifetime = new AbortController()
   const resourceAccount = new hostPackage.HostResourceJwtProvider({ origin, identity: hostIdentity,
@@ -513,6 +517,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const credentialProvider = new HostRestCredentialProvider(credentialOptions)
   t.after(() => credentialProvider.close())
   const credential = await credentialProvider.acquire(AbortSignal.timeout(5000))
+  const initialCredentialSecret = credential.credential
+  const credentialSecrets = [initialCredentialSecret]
+  let replayCredentialSecret = initialCredentialSecret
   assert.equal(credential.installationId, enrollment.installation_id)
   assert.equal(await credentialProvider.acquire(AbortSignal.timeout(1000)), credential, 'valid credential cache minted another key proof')
 
@@ -645,6 +652,61 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const command = (type: string, payload: object, sessionId?: string) => local('POST', '/m0/command', {
     v: 0, type, request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, payload, ...(sessionId === undefined ? {} : { session_id: sessionId }),
   })
+  let renewalSession: { id: string; marker: string } | undefined
+  const renewalSecrets: string[] = []
+  if (process.env.REMOTE_TEST_HOST_RENEWAL === '1') {
+    const initialConnection = query(`select connection_id::text from runtimes where id='${enrollment.runtime_id}'`)
+    const expiresAt = Number(query(`select extract(epoch from expires_at)*1000 from host_connection_credentials where installation_id='${enrollment.installation_id}' order by created_at desc limit 1`))
+    const remaining = expiresAt - Date.now()
+    assert.ok(Number.isFinite(remaining) && remaining > 240_000 && remaining <= 300_000, 'renewal must exercise the ordinary five-minute credential')
+    const renewalCreated = await command('session.create', { workspace_id: primaryWorkspace, preset: 'standard' })
+    const id = renewalCreated.payload.session_id as string, marker = `HOST_RENEWAL_FIXTURE_${randomUUID()}`
+    renewalSecrets.push(marker)
+    const message = { v: 0, type: 'message.submit', request_id: randomUUID(), runtime_epoch: probe.runtime_epoch, session_id: id,
+      payload: { mode: 'queue', text: marker } }
+    const accepted = await local('POST', '/m0/command', message)
+    assert.equal(accepted.payload.native_accepted, true)
+    const nativeId = await until(async () => {
+      const value = query(`select dsh_session_id from sessions where id='${id}' and state='available'`)
+      return value || undefined
+    }, 'renewal fixture persisted native session')
+    const started = Date.now()
+    let refreshed = false, renewed = false
+    process.stdout.write('Host renewal fixture: waiting for the ordinary five-minute credential expiry.\n')
+    while (Date.now() < expiresAt + 20_000) {
+      dsh.check()
+      const left = expiresAt - Date.now()
+      if (!refreshed && left <= 60_000) {
+        const next = issueHostAccess()
+        hostResourceSecrets.push(next.token)
+        Object.assign(hostAccess, next)
+        const temporary = `${accessFile}.next`
+        await writeFile(temporary, JSON.stringify({ token: next.token, tokenType: next.tokenType }), { mode: 0o600, flag: 'wx' })
+        await rename(temporary, accessFile)
+        assert.equal(query(`select connection_id::text from runtimes where id='${enrollment.runtime_id}'`), initialConnection,
+          'refreshing the resource source replaced a still-valid Host lease')
+        refreshed = true
+        process.stdout.write('Host renewal fixture: refreshed the local resource-token source while the original Host lease remained active.\n')
+      }
+      const current = query(`select coalesce(connection_id::text,'') from runtimes where id='${enrollment.runtime_id}'`)
+      if (current && current !== initialConnection) {
+        assert.ok(Date.now() >= expiresAt - 2_000, 'the Host reconnected before natural credential expiry')
+        renewed = true; break
+      }
+      await new Promise(resolve => setTimeout(resolve, left > 10_000 ? 5_000 : 250))
+    }
+    assert.ok(refreshed && renewed, 'the normal Host failed to acquire a new credential and reconnect at expiry')
+    process.stdout.write('Host renewal fixture: observed a fresh connection after natural credential expiry.\n')
+    assert.equal(query(`select count(*) from audit_log where action='host.credential.issue'`), '3', 'natural renewal minted an unexpected number of credentials')
+    assert.throws(() => credential.credential, cause => cause instanceof HostCredentialError && cause.code === 'host.credentials.expired')
+    replayCredentialSecret = (await credentialProvider.acquire(AbortSignal.timeout(5000))).credential
+    credentialSecrets.push(replayCredentialSecret)
+    assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch, 'credential renewal reloaded the native plugin')
+    assert.equal(query(`select dsh_session_id from sessions where id='${id}'`), nativeId)
+    assert.deepEqual((await local('POST', '/m0/command', message)).payload, accepted.payload)
+    renewalSession = { id, marker }
+    t.diagnostic(`The normal five-minute Host lease expired after ${Date.now() - started} ms of observation; a refreshed fixture resource JWT enabled one fresh installation credential/handshake without changing the native runtime or replaying the original message.`)
+  }
   const beforeCreate = (await command('session.list', {})).payload.items.length
   assert.deepEqual((await outsider('GET', '/v1/runtimes')).items, [])
   const scope = { actions: ['approval.decide', 'message.submit', 'question.answer', 'session.archive', 'session.cancel', 'session.create', 'session.read'], workspaces: [primaryWorkspace], sessions: [] }
@@ -672,6 +734,17 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     return collector
   }
   const mobile = await connectPhone(phone, device.device_id, phoneKey, ticket)
+  if (renewalSession) {
+    const requestId = randomUUID()
+    mobile.send({ v: 1, type: 'session.subscribe', request_id: requestId, runtime_id: enrollment.runtime_id,
+      session_id: renewalSession.id, payload: { max_messages: 10 } })
+    const snapshot = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === requestId)
+    assert.equal(snapshot.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(renewalSession!.marker)).length, 1,
+      'renewal or original-ID reconciliation duplicated the native user message')
+    mobile.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+      session_id: renewalSession.id, subscription_id: snapshot.subscription_id, payload: {} })
+    await mobile.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === snapshot.subscription_id)
+  }
   const initialMetrics = await readMetrics()
   assert.equal(metricSample(initialMetrics, 'relay_connections', { phase: 'active', role: 'installation' }), 1)
   assert.equal(metricSample(initialMetrics, 'relay_connections', { phase: 'active', role: 'device' }), 1)
@@ -1029,7 +1102,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
 
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, credential.credential, hostAccess.token, ticket.ticket]) {
+  for (const secret of [marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, ...renewalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, ...credentialSecrets, ...hostResourceSecrets, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
@@ -1106,7 +1179,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(metricSample(finalMetrics, 'approval_host_transitions_total', { to: 'denied' }, true) > 0)
   assert.ok(metricSample(finalMetrics, 'approval_lease_lifetime_seconds_count', { decision: 'allow_once' }) > 0)
   for (const secret of [orgId, ownerId, phoneUserId, device.device_id, enrollment.runtime_id, sessionId, revokeMarker, revokeProof,
-    checkpointFailureSecret, checkpointFailureFile, hostAccess.token, credential.credential, (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
+    checkpointFailureSecret, checkpointFailureFile, ...hostResourceSecrets, ...renewalSecrets, ...credentialSecrets, (revokeContext.arguments as { command: string }).command]) assert.equal(finalMetrics.includes(secret), false, 'metrics exposed identity, body or proof')
   t.diagnostic('Private Prometheus endpoint observed actual signed Host/phone connections, native traffic, command forwarding/retries and completed local revocation propagation without resource IDs, bodies or proofs.')
   t.diagnostic('Committed command creation counters match PostgreSQL rows for every action; Host transition counters match durable receipt audits despite retries. Stage ages/dwell and repository attempts were observed at the owner node.')
   t.diagnostic('Approval registration/decision and Host fact counters match durable audits; signed lease preparation counts match committed authorization audits, without counting approval as execution completion.')
@@ -1123,6 +1196,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   // Use the production offline directory importer to suspend this fixture owner.
   // Reenabling an identity later must not resurrect these installed credentials.
   const authorityPath = join(root, 'current-identity-authority.json')
+  const cachedDigest = createHash('sha256').update(replayCredentialSecret).digest('hex')
+  assert.equal(query(`select expires_at>clock_timestamp() from host_connection_credentials where token_sha256=decode('${cachedDigest}','hex')`), 't',
+    'the cached credential used for revocation verification had already expired')
   const identityOperation = randomUUID()
   await writeFile(authorityPath, JSON.stringify({ v: 1, complete: true, operation_id: identityOperation, database_epoch: databaseEpoch,
     issuer, expected_revision: 1, revision: 2, captured_at: new Date(Date.now() - 1000).toISOString(), expires_at: new Date(Date.now() + 300_000).toISOString(),
@@ -1144,7 +1220,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.after(() => freshProvider.close())
   await assert.rejects(freshProvider.acquire(AbortSignal.timeout(5000)), cause => cause instanceof HostCredentialError && cause.code === 'host.credentials.denied')
   const rejected = new WebSocket(origin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', {
-    headers: { Authorization: `DSH-Host ${credential.credential}` }, handshakeTimeout: 3000,
+    headers: { Authorization: `DSH-Host ${replayCredentialSecret}` }, handshakeTimeout: 3000,
   })
   rejected.on('error', () => {})
   await new Promise<void>((accept, reject) => {
