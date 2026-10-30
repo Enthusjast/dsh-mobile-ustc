@@ -446,6 +446,65 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 		}
 		repo.deviceDirectoryErr = nil
 	})
+	t.Run("grant writes pass the verified actor proof into the transaction", func(t *testing.T) {
+		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
+		repo.activeDeviceErr = nil
+		const runtime = "55555555-5555-4555-8555-555555555555"
+		const target = "66666666-6666-4666-8666-666666666666"
+		input := map[string]any{"role": "viewer", "scope": map[string]any{"actions": []string{"host.list"}, "workspaces": []string{}, "sessions": []string{}}}
+		nonce := ""
+		sequence := 0
+		send := func(token, method, query string, body ...any) *httptest.ResponseRecorder {
+			sequence++
+			uri := "https://api.example.edu/v1/runtimes/" + runtime + "/grants/" + target + query
+			response := sendDPoPRequest(t, api, token, proofKey, proofJWK, method, uri, fmt.Sprintf("grant-write-proof-%04d", sequence), nonce, body...)
+			nonce = response.Header().Get("DPoP-Nonce")
+			if response.Code == 401 {
+				sequence++
+				response = sendDPoPRequest(t, api, token, proofKey, proofJWK, method, uri, fmt.Sprintf("grant-write-proof-%04d", sequence), nonce, body...)
+				nonce = response.Header().Get("DPoP-Nonce")
+			}
+			return response
+		}
+		for _, method := range []string{http.MethodPut, http.MethodDelete} {
+			var body []any
+			if method == http.MethodPut {
+				body = []any{input}
+			}
+			response := send(access, method, "", body...)
+			if response.Code != 200 || repo.grantWriteIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.grantWriteDevice != deviceID || repo.grantWriteJKT != proofJKT || repo.grantWriteRuntime != runtime || repo.grantWriteTarget != target {
+				t.Fatal("grant write lost current verified actor", response.Code)
+			}
+			before := repo.grantWriteCalls
+			for _, query := range []string{"?user_id=attacker", "?device_id=attacker"} {
+				if response := send(access, method, query, body...); response.Code != 400 || repo.grantWriteCalls != before {
+					t.Fatal("grant selectors reached transaction", response.Code)
+				}
+			}
+			if response := send(hostAccess, method, "", body...); response.Code != 403 || repo.grantWriteCalls != before {
+				t.Fatal("host client managed grants", response.Code)
+			}
+			repo.activeDeviceErr = store.ErrDeviceNotFound
+			if response := send(access, method, "", body...); response.Code != 403 || repo.grantWriteCalls != before {
+				t.Fatal("inactive device reached grant mutation", response.Code)
+			}
+			repo.activeDeviceErr = nil
+			for _, failure := range []struct {
+				err    error
+				status int
+			}{{store.ErrAccessDenied, 403}, {store.ErrGrantInvalid, 400}, {store.ErrDatabaseUnavailable, 503}} {
+				repo.grantWriteErr = failure.err
+				if response := send(access, method, "", body...); response.Code != failure.status || strings.Contains(response.Body.String(), "grant_version") {
+					t.Fatal("failed transaction reported a grant result", response.Code)
+				}
+			}
+			repo.grantWriteErr = nil
+		}
+		before := repo.grantWriteCalls
+		if response := send(access, http.MethodDelete, "", input); response.Code != 400 || repo.grantWriteCalls != before {
+			t.Fatal("DELETE accepted a grant body", response.Code)
+		}
+	})
 	t.Run("runtime grant directory binds the current manager phone and target", func(t *testing.T) {
 		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
 		repo.activeDeviceErr = nil

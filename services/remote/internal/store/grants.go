@@ -162,18 +162,34 @@ func stringSliceSubset(candidate, parent []string) bool {
 	return true
 }
 
-func (postgres *Postgres) PutRuntimeGrant(ctx context.Context, identity UserIdentity, deviceID, runtimeID, targetUserID string, input RuntimeGrantInput) (int64, error) {
+func validGrantActor(deviceID, proofJKT, runtimeID, targetUserID string) bool {
+	return grantUUIDPattern.MatchString(deviceID) && keyThumbprintPattern.MatchString(proofJKT) &&
+		grantUUIDPattern.MatchString(runtimeID) && grantUUIDPattern.MatchString(targetUserID)
+}
+
+func (postgres *Postgres) PutRuntimeGrant(ctx context.Context, identity UserIdentity, deviceID, proofJKT, runtimeID, targetUserID string, input RuntimeGrantInput) (int64, error) {
+	if !validGrantActor(deviceID, proofJKT, runtimeID, targetUserID) {
+		return 0, ErrGrantInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return retrySerializable(ctx, func() (int64, error) {
+		return postgres.putRuntimeGrantOnce(ctx, identity, deviceID, proofJKT, runtimeID, targetUserID, input)
+	})
+}
+
+func (postgres *Postgres) putRuntimeGrantOnce(ctx context.Context, identity UserIdentity, deviceID, proofJKT, runtimeID, targetUserID string, input RuntimeGrantInput) (int64, error) {
 	input, err := NormalizeRuntimeGrantInput(input, time.Now())
 	if err != nil {
 		return 0, err
 	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	defer transaction.Rollback()
 
-	actorID, orgID, actorRole, actorScope, isAdmin, err := postgres.authorizeGrantManager(ctx, transaction, identity, runtimeID)
+	actorID, orgID, actorRole, actorScope, isAdmin, err := postgres.authorizeGrantManager(ctx, transaction, identity, deviceID, proofJKT, runtimeID)
 	if err != nil {
 		return 0, err
 	}
@@ -204,14 +220,14 @@ func (postgres *Postgres) PutRuntimeGrant(ctx context.Context, identity UserIden
 		Scan(&previousRole, &previousScopeJSON, &previousVersion, &previousExpiry, &previousRevoked)
 	hasPrevious := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	if hasPrevious && previousRole == "owner" && previousRevoked.Valid == false &&
 		(!previousExpiry.Valid || previousExpiry.Time.After(time.Now())) &&
 		(input.Role != "owner" || input.ExpiresAt != nil) {
 		remaining, err := countOtherActiveOwners(ctx, transaction, runtimeID, orgID, targetID)
 		if err != nil {
-			return 0, ErrDatabaseUnavailable
+			return 0, transactionFailure(err)
 		}
 		if remaining == 0 && !isAdmin {
 			return 0, ErrAccessDenied
@@ -225,7 +241,7 @@ func (postgres *Postgres) PutRuntimeGrant(ctx context.Context, identity UserIden
 	if hasPrevious && previousRevoked.Valid == false && previousRole == input.Role &&
 		grantExpiryEqual(previousExpiry, input.ExpiresAt) && grantScopeEqual(previousScopeJSON, input.Scope) {
 		if err := transaction.Commit(); err != nil {
-			return 0, ErrDatabaseUnavailable
+			return 0, transactionFailure(err)
 		}
 		return previousVersion, nil
 	}
@@ -240,25 +256,36 @@ func (postgres *Postgres) PutRuntimeGrant(ctx context.Context, identity UserIden
 			role = excluded.role, scope = excluded.scope, grant_version = excluded.grant_version,
 			granted_by = excluded.granted_by, expires_at = excluded.expires_at, revoked_at = null`,
 		runtimeID, targetID, input.Role, string(scopeJSON), version, actorID, input.ExpiresAt); err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	if err := writeGrantChange(ctx, transaction, actorID, deviceID, orgID, runtimeID, targetID, input.Role,
 		version, input.ExpiresAt, "runtime_grant.updated", "runtime_grant.update", scopeJSON); err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	return version, nil
 }
 
-func (postgres *Postgres) RevokeRuntimeGrant(ctx context.Context, identity UserIdentity, deviceID, runtimeID, targetUserID string) (int64, error) {
+func (postgres *Postgres) RevokeRuntimeGrant(ctx context.Context, identity UserIdentity, deviceID, proofJKT, runtimeID, targetUserID string) (int64, error) {
+	if !validGrantActor(deviceID, proofJKT, runtimeID, targetUserID) {
+		return 0, ErrGrantInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return retrySerializable(ctx, func() (int64, error) {
+		return postgres.revokeRuntimeGrantOnce(ctx, identity, deviceID, proofJKT, runtimeID, targetUserID)
+	})
+}
+
+func (postgres *Postgres) revokeRuntimeGrantOnce(ctx context.Context, identity UserIdentity, deviceID, proofJKT, runtimeID, targetUserID string) (int64, error) {
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	defer transaction.Rollback()
-	actorID, orgID, actorRole, _, isAdmin, err := postgres.authorizeGrantManager(ctx, transaction, identity, runtimeID)
+	actorID, orgID, actorRole, _, isAdmin, err := postgres.authorizeGrantManager(ctx, transaction, identity, deviceID, proofJKT, runtimeID)
 	if err != nil {
 		return 0, err
 	}
@@ -276,18 +303,18 @@ func (postgres *Postgres) RevokeRuntimeGrant(ctx context.Context, identity UserI
 		return 0, ErrGrantNotFound
 	}
 	if err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	if revoked.Valid {
 		if err := transaction.Commit(); err != nil {
-			return 0, ErrDatabaseUnavailable
+			return 0, transactionFailure(err)
 		}
 		return version, nil
 	}
 	if role == "owner" && (!expires.Valid || expires.Time.After(time.Now())) && !isAdmin {
 		remaining, err := countOtherActiveOwners(ctx, transaction, runtimeID, orgID, targetUserID)
 		if err != nil {
-			return 0, ErrDatabaseUnavailable
+			return 0, transactionFailure(err)
 		}
 		if remaining == 0 {
 			return 0, ErrAccessDenied
@@ -297,29 +324,45 @@ func (postgres *Postgres) RevokeRuntimeGrant(ctx context.Context, identity UserI
 	if _, err := transaction.ExecContext(ctx, `
 		update runtime_grants set revoked_at = now(), grant_version = $3
 		where runtime_id = $1 and user_id = $2 and revoked_at is null`, runtimeID, targetUserID, version); err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	metadata, _ := json.Marshal(map[string]any{"runtime_id": runtimeID, "user_id": targetUserID, "grant_version": version})
 	if _, err := transaction.ExecContext(ctx, `
 		insert into control_outbox (org_id, topic, payload) values ($1, 'runtime_grant.revoked', $2::jsonb)`, orgID, string(metadata)); err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
 		insert into audit_log (org_id, actor_type, actor_id, device_id, runtime_id, action, result, metadata)
 		values ($1, 'user', $2, $3, $4, 'runtime_grant.revoke', 'success', $5::jsonb)`,
 		orgID, actorID, deviceID, runtimeID, string(metadata)); err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	if err := transaction.Commit(); err != nil {
-		return 0, ErrDatabaseUnavailable
+		return 0, transactionFailure(err)
 	}
 	return version, nil
 }
 
-func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx, identity UserIdentity, runtimeID string) (actorID, orgID, role string, scope GrantScope, isAdmin bool, err error) {
-	actorID, err = postgres.userID(ctx, tx, identity.Issuer, identity.Subject)
+func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx, identity UserIdentity, deviceID, proofJKT, runtimeID string) (actorID, orgID, role string, scope GrantScope, isAdmin bool, err error) {
+	if _, err = tx.ExecContext(ctx, `set local lock_timeout='2s'`); err != nil {
+		return "", "", "", GrantScope{}, false, transactionFailure(err)
+	}
+	if _, err = lockRecoveryReady(ctx, tx, ""); err != nil {
+		return "", "", "", GrantScope{}, false, err
+	}
+	actorID, err = postgres.userIDForSerializable(ctx, tx, identity.Issuer, identity.Subject)
 	if err != nil {
 		return "", "", "", GrantScope{}, false, err
+	}
+	var current string
+	err = tx.QueryRowContext(ctx, `select id::text from devices
+	 where id=$1 and user_id=$2 and proof_key_thumbprint=$3 and revoked_at is null
+	 for share /* grant_actor_device_fence */`, deviceID, actorID, proofJKT).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", "", GrantScope{}, false, ErrAccessDenied
+	}
+	if err != nil {
+		return "", "", "", GrantScope{}, false, transactionFailure(err)
 	}
 	err = tx.QueryRowContext(ctx, `
 		select h.org_id::text from runtimes r
@@ -331,7 +374,7 @@ func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx,
 		return "", "", "", GrantScope{}, false, ErrAccessDenied
 	}
 	if err != nil {
-		return "", "", "", GrantScope{}, false, ErrDatabaseUnavailable
+		return "", "", "", GrantScope{}, false, transactionFailure(err)
 	}
 	var membershipRole string
 	err = tx.QueryRowContext(ctx, `
@@ -340,7 +383,7 @@ func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx,
 		return "", "", "", GrantScope{}, false, ErrAccessDenied
 	}
 	if err != nil {
-		return "", "", "", GrantScope{}, false, ErrDatabaseUnavailable
+		return "", "", "", GrantScope{}, false, transactionFailure(err)
 	}
 	isAdmin = membershipRole == "admin"
 	var scopeJSON []byte
@@ -352,9 +395,9 @@ func (postgres *Postgres) authorizeGrantManager(ctx context.Context, tx *sql.Tx,
 	if errors.Is(err, sql.ErrNoRows) {
 		role = ""
 	} else if err != nil {
-		return "", "", "", GrantScope{}, false, ErrDatabaseUnavailable
+		return "", "", "", GrantScope{}, false, transactionFailure(err)
 	} else if err := json.Unmarshal(scopeJSON, &scope); err != nil {
-		return "", "", "", GrantScope{}, false, ErrDatabaseUnavailable
+		return "", "", "", GrantScope{}, false, transactionFailure(err)
 	}
 	if role == "owner" && !slices.Contains(scope.Actions, "grant.manage") {
 		role = ""
@@ -376,7 +419,7 @@ func activeOrganizationUser(ctx context.Context, tx *sql.Tx, orgID, userID strin
 		return "", ErrAccessDenied
 	}
 	if err != nil {
-		return "", ErrDatabaseUnavailable
+		return "", transactionFailure(err)
 	}
 	return id, nil
 }

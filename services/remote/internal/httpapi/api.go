@@ -46,8 +46,8 @@ type Repository interface {
 	ExchangeHostCredential(context.Context, store.UserIdentity, string, string, string) (store.HostConnectionCredential, error)
 	RegisterDevice(context.Context, store.DeviceRegistration) (string, error)
 	RevokeDevice(context.Context, string, string, string) error
-	PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error)
-	RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string) (int64, error)
+	PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, string, store.RuntimeGrantInput) (int64, error)
+	RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string, string) (int64, error)
 	IssueRealtimeTicket(context.Context, store.UserIdentity, string, string, store.GrantScope) (store.RealtimeTicket, error)
 	PrepareRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
 	ConsumeRealtimeTicket(context.Context, string) (store.TicketRedemption, error)
@@ -694,7 +694,7 @@ func (api *API) questionAnswerStatus(w http.ResponseWriter, r *http.Request) {
 func (api *API) putRuntimeGrant(response http.ResponseWriter, request *http.Request) {
 	runtimeID := request.PathValue("id")
 	targetUserID := request.PathValue("user_id")
-	if !uuidPattern.MatchString(runtimeID) || !uuidPattern.MatchString(targetUserID) {
+	if !uuidPattern.MatchString(runtimeID) || !uuidPattern.MatchString(targetUserID) || request.URL.RawQuery != "" {
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 		return
 	}
@@ -710,7 +710,7 @@ func (api *API) putRuntimeGrant(response http.ResponseWriter, request *http.Requ
 	}
 	principal, _ := auth.PrincipalFromContext(request.Context())
 	deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
-	version, err := api.database.PutRuntimeGrant(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, deviceID, runtimeID, targetUserID, input)
+	version, err := api.database.PutRuntimeGrant(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, deviceID, principal.ProofKeyJKT, runtimeID, targetUserID, input)
 	if err != nil {
 		api.writeStoreError(response, err)
 		return
@@ -721,13 +721,13 @@ func (api *API) putRuntimeGrant(response http.ResponseWriter, request *http.Requ
 func (api *API) revokeRuntimeGrant(response http.ResponseWriter, request *http.Request) {
 	runtimeID := request.PathValue("id")
 	targetUserID := request.PathValue("user_id")
-	if !uuidPattern.MatchString(runtimeID) || !uuidPattern.MatchString(targetUserID) {
+	if !uuidPattern.MatchString(runtimeID) || !uuidPattern.MatchString(targetUserID) || request.URL.RawQuery != "" || request.ContentLength != 0 || len(request.TransferEncoding) != 0 {
 		writeError(response, http.StatusBadRequest, "protocol.invalid")
 		return
 	}
 	principal, _ := auth.PrincipalFromContext(request.Context())
 	deviceID, _ := request.Context().Value(deviceContextKey{}).(string)
-	version, err := api.database.RevokeRuntimeGrant(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, deviceID, runtimeID, targetUserID)
+	version, err := api.database.RevokeRuntimeGrant(request.Context(), store.UserIdentity{Issuer: principal.Issuer, Subject: principal.Subject}, deviceID, principal.ProofKeyJKT, runtimeID, targetUserID)
 	if err != nil {
 		api.writeStoreError(response, err)
 		return

@@ -253,7 +253,7 @@ func TestInstallationManagementFencesGrantCommittedWhileWaiting(t *testing.T) {
 	}
 	granted := make(chan error, 1)
 	go func() {
-		_, err := db.PutRuntimeGrant(ctx, owner, managingDevice, "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666", RuntimeGrantInput{Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: []string{}, Sessions: []string{}}})
+		_, err := db.PutRuntimeGrant(ctx, owner, managingDevice, proof, "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666", RuntimeGrantInput{Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: []string{}, Sessions: []string{}}})
 		granted <- err
 	}()
 	wait := func(fragment string) {

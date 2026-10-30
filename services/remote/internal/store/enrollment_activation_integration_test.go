@@ -29,6 +29,10 @@ func enrollmentConnection(created EnrollmentCreated) RuntimeConnectionInput {
 func TestAnActiveHostDoesNotActivateAnUnconfirmedInstallationOrGrant(t *testing.T) {
 	ctx, postgres, input, created := pendingActiveHostFixture(t)
 	owner := UserIdentity{Issuer: input.Issuer, Subject: input.Subject}
+	var ownerProof string
+	if err := postgres.DB.QueryRowContext(ctx, `select proof_key_thumbprint from devices where id='44444444-4444-4444-8444-444444444444'`).Scan(&ownerProof); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := postgres.CreateHostCredentialChallenge(ctx, owner, input.InstallationKeyThumbprint); !errors.Is(err, ErrAccessDenied) {
 		t.Errorf("unconfirmed installation received a challenge: %v", err)
 	}
@@ -54,7 +58,7 @@ func TestAnActiveHostDoesNotActivateAnUnconfirmedInstallationOrGrant(t *testing.
 	if _, err := postgres.IssueRealtimeTicket(ctx, owner, "44444444-4444-4444-8444-444444444444", created.RuntimeID, scope); !errors.Is(err, ErrAccessDenied) {
 		t.Errorf("early grant issued a ticket: %v", err)
 	}
-	if _, err := postgres.PutRuntimeGrant(ctx, owner, "44444444-4444-4444-8444-444444444444", created.RuntimeID, "66666666-6666-4666-8666-666666666666", RuntimeGrantInput{Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: scope.Workspaces, Sessions: []string{}}}); !errors.Is(err, ErrAccessDenied) {
+	if _, err := postgres.PutRuntimeGrant(ctx, owner, "44444444-4444-4444-8444-444444444444", ownerProof, created.RuntimeID, "66666666-6666-4666-8666-666666666666", RuntimeGrantInput{Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: scope.Workspaces, Sessions: []string{}}}); !errors.Is(err, ErrAccessDenied) {
 		t.Errorf("early grant modified another grant: %v", err)
 	}
 	if _, err := postgres.DB.ExecContext(ctx, `delete from runtime_grants where runtime_id=$1`, created.RuntimeID); err != nil {

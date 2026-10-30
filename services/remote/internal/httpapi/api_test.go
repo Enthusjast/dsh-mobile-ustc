@@ -14,6 +14,13 @@ import (
 )
 
 type fakeRepository struct {
+	grantWriteCalls         int
+	grantWriteIdentity      store.UserIdentity
+	grantWriteDevice        string
+	grantWriteJKT           string
+	grantWriteRuntime       string
+	grantWriteTarget        string
+	grantWriteErr           error
 	grantDirectory          store.RuntimeGrantDirectory
 	grantDirectoryErr       error
 	grantDirectoryCalls     int
@@ -213,11 +220,17 @@ func (fake *fakeRepository) RegisterDevice(context.Context, store.DeviceRegistra
 func (fake *fakeRepository) RevokeDevice(context.Context, string, string, string) error {
 	return errors.New("not implemented")
 }
-func (fake *fakeRepository) PutRuntimeGrant(context.Context, store.UserIdentity, string, string, string, store.RuntimeGrantInput) (int64, error) {
-	return 1, nil
+func (fake *fakeRepository) PutRuntimeGrant(_ context.Context, actor store.UserIdentity, device, proof, runtime, target string, _ store.RuntimeGrantInput) (int64, error) {
+	fake.grantWriteCalls++
+	fake.grantWriteIdentity, fake.grantWriteDevice, fake.grantWriteJKT = actor, device, proof
+	fake.grantWriteRuntime, fake.grantWriteTarget = runtime, target
+	return 1, fake.grantWriteErr
 }
-func (fake *fakeRepository) RevokeRuntimeGrant(context.Context, store.UserIdentity, string, string, string) (int64, error) {
-	return 2, nil
+func (fake *fakeRepository) RevokeRuntimeGrant(_ context.Context, actor store.UserIdentity, device, proof, runtime, target string) (int64, error) {
+	fake.grantWriteCalls++
+	fake.grantWriteIdentity, fake.grantWriteDevice, fake.grantWriteJKT = actor, device, proof
+	fake.grantWriteRuntime, fake.grantWriteTarget = runtime, target
+	return 2, fake.grantWriteErr
 }
 func (fake *fakeRepository) IssueRealtimeTicket(context.Context, store.UserIdentity, string, string, store.GrantScope) (store.RealtimeTicket, error) {
 	fake.ticketCalls++

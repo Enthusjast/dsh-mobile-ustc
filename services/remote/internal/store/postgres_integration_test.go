@@ -37,7 +37,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}
 	input := RuntimeGrantInput{Role: "operator", Scope: scope}
 
-	version, err := postgres.PutRuntimeGrant(ctx, identity, deviceID, runtimeID, targetID, input)
+	version, err := postgres.PutRuntimeGrant(ctx, identity, deviceID, deviceProofThumbprint, runtimeID, targetID, input)
 	if err != nil || version != 1 {
 		t.Fatalf("create scoped grant: version=%d error=%v", version, err)
 	}
@@ -48,7 +48,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	version, err = postgres.PutRuntimeGrant(ctx, identity, deviceID, runtimeID, targetID, input)
+	version, err = postgres.PutRuntimeGrant(ctx, identity, deviceID, deviceProofThumbprint, runtimeID, targetID, input)
 	if err != nil || version != 1 {
 		t.Fatalf("idempotent grant update: version=%d error=%v", version, err)
 	}
@@ -60,7 +60,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 		Actions:    []string{"command.status", "host.list", "message.submit", "session.list"},
 		Workspaces: scope.Workspaces, Sessions: []string{},
 	}}
-	if _, err := postgres.PutRuntimeGrant(ctx, identity, deviceID, runtimeID, targetID, widened); !errors.Is(err, ErrAccessDenied) {
+	if _, err := postgres.PutRuntimeGrant(ctx, identity, deviceID, deviceProofThumbprint, runtimeID, targetID, widened); !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("out-of-scope action update error=%v, want ErrAccessDenied", err)
 	}
 	if err := assertGrantState(ctx, testDB, runtimeID, targetID, 1, "operator", false); err != nil {
@@ -70,7 +70,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	version, err = postgres.PutRuntimeGrant(ctx, identity, deviceID, runtimeID, targetID, RuntimeGrantInput{
+	version, err = postgres.PutRuntimeGrant(ctx, identity, deviceID, deviceProofThumbprint, runtimeID, targetID, RuntimeGrantInput{
 		Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: []string{}, Sessions: []string{}},
 	})
 	if err != nil || version != 2 {
@@ -81,17 +81,17 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	}
 
 	unknownDeviceID := "88888888-8888-4888-8888-888888888888"
-	if _, err := postgres.PutRuntimeGrant(ctx, identity, unknownDeviceID, runtimeID, targetID, input); !errors.Is(err, ErrDatabaseUnavailable) {
-		t.Fatalf("audit failure error=%v, want ErrDatabaseUnavailable", err)
+	if _, err := postgres.PutRuntimeGrant(ctx, identity, unknownDeviceID, deviceProofThumbprint, runtimeID, targetID, input); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("unknown actor device error=%v, want ErrAccessDenied", err)
 	}
 	if err := assertGrantState(ctx, testDB, runtimeID, targetID, 2, "viewer", false); err != nil {
-		t.Fatalf("failed audit did not roll grant update back: %v", err)
+		t.Fatalf("unknown actor device changed the grant: %v", err)
 	}
 	if err := assertChangeCounts(ctx, testDB, 2, 2); err != nil {
-		t.Fatalf("failed audit left an outbox record: %v", err)
+		t.Fatalf("unknown actor device left an outbox record: %v", err)
 	}
 
-	version, err = postgres.RevokeRuntimeGrant(ctx, identity, deviceID, runtimeID, targetID)
+	version, err = postgres.RevokeRuntimeGrant(ctx, identity, deviceID, deviceProofThumbprint, runtimeID, targetID)
 	if err != nil || version != 3 {
 		t.Fatalf("revoke scoped grant: version=%d error=%v", version, err)
 	}
@@ -101,7 +101,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 	if err := assertChangeCounts(ctx, testDB, 3, 3); err != nil {
 		t.Fatal(err)
 	}
-	version, err = postgres.RevokeRuntimeGrant(ctx, identity, deviceID, runtimeID, targetID)
+	version, err = postgres.RevokeRuntimeGrant(ctx, identity, deviceID, deviceProofThumbprint, runtimeID, targetID)
 	if err != nil || version != 3 {
 		t.Fatalf("idempotent grant revoke: version=%d error=%v", version, err)
 	}
@@ -109,7 +109,7 @@ func TestPostgresMigrationGrantLifecycleAndTransactionalOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := postgres.RevokeRuntimeGrant(ctx, identity, deviceID, runtimeID, "22222222-2222-4222-8222-222222222222"); !errors.Is(err, ErrAccessDenied) {
+	if _, err := postgres.RevokeRuntimeGrant(ctx, identity, deviceID, deviceProofThumbprint, runtimeID, "22222222-2222-4222-8222-222222222222"); !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("last owner was allowed to revoke itself: %v", err)
 	}
 	if err := assertChangeCounts(ctx, testDB, 3, 3); err != nil {

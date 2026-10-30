@@ -14,7 +14,7 @@ import (
 
 func TestDirectoryPublishesOnlyTheCurrentUsersGrantAndOpaqueWorkspaceMapping(t *testing.T) {
 	ctx, postgres := newPostgresIntegrationDatabase(t)
-	seedGrantFixture(t, ctx, postgres.DB)
+	ownerProof := seedGrantFixture(t, ctx, postgres.DB)
 	const (
 		runtimeID = "55555555-5555-4555-8555-555555555555"
 		workspace = "77777777-7777-4777-8777-777777777777"
@@ -43,7 +43,7 @@ func TestDirectoryPublishesOnlyTheCurrentUsersGrantAndOpaqueWorkspaceMapping(t *
 		t.Fatal(err)
 	}
 	scope := GrantScope{Actions: []string{"session.list", "session.read"}, Workspaces: []string{workspace}, Sessions: []string{sessionID}}
-	if _, err := postgres.PutRuntimeGrant(ctx, owner, deviceID, runtimeID, targetID, RuntimeGrantInput{Role: "viewer", Scope: scope}); err != nil {
+	if _, err := postgres.PutRuntimeGrant(ctx, owner, deviceID, ownerProof, runtimeID, targetID, RuntimeGrantInput{Role: "viewer", Scope: scope}); err != nil {
 		t.Fatal(err)
 	}
 	runtimes, err := postgres.ListRuntimes(ctx, target)
@@ -74,14 +74,14 @@ func TestDirectoryPublishesOnlyTheCurrentUsersGrantAndOpaqueWorkspaceMapping(t *
 		t.Fatalf("explicit session mapping without workspace: %#v, %v", sessions, err)
 	}
 	scope.Workspaces = []string{}
-	if _, err := postgres.PutRuntimeGrant(ctx, owner, deviceID, runtimeID, targetID, RuntimeGrantInput{Role: "viewer", Scope: scope}); err != nil {
+	if _, err := postgres.PutRuntimeGrant(ctx, owner, deviceID, ownerProof, runtimeID, targetID, RuntimeGrantInput{Role: "viewer", Scope: scope}); err != nil {
 		t.Fatal(err)
 	}
 	runtimes, err = postgres.ListRuntimes(ctx, target)
 	if err != nil || len(runtimes) != 1 || runtimes[0].Access.GrantVersion != 2 || len(runtimes[0].Access.Scope.Workspaces) != 0 {
 		t.Fatalf("directory retained stale grant authority: %#v, %v", runtimes, err)
 	}
-	if _, err := postgres.RevokeRuntimeGrant(ctx, owner, deviceID, runtimeID, targetID); err != nil {
+	if _, err := postgres.RevokeRuntimeGrant(ctx, owner, deviceID, ownerProof, runtimeID, targetID); err != nil {
 		t.Fatal(err)
 	}
 	runtimes, err = postgres.ListRuntimes(ctx, target)

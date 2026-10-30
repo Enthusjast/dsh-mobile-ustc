@@ -4,6 +4,9 @@
 
 服务保持 SERIALIZABLE 隔离、原权限与限额，在数据库层为以下完整元数据事务增加有界重试：主机 challenge、凭据交换、runtime attach、session catalog、手机 ticket 签发 / 准备 / 消费。每次尝试重新创建事务，失败事务的 rollback 在回调返回前完成，重新检查身份、安装 / 设备密钥、当前授权、挑战期限与消耗状态。
 
+[Runtime 授权 PUT / DELETE](runtime-grant-writes.md) 也使用同一确认中止重试规则；它们在事务内
+锁定当前手机及 DPoP 指纹，并与并发设备撤销协调。普通错误和结果不明的提交不重放。
+
 按照 [PostgreSQL 18 的事务重试规则](https://www.postgresql.org/docs/18/mvcc-serialization-failure-handling.html)，只对数据库明确中止的 `40001`、`40P01` 重试整段逻辑。最多十六次尝试，退避从 5 ms 增长并在 80 ms 封顶，加同范围随机抖动；等待受原请求 context 约束。业务拒绝、额度、唯一性冲突、连接错误与不确定的提交结果不自动重试。对外仍使用原结构化错误，不输出驱动 SQL / 参数。
 
 放大至 1000 连接 / 32 个 worker 后，单靠增加重试次数仍会耗尽预算。服务现在将同时运行的这七类 SERIALIZABLE 事务限制为默认 4 个，与既有 30 个数据库连接分开管理；其他已连接流量与控制检查不占此 gate。`REMOTE_SERIALIZABLE_ADMISSIONS` 只在启动时接受 1–30，开始使用后不能改动。等待发生在创建事务快照之前，取消不会开始新事务，回滚与 panic 都释放槽位，退避期间让出槽位。外部负载仍保持相同连接数和 worker 数。

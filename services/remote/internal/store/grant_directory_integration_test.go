@@ -17,7 +17,7 @@ func TestRuntimeGrantDirectoryPaginatesRecordedGrantsAndCurrentRecipientState(t 
 	proof := seedGrantFixture(t, ctx, db.DB)
 	identity := UserIdentity{Issuer: "https://id.example.edu", Subject: "owner-subject"}
 	input := RuntimeGrantInput{Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: []string{}, Sessions: []string{}}}
-	if _, err := db.PutRuntimeGrant(ctx, identity, managingDevice, directoryRuntime, directoryTarget, input); err != nil {
+	if _, err := db.PutRuntimeGrant(ctx, identity, managingDevice, proof, directoryRuntime, directoryTarget, input); err != nil {
 		t.Fatal(err)
 	}
 	first, err := db.ListRuntimeGrants(ctx, identity, managingDevice, proof, directoryRuntime, 1, "")
@@ -31,7 +31,7 @@ func TestRuntimeGrantDirectoryPaginatesRecordedGrantsAndCurrentRecipientState(t 
 	if err != nil || len(second.Items) != 1 || second.Items[0].UserID != directoryTarget || second.Items[0].State != "expired" || second.Items[0].Version != 1 || second.Items[0].GrantedBy != directoryOwner || second.NextCursor != nil {
 		t.Fatal("page did not reflect the current expired grant", second, err)
 	}
-	if _, err := db.RevokeRuntimeGrant(ctx, identity, managingDevice, directoryRuntime, directoryTarget); err != nil {
+	if _, err := db.RevokeRuntimeGrant(ctx, identity, managingDevice, proof, directoryRuntime, directoryTarget); err != nil {
 		t.Fatal(err)
 	}
 	second, err = db.ListRuntimeGrants(ctx, identity, managingDevice, proof, directoryRuntime, 100, *first.NextCursor)
@@ -68,7 +68,7 @@ func TestRuntimeGrantDirectoryRechecksManagerAuthorityAndProofOnEveryPage(t *tes
 	ctx, db := newPostgresIntegrationDatabase(t)
 	proof := seedGrantFixture(t, ctx, db.DB)
 	identity := UserIdentity{Issuer: "https://id.example.edu", Subject: "owner-subject"}
-	if _, err := db.PutRuntimeGrant(ctx, identity, managingDevice, directoryRuntime, directoryTarget, RuntimeGrantInput{Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: []string{}, Sessions: []string{}}}); err != nil {
+	if _, err := db.PutRuntimeGrant(ctx, identity, managingDevice, proof, directoryRuntime, directoryTarget, RuntimeGrantInput{Role: "viewer", Scope: GrantScope{Actions: []string{"host.list"}, Workspaces: []string{}, Sessions: []string{}}}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := db.ListRuntimeGrants(ctx, identity, managingDevice, proof, directoryRuntime, 1, "")
