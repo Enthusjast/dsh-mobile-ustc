@@ -1,5 +1,7 @@
 # Remote service foundation
 
+The opt-in [database outage drill](../../docs/database-outage-drill.md) removes connectivity to the exact owned test database, verifies both production relays fail closed, then explicitly restarts them after natural ownership expiry. The real npm DSH Host retains its native session/epoch and reconciles one accepted command without replay; this is a bounded local failure sample, not target-load or backup-restore acceptance.
+
 The phone-authenticated [bounded session directory](../../docs/session-directory.md) pages metadata through `GET /v1/runtimes/{id}/session-directory`, with current device/grant/resource checks on every page and stable UUID ordering. Apply migration 035 for its `(runtime_id,id)` index. Existing full-list clients retain their current route and need separate paging adoption.
 
 Installation owners and current organization admins can [page and retire individual profiles](../../docs/installation-profile-management.md) under `/v1/installations/{id}/runtimes`. Per-profile retirement preserves sibling profiles and the shared installation credentials, while current runtime checks prevent reconnecting the retired profile. It reuses migration 034 and the durable runtime invalidation path.

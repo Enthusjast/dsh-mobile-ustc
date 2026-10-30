@@ -20,9 +20,10 @@ def main():
     parser.add_argument("--renewal", action="store_true", help="Also wait for the normal five-minute Host credential expiry and reconnection")
     parser.add_argument("--installation-revoke", action="store_true", help="Retire the normal DSH installation through its registered owner-phone API")
     parser.add_argument("--host-account-retire", action="store_true", help="Cancel the fixture Host account lifetime and verify scoped plugin cleanup")
+    parser.add_argument("--database-outage", action="store_true", help="Exercise isolated PostgreSQL connection outage, relay restart and native DSH reconciliation")
     options = parser.parse_args()
-    if sum((options.renewal, options.installation_revoke, options.host_account_retire)) > 1:
-        parser.error("renewal, installation revocation and account retirement select separate composition runs")
+    if sum((options.renewal, options.installation_revoke, options.host_account_retire, options.database_outage)) > 1:
+        parser.error("renewal, installation revocation, account retirement and database outage select separate composition runs")
     repo = Path(__file__).resolve().parents[2]
     output = options.output.resolve()
     local = (repo / ".local").resolve()
@@ -48,6 +49,8 @@ def main():
             command.append("--installation-revoke")
         if options.host_account_retire:
             command.append("--host-account-retire")
+        if options.database_outage:
+            command.append("--database-outage")
         child = subprocess.Popen(command,
                                  cwd=repo, env=environment, stdin=slave, stdout=log, stderr=log,
                                  preexec_fn=controlling_terminal, pass_fds=(slave,))

@@ -25,6 +25,7 @@ def main():
     arguments.add_argument("--host-renewal", action="store_true", help="Wait for a real five-minute Host credential renewal in the standalone native DSH composition")
     arguments.add_argument("--installation-revoke", action="store_true", help="Use the registered owner-phone API to retire the normal DSH installation at the end of the standalone composition")
     arguments.add_argument("--host-account-retire", action="store_true", help="Cancel the fixture account source and verify Host plugin retirement without native DSH shutdown")
+    arguments.add_argument("--database-outage", action="store_true", help="Exercise a bounded isolated-database outage and recovery in its own two-node DSH composition")
     arguments.add_argument("--relay-load", type=int, metavar="CONNECTIONS", help="Opt-in authenticated TLS capacity probe with an equal Host/phone split")
     arguments.add_argument("--load-output", type=Path, help="Fresh evidence directory strictly inside repository .local")
     arguments.add_argument("--load-workers", type=int)
@@ -40,6 +41,8 @@ def main():
         arguments.error("--dsh-only selects the native DSH composition, optionally with --cross-node")
     if options.host_renewal and not options.dsh_only:
         arguments.error("--host-renewal requires --dsh-only, optionally with --cross-node")
+    if options.database_outage and (not options.dsh_only or not options.cross_node or options.host_renewal or options.installation_revoke or options.host_account_retire):
+        arguments.error("--database-outage requires its own --cross-node --dsh-only composition")
     if options.host_account_retire and (not options.dsh_only or options.host_renewal or options.installation_revoke):
         arguments.error("--host-account-retire requires its own --dsh-only composition, optionally with --cross-node")
     if options.installation_revoke and (not options.dsh_only or options.host_renewal):
@@ -125,7 +128,7 @@ def main():
             env = dict(os.environ, REMOTE_TEST_CLUSTER_ROOT=root, REMOTE_TEST_DATABASE_URL=dsn,
                        REMOTE_TEST_PSQL=str(pg_bin / "psql"), REMOTE_TEST_PG_DUMP=str(pg_bin / "pg_dump"), REMOTE_TEST_SERVICE_BIN=str(binary))
             # Activation is explicit per invocation, never inherited from a prior run.
-            for field in ("REMOTE_TEST_CROSS_NODE", "REMOTE_TEST_HOST_RENEWAL", "REMOTE_TEST_INSTALLATION_REVOKE", "REMOTE_TEST_HOST_ACCOUNT_RETIRE", "REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC", "REMOTE_TEST_ANDROID_UPGRADE_SERIAL", "REMOTE_TEST_ANDROID_UPGRADE_RECEIPT", "REMOTE_TEST_RELAY_CAPACITY_CONFIG", "REMOTE_TEST_RELAY_CAPACITY_OUTPUT"):
+            for field in ("REMOTE_TEST_CROSS_NODE", "REMOTE_TEST_HOST_RENEWAL", "REMOTE_TEST_INSTALLATION_REVOKE", "REMOTE_TEST_HOST_ACCOUNT_RETIRE", "REMOTE_TEST_DATABASE_OUTAGE", "REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC", "REMOTE_TEST_ANDROID_UPGRADE_SERIAL", "REMOTE_TEST_ANDROID_UPGRADE_RECEIPT", "REMOTE_TEST_RELAY_CAPACITY_CONFIG", "REMOTE_TEST_RELAY_CAPACITY_OUTPUT"):
                 env.pop(field, None)
             if options.cross_node:
                 env["REMOTE_TEST_CROSS_NODE"] = "1"
@@ -135,6 +138,8 @@ def main():
                 env["REMOTE_TEST_INSTALLATION_REVOKE"] = "1"
             if options.host_account_retire:
                 env["REMOTE_TEST_HOST_ACCOUNT_RETIRE"] = "1"
+            if options.database_outage:
+                env["REMOTE_TEST_DATABASE_OUTAGE"] = "1"
             if options.relay_load is not None:
                 env.update(REMOTE_TEST_RELAY_CAPACITY_CONFIG=json.dumps(load), REMOTE_TEST_RELAY_CAPACITY_OUTPUT=str(options.load_output))
                 completed = subprocess.run([go, "test"] + (["-race"] if options.load_race else []) + ["-count=1", "-v", "-timeout=9m", "-run", "^TestAuthenticatedRelayCapacity$", "./internal/httpapi"], cwd=repo / "services/remote", env=env)
