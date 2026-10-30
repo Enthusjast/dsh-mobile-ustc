@@ -23,7 +23,7 @@
 
 `origin` 为 `device`（首次登记）、`host`（Host 回执）、`relay`（转发写出结果不确定）。
 `operation` 为 admit / create / file_admit / receipt / unknown。
-结果为 ok / denied / conflict / invalid / not_ready / cancelled / error；
+结果为 ok / denied / conflict / invalid / not_ready / limited / cancelled / error；
 `not_ready` 表示文件尚未具备准入条件，不作为数据库故障。所有未知值统一归为 `other`。
 
 ## 转换计数与回执边界
@@ -95,3 +95,6 @@ histogram_quantile(0.95, sum by (le, operation, result) (rate(dsh_remote_command
 
 `session.model.select` 是[模型选择命令](session-model-selection.md)的固定动作标签。
 其 `settled` 在原生会话检查点完成后产生；provider、model 和 reasoning 标识不进入指标标签。
+
+共享[命令准入预算](shared-command-limits.md)耗尽时，command store 尝试结果为固定 `limited`。
+它包含共享配额检查的耗时，不产生 command 状态转换；主体 UUID 和策略摘要不作为指标标签。

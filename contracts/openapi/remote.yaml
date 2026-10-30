@@ -717,6 +717,10 @@ paths:
         and exact claims iss, aud, challenge_id, connection_id, nonce, runtime_id, iat, and jti; host
         proofs also include runtime_epoch and hello_sha256. Heartbeats are text frames shaped as
         `{"v":1,"type":"ping","payload":{}}` and receive a pong with connection_id and server_time.
+        Command attempts share PostgreSQL user/device/installation/session budgets across sockets and
+        owner nodes. Exhausted budgets return rate.limited before command registration or forwarding;
+        exact retries and failed authorized attempts consume budget, while existing Host result facts
+        remain independent. These budgets do not replace current authorization or cover every read/HTTP route.
         Devices may send a v=1 `message.submit` frame with request_id, runtime_id, session_id, and
         payload {mode: queue|steer, content: [{type: text, text: ...}]}. Text content is bounded to
         32,768 Unicode characters per block and 16 blocks per frame; the complete UTF-8 frame is

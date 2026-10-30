@@ -34,6 +34,8 @@ func (postgres *Postgres) observeCommandStore(ctx context.Context, operation str
 			result = "cancelled"
 		case errors.Is(err, ErrAccessDenied), errors.Is(err, files.ErrAccess), errors.Is(err, ErrRuntimeConnectionStale):
 			result = "denied"
+		case errors.Is(err, ErrCommandRateLimited):
+			result = "limited"
 		case errors.Is(err, ErrCommandConflict), errors.Is(err, files.ErrConflict):
 			result = "conflict"
 		case errors.Is(err, files.ErrStale):

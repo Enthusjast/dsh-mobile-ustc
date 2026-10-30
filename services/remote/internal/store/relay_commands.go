@@ -65,56 +65,25 @@ func (postgres *Postgres) recordRealtimeCommand(ctx context.Context, ticket Tick
 	if !slices.Contains(ticket.Scope.Actions, commandType) {
 		return CommandStatus{}, ErrAccessDenied
 	}
+	if err := postgres.admitCommandRate(ctx, ticket, commandType, sessionID, "", admission != nil); err != nil {
+		return CommandStatus{}, err
+	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
 
-	var currentScopeJSON []byte
-	var workspaceID sql.NullString
-	var sessionState, orgID string
-	err = transaction.QueryRowContext(ctx, `
-		select g.scope, s.workspace_id::text, s.state, h.org_id::text
-		from users u
-		join devices d on d.user_id = u.id and d.id = $2 and d.revoked_at is null
-		join org_memberships m on m.user_id = u.id
-		join hosts h on h.org_id = m.org_id and h.state = 'active'
-		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
-		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
-		join sessions s on s.runtime_id = r.id and s.id = $5
-		where u.id = $1 and u.status = 'active' and d.key_version = $6 and d.proof_key_thumbprint = $7
-		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > clock_timestamp())
-		for share of u, d, m, h, i, r, g, s`,
-		ticket.UserID, ticket.DeviceID, ticket.RuntimeID, ticket.GrantVersion, sessionID,
-		ticket.DeviceKeyVersion, ticket.ProofKeyThumbprint).Scan(&currentScopeJSON, &workspaceID, &sessionState, &orgID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return CommandStatus{}, ErrAccessDenied
-	}
+	authority, err := authorizeCommandResources(ctx, transaction, ticket, commandType, sessionID, "", admission != nil)
 	if err != nil {
-		return CommandStatus{}, ErrDatabaseUnavailable
-	}
-	// Archived sessions remain valid archive targets. File admission hooks may
-	// reconcile an existing intent there, but must reject all fresh admission.
-	if sessionState != "available" && sessionState != "running" && !(sessionState == "archived" && (commandType == "session.archive" || commandType == "message.submit" && admission != nil)) {
-		return CommandStatus{}, ErrAccessDenied
-	}
-	var currentScope GrantScope
-	if err := json.Unmarshal(currentScopeJSON, &currentScope); err != nil {
-		return CommandStatus{}, ErrDatabaseUnavailable
-	}
-	if !grantScopeSubset(ticket.Scope, currentScope) ||
-		!scopeIncludesSession(ticket.Scope, sessionID, workspaceID) ||
-		!scopeIncludesSession(currentScope, sessionID, workspaceID) {
-		return CommandStatus{}, ErrAccessDenied
+		return CommandStatus{}, err
 	}
 
 	var check func(CommandStatus) error
 	if admission != nil {
 		check = func(status CommandStatus) error { return admission(ctx, transaction, status) }
 	}
-	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, orgID, commandType, postgres.commands.metrics, check)
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, sessionID, "", payloadSHA256, authority.organization, commandType, postgres.commands.metrics, check)
 }
 
 func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket TicketRedemption, requestID, sessionID, workspaceID, payloadSHA256, orgID, action string, metrics *observability.Metrics, admission ...func(CommandStatus) error) (CommandStatus, error) {

@@ -38,5 +38,5 @@ func (m *Metrics) CommandStore(operation, result string, elapsed time.Duration) 
 	if m == nil {
 		return
 	}
-	m.commandStore.WithLabelValues(fixed(operation, "admit", "create", "file_admit", "receipt", "unknown"), fixed(result, "ok", "denied", "conflict", "invalid", "not_ready", "cancelled", "error")).Observe(elapsed.Seconds())
+	m.commandStore.WithLabelValues(fixed(operation, "admit", "create", "file_admit", "receipt", "unknown"), fixed(result, "ok", "denied", "conflict", "invalid", "not_ready", "limited", "cancelled", "error")).Observe(elapsed.Seconds())
 }

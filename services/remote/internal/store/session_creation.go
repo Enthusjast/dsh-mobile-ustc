@@ -3,8 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"slices"
 	"time"
 )
@@ -27,40 +25,20 @@ func (postgres *Postgres) recordRealtimeSessionCreate(ctx context.Context, ticke
 	if !slices.Contains(ticket.Scope.Actions, "session.create") || !slices.Contains(ticket.Scope.Workspaces, workspaceID) {
 		return CommandStatus{}, ErrAccessDenied
 	}
+	if err := postgres.admitCommandRate(ctx, ticket, "session.create", "", workspaceID, false); err != nil {
+		return CommandStatus{}, err
+	}
 	transaction, err := postgres.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
 	defer transaction.Rollback()
-	var scopeJSON []byte
-	var orgID string
-	err = transaction.QueryRowContext(ctx, `
-		select g.scope, h.org_id::text from users u
-		join devices d on d.user_id = u.id and d.id = $2 and d.revoked_at is null
-		join org_memberships m on m.user_id = u.id
-		join hosts h on h.org_id = m.org_id and h.state = 'active'
-		join installations i on i.host_id = h.id and i.revoked_at is null
-		join runtimes r on r.installation_id = i.id and r.id = $3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
-		join runtime_grants g on g.runtime_id = r.id and g.user_id = u.id and g.grant_version = $4
-		join workspaces w on w.runtime_id = r.id and w.id = $5
-		where u.id = $1 and u.status = 'active' and d.key_version = $6 and d.proof_key_thumbprint = $7
-		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > clock_timestamp())
-		for share of u, d, m, h, i, r, g, w`, ticket.UserID, ticket.DeviceID, ticket.RuntimeID,
-		ticket.GrantVersion, workspaceID, ticket.DeviceKeyVersion, ticket.ProofKeyThumbprint).Scan(&scopeJSON, &orgID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return CommandStatus{}, ErrAccessDenied
-	}
+	authority, err := authorizeCommandResources(ctx, transaction, ticket, "session.create", "", workspaceID, false)
 	if err != nil {
-		return CommandStatus{}, ErrDatabaseUnavailable
+		return CommandStatus{}, err
 	}
-	var scope GrantScope
-	if json.Unmarshal(scopeJSON, &scope) != nil {
-		return CommandStatus{}, ErrDatabaseUnavailable
-	}
-	if !grantScopeSubset(ticket.Scope, scope) || !slices.Contains(scope.Actions, "session.create") || !slices.Contains(scope.Workspaces, workspaceID) {
-		return CommandStatus{}, ErrAccessDenied
-	}
-	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, "", workspaceID, digest, orgID, "session.create", postgres.commands.metrics)
+
+	return recordAuthorizedCommand(ctx, transaction, ticket, requestID, "", workspaceID, digest, authority.organization, "session.create", postgres.commands.metrics)
 }
 
 func validateCreatedSession(receipt RelayCommandReceipt) error {

@@ -1507,6 +1507,8 @@ func (server *Server) sendProtocolError(ctx context.Context, live *liveConnectio
 
 func commandErrorCode(err error) string {
 	switch {
+	case errors.Is(err, store.ErrCommandRateLimited):
+		return "rate.limited"
 	case errors.Is(err, files.ErrConflict):
 		return "file.already_bound"
 	case errors.Is(err, files.ErrStale):

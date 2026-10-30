@@ -28,6 +28,7 @@ type Postgres struct {
 	admissionOnce sync.Once
 	admission     chan struct{}
 	commands      commandObservation
+	commandRates  commandRateState
 	approvals     approvalObservation
 	files         fileObservation
 	push          pushObservation
