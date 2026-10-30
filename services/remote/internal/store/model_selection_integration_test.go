@@ -23,6 +23,9 @@ func TestModelSelectionCommandsRequireExplicitAuthorityAndPreserveEvidence(t *te
 		t.Fatal("old ticket inherited new grant action", err)
 	}
 	h.ticket.Scope.Actions = append(h.ticket.Scope.Actions, "session.model.select")
+	if err := h.database.AuthorizeRealtimeSessionRead(h.ctx, h.ticket, h.request.SessionID); err != nil {
+		t.Fatal("current read/selection scope could not read model metadata", err)
+	}
 	status, err := admit(h.ticket, "session.model.select", digest)
 	if err != nil || status.State != "received" {
 		t.Fatal("explicit model-selection permission could not admit", status, err)
@@ -58,6 +61,9 @@ func TestModelSelectionCommandsRequireExplicitAuthorityAndPreserveEvidence(t *te
 	}
 	if _, err := admit(h.ticket, "session.model.select", digest); !errors.Is(err, ErrAccessDenied) {
 		t.Fatal("revoked model authority reconciled through admission", err)
+	}
+	if err := h.database.AuthorizeRealtimeSessionRead(h.ctx, h.ticket, h.request.SessionID); !errors.Is(err, ErrAccessDenied) {
+		t.Fatal("model metadata read retained removed selection authority", err)
 	}
 }
 

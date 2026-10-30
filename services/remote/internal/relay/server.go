@@ -46,7 +46,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.archive.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", creationOptionsCapability, modelSelectionCapability, "session.read.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.archive.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", creationOptionsCapability, modelSelectionCapability, modelCatalogCapability, "session.read.v1"}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -1069,7 +1069,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeCommandReceipt(parent, live, host, envelope)
-		case "session.subscribe", "session.unsubscribe", "session.page", "question.claim", "question.release":
+		case "session.subscribe", "session.unsubscribe", "session.page", "session.models.get", "question.claim", "question.release":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				server.closePolicy(live, "operation denied")
@@ -1096,6 +1096,16 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeQuestionClaimResult(parent, live, envelope)
+		case "session.models.result", "session.models.error":
+			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) || !live.supports(modelCatalogCapability) {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				return
+			}
+			if envelope.RuntimeID != live.runtimeID || envelope.RuntimeEpoch != live.runtimeEpoch || !uuidPattern.MatchString(envelope.RequestID) || !uuidPattern.MatchString(envelope.SubscriptionID) || !uuidPattern.MatchString(envelope.SessionID) || !uuidPattern.MatchString(envelope.SyncID) || envelope.UserID != "" || envelope.DeviceID != "" || envelope.PayloadSHA256 != "" {
+				server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
+				continue
+			}
+			server.routeModelResult(parent, live, envelope)
 		case "session.snapshot", "session.event", "session.checkpoint", "assistant.start", "assistant.chunk", "assistant.end", "session.page.result", "session.fragment", "session.error", "session.closed", "question.snapshot", "question.timed.snapshot":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)

@@ -17,7 +17,8 @@ Host 和手机同时协商 `command.relay.v1`、`session.model.select.v1` 后，
 `reasoning_effort` 可选，存在时必须是非空字符串。provider / model 最长 128 个 UTF-16
 代码单元，effort 最长 64 个；这些值是原生目录标识，payload 不提供 URL、API key 或其他配置字段。
 实际可用性由 Host 当前的 `modelCatalog` 核对，不能通过调用者提供新的 provider 或模型配置。
-目前已有本机 `model.catalog` 调试接口；供手机读取的受限模型目录和 Android 界面仍需后续接入。
+手机协议客户端可先读取[会话授权下的分页模型目录](session-model-catalog.md)，再提交选择。
+本机 `model.catalog` 调试接口仍可使用；Android 界面接入为单独工作。
 
 ## 授权与去重
 

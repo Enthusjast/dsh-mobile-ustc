@@ -792,7 +792,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const collector = new FrameCollector(socket, value => validate(value) || validateApproval(value))
     t.after(() => { socket.terminate() })
     const challenge = await collector.wait(frame => frame.type === 'challenge')
-    const caps = ['approval.signed.v1', 'command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.create.v1', 'session.model.select.v1', 'session.read.v1']
+    const caps = ['approval.signed.v1', 'command.relay.v1', 'connection.heartbeat.v1', 'question.blocking.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.create.v1', 'session.model.select.v1', 'session.models.v1', 'session.read.v1']
     collector.send({ v: 1, type: 'hello.proof', payload: { device_id: deviceId, protocols: [1], capabilities: caps,
       proof: jws(proofKey.privateKey, { alg: 'ES256', typ: 'dsh-relay-handshake-proof+jwt' }, {
         iss: deviceId, aud: 'urn:dsh-mobile-ustc:realtime', challenge_id: challenge.payload.challenge_id,
@@ -835,6 +835,31 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const sessionId = created.session_id
   assert.match(sessionId, /^[0-9a-f-]{36}$/)
   assert.equal((await command('session.list', {})).payload.items.length, beforeCreate + 1)
+  const modelCatalogSubscribe = randomUUID()
+  mobile.send({ v: 1, type: 'session.subscribe', request_id: modelCatalogSubscribe, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 5 } })
+  const modelCatalogSnapshot = await mobile.wait(frame => frame.type === 'session.snapshot' && frame.request_id === modelCatalogSubscribe)
+  let modelCursor: string | null = null
+  const modelChoices: any[] = []
+  do {
+    const modelCatalogRequest = randomUUID()
+    mobile.send({ v: 1, type: 'session.models.get', request_id: modelCatalogRequest, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+      session_id: sessionId, subscription_id: modelCatalogSnapshot.subscription_id,
+      payload: { sync_id: modelCatalogSnapshot.sync_id, limit: 1, ...(modelCursor ? { cursor: modelCursor } : {}) } })
+    const page = await mobile.wait(frame => frame.type === 'session.models.result' && frame.request_id === modelCatalogRequest)
+    assert.equal(page.sync_id, modelCatalogSnapshot.sync_id)
+    assert.ok(page.payload.items.length <= 1)
+    assert.ok(Number.isInteger(page.payload.unavailable_provider_count))
+    modelChoices.push(...page.payload.items)
+    modelCursor = page.payload.next_cursor
+    assert.ok(modelChoices.length <= 20, 'model fixture paging did not terminate')
+  } while (modelCursor)
+  assert.ok(modelChoices.some(item => item.provider.id === 'dsh-m0-test' && item.model.id === 'offline'))
+  assert.ok(modelChoices.some(item => item.provider.id === 'dsh-m0-test' && item.model.id === 'offline-alternative'))
+  assert.equal(new Set(modelChoices.map(item => JSON.stringify([item.provider.id, item.model.id]))).size, modelChoices.length)
+  mobile.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+    session_id: sessionId, subscription_id: modelCatalogSnapshot.subscription_id, payload: {} })
+  await mobile.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === modelCatalogSnapshot.subscription_id)
+  t.diagnostic('The current phone paged both available native models through its authorized session subscription. Pages retained sync identity, omitted private provider configuration and returned explicit unavailable-provider counts before model selection.')
   const selectionRequest = randomUUID()
   const modelSelection = { v: 1, type: 'session.model.select', request_id: selectionRequest, runtime_id: enrollment.runtime_id,
     runtime_epoch: probe.runtime_epoch, session_id: sessionId, payload: { provider: 'dsh-m0-test', model: 'offline' } }
@@ -1202,7 +1227,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
 
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of [marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, ...renewalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, ...credentialSecrets, ...hostResourceSecrets, ticket.ticket]) {
+  for (const secret of ['offline-alternative', marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, ...renewalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, ...credentialSecrets, ...hostResourceSecrets, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
@@ -1588,7 +1613,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
       assert.equal(snapshots.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1,
         'explicit original-ID reconciliation duplicated a native message after recovery')
       const recoveredDump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-      for (const secret of [marker, blockedApproval.marker, runningApproval.marker, (blockedApproval.context.arguments as { command: string }).command, (runningApproval.context.arguments as { command: string }).command])
+      for (const secret of ['offline-alternative', marker, blockedApproval.marker, runningApproval.marker, (blockedApproval.context.arguments as { command: string }).command, (runningApproval.context.arguments as { command: string }).command])
         assert.equal(recoveredDump.includes(secret), false, 'database fault recovery persisted a native command body or full tool arguments')
       t.diagnostic(`During database authority loss, the unspent approved Bash was durably invalidated after ${blockedInvalidationMillis} ms and before its ordinary three-second permit expired; its body never ran. A separately consumed Bash completed once while disconnected, retained an unacknowledged succeeded fact and reconciled it once after restart; exact server acknowledgements cleared both Host reports.`)
       t.diagnostic(`An isolated database connection outage stopped both production relays and closed the old phone; the phone closed in ${closureMillis} ms and database connections were re-enabled after ${outageMillis} ms. Fresh-handshake recovery and original-ID reconciliation completed in ${Date.now() - started} ms. After actual ownership lease expiry, explicit relay restart and new Host/phone handshakes retained the DSH epoch/native session, one durable user message and the original agent_queued command. No route/lease edits or automatic command replay were used.`)

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { modelPageRequest, type ModelPageBinding, type ModelPageRequest, type ModelPage } from './model-catalog.js'
 import { parseCommand, ProbeError, type Command, type Frame } from './protocol.js'
 
 const uuid = z.uuid()
@@ -10,6 +11,7 @@ const base = {
 const requestSchema = z.discriminatedUnion('type', [
   z.strictObject({ ...base, type: z.literal('session.subscribe'), payload: z.strictObject({ max_messages: z.int().min(1).max(100), questions: z.boolean().optional(), timed_questions: z.boolean().optional() }) }),
   z.strictObject({ ...base, type: z.literal('session.unsubscribe'), payload: z.strictObject({}) }),
+  z.strictObject({ ...base, type: z.literal('session.models.get'), payload: modelPageRequest }),
   z.strictObject({ ...base, type: z.literal('session.page'), payload: z.strictObject({
     sync_id: uuid, through_seq: z.int().min(-1), before_seq: z.int().min(0), max_messages: z.int().min(1).max(100),
   }) }),
@@ -20,7 +22,7 @@ type ReadRequest = z.infer<typeof requestSchema>
 
 export interface SessionReaderRuntime {
   epoch: string
-  client: { runtimeId: string }
+  client: { runtimeId: string; modelPage?(binding: ModelPageBinding, request: ModelPageRequest, signal: AbortSignal): Promise<ModelPage> }
   follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal): AsyncIterable<Frame>
   dispatch(command: Command, signal: AbortSignal): Promise<unknown>
   claimQuestion?(sessionId: string, questionId: string, signal: AbortSignal): AsyncIterable<{ remaining_ms: number; expires_at: string }>
@@ -34,6 +36,7 @@ interface Subscription {
   writing: boolean
   finished: boolean
   pages: Set<string>
+  models: Set<string>
   syncId?: string
   claims: Map<string, AbortController>
   usedClaims: Set<string>
@@ -67,10 +70,10 @@ export class RelaySessions {
   private bytes = 0
   private closed = false
 
-  constructor(private readonly runtime: SessionReaderRuntime, private readonly send: (frame: unknown) => Promise<void>, private readonly timedEnabled = false) {}
+  constructor(private readonly runtime: SessionReaderRuntime, private readonly send: (frame: unknown) => Promise<void>, private readonly timedEnabled = false, private readonly modelsEnabled = false) {}
 
   handle(value: unknown): boolean {
-    if (value === null || typeof value !== 'object' || !['session.subscribe', 'session.unsubscribe', 'session.page', 'question.claim', 'question.release'].includes(String((value as { type?: unknown }).type))) return false
+    if (value === null || typeof value !== 'object' || !['session.subscribe', 'session.unsubscribe', 'session.page', 'session.models.get', 'question.claim', 'question.release'].includes(String((value as { type?: unknown }).type))) return false
     const parsed = requestSchema.safeParse(value)
     if (!parsed.success || this.closed) throw new ProbeError('protocol.invalid')
     const request = parsed.data
@@ -82,7 +85,7 @@ export class RelaySessions {
         void this.sendError(request, 'rate.limited')
         return true
       }
-      const subscription: Subscription = { request, abort: new AbortController(), queue: [], bytes: 0, writing: false, finished: false, pages: new Set(), claims: new Map(), usedClaims: new Set() }
+      const subscription: Subscription = { request, abort: new AbortController(), queue: [], bytes: 0, writing: false, finished: false, pages: new Set(), models: new Set(), claims: new Map(), usedClaims: new Set() }
       this.subscriptions.set(request.subscription_id, subscription)
       void this.follow(subscription)
     } else if (!existing || existing.request.session_id !== request.session_id) {
@@ -103,6 +106,13 @@ export class RelaySessions {
         existing.claims.set(request.request_id, abort)
         void this.claim(existing, request, abort)
       }
+    }
+    else if (request.type === 'session.models.get') {
+      if (!this.modelsEnabled || !this.runtime.client.modelPage) throw new ProbeError('protocol.unsupported')
+      if (request.payload.sync_id !== existing.syncId) { void this.sendError(request, 'protocol.resync_required'); return true }
+      if (existing.models.size >= 2 || existing.models.has(request.request_id)) { void this.sendError(request, 'rate.limited'); return true }
+      existing.models.add(request.request_id)
+      void this.models(existing, request)
     }
     else {
       if (existing.pages.size >= 4 || existing.pages.has(request.request_id)) {
@@ -169,6 +179,21 @@ export class RelaySessions {
     }
   }
 
+  private async models(subscription: Subscription, request: Extract<ReadRequest, { type: 'session.models.get' }>): Promise<void> {
+    const signal = AbortSignal.any([subscription.abort.signal, AbortSignal.timeout(3000)])
+    try {
+      const payload = await this.runtime.client.modelPage!({ runtimeId: request.runtime_id, runtimeEpoch: request.runtime_epoch,
+        sessionId: request.session_id, syncId: request.payload.sync_id }, request.payload, signal)
+      if (!signal.aborted) this.enqueue(subscription, this.envelope(request, 'session.models.result', payload, request.payload.sync_id))
+    } catch (error) {
+      if (!subscription.abort.signal.aborted) {
+        const code = signal.aborted ? 'runtime.offline' : this.errorCode(error)
+        try { this.enqueue(subscription, this.envelope(request, 'session.models.error', { code }, request.payload.sync_id)) }
+        catch (failure) { this.fail(subscription, failure) }
+      }
+    } finally { subscription.models.delete(request.request_id) }
+  }
+
   private async page(subscription: Subscription, request: Extract<ReadRequest, { type: 'session.page' }>): Promise<void> {
     try {
       const command = parseCommand({ v: 0, type: 'session.page', request_id: request.request_id,
@@ -219,7 +244,7 @@ export class RelaySessions {
   }
 
   private async sendError(request: ReadRequest, code: string): Promise<void> {
-    try { await this.send(this.envelope(request, 'session.error', { code })) } catch { /* The connection owner handles transport failure. */ }
+    try { await this.send(this.envelope(request, request.type === 'session.models.get' ? 'session.models.error' : 'session.error', { code }, request.type === 'session.models.get' ? request.payload.sync_id : undefined)) } catch { /* The connection owner handles transport failure. */ }
   }
 
   private remove(subscription: Subscription): void {

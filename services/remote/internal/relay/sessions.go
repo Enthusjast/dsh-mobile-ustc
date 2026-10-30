@@ -12,6 +12,7 @@ type sessionSubscription struct {
 	device, host                     *liveConnection
 	ready                            bool
 	pages                            map[string]string
+	models                           map[string]*modelRead
 	fragment                         *sessionFragmentState
 	questions                        bool
 	timedQuestions                   bool
@@ -57,6 +58,10 @@ func (server *Server) routeSessionRead(ctx context.Context, live *liveConnection
 	if envelope.RuntimeID != live.runtimeID || !uuidPattern.MatchString(envelope.RequestID) || !uuidPattern.MatchString(envelope.SessionID) ||
 		envelope.UserID != "" || envelope.DeviceID != "" || envelope.PayloadSHA256 != "" || envelope.SyncID != "" {
 		server.sendProtocolError(ctx, live, "protocol.invalid", &envelope)
+		return
+	}
+	if envelope.Type == "session.models.get" {
+		server.routeModelRead(ctx, live, envelope)
 		return
 	}
 	if envelope.Type != "session.subscribe" {
@@ -350,6 +355,10 @@ func (server *Server) removeSubscriptionLocked(subscription *sessionSubscription
 	if server.subscriptions[subscription.id] != subscription {
 		return false
 	}
+	for _, read := range subscription.models {
+		read.timer.Stop()
+	}
+	subscription.models = nil
 	delete(server.subscriptions, subscription.id)
 	delete(subscription.device.subscriptions, subscription.id)
 	delete(subscription.host.subscriptions, subscription.id)

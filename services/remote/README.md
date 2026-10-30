@@ -1,5 +1,7 @@
 # Remote service foundation
 
+The additive [session model catalog](../../docs/session-model-catalog.md) pages current native provider/model/effort metadata over `session.models.v1`, with current read/selection authority and subscription binding on requests and responses. Queries have finite concurrent routes and timeouts; late results cannot claim a replacement route. Host lookups coalesce until the native provider actually settles, and configuration/defaults/provider failure messages stay private. No additional migration is required.
+
 The additive [remote model selection command](../../docs/session-model-selection.md) uses `session.model.select.v1`, explicit session/workspace authority, epoch-bound JCS digests and the existing durable command lifecycle. Host selection rechecks the native catalog and settles only after its session checkpoint. Apply migration 037 before deployment; existing grants are not expanded automatically.
 
 Pending enrollment confirmations [recheck their pairing deadline after database waits](../../docs/enrollment-expiry.md), including initial grant/audit writes before commit. Expired attempts cannot activate a profile or retain success evidence; approved historical retries remain available. No migration is required.

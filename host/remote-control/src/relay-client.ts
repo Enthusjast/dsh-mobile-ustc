@@ -18,6 +18,7 @@ import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
 import type { HostExportPeer } from './relay-exports.js'
 import { EXPORT_CAPABILITY } from './export-protocol.js'
 import { bindNativeObservations, HOST_OBSERVATIONS_CAPABILITY, type NativeObservations } from './native-observations.js'
+import { MODEL_CATALOG_CAPABILITY, type ModelPage, type ModelPageBinding, type ModelPageRequest } from './model-catalog.js'
 import { HostConnectionLease } from './connection-lease.js'
 import { HostReconnectBackoff } from './relay-backoff.js'
 
@@ -136,6 +137,7 @@ export interface HostRelayOptions {
       runtimeId: string
       sessionCatalog(signal: AbortSignal, sessionIds?: readonly string[]): Promise<SessionCatalogItem[]>
       watchSessionCatalog(onChange: (change: SessionCatalogChange) => void): () => void
+      modelPage?(binding: ModelPageBinding, request: ModelPageRequest, signal: AbortSignal): Promise<ModelPage>
       creationOptions?(): SessionCreationOptions
       observations?: NativeObservations
     }
@@ -477,6 +479,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     if (options.files) offered.push(FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY)
     if (options.files && options.runtime.reconcileFileMessage) offered.push(FILE_RECONCILE_CAPABILITY)
     if(options.exports)offered.push(EXPORT_CAPABILITY)
+    if (options.runtime.client.modelPage) offered.push(MODEL_CATALOG_CAPABILITY)
     if (options.runtime.client.observations) offered.push(HOST_OBSERVATIONS_CAPABILITY)
     connection.signal.throwIfAborted()
     const proof = await withAbort(proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered), connection.signal)
@@ -544,7 +547,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       follow: (command, signal) => options.runtime.follow(command, signal),
       dispatch: (command, signal) => options.runtime.dispatch(command, signal, { userId: 'relay-read', deviceId: 'relay-read' }),
       ...(options.runtime.claimQuestion ? { claimQuestion: (sessionId: string, questionId: string, signal: AbortSignal) => options.runtime.claimQuestion!(sessionId, questionId, signal) } : {}),
-    }, sendCurrent, ack.data.payload.capabilities.includes('question.timed.v1'))
+    }, sendCurrent, ack.data.payload.capabilities.includes('question.timed.v1'), ack.data.payload.capabilities.includes(MODEL_CATALOG_CAPABILITY))
     const pendingCatalogAcks = new Map<string, { count: number; resolve(): void; reject(error: Error): void }>()
     let catalogRefresh: Promise<void> | undefined
     let catalogDirty = false

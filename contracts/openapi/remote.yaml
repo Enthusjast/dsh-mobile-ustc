@@ -720,7 +720,13 @@ paths:
         Devices may send a v=1 `message.submit` frame with request_id, runtime_id, session_id, and
         payload {mode: queue|steer, content: [{type: text, text: ...}]}. Text content is bounded to
         32,768 Unicode characters per block and 16 blocks per frame; the complete UTF-8 frame is
-        limited to 64 KiB. Both peers may additionally negotiate `session.model.select.v1` for epoch-bound model selection with explicit session.model.select permission; provider/model/optional reasoning_effort are checked against the current native catalog and success waits for its checkpoint. Both peers may additionally negotiate `session.cancel.v1` for an
+        limited to 64 KiB. The additive session.models.v1 extension provides session.models.get/result/error
+        over an active session.read subscription, requiring both session.read and session.model.select.
+        Requests carry {sync_id, limit: 1..50, cursor?}; responses page provider/model/effort identifiers
+        and labels, next_cursor and unavailable_provider_count within 32 KiB. Cursors bind the current
+        runtime/epoch/session/sync and catalog digest. Provider settings, defaults and failure messages
+        are omitted. Each request and response rechecks current authority; bounded internal correlations
+        and timeouts discard late replies after cancellation or replacement. Both peers may additionally negotiate `session.model.select.v1` for epoch-bound model selection with explicit session.model.select permission; provider/model/optional reasoning_effort are checked against the current native catalog and success waits for its checkpoint. Both peers may additionally negotiate `session.cancel.v1` for an
         epoch-bound `session.cancel` with an empty payload and explicit session.cancel action.
         Negotiating `session.create.v1` allows `session.create` with the current runtime_epoch and
         payload {workspace_id, preset}, before a session UUID exists. It requires session.create

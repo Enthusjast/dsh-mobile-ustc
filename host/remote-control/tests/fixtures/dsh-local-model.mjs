@@ -13,7 +13,7 @@ class LocalModel extends LlmAdapter {
   }
 
   providerInfo(provider) { return { id: provider, name: 'Local DSH integration fixture' } }
-  async listModels(provider) { return [{ provider, id: 'offline', name: 'Offline fixture' }] }
+  async listModels(provider) { return [{ provider, id: 'offline', name: 'Offline fixture' }, { provider, id: 'offline-alternative', name: 'Alternative offline fixture' }] }
   async *stream(options) {
     options.signal?.throwIfAborted()
     const userText = options.messages

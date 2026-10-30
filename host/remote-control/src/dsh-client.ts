@@ -14,6 +14,7 @@ import { sessionAttachmentSource,sessionAttachmentManifest } from './session-fil
 import { ExportDirectory } from './export-directory.js'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
+import { readModelPage, type ModelPageBinding, type ModelPageRequest } from './model-catalog.js'
 import { NativeObservations } from './native-observations.js'
 
 export type DshPromptPart = Extract<PromptContentPart, { type: 'text' | 'file' }>
@@ -323,6 +324,11 @@ export class DshClient {
         })),
       })),
     }
+  }
+
+  modelPage(binding: ModelPageBinding, request: ModelPageRequest, signal: AbortSignal) {
+    if (binding.runtimeId !== this.runtimeId) throw new ProbeError('runtime.changed')
+    return readModelPage(this.controller, () => this.controller.modelCatalog(), binding, request, signal)
   }
 
   async selectModel(id: SessionId, selection: { provider: string; model: string; reasoning_effort?: string }, signal?: AbortSignal) {
