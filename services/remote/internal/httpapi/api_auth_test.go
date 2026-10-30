@@ -399,6 +399,53 @@ func TestProtectedRoutesRequireActiveDeviceAndBindCommandStatusToIt(t *testing.T
 			t.Fatal("known-resource routes did not select their own operations")
 		}
 	})
+	t.Run("own device directory derives identity and rejects caller selectors", func(t *testing.T) {
+		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}})
+		repo.activeDeviceErr = nil
+		repo.deviceDirectory = store.DeviceDirectory{Items: []store.DeviceSummary{{ID: deviceID, Name: "Current phone", KeyVersion: 1, State: "active", Current: true, CreatedAt: now}}}
+		nonce := ""
+		sequence := 0
+		send := func(token, path string) *httptest.ResponseRecorder {
+			sequence++
+			uri := "https://api.example.edu/v1/devices" + path
+			response := sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("directory-proof-%04d", sequence), nonce)
+			nonce = response.Header().Get("DPoP-Nonce")
+			if response.Code == 401 {
+				sequence++
+				response = sendDPoPRequest(t, api, token, proofKey, proofJWK, http.MethodGet, uri, fmt.Sprintf("directory-proof-%04d", sequence), nonce)
+				nonce = response.Header().Get("DPoP-Nonce")
+			}
+			return response
+		}
+		response := send(access, "?limit=2&cursor=opaque")
+		if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || repo.deviceDirectoryIdentity != (store.UserIdentity{Issuer: issuer, Subject: "user-ustc-123"}) || repo.deviceDirectoryDevice != deviceID || repo.deviceDirectoryJKT != proofJKT || repo.deviceDirectoryLimit != 2 || repo.deviceDirectoryCursor != "opaque" {
+			t.Fatal("directory lost its authenticated caller", response.Code)
+		}
+		before := repo.deviceDirectoryCalls
+		for _, query := range []string{"?user_id=attacker", "?device_id=attacker", "?limit=0", "?limit=101", "?limit=01", "?limit=2&limit=3", "?cursor=", "?x=%zz"} {
+			if response := send(access, query); response.Code != 400 || repo.deviceDirectoryCalls != before {
+				t.Fatal("invalid directory selectors reached repository", response.Code)
+			}
+		}
+		if response := send(hostAccess, ""); response.Code != 403 || repo.deviceDirectoryCalls != before {
+			t.Fatal("host client enumerated phone devices", response.Code)
+		}
+		repo.activeDeviceErr = store.ErrDeviceNotFound
+		if response := send(access, ""); response.Code != 403 || repo.deviceDirectoryCalls != before {
+			t.Fatal("unregistered or revoked key enumerated devices", response.Code)
+		}
+		repo.activeDeviceErr = nil
+		for _, failure := range []struct {
+			err    error
+			status int
+		}{{store.ErrAccessDenied, 403}, {store.ErrDeviceDirectoryInvalid, 400}, {store.ErrDatabaseUnavailable, 503}} {
+			repo.deviceDirectoryErr = failure.err
+			if response := send(access, ""); response.Code != failure.status || strings.Contains(response.Body.String(), "Current phone") {
+				t.Fatal("directory failure disclosed records", response.Code)
+			}
+		}
+		repo.deviceDirectoryErr = nil
+	})
 	t.Run("APK release selection binds current organization and phone proof", func(t *testing.T) {
 		api := New(repo, identity, Config{HostClientIDs: []string{"host-client"}, Releases: releaseCatalog(t)})
 		repo.releaseUser = "22222222-2222-4222-8222-222222222222"

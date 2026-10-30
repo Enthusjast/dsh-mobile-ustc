@@ -34,6 +34,28 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
   /v1/devices:
+    get:
+      description: List only the authenticated account's phone devices, including revoked records. Requires a currently active registered phone proof key; host clients and unregistered or revoked keys are denied. No runtime grant or organization membership is required. The cursor is an opaque metadata locator bound to the account and current proof key, not an authorization credential. Unknown or repeated query selectors are rejected.
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: cursor
+          schema: { type: string, minLength: 1, maxLength: 1024 }
+      responses:
+        '200':
+          description: Bounded own-device metadata in descending creation time and UUID order. Pages recheck current authority and may observe later status changes; they are not a historical snapshot. Responses contain no keys, credential material or push addresses.
+          headers:
+            DPoP-Nonce: { $ref: '#/components/headers/DPoP-Nonce' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDirectoryResponse'
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
     post:
       description: Phone-client registration. Separately allowlisted host OAuth clients cannot register phone credentials.
       requestBody:
@@ -1222,6 +1244,34 @@ components:
                 properties:
                   organization_id: { type: string, format: uuid }
                   role: { enum: [member, admin] }
+    DeviceDirectoryResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { const: true }
+        data:
+          type: object
+          additionalProperties: false
+          required: [items, next_cursor]
+          properties:
+            next_cursor: { type: [string, 'null'], maxLength: 1024 }
+            items:
+              type: array
+              maxItems: 100
+              items:
+                type: object
+                additionalProperties: false
+                required: [device_id, name, key_version, state, is_current, created_at, last_seen_at, revoked_at]
+                properties:
+                  device_id: { type: string, format: uuid }
+                  name: { type: string, minLength: 1, maxLength: 160 }
+                  key_version: { type: integer, minimum: 1, maximum: 9007199254740991 }
+                  state: { enum: [active, revoked] }
+                  is_current: { type: boolean }
+                  created_at: { type: string, format: date-time }
+                  last_seen_at: { type: [string, 'null'], format: date-time }
+                  revoked_at: { type: [string, 'null'], format: date-time }
     CurrentDeviceResponse:
       type: object
       additionalProperties: false

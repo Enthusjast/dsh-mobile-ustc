@@ -324,6 +324,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     }),
   }), 201)
   assert.deepEqual(await phone('GET', '/v1/devices/current'), { state: 'unregistered' })
+  await phone('GET', '/v1/devices', undefined, 403)
   const releaseQuery = `/v1/app/releases/latest?organization_id=${orgId}&version_code=1&protocol_version=1&android_api=26`
   await phone('GET', releaseQuery, undefined, 403)
   const device = await register(phone, phoneKey, approvalKey, 'phone')
@@ -333,6 +334,31 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   } })
   const siblingDevice = await register(siblingPhone, siblingKey, siblingApprovalKey, 'phone')
   await register(outsider, outsiderKey, outsiderApprovalKey, 'outsider')
+  const deviceContract = parseYaml(await readFile('contracts/openapi/remote.yaml', 'utf8'))
+  const deviceValidator = new Ajv2020({ strict: false })
+  deviceValidator.addFormat('date-time', value => Number.isFinite(Date.parse(value)))
+  deviceValidator.addFormat('uuid', /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  const validateDevices = deviceValidator.compile({ $ref: '#/components/schemas/DeviceDirectoryResponse', components: deviceContract.components })
+  const listedDevices: Array<{ device_id: string; state: string; is_current: boolean }> = []
+  let devicePage = await phone('GET', '/v1/devices?limit=1')
+  assert.equal(validateDevices({ ok: true, data: devicePage }), true, JSON.stringify(validateDevices.errors))
+  assert.ok(devicePage.next_cursor)
+  await siblingPhone('GET', `/v1/devices?cursor=${encodeURIComponent(devicePage.next_cursor)}`, undefined, 403)
+  for (;;) {
+    listedDevices.push(...devicePage.items)
+    if (!devicePage.next_cursor) break
+    assert.ok(listedDevices.length <= 2, 'device directory failed to advance its cursor')
+    devicePage = await phone('GET', `/v1/devices?limit=1&cursor=${encodeURIComponent(devicePage.next_cursor)}`)
+    assert.equal(validateDevices({ ok: true, data: devicePage }), true, JSON.stringify(validateDevices.errors))
+  }
+  assert.deepEqual(new Set(listedDevices.map(item => item.device_id)), new Set([device.device_id, siblingDevice.device_id]))
+  assert.equal(listedDevices.filter(item => item.is_current).length, 1)
+  assert.equal(listedDevices.find(item => item.is_current)?.device_id, device.device_id)
+  const listedSiblingDeviceId = listedDevices.find(item => !item.is_current)!.device_id
+  assert.equal((await outsider('GET', '/v1/devices')).items.length, 1)
+  await owner('GET', '/v1/devices', undefined, 403)
+  await phone('GET', `/v1/devices?user_id=${outsiderId}`, undefined, 400)
+  t.diagnostic('A registered phone paged only its own device metadata before any runtime grant; unregistered/host clients, foreign account selectors and another proof key using its cursor were denied.')
   // No host has been enrolled and no runtime grant exists yet. APK metadata
   // depends on the current organization/account/phone, independently of lists.
   const publication = await phone('GET', releaseQuery)
@@ -1107,8 +1133,12 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
   const deviceRevokedAt = Date.now()
-  await phone('DELETE', `/v1/devices/${siblingDevice.device_id}`)
+  await phone('DELETE', `/v1/devices/${listedSiblingDeviceId}`)
   assert.equal((await siblingPhone('GET', '/v1/devices/current')).state, 'revoked')
+  await siblingPhone('GET', '/v1/devices', undefined, 403)
+  const afterDeviceRevocation = await phone('GET', '/v1/devices')
+  assert.equal(validateDevices({ ok: true, data: afterDeviceRevocation }), true, JSON.stringify(validateDevices.errors))
+  assert.equal(afterDeviceRevocation.items.find((item: any) => item.device_id === listedSiblingDeviceId)?.state, 'revoked')
   await siblingMobile.wait(frame => frame.type === 'access.revoked' && frame.payload.code === 'access.revoked')
   await until(async () => siblingMobile.closed ? true : undefined, 'idle revoked device socket close', 5000)
   assert.ok(Date.now() - deviceRevokedAt < 5000, 'idle device revocation exceeded five seconds')
