@@ -84,6 +84,26 @@ export async function apply(ctx: Context, config: Config = {}, credentials?: Hos
 async function applyInternal(ctx: Context, config: Config, credentials?: HostCredentialProvider, signedOptions?: SignedApprovalOptions,
   journalKeyProtector?: JournalKeyProtector, enrollment?: HostEnrolledRuntimeOptions): Promise<void> {
   if (!config.enabled) return
+  if (config.requireProtectedJournalKey && !journalKeyProtector) throw new Error('remote-control requires a journal key protector')
+  // All listener/guard effects need their own fiber, including when the public
+  // apply function is invoked directly in a context that owns the native host.
+  const parentFiber = ctx.fiber
+  let setupError: unknown
+  const scope = ctx.plugin({ name: 'ustc-remote-control-owner',
+    inject: signedOptions && !signedOptions.workingDirectory ? [...inject, 'workingDirectory'] : inject,
+    apply(owned: Context) {
+      const task = applyOwned(owned, config, parentFiber, credentials, signedOptions, journalKeyProtector, enrollment)
+      void task.catch(error => { setupError = error })
+      return task
+    },
+  })
+  try { await scope.await() }
+  catch (error) { throw setupError ?? error }
+}
+
+async function applyOwned(ctx: Context, config: Config, parentFiber: Context['fiber'], credentials?: HostCredentialProvider, signedOptions?: SignedApprovalOptions,
+  journalKeyProtector?: JournalKeyProtector, enrollment?: HostEnrolledRuntimeOptions): Promise<void> {
+  if (!config.enabled) return
   const options = Config(config)
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.runtimeId!)) {
     throw new Error('remote-control requires a stable per-profile runtimeId UUID')
@@ -115,8 +135,8 @@ async function applyInternal(ctx: Context, config: Config, credentials?: HostCre
   const client = new DshClient(ctx, options.runtimeId!, workspaces, presets)
   const keyOpen = new AbortController()
   const ownerFiber = ctx.fiber
-  ctx.on('internal/plugin', fiber => { if (fiber === ownerFiber && fiber.uid === null) keyOpen.abort() }, { global: true })
-  if (ownerFiber.uid === null) keyOpen.abort()
+  ctx.on('internal/plugin', fiber => { if ((fiber === ownerFiber || fiber === parentFiber) && fiber.uid === null) keyOpen.abort() }, { global: true })
+  if (ownerFiber.uid === null || parentFiber.uid === null) keyOpen.abort()
   const credentialSignal = credentials?.signal
   if (credentialSignal) {
     const cancelled = () => keyOpen.abort()
@@ -163,22 +183,38 @@ async function applyInternal(ctx: Context, config: Config, credentials?: HostCre
         throw error
       }
       return async () => {
+        // Close admission and pending interactions synchronously. Transport and
+        // file cleanup may still need asynchronous work after account retirement.
+        runtime?.close()
+        signed?.close()
         try { await relay?.close() }
         finally {
           try { await server?.close() }
-          finally { runtime?.close(); await runtime?.exports.close(); signed?.close(); journal.close() }
+          finally {
+            try { await runtime?.exports.close() }
+            finally { journal.close() }
+          }
         }
       }
     } catch (error) {
       runtime?.close()
-      await runtime?.exports.close()
-      signed?.close()
-      journal.close()
+      try { await runtime?.exports.close() }
+      finally { signed?.close(); journal.close() }
       throw error
     }
   }, 'remote-control.debug')
-  try { ctx.effect(() => () => keyOpen.abort(), 'remote-control.key-open') }
+  // This is our dedicated child fiber. Dispose listeners and guards along with
+  // endpoints, without disposing the distribution's parent or native DSH host.
+  const retire = () => {
+    if (ownerFiber.uid !== null) void Promise.resolve().then(() => ownerFiber.dispose()).catch(() => {})
+  }
+  keyOpen.signal.addEventListener('abort', retire, { once: true })
+  try { ctx.effect(() => () => {
+    keyOpen.signal.removeEventListener('abort', retire)
+    keyOpen.abort()
+  }, 'remote-control.key-open') }
   catch (error) { keyOpen.abort(); throw error }
+  if (keyOpen.signal.aborted) retire()
   await startup
 }
 

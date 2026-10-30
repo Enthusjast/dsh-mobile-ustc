@@ -604,6 +604,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     `const path=args[4]==='fixture-account'?${JSON.stringify(journalProtectorFile)}:null;if(!path)process.exit(2)`,
     "process.stdout.write(fs.readFileSync(path).toString('base64')+'\\n')", '',
   ].join('\n'), { mode: 0o700 })
+  const accountRetireFile = join(root, 'retire-host-account.json'), accountRetireReport = join(root, 'retired-native-state.json')
   const checkpointFailureFile = join(root, 'inject-checkpoint-failure')
   const checkpointFailureSecret = `PRIVATE_CHECKPOINT_FAILURE_${randomUUID()}`
   await writeFile(wrapper, [
@@ -623,8 +624,9 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     `const bindingStore=enrollmentClient?new HostEnrollmentBindingStore({path:${JSON.stringify(bindingPath)},client:enrollmentClient,protector:enrollmentProtector}):null`,
     `const signed={hostId:${JSON.stringify(persistedHostId)},installationId:${JSON.stringify(persistedInstallationId)},policyVersion:7,requiredAssurance:{profile:'fixture/step-up',max_auth_age_seconds:60},authorities:[${JSON.stringify(authority)}],requiresApproval:execution=>['bash','pwsh','run_code'].includes(execution.name)}`,
     "const plugin=bindingStore?createEnrolledRemoteControlPlugin({client:enrollmentClient,binding:bindingStore,credentials:credentialProvider,profileRef:'e2e'},signed,journalProtector):createRemoteControlPlugin(credentialProvider,signed,journalProtector)",
+    `function watchAccountRetirement(ctx){let checking=false,ended=false;const timer=setInterval(async()=>{if(checking||ended)return;checking=true;try{const input=JSON.parse(await readFile(${JSON.stringify(accountRetireFile)},'utf8'));ended=true;clearInterval(timer);const agent=ctx.agents.get(input.native_id);owner.abort();await new Promise(resolve=>setImmediate(resolve));const persisted=agent?await ctx.sessions.flush(agent.session):false;await writeFile(${JSON.stringify(accountRetireReport)},JSON.stringify({same_agent:!!agent&&ctx.agents.get(input.native_id)===agent,persisted:!!persisted}),{mode:0o600})}catch(error){if(error.code!=='ENOENT'){ended=true;clearInterval(timer)}}finally{checking=false}},25);timer.unref();return()=>{ended=true;clearInterval(timer)}}`,
     'export const {name,inject}=plugin',
-    `export function apply(ctx,config){ctx.effect(()=>()=>{owner.abort();bindingStore?.close();enrollmentClient?.close();credentialProvider.close();resourceAccount.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
+    `export function apply(ctx,config){ctx.effect(()=>watchAccountRetirement(ctx));ctx.effect(()=>()=>{owner.abort();bindingStore?.close();enrollmentClient?.close();credentialProvider.close();resourceAccount.close();localInstallation?.close();localInstallationStore?.close();journalMaster?.fill(0)});ctx.effect(()=>{const original=ctx.sessions.flush.bind(ctx.sessions);ctx.sessions.flush=async session=>{let fail=false;try{await readFile(${JSON.stringify(checkpointFailureFile)});fail=true}catch(error){if(error.code!=='ENOENT')throw error}if(fail)throw new Error(${JSON.stringify(checkpointFailureSecret)});return original(session)};return()=>{ctx.sessions.flush=original}});ctx.on('tools/execute',async(exec,next)=>{if(exec.name==='bash'&&exec.arguments.command.includes('approval-revoke.txt')){await writeFile(${JSON.stringify(join(workspace,'approval-revoke-held'))},'held');const signal=exec.signal;await new Promise(resolve=>{const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);resolve()};const timer=setTimeout(abort,30000);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort()})}return next()},{prepend:true});return plugin.apply(ctx,config)}`, '',
   ].join('\n'), { mode: 0o600 })
   const patch = join(root, 'host.patch.yml')
   const standardPreset = await readFile(join(dirname(require.resolve('@deepseek-ai/dsh-web-app/package.json')), 'presets/standard.patch.yml'), 'utf8')
@@ -1297,6 +1299,24 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   ownerReader.send({ v: 1, type: 'session.subscribe', request_id: ownerReadRequest, runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 5 } })
   await ownerReader.wait(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
   t.diagnostic('The installation owner paged both profiles and retired the fixture sibling through the scoped API. Exact retry wrote one audit, every relay acknowledged, and the same real DSH Host connection served a new owner-phone native snapshot afterward. The shared installation and primary profile stayed active.')
+  if (process.env.REMOTE_TEST_HOST_ACCOUNT_RETIRE === '1') {
+    const nativeId = query(`select dsh_session_id from sessions where id='${sessionId}'`)
+    await writeFile(accountRetireFile, JSON.stringify({ native_id: nativeId }), { mode: 0o600, flag: 'wx' })
+    await until(async () => {
+      dsh.check()
+      try { await lstat(socketPath); return undefined } catch (cause) { if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return true; throw cause }
+    }, 'old account plugin IPC removed', 5000)
+    await until(async () => query(`select connection_id is null from runtimes where id='${enrollment.runtime_id}'`) === 't' ? true : undefined,
+      'account-retired Host detached', 5000)
+    const native = await until(async () => { try { return JSON.parse(await readFile(accountRetireReport, 'utf8')) } catch { return undefined } }, 'native DSH persistence after account retirement', 5000)
+    assert.deepEqual(native, { same_agent: true, persisted: true })
+    assert.equal(query(`select status from users where id='${ownerId}'`), 'active')
+    assert.equal(query(`select revoked_at is null from installations where id='${listedInstallationId}'`), 't')
+    assert.equal((await ownerPhone('GET', installationRuntimePath)).items.find((item: any) => item.runtime_id === enrollment.runtime_id)?.state, 'active')
+    dsh.check()
+    t.diagnostic('Cancelling the fixture account source retired the enrolled normal plugin, removed its IPC endpoint and detached its Host connection. The npm DSH process kept the same native Agent and completed a fresh persistence checkpoint; the server account and installation stayed active. Local retirement did not impersonate server revocation.')
+    return
+  }
   // Both management paths must retire a credential that is still within its TTL.
   const cachedDigest = createHash('sha256').update(replayCredentialSecret).digest('hex')
   assert.equal(query(`select expires_at>clock_timestamp() from host_connection_credentials where token_sha256=decode('${cachedDigest}','hex')`), 't',

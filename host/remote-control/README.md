@@ -144,3 +144,10 @@ The [Host resource JWT provider](../../docs/host-resource-jwt.md) can verify an
 existing account's DPoP-bound access token against a configured issuer key set
 before enrollment and credential acquisition. The login/refresh source and
 the issuer-to-key-set trust configuration still come from the distribution.
+
+Ending the credential account lifetime now retires a dedicated plugin resource
+scope, including its local IPC, followers, pending interactions, journal and
+native listeners. The parent DSH host and Agent remain available. Explicit
+reload with a new account lifetime rechecks binding and starts a new epoch;
+transport reconnect alone keeps the ordinary existing runtime. See the
+[account lifecycle boundary](../../docs/host-relay-lifecycle.md).
