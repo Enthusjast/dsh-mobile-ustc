@@ -47,7 +47,7 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var capabilityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.archive.v1", "session.cancel.v1", "session.catalog.v1", "session.create.v1", creationOptionsCapability, modelSelectionCapability, modelCatalogCapability, "session.read.v1"}
+var supportedCapabilities = []string{"command.relay.v1", "connection.heartbeat.v1", "question.blocking.v1", "question.timed.v1", "session.archive.v1", "session.cancel.v1", "session.catalog.v1", directoryMetadataCapability, "session.create.v1", creationOptionsCapability, modelSelectionCapability, modelCatalogCapability, "session.read.v1", changesCapability, sessionForkCapability, messageActionsCapability}
 var errRelayQueueFull = errors.New("relay: connection send queue is full")
 
 type Repository interface {
@@ -61,6 +61,8 @@ type Repository interface {
 	DetachRuntimeConnection(context.Context, string, string, string, string) error
 	RecordRealtimeCommand(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error)
 	RecordRealtimeSessionCreate(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
+	RecordRealtimeSessionFork(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error)
+	AuthorizeRealtimeSessionFork(context.Context, store.TicketRedemption, string, string) error
 	RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error)
 	MarkRealtimeCommandUnknown(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error)
 	SyncRealtimeSessionCatalog(context.Context, store.RuntimeConnection, int64, bool, []store.SessionCatalogItem) error
@@ -89,6 +91,7 @@ type Server struct {
 	catalogBytes         int
 	creationOptionsBytes int
 	subscriptions        map[string]*sessionSubscription
+	readerOperations     map[string]*readerOperation
 	approvals            *approvalRouter
 	fileHandoffs         *files.Handoffs
 	fileMessages         fileMessageRecorder
@@ -128,6 +131,7 @@ type liveConnection struct {
 	commandWindowCount     int
 	catalogSnapshotID      string
 	catalogMode            string
+	catalogMetadataVersion int
 	catalogNextIndex       int
 	catalogBytes           int
 	catalogItems           []store.SessionCatalogItem
@@ -232,7 +236,7 @@ func (item *messageContent) UnmarshalJSON(raw []byte) error {
 			return err
 		}
 		*item = messageContent{Type: value.Type, Text: value.Text}
-	case "file":
+	case "file", "image":
 		var value struct {
 			Type   string `json:"type"`
 			FileID string `json:"file_id"`
@@ -257,13 +261,57 @@ type commandReceiptPayload struct {
 	PayloadSHA256  string                    `json:"payload_sha256"`
 	WorkspaceID    string                    `json:"workspace_id,omitempty"`
 	CreatedSession *store.SessionCatalogItem `json:"created_session,omitempty"`
+	ChildSessionID string                    `json:"child_session_id,omitempty"`
+	ForkOutcome    *store.SessionForkOutcome `json:"fork_outcome,omitempty"`
+	CommandType    string                    `json:"command_type,omitempty"`
 }
 
 type sessionCatalogPayload struct {
-	Mode     string                     `json:"mode"`
-	Index    *int                       `json:"index"`
-	Complete *bool                      `json:"complete"`
-	Items    []store.SessionCatalogItem `json:"items"`
+	Mode            string                     `json:"mode"`
+	Index           *int                       `json:"index"`
+	Complete        *bool                      `json:"complete"`
+	Items           []store.SessionCatalogItem `json:"items"`
+	MetadataVersion *int                       `json:"metadata_version,omitempty"`
+}
+
+func (payload *sessionCatalogPayload) UnmarshalJSON(raw []byte) error {
+	type plain sessionCatalogPayload
+	var value struct {
+		plain
+		MetadataVersion json.RawMessage `json:"metadata_version"`
+		Items           []struct {
+			store.SessionCatalogItem
+			Metadata json.RawMessage `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := decodePayload(raw, &value); err != nil {
+		return err
+	}
+	parsed := sessionCatalogPayload(value.plain)
+	if value.MetadataVersion != nil {
+		var version int
+		if json.Unmarshal(value.MetadataVersion, &version) != nil || version != 1 {
+			return errors.New("relay: invalid catalog metadata version")
+		}
+		parsed.MetadataVersion = &version
+	}
+	if value.Items != nil {
+		if len(value.Items) > 256 {
+			return errors.New("relay: invalid catalog item count")
+		}
+		parsed.Items = make([]store.SessionCatalogItem, len(value.Items))
+		for index, item := range value.Items {
+			if parsed.MetadataVersion == nil && item.Metadata != nil {
+				return errors.New("relay: unversioned catalog metadata")
+			}
+			if item.Metadata != nil && json.Unmarshal(item.Metadata, &item.SessionCatalogItem.Metadata) != nil {
+				return errors.New("relay: invalid catalog metadata")
+			}
+			parsed.Items[index] = item.SessionCatalogItem
+		}
+	}
+	*payload = parsed
+	return nil
 }
 
 type normalizedMessageSubmit struct {
@@ -300,11 +348,11 @@ func (server *Server) capabilities() []string {
 	if server.fileHandoffs != nil {
 		capabilities = append(capabilities, files.HandoffCapability)
 		if server.fileMessages != nil {
-			capabilities = append(capabilities, files.MessageCapability, files.ReconcileCapability)
+			capabilities = append(capabilities, files.MessageCapability, files.ReconcileCapability, imageMessageCapability)
 		}
 	}
 	if server.exports != nil {
-		capabilities = append(capabilities, files.ExportCapability)
+		capabilities = append(capabilities, files.ExportCapability, sessionMediaCapability)
 	}
 	return capabilities
 }
@@ -596,6 +644,7 @@ func (server *Server) unregisterConnection(live *liveConnection) {
 	}
 	live.catalogSnapshotID = ""
 	live.catalogMode = ""
+	live.catalogMetadataVersion = 0
 	live.catalogNextIndex = 0
 	live.catalogBytes = 0
 	live.catalogItems = nil
@@ -1083,7 +1132,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 			}) != nil {
 				return
 			}
-		case "message.submit", "session.cancel", "session.archive", "session.model.select", "session.create", "session.create.options.get", "question.answer", "question.timed.answer":
+		case "message.submit", "session.cancel", "session.archive", "session.model.select", "session.create", "session.fork", "session.create.options.get", "question.answer", "question.timed.answer":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				server.closePolicy(live, "operation denied")
@@ -1107,6 +1156,8 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				server.readCreationOptions(parent, live, envelope)
 			} else if envelope.Type == "session.create" {
 				server.routeSessionCreate(parent, live, envelope)
+			} else if envelope.Type == "session.fork" {
+				server.routeSessionFork(parent, live, envelope)
 			} else {
 				server.routeSessionCommand(parent, live, envelope)
 			}
@@ -1127,7 +1178,7 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeCommandReceipt(parent, live, host, envelope)
-		case "session.subscribe", "session.unsubscribe", "session.page", "session.models.get", "question.claim", "question.release":
+		case "session.subscribe", "session.unsubscribe", "session.page", "session.models.get", "question.claim", "question.release", "session.changes.get", "session.changes.patch.get", "session.message.preview.get", "session.message.preview.confirm", "session.media.resolve":
 			if live.peer.role != "device" {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
 				server.closePolicy(live, "operation denied")
@@ -1142,9 +1193,16 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				server.sendProtocolError(parent, live, "rate.limited", &envelope)
 				continue
 			}
-			if envelope.Type == "question.claim" || envelope.Type == "question.release" {
+			switch envelope.Type {
+			case "question.claim", "question.release":
 				server.routeQuestionClaim(parent, live, envelope)
-			} else {
+			case "session.changes.get", "session.changes.patch.get":
+				server.routeChangesRead(parent, live, envelope)
+			case "session.message.preview.get", "session.message.preview.confirm":
+				server.routeMessagePreview(parent, live, envelope)
+			case "session.media.resolve":
+				server.routeMediaResolve(parent, live, envelope)
+			default:
 				server.routeSessionRead(parent, live, envelope)
 			}
 		case "question.claimed", "question.claim.closed":
@@ -1154,6 +1212,20 @@ func (server *Server) runHeartbeat(parent context.Context, live *liveConnection,
 				return
 			}
 			server.routeQuestionClaimResult(parent, live, envelope)
+		case "session.changes.result", "session.changes.error", "session.changes.patch.result", "session.changes.patch.error", "session.message.preview.result", "session.message.preview.error", "session.media.result", "session.media.error":
+			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) {
+				server.sendProtocolError(parent, live, "access.denied", &envelope)
+				server.closePolicy(live, "operation denied")
+				return
+			}
+			switch envelope.Type {
+			case "session.changes.result", "session.changes.error", "session.changes.patch.result", "session.changes.patch.error":
+				server.routeChangesResult(parent, live, envelope)
+			case "session.message.preview.result", "session.message.preview.error":
+				server.routeMessagePreviewResult(parent, live, envelope)
+			case "session.media.result", "session.media.error":
+				server.routeMediaResult(parent, live, envelope)
+			}
 		case "session.models.result", "session.models.error":
 			if live.peer.role != "installation" || host == nil || !live.peer.installation.ExpiresAt.After(time.Now()) || !live.supports(modelCatalogCapability) {
 				server.sendProtocolError(parent, live, "access.denied", &envelope)
@@ -1204,11 +1276,16 @@ func (server *Server) routeSessionCatalog(parent context.Context, live *liveConn
 		payload.Items == nil || *payload.Index < 0 || len(payload.Items) > 256 ||
 		(payload.Mode != "snapshot" && payload.Mode != "delta") ||
 		(!*payload.Complete && len(payload.Items) == 0) ||
-		(payload.Mode == "delta" && len(payload.Items) == 0) {
+		(payload.Mode == "delta" && len(payload.Items) == 0) ||
+		!validateDirectoryCatalogMetadata(payload.MetadataVersion, payload.Items, live.supports(directoryMetadataCapability)) {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
 	index, complete := *payload.Index, *payload.Complete
+	metadataVersion := 0
+	if payload.MetadataVersion != nil {
+		metadataVersion = *payload.MetadataVersion
+	}
 	var (
 		items         []store.SessionCatalogItem
 		invalid       bool
@@ -1221,11 +1298,12 @@ func (server *Server) routeSessionCatalog(parent context.Context, live *liveConn
 		server.catalogBytes -= live.catalogBytes
 		live.catalogSnapshotID = envelope.RequestID
 		live.catalogMode = payload.Mode
+		live.catalogMetadataVersion = metadataVersion
 		live.catalogNextIndex = 0
 		live.catalogBytes = 0
 		live.catalogItems = nil
 	}
-	if live.catalogSnapshotID != envelope.RequestID || live.catalogMode != payload.Mode || live.catalogNextIndex != index {
+	if live.catalogSnapshotID != envelope.RequestID || live.catalogMode != payload.Mode || live.catalogMetadataVersion != metadataVersion || live.catalogNextIndex != index {
 		invalid = true
 	} else if live.catalogBytes+len(data) > maxSessionCatalogBytes ||
 		server.catalogBytes+len(data) > maxSessionCatalogBytesTotal || len(live.catalogItems)+len(payload.Items) > 20_000 {
@@ -1241,6 +1319,7 @@ func (server *Server) routeSessionCatalog(parent context.Context, live *liveConn
 			applyingBytes = live.catalogBytes
 			live.catalogSnapshotID = ""
 			live.catalogMode = ""
+			live.catalogMetadataVersion = 0
 			live.catalogNextIndex = 0
 			live.catalogBytes = 0
 			live.catalogItems = nil
@@ -1250,6 +1329,7 @@ func (server *Server) routeSessionCatalog(parent context.Context, live *liveConn
 		server.catalogBytes -= live.catalogBytes
 		live.catalogSnapshotID = ""
 		live.catalogMode = ""
+		live.catalogMetadataVersion = 0
 		live.catalogNextIndex = 0
 		live.catalogBytes = 0
 		live.catalogItems = nil
@@ -1327,6 +1407,7 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 	}
 	var payload any
 	var fileIDs []string
+	var hasImages bool
 	var digest string
 	if envelope.Type == "message.submit" {
 		var submit messageSubmitPayload
@@ -1336,9 +1417,10 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		}
 		payload = submit
 		for _, item := range submit.Content {
-			if item.Type == "file" {
+			if item.Type == "file" || item.Type == "image" {
 				fileIDs = append(fileIDs, item.FileID)
 			}
+			hasImages = hasImages || item.Type == "image"
 		}
 		digest, _ = messageSubmitDigest(envelope.SessionID, submit)
 	} else if envelope.Type == "session.model.select" {
@@ -1388,6 +1470,10 @@ func (server *Server) routeSessionCommand(parent context.Context, live *liveConn
 		return
 	}
 	if len(fileIDs) > 0 && (server.fileHandoffs == nil || server.fileMessages == nil || !live.supports(files.MessageCapability) || !host.supports(files.MessageCapability) || !host.supports(files.HandoffCapability)) {
+		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
+		return
+	}
+	if hasImages && (!live.supports(imageMessageCapability) || !host.supports(imageMessageCapability)) {
 		server.sendProtocolError(parent, live, "protocol.unsupported", &envelope)
 		return
 	}
@@ -1490,8 +1576,11 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
-	if (payload.WorkspaceID == "" && envelope.SessionID == "") ||
-		(payload.WorkspaceID != "" && (!uuidPattern.MatchString(payload.WorkspaceID) || !live.supports("session.create.v1"))) {
+	if (payload.CommandType != "" && payload.CommandType != "session.fork") ||
+		(payload.WorkspaceID == "" && envelope.SessionID == "") ||
+		(payload.WorkspaceID != "" && !uuidPattern.MatchString(payload.WorkspaceID)) ||
+		(payload.CommandType == "session.fork" && (!live.supports(sessionForkCapability) || payload.WorkspaceID == "" || envelope.SessionID == "")) ||
+		(payload.CommandType == "" && (payload.ChildSessionID != "" || payload.ForkOutcome != nil || (payload.WorkspaceID != "" && !live.supports("session.create.v1")))) {
 		server.sendProtocolError(parent, live, "protocol.invalid", &envelope)
 		return
 	}
@@ -1500,6 +1589,8 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 		RuntimeID: live.runtimeID, RuntimeEpoch: live.runtimeEpoch, ConnectionID: live.connectionID,
 		DeviceID: envelope.DeviceID, RequestID: envelope.RequestID, SessionID: envelope.SessionID,
 		WorkspaceID: payload.WorkspaceID, CreatedSession: payload.CreatedSession,
+		ChildSessionID: payload.ChildSessionID, ForkOutcome: payload.ForkOutcome,
+		CommandType:   payload.CommandType,
 		PayloadSHA256: payload.PayloadSHA256, State: payload.State,
 	})
 	if err != nil {
@@ -1515,8 +1606,12 @@ func (server *Server) routeCommandReceipt(parent context.Context, live *liveConn
 
 func (server *Server) sendCommandReceipt(ctx context.Context, live *liveConnection, status store.CommandStatus, runtimeEpoch string) error {
 	if live.peer.role == "device" {
-		if status.WorkspaceID != "" && (!live.supports("session.create.v1") || !slices.Contains(live.peer.redemption.Scope.Workspaces, status.WorkspaceID) ||
-			(!slices.Contains(live.peer.redemption.Scope.Actions, "session.create") && !slices.Contains(live.peer.redemption.Scope.Actions, "command.status"))) {
+		capability, action := "session.create.v1", "session.create"
+		if status.CommandType == "session.fork" {
+			capability, action = sessionForkCapability, "session.fork"
+		}
+		if status.WorkspaceID != "" && (!live.supports(capability) || !slices.Contains(live.peer.redemption.Scope.Workspaces, status.WorkspaceID) ||
+			(!slices.Contains(live.peer.redemption.Scope.Actions, action) && !slices.Contains(live.peer.redemption.Scope.Actions, "command.status"))) {
 			return nil
 		}
 		if err := server.database.AuthorizeRealtimeCommandReceipt(ctx, live.peer.redemption, status); err != nil {
@@ -1540,6 +1635,15 @@ func (server *Server) sendCommandReceipt(ctx context.Context, live *liveConnecti
 	}
 	if status.WorkspaceID != "" {
 		frame["payload"].(map[string]any)["workspace_id"] = status.WorkspaceID
+	}
+	if status.ChildSessionID != "" {
+		frame["payload"].(map[string]any)["child_session_id"] = status.ChildSessionID
+	}
+	if status.ForkOutcome != nil {
+		frame["payload"].(map[string]any)["fork_outcome"] = status.ForkOutcome
+	}
+	if status.CommandType != "" {
+		frame["payload"].(map[string]any)["command_type"] = status.CommandType
 	}
 	return live.sendJSON(ctx, frame)
 }
@@ -1604,7 +1708,7 @@ func normalizeMessageSubmit(payload messageSubmitPayload) error {
 	}
 	seen := map[string]bool{}
 	for _, item := range payload.Content {
-		if item.Type == "file" {
+		if item.Type == "file" || item.Type == "image" {
 			if item.Text != "" || !uuidPattern.MatchString(item.FileID) || seen[item.FileID] {
 				return errors.New("relay: invalid file content")
 			}
@@ -1630,10 +1734,12 @@ func messageSubmitDigest(sessionID string, payload messageSubmitPayload) (string
 		if index > 0 {
 			encoded = append(encoded, ',')
 		}
-		if item.Type == "file" {
+		if item.Type == "file" || item.Type == "image" {
 			encoded = append(encoded, `{"file_id":`...)
 			encoded = appendJSONString(encoded, item.FileID)
-			encoded = append(encoded, `,"type":"file"}`...)
+			encoded = append(encoded, `,"type":`...)
+			encoded = appendJSONString(encoded, item.Type)
+			encoded = append(encoded, '}')
 		} else {
 			encoded = append(encoded, `{"text":`...)
 			encoded = appendJSONString(encoded, item.Text)

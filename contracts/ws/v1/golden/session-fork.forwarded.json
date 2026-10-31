@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "runtime_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_epoch": "99999999-9999-4999-8999-999999999999",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "type": "session.fork",
+  "payload": {
+    "workspace_id": "88888888-8888-4888-8888-888888888888",
+    "anchor": {
+      "v": 1,
+      "subscription_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "sync_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "native_seq": 7,
+      "message_version_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "anchor_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "user_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "device_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "payload_sha256": "79e716f704a57558f659ae7ca83657f4741fccd1817b29ccfb33c1a1f5047d51"
+}

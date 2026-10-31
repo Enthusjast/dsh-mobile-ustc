@@ -1,0 +1,591 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dsh-mobile-ustc:ws:media:v1",
+  "description": "Negotiated strict feature frames; references convey no authority. Current owner, resource, runtime epoch, reader sync, exact manifest/anchor and independent action/export grants remain runtime requirements.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/mediaResolve"
+    },
+    {
+      "$ref": "#/$defs/hostMediaResolve"
+    },
+    {
+      "$ref": "#/$defs/mediaResult"
+    },
+    {
+      "$ref": "#/$defs/mediaError"
+    }
+  ],
+  "$defs": {
+    "hostMediaResolve": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "type": {
+          "type": "string",
+          "const": "session.media.resolve"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "runtime_epoch": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "subscription_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "device_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "key_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "grant_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "allow_workspace": {
+              "type": "boolean",
+              "const": false
+            },
+            "lease_until": {
+              "type": "string",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "sync_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "reference": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "origin": {
+                  "type": "string",
+                  "const": "session_attachment"
+                },
+                "native_seq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "part_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4095
+                },
+                "event_version_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "manifest": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512,
+                      "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+                    },
+                    "size_bytes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 16777216
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "size_bytes",
+                    "sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "media_type": {
+                  "type": "string",
+                  "enum": [
+                    "image/png",
+                    "image/jpeg",
+                    "image/webp",
+                    "image/gif"
+                  ]
+                },
+                "width": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16384
+                },
+                "height": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16384
+                }
+              },
+              "required": [
+                "v",
+                "origin",
+                "native_seq",
+                "part_index",
+                "event_version_sha256",
+                "manifest",
+                "media_type",
+                "width",
+                "height"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "user_id",
+            "device_id",
+            "key_version",
+            "grant_version",
+            "allow_workspace",
+            "lease_until",
+            "expires_at",
+            "sync_id",
+            "reference"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "mediaError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.media.error"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/mediaErrorPayload"
+        }
+      }
+    },
+    "mediaErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "access.denied",
+            "runtime.changed",
+            "runtime.offline",
+            "protocol.unsupported",
+            "protocol.invalid",
+            "protocol.resync_required",
+            "rate.limited",
+            "file.export_unavailable",
+            "file.export_changed",
+            "file.export_unsupported",
+            "file.too_large",
+            "file.unavailable",
+            "file.state_changed",
+            "session.persistence_unavailable"
+          ]
+        }
+      }
+    },
+    "mediaResolve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.media.resolve"
+        },
+        "payload": {
+          "$ref": "#/$defs/mediaResolvePayload"
+        }
+      }
+    },
+    "mediaResolvePayload": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "reference": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "origin": {
+              "type": "string",
+              "const": "session_attachment"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "part_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4095
+            },
+            "event_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "manifest": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16777216
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "media_type": {
+              "type": "string",
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif"
+              ]
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            }
+          },
+          "required": [
+            "v",
+            "origin",
+            "native_seq",
+            "part_index",
+            "event_version_sha256",
+            "manifest",
+            "media_type",
+            "width",
+            "height"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sync_id",
+        "reference"
+      ],
+      "additionalProperties": false
+    },
+    "mediaResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.media.result"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/mediaResultPayload"
+        }
+      }
+    },
+    "mediaResultPayload": {
+      "type": "object",
+      "properties": {
+        "reference": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "origin": {
+              "type": "string",
+              "const": "session_attachment"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "part_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4095
+            },
+            "event_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "manifest": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16777216
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "media_type": {
+              "type": "string",
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif"
+              ]
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            }
+          },
+          "required": [
+            "v",
+            "origin",
+            "native_seq",
+            "part_index",
+            "event_version_sha256",
+            "manifest",
+            "media_type",
+            "width",
+            "height"
+          ],
+          "additionalProperties": false
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "kind",
+            "origin",
+            "name",
+            "size_bytes",
+            "expires_at"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "kind": {
+              "const": "file"
+            },
+            "origin": {
+              "const": "session_attachment"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16777216
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          }
+        }
+      },
+      "required": [
+        "reference",
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "Source name and size must exactly equal the current reference manifest. No unavailable/directory source, native attachment identity, path or URL. A source reference is not export or download authority."
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

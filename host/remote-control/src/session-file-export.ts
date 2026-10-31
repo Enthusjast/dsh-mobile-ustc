@@ -4,7 +4,7 @@ import type { SessionWireEvent } from '@deepseek-ai/dsh-api-session-controller/t
 import { basename, dirname } from 'node:path'
 import { fileManifest, type FileManifest } from './file-admission.js'
 import { PinnedExportSource } from './file-export-source.js'
-import { isHumanInput } from './projection.js'
+import { isHumanInput } from './visible-message.js'
 import { ProbeError } from './protocol.js'
 
 function object(value: unknown): Record<string, unknown> {
@@ -37,6 +37,12 @@ function sessionReference(event: SessionWireEvent, index: number): {manifest:Fil
   else throw new ProbeError('file.export_unavailable')
 }
 export function sessionAttachmentManifest(event:SessionWireEvent,index:number):FileManifest {return {...sessionReference(event,index).manifest}}
+export function sessionImageDescriptor(event: SessionWireEvent, index: number) {
+  const selected = sessionReference(event, index)
+  if (selected.kind !== 'image') throw new ProbeError('file.export_unavailable')
+  const ref = selected.reference as ImageAttachmentRef
+  return { manifest: { ...selected.manifest }, media_type: ref.mediaType, width: ref.width, height: ref.height }
+}
 export async function sessionAttachmentSource(ctx: Context, event: SessionWireEvent, index: number, signal: AbortSignal, current: () => void): Promise<PinnedExportSource> {
   const selected=sessionReference(event,index)
   const path=selected.kind==='file'?ctx.attachments.fileHostPath(selected.reference as FileAttachmentRef):ctx.attachments.imageHostPath(selected.reference as ImageAttachmentRef)

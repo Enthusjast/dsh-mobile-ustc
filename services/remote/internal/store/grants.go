@@ -31,13 +31,13 @@ type RuntimeGrantInput struct {
 }
 
 var roleActions = map[string]map[string]struct{}{
-	"viewer": actionSet("host.list", "session.list", "session.read", "command.status"),
+	"viewer": actionSet("host.list", "session.list", "session.read", "session.metadata.read", "session.changes.read", "command.status"),
 	"operator": actionSet(
-		"host.list", "session.list", "session.read", "command.status", "session.create", "message.submit",
+		"host.list", "session.list", "session.read", "session.metadata.read", "session.changes.read", "session.fork", "command.status", "session.create", "message.submit",
 		"session.cancel", "session.archive", "session.model.select", "approval.decide", "question.answer", "file.upload", "file.download",
 	),
 	"owner": actionSet(
-		"host.list", "session.list", "session.read", "command.status", "session.create", "message.submit",
+		"host.list", "session.list", "session.read", "session.metadata.read", "session.changes.read", "session.fork", "command.status", "session.create", "message.submit",
 		"session.cancel", "session.archive", "session.model.select", "approval.decide", "question.answer", "file.upload", "file.download", "grant.manage",
 	),
 }
@@ -96,7 +96,7 @@ func NormalizeTicketScope(role string, scope GrantScope) (GrantScope, error) {
 	}
 	if role == "owner" {
 		allowedActions = actionSet(
-			"host.list", "session.list", "session.read", "command.status", "session.create", "message.submit",
+			"host.list", "session.list", "session.read", "session.metadata.read", "session.changes.read", "session.fork", "command.status", "session.create", "message.submit",
 			"session.cancel", "session.archive", "session.model.select", "approval.decide", "question.answer", "file.upload", "file.download",
 		)
 	}

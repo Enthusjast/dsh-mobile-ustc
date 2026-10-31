@@ -20,6 +20,7 @@ import { relayNodeFixtures } from './relay-node-fixture.js'
 import { withIsolatedDatabaseOutage } from './database-outage.js'
 import { HostCredentialError, HostRestCredentialProvider, type HostResourceAccess, type HostRestCredentialOptions } from '../../host/remote-control/src/host-credentials.js'
 import { decodeSecretBase64 } from '../../host/remote-control/src/linux-secret-service.js'
+import { directoryMetadataSchema } from '../../host/remote-control/src/directory-metadata.js'
 
 const require = createRequire(import.meta.url)
 const WebSocket = require('ws') as new (url: string, protocol: string, options: object) => any
@@ -1227,8 +1228,17 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
 
   const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  for (const secret of ['offline-alternative', marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, ...renewalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting', workspace, code, ...credentialSecrets, ...hostResourceSecrets, ticket.ticket]) {
-    assert.equal(dump.includes(secret), false, 'Relay persisted a session body, local path or raw credential')
+  const withoutDisplayNames = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner', '--exclude-table-data=public.sessions'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }) + query("select coalesce(jsonb_agg(to_jsonb(s)-'directory_metadata'),'[]'::jsonb)::text from sessions s")
+  // Native titles are explicitly admitted display metadata, not a transcript cache.
+  // Credentials and local paths remain forbidden even inside those names.
+  const storedNames: unknown = JSON.parse(query("select coalesce(jsonb_agg(directory_metadata),'[]'::jsonb)::text from sessions where directory_metadata is not null"))
+  assert.ok(Array.isArray(storedNames))
+  for (const metadata of storedNames) directoryMetadataSchema.parse(metadata)
+  for (const secret of ['offline-alternative', marker, cancelMarker, archiveStopMarker, questionMarker, answerMarker, ...timedSecrets, ...approvalSecrets, ...renewalSecrets, 'Answer the timed DSH fixture question.', 'Choose the local DSH fixture answer.', 'DSH local integration fixture response', 'Cancelable model call is waiting']) {
+    assert.equal(withoutDisplayNames.includes(secret), false, 'Relay persisted transcript or private model data outside bounded display names')
+  }
+  for (const secret of [workspace, code, ...credentialSecrets, ...hostResourceSecrets, ticket.ticket]) {
+    assert.equal(dump.includes(secret), false, 'Relay persisted a local path or raw credential')
   }
   assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
   const deviceRevokedAt = Date.now()

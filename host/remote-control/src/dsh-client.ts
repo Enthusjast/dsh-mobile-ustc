@@ -16,8 +16,10 @@ import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { readModelPage, type ModelPageBinding, type ModelPageRequest } from './model-catalog.js'
 import { NativeObservations } from './native-observations.js'
+import { nativeDirectoryMetadata, ordinaryDirectorySession, type DirectoryMetadata } from './directory-metadata.js'
+import { imagePromptError, resolveNativeImage } from './image-admission.js'
 
-export type DshPromptPart = Extract<PromptContentPart, { type: 'text' | 'file' }>
+export type DshPromptPart = Extract<PromptContentPart, { type: 'text' | 'file' | 'image' }>
 
 export interface WorkspaceExportRoot { id: string; directory: string }
 export interface AttachmentExportCursor { through:number;before:number;skipSeq?:number;skipIndex?:number }
@@ -29,6 +31,7 @@ export interface SessionCatalogItem {
   workspace_id: string | null
   state: 'available' | 'running' | 'archived' | 'unavailable'
   last_persisted_seq: number
+  metadata?: DirectoryMetadata
 }
 export type SessionCatalogChange = { kind: 'snapshot' } | { kind: 'delta'; sessionIds: readonly string[] }
 
@@ -68,13 +71,13 @@ export class DshClient {
     const { items } = await this.controller.list({}, signal)
     signal.throwIfAborted()
     const allowed = items.filter(item => item.cwd !== undefined && this.workspaces.some(w => w.cwd === item.cwd))
-    // Child sessions require a verified parent address and cannot be independently taken over.
+    // Ordinary seeded forks are independent roots; true subagents remain parent-owned.
     const roots = []
     const ids = new Map<string, string>()
     for (const item of allowed) {
       const inspection = await this.controller.inspect(item.sessionId, signal)
       signal.throwIfAborted()
-      if (inspection.meta.parentSession !== undefined || inspection.meta.origin === 'subagent') continue
+      if (!ordinaryDirectorySession(inspection.meta)) continue
       const id = mobileSessionId(this.runtimeId, item.sessionId)
       ids.set(id, item.sessionId)
       roots.push({ session_id: id, running: item.running, archived: this.isArchived(item.sessionId), agent_available: item.agentAvailable, updated_at: item.updatedAt })
@@ -85,6 +88,7 @@ export class DshClient {
 
   async sessionCatalog(signal: AbortSignal, sessionIds?: readonly string[]): Promise<SessionCatalogItem[]> {
     const { items } = await this.controller.list({}, signal)
+    const nativeWorkspaces = this.ctx.workspaceRegistry.list()
     const requested = sessionIds === undefined ? undefined : new Set(sessionIds)
     const catalog: SessionCatalogItem[] = []
     const ids = new Map<string, string>()
@@ -92,19 +96,21 @@ export class DshClient {
     const tombstone = (nativeId: string) => ({
       session_id: mobileSessionId(this.runtimeId, nativeId), dsh_session_id: nativeId,
       workspace_id: null, state: 'unavailable' as const, last_persisted_seq: -1,
+      metadata: nativeDirectoryMetadata(undefined),
     })
     for (const item of items) {
       signal.throwIfAborted()
       const nativeId = String(item.sessionId)
       if (requested && !requested.has(nativeId)) continue
       found.add(nativeId)
-      const workspace = this.workspaces.find(candidate => candidate.cwd === item.cwd)
+      const configured = this.workspaces.filter(candidate => candidate.cwd === item.cwd)
+      const workspace = configured.length === 1 ? configured[0] : undefined
       if (!workspace) {
         if (requested) catalog.push(tombstone(nativeId))
         continue
       }
       const inspection = await this.controller.inspect(item.sessionId, signal)
-      if (inspection.meta.parentSession !== undefined || inspection.meta.origin === 'subagent') {
+      if (!ordinaryDirectorySession(inspection.meta)) {
         if (requested) catalog.push(tombstone(nativeId))
         continue
       }
@@ -122,6 +128,8 @@ export class DshClient {
         workspace_id: workspace?.remoteId ?? null,
         state: this.isArchived(item.sessionId) ? 'archived' : item.running ? 'running' : 'available',
         last_persisted_seq: persisted.through_seq,
+        metadata: nativeDirectoryMetadata(item.projections, workspace.remoteId === undefined ? undefined :
+          nativeWorkspaces.find(native => native.path === workspace.cwd)?.title),
       })
     }
     if (requested) {
@@ -159,12 +167,17 @@ export class DshClient {
       timer.unref()
     }
     const disposers = [
+      this.ctx.sessionProjections.onChanged((session, key) => {
+        if (key === 'title') schedule(false, String(session.id))
+      }),
       this.ctx.on('api-session/added', () => schedule(true), { global: true }),
       this.ctx.on('api-session/removed', sessionId => schedule(true, String(sessionId)), { global: true }),
       this.ctx.on('api-session/status', sessionId => schedule(false, String(sessionId)), { global: true }),
       this.ctx.on('api-session/activity', sessionId => schedule(false, String(sessionId)), { global: true }),
       this.ctx.on('domain/changed', change => {
-        if (change.domain !== workspaceDomainSpec.name || change.table !== '' || change.operation !== 'put') return
+        if (change.domain !== workspaceDomainSpec.name) return
+        if (change.table === 'workspaces') { schedule(true); return }
+        if (change.table !== '' || change.operation !== 'put') return
         // The domain emits before the registry updates its own cache. Diff the
         // durable event snapshot, then publish through the existing window.
         const state = workspaceDomainState.parse(change.value)
@@ -190,11 +203,46 @@ export class DshClient {
     return SessionId(nativeId)
   }
 
+  /** Internal configured resource context; paths must never enter mobile payloads. */
+  configuredSessionContext(id: string, signal: AbortSignal): Promise<{ native: SessionId; workspace: Workspace }> {
+    return this.exportWorkspace(id, signal)
+  }
+
+  async persistedCursor(id: SessionId, signal: AbortSignal) {
+    signal.throwIfAborted()
+    return this.ctx.sessions.get(id) === undefined ? this.readColdCursor(id, signal) : this.checkpoint(id)
+  }
+
+  nativeForkSupported(): boolean { return typeof this.ctx.sessionController?.fork === 'function' }
+
+  forkNative(id: SessionId, atSeq: number) {
+    return this.controller.fork({ sessionId: id, atSeq, allowMigration: false })
+  }
+
+  async workspaceChangesContext(id: string, signal: AbortSignal): Promise<{ root: string; guard: () => void }> {
+    const { workspace } = await this.configuredSessionContext(id, signal)
+    const filesystem = this.ctx.fs
+    if (!filesystem) throw new ProbeError('changes.unavailable')
+    const provider = Reflect.get(filesystem, symbols.original) ?? filesystem
+    const backend = Object.getPrototypeOf(provider)?.constructor
+    if (backend !== LocalFileSystem && backend !== SandboxedFileSystem) throw new ProbeError('changes.unavailable')
+    const { id: workspaceId, cwd, remoteId } = workspace
+    const guard = () => {
+      signal.throwIfAborted()
+      const active = this.ctx.fs
+      if (!active || (Reflect.get(active, symbols.original) ?? active) !== provider) throw new ProbeError('access.denied')
+      const matches = this.workspaces.filter(item => item.cwd === cwd)
+      if (matches.length !== 1 || matches[0]!.id !== workspaceId || matches[0]!.remoteId !== remoteId) throw new ProbeError('access.denied')
+    }
+    guard()
+    return { root: cwd, guard }
+  }
+
   private async exportWorkspace(id: string, signal: AbortSignal): Promise<{ native: SessionId; workspace: Workspace }> {
     const native = await this.resolve(id, signal)
     const inspection = await this.controller.inspect(native, signal)
     const matches = this.workspaces.filter(workspace => workspace.cwd === inspection.meta.cwd)
-    if (matches.length !== 1 || inspection.meta.parentSession !== undefined || inspection.meta.origin === 'subagent') throw new ProbeError('access.denied')
+    if (matches.length !== 1 || !ordinaryDirectorySession(inspection.meta)) throw new ProbeError('access.denied')
     return { native, workspace: matches[0]! }
   }
 
@@ -358,7 +406,13 @@ export class DshClient {
     this.requireUnarchived(id)
     // Native requestId is namespaced away from other desktop/remote input channels.
     const blocks = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : content
-    await this.observations.measure('prompt', () => this.controller.prompt({ sessionId: id, requestId: `m0:${requestId}` as never, mode, content: [...blocks] }, signal), undefined, signal)
+    try {
+      await this.observations.measure('prompt', () => this.controller.prompt({ sessionId: id, requestId: `m0:${requestId}` as never, mode, content: [...blocks] }, signal), undefined, signal)
+    } catch (error) {
+      const rejected = blocks.some(part => part.type === 'image') ? imagePromptError(error) : undefined
+      if (rejected) throw rejected
+      throw error
+    }
     const checkpoint = await this.checkpoint(id)
     return { native_accepted: true, checkpoint }
   }
@@ -403,6 +457,11 @@ export class DshClient {
   }
 
   releaseFile(id: SessionId, receiptId: FileUploadReceiptId): boolean { return releaseNativeFile(this.ctx, id, receiptId) }
+
+  resolveImageFile(id: SessionId, receiptId: FileUploadReceiptId, manifest: FileManifest, signal: AbortSignal,
+    current: () => void): Promise<Extract<PromptContentPart, { type: 'image' }>> {
+    return resolveNativeImage(this.ctx, id, receiptId, manifest, signal, () => { this.requireUnarchived(id); current() })
+  }
 
   fileStaged(id: SessionId, receiptId: FileUploadReceiptId): boolean {
     const agent = this.ctx.agents.get(id)

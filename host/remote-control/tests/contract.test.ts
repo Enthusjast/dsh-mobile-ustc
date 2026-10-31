@@ -19,6 +19,8 @@ test('generated JSON Schema and runtime parser agree on cross-language golden re
     '../../../contracts/m0/golden/session-list.request.json',
     '../../../contracts/m0/golden/message-submit.request.json',
     '../../../contracts/m0/golden/message-file-submit.request.json',
+    '../../../contracts/m0/golden/message-image-submit.request.json',
+    '../../../contracts/m0/golden/session-fork.request.json',
   ]) {
     const value = await load(path)
     assert.equal(validate(value), true, ajv.errorsText(validate.errors))

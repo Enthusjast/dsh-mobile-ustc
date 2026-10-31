@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "data": {
+    "runtime_id": "55555555-5555-4555-8555-555555555555",
+    "items": [
+      {
+        "session_id": "c6ccd869-3420-5f12-a792-95ca0eccec12",
+        "workspace_id": "88888888-8888-4888-8888-888888888888",
+        "state": "available",
+        "last_persisted_seq": 7,
+        "updated_at": "2026-10-30T12:00:00Z"
+      }
+    ],
+    "next_cursor": null
+  }
+}

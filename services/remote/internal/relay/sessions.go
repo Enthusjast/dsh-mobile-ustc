@@ -14,6 +14,8 @@ type sessionSubscription struct {
 	pages                            map[string]string
 	models                           map[string]*modelRead
 	fragment                         *sessionFragmentState
+	media                            bool
+	mediaReads                       map[string]*mediaRead
 	questions                        bool
 	timedQuestions                   bool
 	claims                           map[string]*questionClaim
@@ -102,6 +104,7 @@ func (server *Server) routeSessionRead(ctx context.Context, live *liveConnection
 	}
 	subscription := &sessionSubscription{id: id, requestID: envelope.RequestID, sessionID: envelope.SessionID, device: live, host: host, pages: make(map[string]string), questions: live.supports("question.blocking.v1") && host.supports("question.blocking.v1")}
 	subscription.timedQuestions = live.supports("question.timed.v1") && host.supports("question.timed.v1")
+	subscription.media = live.supports(sessionMediaCapability) && host.supports(sessionMediaCapability) && live.supports("file.export.v1") && host.supports("file.export.v1")
 	subscription.claims = make(map[string]*questionClaim)
 	subscription.claimIDs = make(map[string]struct{})
 	server.mu.Lock()
@@ -145,6 +148,9 @@ func (server *Server) routeSessionRead(ctx context.Context, live *liveConnection
 	}
 	if subscription.timedQuestions {
 		forward["timed_questions"] = true
+	}
+	if subscription.media {
+		forward["media_refs"] = true
 	}
 	envelope.Payload, _ = json.Marshal(forward)
 	if err := host.sendJSON(ctx, envelope); err != nil {
@@ -359,6 +365,11 @@ func (server *Server) removeSubscriptionLocked(subscription *sessionSubscription
 		read.timer.Stop()
 	}
 	subscription.models = nil
+	for _, read := range subscription.mediaReads {
+		read.timer.Stop()
+	}
+	subscription.mediaReads = nil
+	server.removeReaderOperationsLocked(subscription)
 	delete(server.subscriptions, subscription.id)
 	delete(subscription.device.subscriptions, subscription.id)
 	delete(subscription.host.subscriptions, subscription.id)

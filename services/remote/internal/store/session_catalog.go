@@ -19,11 +19,12 @@ const maxSessionCatalogItems = 20_000
 // SessionCatalogItem contains only identifiers and directory metadata. Session
 // bodies and event data never enter the control-plane catalog.
 type SessionCatalogItem struct {
-	SessionID        string  `json:"session_id"`
-	DSHSessionID     string  `json:"dsh_session_id"`
-	WorkspaceID      *string `json:"workspace_id"`
-	State            string  `json:"state"`
-	LastPersistedSeq int64   `json:"last_persisted_seq"`
+	SessionID        string             `json:"session_id"`
+	DSHSessionID     string             `json:"dsh_session_id"`
+	WorkspaceID      *string            `json:"workspace_id"`
+	State            string             `json:"state"`
+	LastPersistedSeq int64              `json:"last_persisted_seq"`
+	Metadata         *DirectoryMetadata `json:"metadata,omitempty"`
 }
 
 func MobileSessionID(runtimeID, dshSessionID string) (string, error) {
@@ -80,6 +81,9 @@ func (postgres *Postgres) syncRealtimeSessionCatalogOnce(ctx context.Context, co
 		if item.WorkspaceID != nil && !grantUUIDPattern.MatchString(*item.WorkspaceID) {
 			return ErrSessionCatalogInvalid
 		}
+		if !item.Metadata.Valid() || item.Metadata != nil && (item.WorkspaceID == nil && item.Metadata.WorkspaceTitle != nil || item.State == "unavailable" && (item.Metadata.Title != nil || item.Metadata.WorkspaceTitle != nil)) {
+			return ErrSessionCatalogInvalid
+		}
 		mapped, err := MobileSessionID(connection.RuntimeID, item.DSHSessionID)
 		if err != nil || mapped != item.SessionID {
 			return ErrSessionCatalogInvalid
@@ -124,21 +128,21 @@ func (postgres *Postgres) syncRealtimeSessionCatalogOnce(ctx context.Context, co
 	}
 	if replace {
 		if _, err := transaction.ExecContext(ctx, `
-			update sessions set state = 'unavailable', workspace_id = null, updated_at = clock_timestamp()
+			update sessions set state = 'unavailable', workspace_id = null, directory_metadata = null, updated_at = clock_timestamp()
 			where runtime_id = $1`, connection.RuntimeID); err != nil {
 			return transactionFailure(err)
 		}
 	}
 	result, err := transaction.ExecContext(ctx, `
-		insert into sessions (id, runtime_id, workspace_id, dsh_session_id, state, last_persisted_seq, updated_at)
-		select item.session_id, $1, item.workspace_id, item.dsh_session_id, item.state, item.last_persisted_seq, clock_timestamp()
+		insert into sessions (id, runtime_id, workspace_id, dsh_session_id, state, last_persisted_seq, directory_metadata, updated_at)
+		select item.session_id, $1, item.workspace_id, item.dsh_session_id, item.state, item.last_persisted_seq, item.metadata, clock_timestamp()
 		from jsonb_to_recordset($2::jsonb) as item(
-			session_id uuid, workspace_id uuid, dsh_session_id text, state text, last_persisted_seq bigint
+			session_id uuid, workspace_id uuid, dsh_session_id text, state text, last_persisted_seq bigint, metadata jsonb
 		)
 		left join workspaces w on w.runtime_id = $1 and w.id = item.workspace_id
 		where item.workspace_id is null or w.id is not null
 		on conflict (runtime_id, dsh_session_id) do update set
-			id = excluded.id, workspace_id = excluded.workspace_id, state = excluded.state,
+			id = excluded.id, workspace_id = excluded.workspace_id, state = excluded.state, directory_metadata = excluded.directory_metadata,
 			last_persisted_seq = case
 				when excluded.state = 'unavailable' and excluded.workspace_id is null and excluded.last_persisted_seq = -1
 				then sessions.last_persisted_seq else excluded.last_persisted_seq end,

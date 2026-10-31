@@ -1,5 +1,8 @@
 import type { SessionWireEvent } from '@deepseek-ai/dsh-api-session-controller/types'
 import { fileManifest } from './file-admission.js'
+import { isHumanInput } from './visible-message.js'
+import { sessionImageDescriptor } from './session-file-export.js'
+import { mediaEventVersion, visibleMediaReference } from './media-protocol.js'
 
 const fields: Record<string, readonly string[]> = {
   'turn/start': ['turn'], 'turn/end': ['turn', 'reason'],
@@ -11,17 +14,12 @@ const fields: Record<string, readonly string[]> = {
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
-export function isHumanInput(value: unknown): boolean {
-  const source = object(value)
-  return source.kind === 'user' || (source.kind === 'user-question-reply' && source.outcome === 'answered'
-    && typeof source.callId === 'string' && source.callId.length > 0)
-}
 function pick(value: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]))
 }
-function content(value: unknown): unknown[] {
+function content(value: unknown, media?: (index: number) => Record<string, unknown> | undefined): unknown[] {
   if (!Array.isArray(value)) return []
-  return value.flatMap(part => {
+  return value.flatMap((part, index): unknown[] => {
     const block = object(part)
     if (block.type === 'text') return [pick(block, ['type', 'text'])]
     if (block.type === 'reasoning') return [pick(block, ['type', 'text'])]
@@ -34,12 +32,16 @@ function content(value: unknown): unknown[] {
       return [{ type: 'text', text: name.success && typeof bytes === 'number' && Number.isSafeInteger(bytes) && bytes >= 0
         ? `[附件：${name.data}（${bytes} 字节）]` : '[附件：请在电脑端查看]' }]
     }
+    if (block.type === 'image') {
+      const reference = media?.(index)
+      return reference ? [{ type: 'image', reference }] : [{ type: 'text', text: '[图片：需支持图片预览的客户端与独立下载授权]' }]
+    }
     return []
   })
 }
 
 /** Explicit display projection. Unknown/configuration events advance the cursor without exporting data. */
-export function projectEvent(event: SessionWireEvent) {
+export function projectEvent(event: SessionWireEvent, mediaRefs = false) {
   const data = object(event.data)
   const humanInput = isHumanInput(data.source)
   let projected: Record<string, unknown> = {}
@@ -54,11 +56,24 @@ export function projectEvent(event: SessionWireEvent) {
   }
   if (event.type === 'assistant/attempt') projected = { ...pick(data, ['turn', 'step']), stream: projectStream(data.stream) }
   const visible = Object.keys(projected).length > 0
-  return {
+  const result = {
     native_seq: event.seq, time: event.time, type: visible ? event.type : 'cursor', data: projected,
     ...(visible && event.surfaceOp !== undefined ? { surface_op: event.surfaceOp } : {}),
     ...(visible && event.sourceEventSeqs !== undefined ? { source_event_seqs: event.sourceEventSeqs } : {}),
   }
+  if (mediaRefs && (event.type === 'user/message' && humanInput || event.type === 'assistant/message' || event.type === 'tool/result')) {
+    const version = mediaEventVersion(result)
+    const image = (index: number) => {
+      try {
+        const reference = visibleMediaReference.safeParse({ v: 1, origin: 'session_attachment', native_seq: event.seq,
+          part_index: index, event_version_sha256: version, ...sessionImageDescriptor(event, index) })
+        return reference.success ? reference.data : undefined
+      } catch { return undefined }
+    }
+    if (event.type === 'user/message') projected.content = content(data.content, image)
+    else (projected.message as Record<string, unknown>).content = content(object(data.message).content, image)
+  }
+  return result
 }
 
 /** Discard provider replay metadata and extension fields even inside assistant stream records. */

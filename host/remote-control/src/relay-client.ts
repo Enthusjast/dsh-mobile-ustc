@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import type { CommandOwner, CommandState } from './command-journal.js'
-import type { SessionCatalogChange, SessionCatalogItem } from './dsh-client.js'
+import type { DshClient, SessionCatalogChange, SessionCatalogItem } from './dsh-client.js'
 import { archivePayload, modelSelectionPayload, parseCommand, ProbeError, type Command } from './protocol.js'
 import type { CommandStateObserver } from './runtime.js'
 import { RelaySessions, type SessionReaderRuntime } from './relay-sessions.js'
@@ -21,6 +21,11 @@ import { bindNativeObservations, HOST_OBSERVATIONS_CAPABILITY, type NativeObserv
 import { MODEL_CATALOG_CAPABILITY, type ModelPage, type ModelPageBinding, type ModelPageRequest } from './model-catalog.js'
 import { HostConnectionLease } from './connection-lease.js'
 import { HostReconnectBackoff } from './relay-backoff.js'
+import { DIRECTORY_METADATA_CAPABILITY, directoryMetadataSchema } from './directory-metadata.js'
+import { IMAGE_MESSAGE_CAPABILITY, SESSION_MEDIA_CAPABILITY, imageReference } from './image-protocol.js'
+import { CHANGES_CAPABILITY } from './changes-protocol.js'
+import { FORK_CAPABILITY, MESSAGE_ACTIONS_CAPABILITY, forkPayloadSchema, forkOutcomeSchema, relayForkDigest } from './fork-protocol.js'
+import { WorkspaceChanges } from './workspace-changes.js'
 
 const MAX_FRAME_BYTES = 64 * 1024
 const MAX_BUFFERED_BYTES = 512 * 1024
@@ -85,23 +90,24 @@ const submitSchema = z.strictObject({
   payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),
   payload: z.strictObject({
     mode: z.enum(['queue', 'steer']),
-    content: z.array(z.discriminatedUnion('type', [z.strictObject({ type: z.literal('text'), text: nonEmptyText }), fileReference])).min(1).max(16).refine(parts => {
-      const ids = parts.filter(part => part.type === 'file').map(part => part.file_id)
+    content: z.array(z.discriminatedUnion('type', [z.strictObject({ type: z.literal('text'), text: nonEmptyText }), fileReference, imageReference])).min(1).max(16).refine(parts => {
+      const ids = parts.filter(part => part.type !== 'text').map(part => part.file_id)
       return new Set(ids).size === ids.length
     }),
   }),
 })
 const cancelSchema = submitSchema.extend({ type: z.literal('session.cancel'), payload: z.strictObject({}) })
 const reconcileSchema = submitSchema.extend({ type: z.literal('message.files.reconcile'),
-  payload: submitSchema.shape.payload.refine(payload => payload.content.some(part => part.type === 'file')) })
+  payload: submitSchema.shape.payload.refine(payload => payload.content.some(part => part.type !== 'text')) })
 const modelSelectionSchema = submitSchema.extend({ type: z.literal('session.model.select'), payload: modelSelectionPayload })
 const archiveSchema = submitSchema.extend({ type: z.literal('session.archive'), payload: archivePayload })
+const forkSchema = submitSchema.extend({ type: z.literal('session.fork'), payload: forkPayloadSchema })
 const questionSchema = submitSchema.extend({ type: z.literal('question.answer'), payload: questionAnswerPayload })
 const timedQuestionSchema = submitSchema.extend({ type: z.literal('question.timed.answer'), payload: questionAnswerPayload })
 const createSchema = submitSchema.omit({ session_id: true }).extend({
   type: z.literal('session.create'), payload: z.strictObject({ workspace_id: uuid, preset: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/) }),
 })
-const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, reconcileSchema, cancelSchema, archiveSchema, modelSelectionSchema, createSchema, questionSchema, timedQuestionSchema])
+const forwardedCommandSchema = z.discriminatedUnion('type', [submitSchema, reconcileSchema, cancelSchema, archiveSchema, modelSelectionSchema, createSchema, forkSchema, questionSchema, timedQuestionSchema])
 type ForwardedCommand = z.infer<typeof forwardedCommandSchema>
 const catalogItemSchema = z.strictObject({
   session_id: uuid,
@@ -110,6 +116,8 @@ const catalogItemSchema = z.strictObject({
   state: z.enum(['available', 'running', 'archived', 'unavailable']),
   last_persisted_seq: z.number().int().min(-1),
 })
+const directoryCatalogItemSchema = catalogItemSchema.extend({ metadata: directoryMetadataSchema.optional() })
+const receiptCatalogItemSchema = directoryCatalogItemSchema.transform(({ metadata: _metadata, ...item }) => item)
 
 export interface HostHandshakeSigner {
   /** Sign the JWS signing input with the registered P-256 key and return 64-byte IEEE-P1363 r||s. */
@@ -140,11 +148,17 @@ export interface HostRelayOptions {
       modelPage?(binding: ModelPageBinding, request: ModelPageRequest, signal: AbortSignal): Promise<ModelPage>
       creationOptions?(): SessionCreationOptions
       observations?: NativeObservations
+      resolveImageFile?: DshClient['resolveImageFile']
+      nativeForkSupported?: () => boolean
+      workspaceChangesContext?: NonNullable<SessionReaderRuntime['client']['workspaceChangesContext']>
     }
     dispatch(command: Command, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
     reconcileFileMessage?(command: Extract<Command, { type: 'message.submit' }>, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<unknown>
     follow: SessionReaderRuntime['follow']
     claimQuestion?: SessionReaderRuntime['claimQuestion']
+    messageActions?: NonNullable<SessionReaderRuntime['messageActions']>
+    changes?: NonNullable<SessionReaderRuntime['changes']>
+    mediaCurrent?: (session: string, sync: string) => boolean
   }
   credentials: HostCredentialProvider
   dshVersion: string
@@ -274,16 +288,16 @@ function sendFrame(socket: RelaySocket, value: unknown): Promise<void> {
   })
 }
 
-function splitSessionCatalog(mode: 'snapshot' | 'delta', runtimeId: string, runtimeEpoch: string, snapshotId: string, items: SessionCatalogItem[]): SessionCatalogItem[][] {
+function splitSessionCatalog(mode: 'snapshot' | 'delta', runtimeId: string, runtimeEpoch: string, snapshotId: string, items: SessionCatalogItem[], metadata: boolean): SessionCatalogItem[][] {
   if (items.length > 20_000) throw new ProbeError('rate.limited')
   const chunks: SessionCatalogItem[][] = []
   let current: SessionCatalogItem[] = []
   for (const item of items) {
-    if (!catalogItemSchema.safeParse(item).success) throw new ProbeError('protocol.invalid')
+    if (!(metadata ? directoryCatalogItemSchema : catalogItemSchema).safeParse(item).success) throw new ProbeError('protocol.invalid')
     const candidate = [...current, item]
     const probe = {
       v: 1, type: 'session.catalog', request_id: snapshotId, runtime_id: runtimeId, runtime_epoch: runtimeEpoch,
-      payload: { mode, index: chunks.length, complete: false, items: candidate },
+      payload: { mode, index: chunks.length, complete: false, items: candidate, ...(metadata ? { metadata_version: 1 } : {}) },
     }
     if (candidate.length > 256 || Buffer.byteLength(JSON.stringify(probe)) > MAX_FRAME_BYTES - 1024) {
       if (current.length === 0) throw new ProbeError('protocol.frame_too_large')
@@ -389,6 +403,8 @@ function parseForwarded(data: unknown, runtimeId: string, runtimeEpoch: string):
         ? relayTimedQuestionDigest(parsed.data.session_id, parsed.data.runtime_epoch, parsed.data.payload)
       : parsed.data.type === 'session.create'
         ? relayCreateDigest(parsed.data.runtime_epoch, parsed.data.payload)
+      : parsed.data.type === 'session.fork'
+        ? relayForkDigest(parsed.data.runtime_epoch, parsed.data.session_id, parsed.data.payload)
         : forwardedDigest(parsed.data.session_id, parsed.data.payload)) !== parsed.data.payload_sha256) {
     throw new ProbeError('protocol.invalid')
   }
@@ -474,6 +490,12 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
       if (options.runtime.client.creationOptions) sourceOptions = creationOptionsSchema.parse(options.runtime.client.creationOptions())
     } catch { /* The bounded metadata extension is unavailable; core Relay operations remain independent. */ }
     const offered: string[] = options.approvals ? [...capabilities, SIGNED_APPROVAL_CAPABILITY, APPROVAL_INVALIDATION_CAPABILITY] : [...capabilities]
+    offered.push(DIRECTORY_METADATA_CAPABILITY)
+    if (options.files && typeof options.runtime.client.resolveImageFile === 'function') offered.push(IMAGE_MESSAGE_CAPABILITY)
+    if (options.exports && options.runtime.mediaCurrent) offered.push(SESSION_MEDIA_CAPABILITY)
+    if (options.runtime.messageActions) offered.push(MESSAGE_ACTIONS_CAPABILITY)
+    if (options.runtime.messageActions && options.runtime.client.nativeForkSupported?.()) offered.push(FORK_CAPABILITY)
+    if (options.runtime.changes && options.runtime.client.workspaceChangesContext && await WorkspaceChanges.supported()) offered.push(CHANGES_CAPABILITY)
     if (options.questionReferences) offered.push(QUESTION_REFERENCES_CAPABILITY)
     if (sourceOptions) offered.push(CREATION_OPTIONS_CAPABILITY)
     if (options.files) offered.push(FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY)
@@ -542,12 +564,19 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     }
 
     const catalogEnabled = ack.data.payload.capabilities.includes('session.catalog.v1')
+    const metadataEnabled = ack.data.payload.capabilities.includes(DIRECTORY_METADATA_CAPABILITY)
     if (ack.data.payload.capabilities.includes('session.read.v1')) sessions = new RelaySessions({
       epoch: options.runtime.epoch, client: options.runtime.client,
       follow: (command, signal) => options.runtime.follow(command, signal),
       dispatch: (command, signal) => options.runtime.dispatch(command, signal, { userId: 'relay-read', deviceId: 'relay-read' }),
       ...(options.runtime.claimQuestion ? { claimQuestion: (sessionId: string, questionId: string, signal: AbortSignal) => options.runtime.claimQuestion!(sessionId, questionId, signal) } : {}),
-    }, sendCurrent, ack.data.payload.capabilities.includes('question.timed.v1'), ack.data.payload.capabilities.includes(MODEL_CATALOG_CAPABILITY))
+      ...(options.runtime.messageActions ? { messageActions: options.runtime.messageActions } : {}),
+      ...(options.runtime.changes ? { changes: options.runtime.changes } : {}),
+    }, sendCurrent, ack.data.payload.capabilities.includes('question.timed.v1'), ack.data.payload.capabilities.includes(MODEL_CATALOG_CAPABILITY), {
+      media: !!exports && !!options.runtime.mediaCurrent && ack.data.payload.capabilities.includes(SESSION_MEDIA_CAPABILITY),
+      messageActions: ack.data.payload.capabilities.includes(MESSAGE_ACTIONS_CAPABILITY),
+      changes: ack.data.payload.capabilities.includes(CHANGES_CAPABILITY),
+    })
     const pendingCatalogAcks = new Map<string, { count: number; resolve(): void; reject(error: Error): void }>()
     let catalogRefresh: Promise<void> | undefined
     let catalogDirty = false
@@ -582,10 +611,11 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
           const sessionIDs = mode === 'snapshot' ? undefined : [...deltaSessionIDs]
           snapshotRequested = false
           deltaSessionIDs.clear()
-          const items = await options.runtime.client.sessionCatalog(connection.signal, sessionIDs)
+          const sourceItems = await options.runtime.client.sessionCatalog(connection.signal, sessionIDs)
+          const items = metadataEnabled ? sourceItems : sourceItems.map(({ metadata: _metadata, ...item }) => item)
           if (mode === 'delta' && items.length === 0) continue
           const snapshotId = randomUUID()
-          const chunks = splitSessionCatalog(mode, options.runtime.client.runtimeId, options.runtime.epoch, snapshotId, items)
+          const chunks = splitSessionCatalog(mode, options.runtime.client.runtimeId, options.runtime.epoch, snapshotId, items, metadataEnabled)
           const acknowledged = waitForCatalogAck(snapshotId, items.length)
           // A failed write can end this task before it reaches the acknowledgement.
           void acknowledged.catch(() => {})
@@ -597,7 +627,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
                 request_id: snapshotId,
                 runtime_id: options.runtime.client.runtimeId,
                 runtime_epoch: options.runtime.epoch,
-                payload: { mode, index, complete: index === chunks.length - 1, items: chunks[index] },
+                payload: { mode, index, complete: index === chunks.length - 1, items: chunks[index], ...(metadataEnabled ? { metadata_version: 1 } : {}) },
               })
             }
             await acknowledged
@@ -715,12 +745,15 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         const forwarded = parseForwarded(value, options.runtime.client.runtimeId, options.runtime.epoch)
         if (forwarded.type === 'message.files.reconcile' && (!files || !options.runtime.reconcileFileMessage
           || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY) || !ack.data.payload.capabilities.includes(FILE_RECONCILE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
-        if (forwarded.type === 'message.submit' && forwarded.payload.content.some(part => part.type === 'file')
+        if ((forwarded.type === 'message.submit' || forwarded.type === 'message.files.reconcile') && forwarded.payload.content.some(part => part.type !== 'text')
           && (!files || !ack.data.payload.capabilities.includes(FILE_MESSAGE_CAPABILITY))) throw new ProbeError('protocol.unsupported')
+        if ((forwarded.type === 'message.submit' || forwarded.type === 'message.files.reconcile') && forwarded.payload.content.some(part => part.type === 'image')
+          && !ack.data.payload.capabilities.includes(IMAGE_MESSAGE_CAPABILITY)) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.cancel' && !ack.data.payload.capabilities.includes('session.cancel.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.model.select' && !ack.data.payload.capabilities.includes('session.model.select.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.archive' && !ack.data.payload.capabilities.includes('session.archive.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'session.create' && !ack.data.payload.capabilities.includes('session.create.v1')) throw new ProbeError('protocol.unsupported')
+        if (forwarded.type === 'session.fork' && !ack.data.payload.capabilities.includes(FORK_CAPABILITY)) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'question.answer' && !ack.data.payload.capabilities.includes('question.blocking.v1')) throw new ProbeError('protocol.unsupported')
         if (forwarded.type === 'question.timed.answer' && !ack.data.payload.capabilities.includes('question.timed.v1')) throw new ProbeError('protocol.unsupported')
         const command = makeCommand(forwarded)
@@ -730,9 +763,26 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
           reported = state
           let item: z.infer<typeof catalogItemSchema> | undefined
           if (forwarded.type === 'session.create' && state === 'settled') {
-            const parsed = catalogItemSchema.safeParse((result as { catalog_item?: unknown } | undefined)?.catalog_item)
+            const parsed = receiptCatalogItemSchema.safeParse((result as { catalog_item?: unknown } | undefined)?.catalog_item)
             if (!parsed.success || parsed.data.workspace_id !== forwarded.payload.workspace_id || parsed.data.state === 'unavailable') throw new ProbeError('journal.integrity_failed')
             item = parsed.data
+          }
+          let forkResult: { child_session_id: string; fork_outcome: z.infer<typeof forkOutcomeSchema> } | undefined
+          if (forwarded.type === 'session.fork') {
+            const value = result as { child_session_id?: unknown; fork_outcome?: unknown; catalog_item?: unknown } | undefined
+            if (value?.child_session_id !== undefined || value?.fork_outcome !== undefined) {
+              const child = uuid.safeParse(value.child_session_id)
+              const outcome = forkOutcomeSchema.safeParse(value.fork_outcome)
+              if (!child.success || !outcome.success || child.data === forwarded.session_id) throw new ProbeError('journal.integrity_failed')
+              forkResult = { child_session_id: child.data, fork_outcome: outcome.data }
+            }
+            if (state === 'settled') {
+              const parsed = receiptCatalogItemSchema.safeParse(value?.catalog_item)
+              if (!forkResult || forkResult.fork_outcome.checkpoint !== 'persisted'
+                || !parsed.success || parsed.data.session_id !== forkResult.child_session_id || parsed.data.workspace_id !== forwarded.payload.workspace_id
+                || parsed.data.state === 'unavailable') throw new ProbeError('journal.integrity_failed')
+              item = parsed.data
+            }
           }
           await sendCurrent({
             v: 1,
@@ -744,7 +794,8 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
             device_id: forwarded.device_id,
             payload: {
               state, payload_sha256: forwarded.payload_sha256,
-              ...(forwarded.type === 'session.create' ? { workspace_id: forwarded.payload.workspace_id } : {}),
+              ...(forwarded.type === 'session.create' || forwarded.type === 'session.fork' ? { workspace_id: forwarded.payload.workspace_id } : {}),
+              ...(forwarded.type === 'session.fork' ? { command_type: 'session.fork', ...forkResult } : {}),
               ...(item ? { created_session: item } : {}),
             },
           })

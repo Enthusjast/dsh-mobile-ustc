@@ -5,9 +5,11 @@ import { FileExportRegistry, type ExportAuthority } from './file-export-registry
 import { MAX_EXPORT_FILE_BYTES } from './file-export-source.js'
 import type { ExportNode, ExportPage } from './export-protocol.js'
 import { ProbeError } from './protocol.js'
+import type { VisibleMediaReference } from './media-protocol.js'
+import { verifyVisibleMedia } from './session-media.js'
 
 export interface CatalogAuthority extends ExportAuthority { keyVersion: number; grantVersion: number; allowWorkspace: boolean; expiresAt: number }
-type Selector = { type: 'attachments' } | { type: 'attachment'; seq: number; index: number }
+type Selector = { type: 'attachments' } | { type: 'attachment'; seq: number; index: number; media?: { reference: VisibleMediaReference; sync: string } }
   | { type: 'workspace'; root: string; parts: string[]; kind: 'directory' | 'file'; version?: string }
 interface Item { node: ExportNode; selector: Selector; session: string; owner: string; start: bigint; wall: number; expires: number }
 interface Cursor { item: Item; directory: string; session: string; owner: string; expires: number; busy: boolean; reader?: ExportDirectory; native?: AttachmentExportCursor }
@@ -18,7 +20,8 @@ export class ExportCatalog {
   #cursors = new Map<string, Cursor>()
   #closed = false
   #timer: NodeJS.Timeout
-  constructor(private readonly client: DshClient, private readonly registry: FileExportRegistry) {
+  constructor(private readonly client: DshClient, private readonly registry: FileExportRegistry,
+    private readonly mediaCurrent?: (session: string, sync: string) => boolean) {
     this.#timer = setInterval(() => this.#prune(), 1000); this.#timer.unref()
   }
   #owner(scope: CatalogAuthority) { return `${scope.owner.userId}:${scope.owner.deviceId}:${scope.keyVersion}:${scope.grantVersion}` }
@@ -42,7 +45,20 @@ export class ExportCatalog {
     const item = this.#items.get(id)
     if (!item || item.session !== session || item.owner !== this.#owner(scope)) throw new ProbeError('file.export_unavailable')
     if (item.selector.type === 'workspace' && !scope.allowWorkspace) throw new ProbeError('access.denied')
+    if (item.selector.type === 'attachment' && item.selector.media && !this.mediaCurrent?.(session, item.selector.media.sync)) throw new ProbeError('file.export_unavailable')
     return item
+  }
+  async resolveMedia(session: string, sync: string, reference: VisibleMediaReference, scope: CatalogAuthority): Promise<ExportNode> {
+    this.#current(scope)
+    const current = () => {
+      this.#current(scope)
+      if (!this.mediaCurrent?.(session, sync)) throw new ProbeError('protocol.resync_required')
+    }
+    current()
+    const verified = await verifyVisibleMedia(this.client, session, reference, scope.signal, current)
+    current()
+    return this.#add(session, scope, { type: 'attachment', seq: verified.native_seq, index: verified.part_index,
+      media: { reference: verified, sync } }, verified.manifest.name, verified.manifest.size_bytes)
   }
   async list(session: string, scope: CatalogAuthority, directory?: string, continuation?: string): Promise<ExportPage> {
     this.#current(scope)
@@ -91,11 +107,17 @@ export class ExportCatalog {
     const item = this.#find(source, session, scope), selector = item.selector
     if (item.node.kind !== 'file') throw new ProbeError('file.export_unavailable')
     if (item.node.unavailable) throw new ProbeError(item.node.unavailable)
+    if (selector.type === 'attachment' && selector.media) await verifyVisibleMedia(this.client, session, selector.media.reference, scope.signal,
+      () => { this.#current(scope); this.#find(source, session, scope) })
     const authority: ExportAuthority = { owner: { ...scope.owner }, signal: scope.signal, current: () => { this.#current(scope); this.#find(source, session, scope) } }
     const entry = selector.type === 'attachment' ? await this.registry.registerSessionAttachment(session, selector.seq, selector.index, authority)
       : selector.type === 'workspace' && selector.kind === 'file' ? await this.registry.registerWorkspaceArtifact(session, selector.root, selector.parts, authority, selector.version)
         : undefined
     if (!entry) throw new ProbeError('file.export_unavailable')
+    if (selector.type === 'attachment' && selector.media && (entry.sha256 !== selector.media.reference.manifest.sha256 || entry.size_bytes !== selector.media.reference.manifest.size_bytes || entry.name !== selector.media.reference.manifest.name)) {
+      await this.registry.release(entry.export_id, session, authority)
+      throw new ProbeError('file.export_changed')
+    }
     return { ...entry, expires_at: new Date(Math.min(item.expires, Date.parse(entry.expires_at))).toISOString() }
   }
   async close() { this.#closed = true; clearInterval(this.#timer); const cursors = [...this.#cursors.values()]; this.#cursors.clear(); this.#items.clear(); await Promise.all(cursors.map(cursor => cursor.reader?.close())) }

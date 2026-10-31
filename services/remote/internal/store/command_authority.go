@@ -59,3 +59,52 @@ func authorizeCommandResources(ctx context.Context, tx *sql.Tx, ticket TicketRed
 	}
 	return result, nil
 }
+
+// A fork reads a source and creates in that exact source workspace. A session
+// grant alone never supplies workspace-create authority.
+func authorizeSessionForkResources(ctx context.Context, tx *sql.Tx, ticket TicketRedemption, sourceSessionID, workspaceID string) (commandAuthority, error) {
+	var result commandAuthority
+	var scopeJSON []byte
+	var state string
+	err := tx.QueryRowContext(ctx, `
+		select g.scope,s.state,h.org_id::text,i.id::text
+		from users u
+		join devices d on d.user_id=u.id and d.id=$2 and d.revoked_at is null
+		join org_memberships m on m.user_id=u.id
+		join hosts h on h.org_id=m.org_id and h.state='active'
+		join installations i on i.host_id=h.id and i.revoked_at is null
+		join runtimes r on r.installation_id=i.id and r.id=$3 and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
+		join runtime_grants g on g.runtime_id=r.id and g.user_id=u.id and g.grant_version=$4
+		join sessions s on s.runtime_id=r.id and s.id=$5
+		join workspaces w on w.runtime_id=r.id and w.id=s.workspace_id and w.id=$8
+		where u.id=$1 and u.status='active' and d.key_version=$6 and d.proof_key_thumbprint=$7
+		  and g.revoked_at is null and (g.expires_at is null or g.expires_at>clock_timestamp())
+		for share of u,d,m,h,i,r,g,s,w`, ticket.UserID, ticket.DeviceID, ticket.RuntimeID, ticket.GrantVersion,
+		sourceSessionID, ticket.DeviceKeyVersion, ticket.ProofKeyThumbprint, workspaceID).
+		Scan(&scopeJSON, &state, &result.organization, &result.installation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return result, ErrAccessDenied
+	}
+	if err != nil {
+		return result, ErrDatabaseUnavailable
+	}
+	var scope GrantScope
+	if json.Unmarshal(scopeJSON, &scope) != nil {
+		return result, ErrDatabaseUnavailable
+	}
+	workspace := sql.NullString{String: workspaceID, Valid: true}
+	if (state != "available" && state != "running" && state != "archived") || !grantScopeSubset(ticket.Scope, scope) ||
+		!scopeIncludesSession(ticket.Scope, sourceSessionID, workspace) || !scopeIncludesSession(scope, sourceSessionID, workspace) ||
+		!slices.Contains(ticket.Scope.Workspaces, workspaceID) || !slices.Contains(scope.Workspaces, workspaceID) {
+		return result, ErrAccessDenied
+	}
+	for _, action := range []string{"session.read", "session.fork", "command.status", "session.create"} {
+		if !slices.Contains(ticket.Scope.Actions, action) || !slices.Contains(scope.Actions, action) {
+			return result, ErrAccessDenied
+		}
+	}
+	if err := checkCommandGrantTime(ctx, tx, ticket); err != nil {
+		return result, err
+	}
+	return result, nil
+}

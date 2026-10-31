@@ -1,0 +1,819 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dsh-mobile-ustc:ws:changes:v1",
+  "description": "Negotiated strict feature frames; references convey no authority. Current owner, resource, runtime epoch, reader sync, exact manifest/anchor and independent action/export grants remain runtime requirements.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/changesGet"
+    },
+    {
+      "$ref": "#/$defs/changesPatchGet"
+    },
+    {
+      "$ref": "#/$defs/changesResult"
+    },
+    {
+      "$ref": "#/$defs/changesPatchResult"
+    },
+    {
+      "$ref": "#/$defs/changesError"
+    },
+    {
+      "$ref": "#/$defs/changesPatchError"
+    }
+  ],
+  "$defs": {
+    "changesError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.error"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/readerErrorPayload"
+        }
+      }
+    },
+    "changesGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.get"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesRequest"
+        }
+      }
+    },
+    "changesPage": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "source": {
+          "type": "string",
+          "const": "configured_workspace_git"
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "git_head"
+            },
+            "oid": {
+              "type": "string",
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            }
+          },
+          "required": [
+            "kind",
+            "oid"
+          ],
+          "additionalProperties": false
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "scope": {
+          "type": "string",
+          "const": "tracked_head_to_index_worktree"
+        },
+        "excluded": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "string",
+              "const": "untracked"
+            },
+            {
+              "type": "string",
+              "const": "ignored"
+            },
+            {
+              "type": "string",
+              "const": "submodule_contents"
+            }
+          ],
+          "minItems": 3,
+          "maxItems": 3,
+          "items": false
+        },
+        "complete": {
+          "type": "boolean",
+          "const": true
+        },
+        "truncated": {
+          "type": "boolean",
+          "const": false
+        },
+        "files": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "added",
+                  "modified",
+                  "deleted",
+                  "renamed",
+                  "type_changed"
+                ]
+              },
+              "old_path": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "bytes_base64": {
+                        "type": "string",
+                        "maxLength": 16384,
+                        "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                      },
+                      "display": {
+                        "type": "string",
+                        "maxLength": 16384
+                      }
+                    },
+                    "required": [
+                      "bytes_base64",
+                      "display"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "new_path": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "bytes_base64": {
+                        "type": "string",
+                        "maxLength": 16384,
+                        "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                      },
+                      "display": {
+                        "type": "string",
+                        "maxLength": 16384
+                      }
+                    },
+                    "required": [
+                      "bytes_base64",
+                      "display"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "old_mode": {
+                "type": "string",
+                "pattern": "^[0-7]{6}$"
+              },
+              "new_mode": {
+                "type": "string",
+                "pattern": "^[0-7]{6}$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "binary",
+                  "symlink",
+                  "gitlink"
+                ]
+              },
+              "patch_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1048576
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "copyable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "file_id",
+              "status",
+              "old_path",
+              "new_path",
+              "old_mode",
+              "new_mode",
+              "kind",
+              "patch_bytes",
+              "complete",
+              "copyable"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "sync_id",
+        "snapshot_id",
+        "source",
+        "base",
+        "version",
+        "manifest_sha256",
+        "expires_at",
+        "scope",
+        "excluded",
+        "complete",
+        "truncated",
+        "files",
+        "next_cursor"
+      ],
+      "additionalProperties": false,
+      "description": "Current configured-workspace Git HEAD to tracked index/worktree snapshot, never attributed to a turn. Maximum 32768 serialized UTF-8 bytes per page; version/manifest and connection-local cursors expire after 30 seconds. Runtime checks current reader/grant, exact source and byte budgets."
+    },
+    "changesPatch": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "file_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "text",
+            "binary",
+            "symlink",
+            "gitlink"
+          ]
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "copyable": {
+          "type": "boolean"
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "patch_base64": {
+          "type": "string",
+          "maxLength": 22000
+        },
+        "patch_utf8": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 16384
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hunks": {
+          "maxItems": 20000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "old_start": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "old_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "new_start": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "new_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "lines": {
+                "maxItems": 20000,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "context",
+                        "add",
+                        "delete",
+                        "no_final_newline"
+                      ]
+                    },
+                    "bytes_base64": {
+                      "type": "string",
+                      "maxLength": 22000
+                    },
+                    "text": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 16384
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "old_line": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "new_line": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "bytes_base64",
+                    "text",
+                    "old_line",
+                    "new_line"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "old_start",
+              "old_count",
+              "new_start",
+              "new_count",
+              "lines"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "sync_id",
+        "snapshot_id",
+        "file_id",
+        "version",
+        "kind",
+        "complete",
+        "copyable",
+        "partial",
+        "patch_base64",
+        "patch_utf8",
+        "hunks",
+        "next_cursor"
+      ],
+      "additionalProperties": false,
+      "description": "At most 16384 serialized UTF-8 bytes per page and 20000 lines across the bounded snapshot. Byte-exact full copy only when complete, nonbinary, not partial, with no next cursor and exact UTF-8 patch bytes.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "copyable"
+            ],
+            "properties": {
+              "copyable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "complete": {
+                "const": true
+              },
+              "partial": {
+                "const": false
+              },
+              "next_cursor": {
+                "type": "null"
+              },
+              "patch_utf8": {
+                "type": "string",
+                "maxLength": 16384
+              },
+              "kind": {
+                "enum": [
+                  "text",
+                  "symlink",
+                  "gitlink"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "changesPatchError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.patch.error"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/readerErrorPayload"
+        }
+      }
+    },
+    "changesPatchGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.patch.get"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesPatchRequest"
+        }
+      }
+    },
+    "changesPatchRequest": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "file_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "cursor": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "sync_id",
+        "snapshot_id",
+        "file_id"
+      ],
+      "additionalProperties": false
+    },
+    "changesPatchResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.patch.result"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesPatch"
+        }
+      }
+    },
+    "changesRequest": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cursor": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "sync_id",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "changesResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.result"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesPage"
+        }
+      }
+    },
+    "readerErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "session.not_found",
+            "runtime.changed",
+            "runtime.offline",
+            "access.denied",
+            "protocol.invalid",
+            "protocol.snapshot_too_large",
+            "protocol.resync_required",
+            "rate.limited",
+            "message.stale",
+            "message.unavailable",
+            "message.not_persisted",
+            "changes.stale",
+            "changes.unavailable",
+            "changes.not_git",
+            "changes.limit"
+          ]
+        }
+      }
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

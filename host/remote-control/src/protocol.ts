@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import { questionAnswerPayload } from './questions.js'
+import { imageReference } from './image-protocol.js'
+import { forkPayloadSchema } from './fork-protocol.js'
 
 export const MAX_FRAME_BYTES = 64 * 1024
 export const MAX_QUEUE_BYTES = 512 * 1024
@@ -13,8 +15,8 @@ const sessionCommand = <T extends string, P extends z.ZodType>(type: T, payload:
   z.strictObject({ ...session, type: z.literal(type), payload })
 const textContent = z.strictObject({ type: z.literal('text'), text: z.string().min(1).max(32_768).regex(/\S/) })
 const fileContent = z.strictObject({ type: z.literal('file'), file_id: uuid })
-const messageContent = z.array(z.discriminatedUnion('type', [textContent, fileContent])).min(1).max(16).refine(items => {
-  const files = items.filter(item => item.type === 'file').map(item => item.file_id)
+const messageContent = z.array(z.discriminatedUnion('type', [textContent, fileContent, imageReference])).min(1).max(16).refine(items => {
+  const files = items.filter(item => item.type !== 'text').map(item => item.file_id)
   return new Set(files).size === files.length
 })
 export const modelSelectionPayload = z.strictObject({
@@ -38,11 +40,12 @@ export const Command = z.discriminatedUnion('type', [
     z.strictObject({ mode: z.enum(['queue', 'steer']), content: messageContent }),
   ])),
   sessionCommand('session.cancel', empty),
+  sessionCommand('session.fork', forkPayloadSchema),
   sessionCommand('session.archive', archivePayload),
   sessionCommand('question.answer', questionAnswerPayload),
   sessionCommand('question.timed.answer', questionAnswerPayload),
   sessionCommand('session.model.select', modelSelectionPayload),
-  sessionCommand('session.subscribe', z.strictObject({ max_messages: z.int().min(1).max(100).default(30) })),
+  sessionCommand('session.subscribe', z.strictObject({ max_messages: z.int().min(1).max(100).default(30), media_refs: z.boolean().optional() })),
   sessionCommand('session.page', z.strictObject({
     sync_id: uuid, through_seq: z.int().min(-1), before_seq: z.int().min(0), max_messages: z.int().min(1).max(100).default(30),
   })),

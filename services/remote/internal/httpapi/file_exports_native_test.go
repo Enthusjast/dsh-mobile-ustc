@@ -54,11 +54,20 @@ func nativeExportError(t *testing.T, frame map[string]json.RawMessage) string {
 
 func connectExportPhone(t *testing.T, h *fileHTTPFixture, caller *fileHTTPCaller, token, device string, workspace bool) *fileHost {
 	t.Helper()
+	return connectExportPhoneScope(t, h, caller, token, device, workspace, false, true)
+}
+
+func connectExportPhoneScope(t *testing.T, h *fileHTTPFixture, caller *fileHTTPCaller, token, device string, workspace, media, download bool) *fileHost {
+	t.Helper()
 	workspaces, sessions := []string{}, []string{h.session}
 	if workspace {
 		workspaces, sessions = []string{fileWorkspaceID}, []string{}
 	}
-	code, raw := caller.call(token, "POST", "/v1/realtime/tickets", map[string]any{"runtime_id": fileRuntimeID, "scope": map[string]any{"actions": []string{"session.read", "file.download"}, "workspaces": workspaces, "sessions": sessions}})
+	actions := []string{"session.read"}
+	if download {
+		actions = append(actions, "file.download")
+	}
+	code, raw := caller.call(token, "POST", "/v1/realtime/tickets", map[string]any{"runtime_id": fileRuntimeID, "scope": map[string]any{"actions": actions, "workspaces": workspaces, "sessions": sessions}})
 	var reply struct {
 		Data struct {
 			Ticket string `json:"ticket"`
@@ -81,6 +90,9 @@ func connectExportPhone(t *testing.T, h *fileHTTPFixture, caller *fileHTTPCaller
 	}
 	_ = json.Unmarshal(challenge["payload"], &data)
 	caps := []string{"connection.heartbeat.v1", files.ExportCapability}
+	if media {
+		caps = append(caps, "session.read.v1", "session.media.v1", "message.images.v1")
+	}
 	sort.Strings(caps)
 	proof := approvalSign(t, caller.key, jose.ES256, "", "dsh-relay-handshake-proof+jwt", map[string]any{"iss": device, "aud": auth.RelayHandshakeAudience, "connection_id": data.Connection, "challenge_id": data.Challenge, "nonce": data.Nonce, "runtime_id": fileRuntimeID, "hello_sha256": auth.RelayHelloDigest("device", device, "1", strings.Join(caps, "\n")), "iat": time.Now().Unix(), "jti": "export-phone-" + data.Connection}, nil)
 	phone.send(t, map[string]any{"v": 1, "type": "hello.proof", "payload": map[string]any{"device_id": device, "protocols": []int{1}, "capabilities": caps, "proof": proof}})
@@ -123,6 +135,14 @@ func requestNativeExport(t *testing.T, phone *fileHost, epoch, id, source string
 }
 
 func TestExportRelayUsesRealDSHWorkspaceAndPersistedAttachmentSources(t *testing.T) {
+	runNativeExportComposition(t, false)
+}
+
+func TestExportRelayUsesRealDSHTypedImageAndRevocation(t *testing.T) {
+	runNativeExportComposition(t, true)
+}
+
+func runNativeExportComposition(t *testing.T, image bool) {
 	if os.Getenv("REMOTE_TEST_CLUSTER_ROOT") == "" {
 		t.Skip("requires explicit isolated PostgreSQL/native DSH runner")
 	}
@@ -143,7 +163,7 @@ func TestExportRelayUsesRealDSHWorkspaceAndPersistedAttachmentSources(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(map[string]any{"runtime": fileRuntimeID, "workspace": fileWorkspaceID, "installation": "55555555-5555-4555-8555-555555555555", "credential": credential, "privateKey": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: private})), "url": h.server.URL})
+	raw, _ := json.Marshal(map[string]any{"runtime": fileRuntimeID, "workspace": fileWorkspaceID, "installation": "55555555-5555-4555-8555-555555555555", "credential": credential, "privateKey": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: private})), "url": h.server.URL, "image": image})
 	dir := t.TempDir()
 	config := filepath.Join(dir, "native.json")
 	ca := filepath.Join(dir, "ca.pem")
@@ -156,7 +176,7 @@ func TestExportRelayUsesRealDSHWorkspaceAndPersistedAttachmentSources(t *testing
 	}
 	_, source, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(source), "../../../.."))
-	ctx, cancel := context.WithTimeout(h.ctx, 35*time.Second)
+	ctx, cancel := context.WithTimeout(h.ctx, 90*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "node", "--import", "tsx", filepath.Join(root, "tools/integration/file-export-host.ts"), config)
 	command.Dir = root
@@ -351,8 +371,17 @@ func TestExportRelayUsesRealDSHWorkspaceAndPersistedAttachmentSources(t *testing
 	}
 	_, _ = io.WriteString(stdin, "inspect\n")
 	inspection := next("inspected")
-	if string(inspection["prompt_calls"]) != "0" || string(inspection["human_messages"]) != "1" {
+	wantMessages := "1"
+	if image {
+		wantMessages = "2"
+	}
+	if string(inspection["prompt_calls"]) != "0" || string(inspection["human_messages"]) != wantMessages {
 		t.Fatal("export admitted a prompt or another native message")
+	}
+	if image {
+		var imageSHA string
+		_ = json.Unmarshal(ready["image_sha256"], &imageSHA)
+		exerciseNativeImageExport(t, h, epoch, imageSHA)
 	}
 	_, _ = io.WriteString(stdin, "stop\n")
 	if err := <-done; err != nil {

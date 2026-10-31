@@ -329,6 +329,12 @@ func (fake *fakeRepository) RecordRealtimeCommand(context.Context, store.TicketR
 func (fake *fakeRepository) RecordRealtimeSessionCreate(context.Context, store.TicketRedemption, string, string, string) (store.CommandStatus, error) {
 	return store.CommandStatus{}, nil
 }
+func (fake *fakeRepository) RecordRealtimeSessionFork(context.Context, store.TicketRedemption, string, string, string, string) (store.CommandStatus, error) {
+	return store.CommandStatus{}, store.ErrAccessDenied
+}
+func (fake *fakeRepository) AuthorizeRealtimeSessionFork(context.Context, store.TicketRedemption, string, string) error {
+	return store.ErrAccessDenied
+}
 func (fake *fakeRepository) RecordRealtimeCommandReceipt(context.Context, store.RelayCommandReceipt) (store.CommandStatus, error) {
 	return store.CommandStatus{}, nil
 }

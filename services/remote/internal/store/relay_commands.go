@@ -22,8 +22,11 @@ type RelayCommandReceipt struct {
 	ConnectionID   string
 	DeviceID       string
 	RequestID      string
+	CommandType    string
 	SessionID      string
 	WorkspaceID    string
+	ChildSessionID string
+	ForkOutcome    *SessionForkOutcome
 	CreatedSession *SessionCatalogItem
 	PayloadSHA256  string
 	State          string
@@ -95,13 +98,21 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 	var status CommandStatus
 	var existingUserID, existingRuntimeID string
 	var existingAction sql.NullString
+	var forkOutcome []byte
 	err := transaction.QueryRowContext(ctx, `
-		select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action
+		select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action, coalesce(child_session_id::text, ''), fork_outcome
 		from commands where device_id = $1 and request_id = $2 for update`, ticket.DeviceID, requestID).
-		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction)
+		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction, &status.ChildSessionID, &forkOutcome)
 	if err == nil {
-		if existingAction.Valid && existingAction.String != action || existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256 {
+		if existingAction.Valid && existingAction.String != action || action == "session.fork" && !existingAction.Valid || existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || ((workspaceID == "" || action == "session.fork") && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256 {
 			return CommandStatus{}, ErrCommandConflict
+		}
+		status.ForkOutcome, err = DecodeSessionForkOutcome(forkOutcome)
+		if err != nil {
+			return CommandStatus{}, ErrDatabaseUnavailable
+		}
+		if existingAction.Valid && existingAction.String == "session.fork" {
+			status.CommandType = "session.fork"
 		}
 		if len(admission) > 0 && admission[0] != nil {
 			if err := admission[0](status); err != nil {
@@ -124,22 +135,29 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 		insert into commands (device_id, request_id, user_id, runtime_id, session_id, payload_sha256, workspace_id, state, action)
 		values ($1, $2, $3, $4, nullif($5, '')::uuid, $6, nullif($7, '')::uuid, 'received', $8)
 		on conflict (device_id, request_id) do nothing
-		returning request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action`,
+		returning request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action, coalesce(child_session_id::text, ''), fork_outcome`,
 		ticket.DeviceID, requestID, ticket.UserID, ticket.RuntimeID, sessionID, payloadSHA256, workspaceID, action).
-		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction)
+		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction, &status.ChildSessionID, &forkOutcome)
 	inserted := err == nil
 	if errors.Is(err, sql.ErrNoRows) {
 		// A concurrent retry inserted the same primary key after the first lookup.
 		err = transaction.QueryRowContext(ctx, `
-			select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action
+			select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action, coalesce(child_session_id::text, ''), fork_outcome
 			from commands where device_id = $1 and request_id = $2 for update`, ticket.DeviceID, requestID).
-			Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction)
-		if err == nil && (existingAction.Valid && existingAction.String != action || existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || (workspaceID == "" && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256) {
+			Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction, &status.ChildSessionID, &forkOutcome)
+		if err == nil && (existingAction.Valid && existingAction.String != action || action == "session.fork" && !existingAction.Valid || existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || ((workspaceID == "" || action == "session.fork") && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256) {
 			return CommandStatus{}, ErrCommandConflict
 		}
 	}
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+	status.ForkOutcome, err = DecodeSessionForkOutcome(forkOutcome)
+	if err != nil {
+		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+	if existingAction.Valid && existingAction.String == "session.fork" {
+		status.CommandType = "session.fork"
 	}
 	if inserted {
 		metadata, _ := json.Marshal(map[string]any{
@@ -199,21 +217,9 @@ func (postgres *Postgres) recordRealtimeCommandReceipt(ctx context.Context, rece
 		receipt.KeyVersion <= 0 || !validSHA256Hex(receipt.PayloadSHA256) {
 		return CommandStatus{}, ErrCommandTransition
 	}
-	if receipt.WorkspaceID == "" {
-		if !grantUUIDPattern.MatchString(receipt.SessionID) || receipt.CreatedSession != nil {
-			return CommandStatus{}, ErrCommandTransition
-		}
-	} else {
-		if !grantUUIDPattern.MatchString(receipt.WorkspaceID) || receipt.State == "agent_queued" || receipt.State == "observed" {
-			return CommandStatus{}, ErrCommandTransition
-		}
-		if receipt.State == "settled" {
-			if err := validateCreatedSession(receipt); err != nil {
-				return CommandStatus{}, err
-			}
-		} else if receipt.SessionID != "" || receipt.CreatedSession != nil {
-			return CommandStatus{}, ErrCommandTransition
-		}
+	if (receipt.SessionID != "" && !grantUUIDPattern.MatchString(receipt.SessionID)) ||
+		(receipt.WorkspaceID != "" && !grantUUIDPattern.MatchString(receipt.WorkspaceID)) {
+		return CommandStatus{}, ErrCommandTransition
 	}
 	if _, ok := relayReceiptStates[receipt.State]; !ok {
 		return CommandStatus{}, ErrCommandTransition
@@ -242,43 +248,108 @@ func (postgres *Postgres) recordRealtimeCommandReceipt(ctx context.Context, rece
 	var status CommandStatus
 	var action sql.NullString
 	var created time.Time
+	var forkOutcome []byte
 	err = transaction.QueryRowContext(ctx, `
-		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at,coalesce(c.child_session_id::text,''),c.fork_outcome
 		from commands c
 		where c.device_id = $1 and c.request_id = $2 and c.runtime_id = $3
 		for update`, receipt.DeviceID, receipt.RequestID, receipt.RuntimeID).
-		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created, &status.ChildSessionID, &forkOutcome)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
+	status.ForkOutcome, err = DecodeSessionForkOutcome(forkOutcome)
+	if err != nil {
+		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+	isFork := action.Valid && action.String == "session.fork"
+	if isFork {
+		status.CommandType = "session.fork"
+		validationReceipt := receipt
+		if validationReceipt.ChildSessionID == "" {
+			validationReceipt.ChildSessionID = status.ChildSessionID
+		}
+		if err := validateSessionForkReceipt(ctx, transaction, validationReceipt); err != nil {
+			return CommandStatus{}, err
+		}
+	} else {
+		if receipt.CommandType != "" || receipt.ChildSessionID != "" || receipt.ForkOutcome != nil {
+			return CommandStatus{}, ErrCommandTransition
+		}
+		if receipt.WorkspaceID == "" {
+			if receipt.SessionID == "" || receipt.CreatedSession != nil {
+				return CommandStatus{}, ErrCommandTransition
+			}
+		} else {
+			if receipt.State == "agent_queued" || receipt.State == "observed" {
+				return CommandStatus{}, ErrCommandTransition
+			}
+			if receipt.State == "settled" {
+				if err := validateCreatedSession(receipt); err != nil {
+					return CommandStatus{}, err
+				}
+			} else if receipt.SessionID != "" || receipt.CreatedSession != nil {
+				return CommandStatus{}, ErrCommandTransition
+			}
+		}
+	}
 	if status.WorkspaceID != receipt.WorkspaceID || status.PayloadSHA256 != receipt.PayloadSHA256 ||
 		(status.WorkspaceID == "" && status.SessionID != receipt.SessionID) ||
 		(status.WorkspaceID != "" && status.SessionID != "" && status.SessionID != receipt.SessionID) {
 		return CommandStatus{}, ErrCommandConflict
 	}
-	if status.State == receipt.State {
+	forkChanged := false
+	if isFork {
+		previousChild, previousOutcome := status.ChildSessionID, status.ForkOutcome
+		if err := mergeSessionForkReceipt(&status, receipt); err != nil {
+			return CommandStatus{}, err
+		}
+		forkChanged = previousChild != status.ChildSessionID || (previousOutcome == nil) != (status.ForkOutcome == nil) ||
+			(previousOutcome != nil && status.ForkOutcome != nil && *previousOutcome != *status.ForkOutcome)
+		if status.State == "outcome_unknown" && receipt.State == "host_accepted" {
+			return CommandStatus{}, ErrCommandTransition
+		}
+	}
+	if status.State == receipt.State && !forkChanged {
 		if err := transaction.Commit(); err != nil {
 			return CommandStatus{}, ErrDatabaseUnavailable
 		}
 		return status, nil
 	}
-	if _, ok := commandTransitions[status.State][receipt.State]; !ok {
-		return CommandStatus{}, ErrCommandTransition
+	if status.State != receipt.State {
+		if _, ok := commandTransitions[status.State][receipt.State]; !ok {
+			return CommandStatus{}, ErrCommandTransition
+		}
 	}
 	if receipt.CreatedSession != nil {
-		if err := recordCreatedSession(ctx, transaction, receipt); err != nil {
+		catalogReceipt := receipt
+		if isFork {
+			catalogReceipt.SessionID = status.ChildSessionID
+		}
+		if err := recordCreatedSession(ctx, transaction, catalogReceipt); err != nil {
 			return CommandStatus{}, err
 		}
-		status.SessionID = receipt.SessionID
+		if !isFork {
+			status.SessionID = receipt.SessionID
+		}
+	}
+	var encodedOutcome any
+	if status.ForkOutcome != nil {
+		raw, err := json.Marshal(status.ForkOutcome)
+		if err != nil {
+			return CommandStatus{}, ErrCommandTransition
+		}
+		encodedOutcome = string(raw)
 	}
 	previousState, previousEntered := status.State, status.UpdatedAt
 	err = transaction.QueryRowContext(ctx, `
-		update commands set state = $1, session_id = nullif($4, '')::uuid, updated_at = clock_timestamp()
+		update commands set state = $1, session_id = nullif($4, '')::uuid,
+		 child_session_id = nullif($5, '')::uuid, fork_outcome = $6::jsonb, updated_at = clock_timestamp()
 		where device_id = $2 and request_id = $3
-		returning updated_at`, receipt.State, receipt.DeviceID, receipt.RequestID, status.SessionID).Scan(&status.UpdatedAt)
+		returning updated_at`, receipt.State, receipt.DeviceID, receipt.RequestID, status.SessionID, status.ChildSessionID, encodedOutcome).Scan(&status.UpdatedAt)
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
@@ -296,7 +367,9 @@ func (postgres *Postgres) recordRealtimeCommandReceipt(ctx context.Context, rece
 	if err := transaction.Commit(); err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}
-	postgres.commands.metrics.CommandTransition(action.String, previousState, status.State, "host", created, previousEntered, status.UpdatedAt)
+	if previousState != status.State {
+		postgres.commands.metrics.CommandTransition(action.String, previousState, status.State, "host", created, previousEntered, status.UpdatedAt)
+	}
 	return status, nil
 }
 
@@ -324,17 +397,25 @@ func (postgres *Postgres) markRealtimeCommandUnknown(ctx context.Context, ticket
 	var status CommandStatus
 	var action sql.NullString
 	var created time.Time
+	var forkOutcome []byte
 	err = transaction.QueryRowContext(ctx, `
-		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at,coalesce(c.child_session_id::text,''),c.fork_outcome
 		from commands c
 		where c.device_id = $1 and c.user_id = $2 and c.request_id = $3 and c.runtime_id = $4
 		for update`, ticket.DeviceID, ticket.UserID, requestID, ticket.RuntimeID).
-		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created, &status.ChildSessionID, &forkOutcome)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+	status.ForkOutcome, err = DecodeSessionForkOutcome(forkOutcome)
+	if err != nil {
+		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+	if action.Valid && action.String == "session.fork" {
+		status.CommandType = "session.fork"
 	}
 	if status.SessionID != sessionID || status.PayloadSHA256 != payloadSHA256 {
 		return CommandStatus{}, ErrCommandConflict

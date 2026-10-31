@@ -6,6 +6,9 @@ import { type Command, type Frame, ProbeError } from './protocol.js'
 import { SessionSync } from './session-sync.js'
 import { NativeFileRegistry } from './file-registry.js'
 import { FileExportRegistry } from './file-export-registry.js'
+import { SessionMessageActions } from './session-message-actions.js'
+import { forkSessionOnce } from './session-fork.js'
+import { WorkspaceChanges } from './workspace-changes.js'
 
 const localCommandOwner: CommandOwner = { userId: 'local', deviceId: 'local' }
 const definiteRejections = new Set([
@@ -13,6 +16,8 @@ const definiteRejections = new Set([
   'interaction.stale', 'interaction.invalid_answer',
   'session.active', 'session.archived',
   'file.staging_required',
+  'image.invalid', 'image.too_large', 'image.busy', 'image.model_unsupported',
+  'message.stale', 'message.unavailable', 'message.not_persisted',
 ])
 
 export type CommandStateObserver = (state: CommandState, result?: unknown) => void | Promise<void>
@@ -20,6 +25,8 @@ export type CommandStateObserver = (state: CommandState, result?: unknown) => vo
 export class ProbeRuntime {
   readonly files: NativeFileRegistry
   readonly exports: FileExportRegistry
+  readonly messageActions: SessionMessageActions
+  readonly changes = new WorkspaceChanges()
   private readonly sync: SessionSync
   private readonly commands = new Map<string, { digest: string; result: Promise<unknown> }>()
   private readonly serial = new Map<string, Promise<unknown>>()
@@ -30,6 +37,7 @@ export class ProbeRuntime {
     this.files = new NativeFileRegistry(client, epoch)
     this.exports = new FileExportRegistry(client)
     this.sync = new SessionSync(client, this.epoch, interactions, interactions.timed)
+    this.messageActions = new SessionMessageActions(client)
   }
 
   private check(command: Command): void {
@@ -42,7 +50,7 @@ export class ProbeRuntime {
   }
 
   async reconcileFileMessage(command: Extract<Command, { type: 'message.submit' }>, signal: AbortSignal, owner: CommandOwner, observe?: CommandStateObserver): Promise<Frame> {
-    if (command.type !== 'message.submit' || !('content' in command.payload) || !command.payload.content.some(part => part.type === 'file')) throw new ProbeError('protocol.invalid')
+    if (command.type !== 'message.submit' || !('content' in command.payload) || !command.payload.content.some(part => part.type !== 'text')) throw new ProbeError('protocol.invalid')
     return this.execute(command, signal, owner, observe, true)
   }
 
@@ -62,6 +70,8 @@ export class ProbeRuntime {
         case 'session.create': return 'workspace_id' in command.payload
           ? this.client.createRemote(command.payload.workspace_id, command.payload.preset, signal)
           : this.client.create(command.payload.workspace, command.payload.preset, signal)
+        case 'session.fork': return forkSessionOnce(this.client, this.messageActions, command.session_id, command.payload, owner, signal,
+          partial => this.journal.noteResult(command.request_id, owner, partial))
         case 'session.page': return this.sync.page(command, signal)
         case 'interaction.list': return this.interactions.list()
         case 'interaction.answer': {
@@ -97,16 +107,21 @@ export class ProbeRuntime {
           const wire = 'text' in command.payload ? command.payload.text : command.payload.content
           const files = new Set<string>()
           let missing = false
-          const content = typeof wire === 'string' ? wire : wire.flatMap((part): DshPromptPart[] => {
-            if (part.type === 'text') return [part]
-            files.add(part.file_id)
-            try { return [this.files.resolve(part.file_id, command.session_id, owner)] }
-            catch (error) {
-              if (!recoveringDispatch || !(error instanceof ProbeError) || error.code !== 'file.staging_required') throw error
-              missing = true
-              return []
+          let content: string | DshPromptPart[]
+          if (typeof wire === 'string') content = wire
+          else {
+            const resolved: DshPromptPart[] = []
+            for (const part of wire) {
+              if (part.type === 'text') { resolved.push(part); continue }
+              files.add(part.file_id)
+              try { resolved.push(part.type === 'image' ? await this.files.resolveImage(part.file_id, command.session_id, owner, signal) : this.files.resolve(part.file_id, command.session_id, owner)) }
+              catch (error) {
+                if (!recoveringDispatch || !(error instanceof ProbeError) || error.code !== 'file.staging_required') throw error
+                missing = true
+              }
             }
-          })
+            content = resolved
+          }
           if (missing) return this.client.reconcilePrompt(id, nativeRequestId, signal)
           try { return await this.client.prompt(id, nativeRequestId, command.payload.mode, content, signal) }
           finally { for (const file of files) this.files.drop(file) }
@@ -114,7 +129,7 @@ export class ProbeRuntime {
         case 'session.subscribe': throw new ProbeError('protocol.streaming_required')
       }
     }
-    const mutating = ['session.create', 'message.submit', 'session.cancel', 'session.archive', 'session.model.select', 'interaction.answer', 'question.answer', 'question.timed.answer'].includes(command.type)
+    const mutating = ['session.create', 'session.fork', 'message.submit', 'session.cancel', 'session.archive', 'session.model.select', 'interaction.answer', 'question.answer', 'question.timed.answer'].includes(command.type)
     let payload: unknown
     if (!mutating) payload = await run()
     else {
@@ -140,7 +155,7 @@ export class ProbeRuntime {
         await report(admission.state)
         throw new ProbeError(admission.errorCode ?? 'command.rejected')
       } else if (admission.state === 'outcome_unknown') {
-        await report(admission.state)
+        await report(admission.state, admission.result)
         throw new ProbeError('command.outcome_unknown')
       } else if (admission.state === 'agent_queued' || admission.state === 'settled') {
         if (admission.result === undefined) throw new ProbeError('journal.integrity_failed')
@@ -151,7 +166,7 @@ export class ProbeRuntime {
         payload = admission.result
       } else if (admission.state === 'dispatching' && command.type !== 'message.submit') {
         this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
-        await report('outcome_unknown')
+        await report('outcome_unknown', admission.result)
         throw new ProbeError('command.outcome_unknown')
       } else {
         const admittedState = admission.state === 'dispatching' ? 'host_accepted' : admission.state
@@ -165,14 +180,20 @@ export class ProbeRuntime {
           await report('dispatching')
           try {
             const value = await run(recoveringDispatch)
+            if (command.type === 'session.fork' && value !== null && typeof value === 'object' && 'command_state' in value && value.command_state === 'outcome_unknown') {
+              this.journal.noteResult(command.request_id, owner, value)
+              this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
+              await report('outcome_unknown', value)
+              return value
+            }
             const lateAnswer = command.type === 'question.timed.answer' && value !== null && typeof value === 'object' && 'delivery' in value && value.delivery === 'late_message'
-            const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create' || command.type === 'session.model.select' || lateAnswer
+            const checkpointRequired = command.type === 'message.submit' || command.type === 'session.create' || command.type === 'session.fork' || command.type === 'session.model.select' || lateAnswer
             if (checkpointRequired && value !== null && typeof value === 'object'
               && 'checkpoint' in value && value.checkpoint !== null && typeof value.checkpoint === 'object'
               && 'state' in value.checkpoint && value.checkpoint.state !== 'persisted') {
               const uncertain = { ...value, command_state: 'outcome_unknown' }
               this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
-              await report('outcome_unknown')
+              await report('outcome_unknown', uncertain)
               return uncertain
             }
             if (checkpointRequired && (value === null || typeof value !== 'object' || !('checkpoint' in value)
@@ -191,7 +212,7 @@ export class ProbeRuntime {
               await report('rejected')
             } else {
               this.journal.fail(command.request_id, owner, 'outcome_unknown', 'command.outcome_unknown')
-              await report('outcome_unknown')
+              await report('outcome_unknown', this.journal.lookup(command, owner)?.result)
             }
             throw error
           }
@@ -208,6 +229,8 @@ export class ProbeRuntime {
     return { v: 0, type: `${command.type}.result`, request_id: command.request_id, runtime_epoch: this.epoch, payload }
   }
 
+
+  mediaCurrent(session: string, sync: string): boolean { return !this.closed && this.sync.mediaCurrent(session, sync) }
   follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal) {
     this.check(command)
     return this.sync.follow(command, AbortSignal.any([signal, this.lifetime.signal]))
@@ -225,6 +248,8 @@ export class ProbeRuntime {
     // The plugin's asynchronous teardown separately awaits export cleanup.
     void this.exports.close().catch(() => {})
     this.files.close()
+    this.messageActions.close()
+    this.changes.close()
     this.interactions.close()
   }
 }

@@ -35,6 +35,18 @@ export class NativeFileRegistry {
     if (!staged || !this.entries.has(fileId) || !staged.confirmed || staged.session !== session || staged.file.user_id !== owner.userId || staged.file.device_id !== owner.deviceId) throw new ProbeError('file.staging_required')
     return { type: 'file', receiptId: staged.upload.receiptId }
   }
+  async resolveImage(fileId: string, session: string, owner: { userId: string; deviceId: string }, signal: AbortSignal): Promise<DshPromptPart> {
+    this.resolve(fileId, session, owner) // The ordinary scanner/native-ready/ownership gate is never bypassed.
+    const staged = this.entries.get(fileId)!
+    const current = () => {
+      signal.throwIfAborted()
+      if (this.entries.get(fileId) !== staged || !this.available(fileId) || staged.file.user_id !== owner.userId || staged.file.device_id !== owner.deviceId) throw new ProbeError('file.staging_required')
+    }
+    const image = await this.client.resolveImageFile(staged.native, staged.upload.receiptId,
+      { name: staged.file.name, size_bytes: staged.file.size_bytes, sha256: staged.file.sha256 }, AbortSignal.any([signal, staged.signal]), current)
+    current()
+    return image
+  }
   drop(fileId: string): void {
     const staged = this.entries.get(fileId)
     this.entries.delete(fileId)

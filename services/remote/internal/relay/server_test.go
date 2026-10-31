@@ -33,6 +33,7 @@ type relayTestStore struct {
 	attachInput        store.RuntimeConnectionInput
 	attachErr          error
 	touchCalls         int
+	touchErr           error
 	detached           chan store.RuntimeConnection
 	commands           map[string]store.CommandStatus
 	leaseCalls         int
@@ -72,6 +73,9 @@ func (fake *relayTestStore) AuthorizeRealtimeCommandReceipt(ctx context.Context,
 	if err := fake.ValidateRealtimeLease(ctx, ticket); err != nil {
 		return err
 	}
+	if status.CommandType == "session.fork" {
+		return fake.AuthorizeRealtimeSessionFork(ctx, ticket, status.SessionID, status.WorkspaceID)
+	}
 	if status.WorkspaceID != "" {
 		if slices.Contains(ticket.Scope.Workspaces, status.WorkspaceID) {
 			return nil
@@ -104,9 +108,9 @@ func (fake *relayTestStore) AttachRuntimeConnection(_ context.Context, input sto
 
 func (fake *relayTestStore) TouchRuntimeConnection(context.Context, string, string, string, string) error {
 	fake.mu.Lock()
+	defer fake.mu.Unlock()
 	fake.touchCalls++
-	fake.mu.Unlock()
-	return nil
+	return fake.touchErr
 }
 
 func (fake *relayTestStore) DetachRuntimeConnection(_ context.Context, installationID, runtimeID, runtimeEpoch, connectionID string) error {
@@ -162,6 +166,19 @@ func (fake *relayTestStore) RecordRealtimeCommandReceipt(_ context.Context, rece
 	defer fake.mu.Unlock()
 	status, ok := fake.commands[receipt.RequestID]
 	if !ok || (status.WorkspaceID == "" && status.SessionID != receipt.SessionID) || status.WorkspaceID != receipt.WorkspaceID || status.PayloadSHA256 != receipt.PayloadSHA256 {
+		return store.CommandStatus{}, store.ErrCommandTransition
+	}
+	if status.CommandType == "session.fork" {
+		if receipt.CommandType != "session.fork" || status.SessionID != receipt.SessionID || status.ChildSessionID != "" && receipt.ChildSessionID != "" && status.ChildSessionID != receipt.ChildSessionID {
+			return store.CommandStatus{}, store.ErrCommandTransition
+		}
+		if receipt.ChildSessionID != "" {
+			status.ChildSessionID = receipt.ChildSessionID
+		}
+		if receipt.ForkOutcome != nil {
+			status.ForkOutcome = receipt.ForkOutcome
+		}
+	} else if receipt.CommandType != "" || receipt.ChildSessionID != "" || receipt.ForkOutcome != nil {
 		return store.CommandStatus{}, store.ErrCommandTransition
 	}
 	if receipt.CreatedSession != nil {

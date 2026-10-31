@@ -1,0 +1,582 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dsh-mobile-ustc:ws:fork:v1",
+  "description": "Negotiated strict feature frames; references convey no authority. Current owner, resource, runtime epoch, reader sync, exact manifest/anchor and independent action/export grants remain runtime requirements.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/sessionFork"
+    },
+    {
+      "$ref": "#/$defs/sessionForkToHost"
+    },
+    {
+      "$ref": "#/$defs/hostForkReceipt"
+    },
+    {
+      "$ref": "#/$defs/deviceForkReceipt"
+    }
+  ],
+  "$defs": {
+    "deviceForkReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "command.receipt"
+        },
+        "payload": {
+          "$ref": "#/$defs/deviceForkReceiptPayload"
+        }
+      }
+    },
+    "deviceForkReceiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_type",
+        "workspace_id",
+        "state",
+        "payload_sha256",
+        "updated_at"
+      ],
+      "properties": {
+        "command_type": {
+          "const": "session.fork"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "enum": [
+            "received",
+            "host_accepted",
+            "dispatching",
+            "settled",
+            "rejected",
+            "outcome_unknown"
+          ]
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "fork_outcome": {
+          "$ref": "#/$defs/forkOutcome"
+        }
+      },
+      "dependentRequired": {
+        "child_session_id": [
+          "fork_outcome"
+        ],
+        "fork_outcome": [
+          "child_session_id"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "child_session_id",
+              "fork_outcome"
+            ],
+            "properties": {
+              "child_session_id": {},
+              "fork_outcome": {
+                "type": "object",
+                "properties": {
+                  "checkpoint": {
+                    "const": "persisted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "rejected"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "child_session_id"
+                  ],
+                  "properties": {
+                    "child_session_id": {}
+                  }
+                },
+                {
+                  "required": [
+                    "fork_outcome"
+                  ],
+                  "properties": {
+                    "fork_outcome": {}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Negotiated session.fork.v1 only. Envelope session_id always remains the source; child differs from source. Runtime enforces exact anchor/workspace, original-once journal, monotone retained outcome, child catalog identity and checkpoint evidence. Unknown outcome must never replay the native fork."
+    },
+    "forkOutcome": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "workspace_attachment": {
+          "type": "string",
+          "enum": [
+            "attached",
+            "failed",
+            "unknown"
+          ]
+        },
+        "checkpoint": {
+          "type": "string",
+          "enum": [
+            "persisted",
+            "unavailable",
+            "failed",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "workspace_attachment",
+        "checkpoint"
+      ],
+      "additionalProperties": false
+    },
+    "forkPayload": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "anchor": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "subscription_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "sync_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "message_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "anchor_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "v",
+            "subscription_id",
+            "sync_id",
+            "native_seq",
+            "message_version_sha256",
+            "anchor_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "workspace_id",
+        "anchor"
+      ],
+      "additionalProperties": false
+    },
+    "hostForkReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "device_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "command.receipt"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/hostForkReceiptPayload"
+        }
+      }
+    },
+    "hostForkReceiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_type",
+        "workspace_id",
+        "state",
+        "payload_sha256"
+      ],
+      "properties": {
+        "command_type": {
+          "const": "session.fork"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "enum": [
+            "host_accepted",
+            "dispatching",
+            "settled",
+            "rejected",
+            "outcome_unknown"
+          ]
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "fork_outcome": {
+          "$ref": "#/$defs/forkOutcome"
+        },
+        "created_session": {
+          "$ref": "#/$defs/sessionCatalogItem"
+        }
+      },
+      "dependentRequired": {
+        "child_session_id": [
+          "fork_outcome"
+        ],
+        "fork_outcome": [
+          "child_session_id"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "child_session_id",
+              "fork_outcome",
+              "created_session"
+            ],
+            "properties": {
+              "child_session_id": {},
+              "created_session": {},
+              "fork_outcome": {
+                "type": "object",
+                "properties": {
+                  "checkpoint": {
+                    "const": "persisted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "rejected"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "child_session_id"
+                  ],
+                  "properties": {
+                    "child_session_id": {}
+                  }
+                },
+                {
+                  "required": [
+                    "fork_outcome"
+                  ],
+                  "properties": {
+                    "fork_outcome": {}
+                  }
+                },
+                {
+                  "required": [
+                    "created_session"
+                  ],
+                  "properties": {
+                    "created_session": {}
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "created_session"
+            ],
+            "properties": {
+              "created_session": {}
+            }
+          },
+          "then": {
+            "required": [
+              "child_session_id",
+              "fork_outcome"
+            ],
+            "properties": {
+              "child_session_id": {},
+              "fork_outcome": {
+                "type": "object",
+                "properties": {
+                  "checkpoint": {
+                    "const": "persisted"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Negotiated session.fork.v1 only. Envelope session_id always remains the source; child differs from source. Runtime enforces exact anchor/workspace, original-once journal, monotone retained outcome, child catalog identity and checkpoint evidence. Unknown outcome must never replay the native fork."
+    },
+    "sessionCatalogItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "dsh_session_id",
+        "workspace_id",
+        "state",
+        "last_persisted_seq"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dsh_session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "workspace_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "available",
+            "running",
+            "archived",
+            "unavailable"
+          ]
+        },
+        "last_persisted_seq": {
+          "type": "integer",
+          "minimum": -1
+        }
+      }
+    },
+    "sessionFork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.fork"
+        },
+        "payload": {
+          "$ref": "#/$defs/forkPayload"
+        }
+      }
+    },
+    "sessionForkToHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "user_id",
+        "device_id",
+        "payload_sha256",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.fork"
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "payload": {
+          "$ref": "#/$defs/forkPayload"
+        }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -51,6 +51,16 @@ func parseSessionDirectoryCursor(encoded string) (sessionDirectoryCursor, error)
 // SessionDirectory pages only metadata under the current phone and explicit
 // session.list resource scope. Stable UUID order is independent of activity updates.
 func (postgres *Postgres) SessionDirectory(ctx context.Context, identity UserIdentity, deviceID, proofJKT, runtimeID string, limit int, encoded string) (SessionDirectory, error) {
+	return postgres.sessionDirectory(ctx, identity, deviceID, proofJKT, runtimeID, limit, encoded, false)
+}
+
+// SessionDirectoryNames is the explicit versioned names projection. The same
+// statement still requires session.list and rechecks the current metadata action.
+func (postgres *Postgres) SessionDirectoryNames(ctx context.Context, identity UserIdentity, deviceID, proofJKT, runtimeID string, limit int, encoded string) (SessionDirectory, error) {
+	return postgres.sessionDirectory(ctx, identity, deviceID, proofJKT, runtimeID, limit, encoded, true)
+}
+
+func (postgres *Postgres) sessionDirectory(ctx context.Context, identity UserIdentity, deviceID, proofJKT, runtimeID string, limit int, encoded string, names bool) (SessionDirectory, error) {
 	page := SessionDirectory{RuntimeID: runtimeID, Items: []Session{}}
 	if !grantUUIDPattern.MatchString(deviceID) || !grantUUIDPattern.MatchString(runtimeID) || !keyThumbprintPattern.MatchString(proofJKT) || limit < 1 || limit > 100 {
 		return page, ErrSessionDirectoryInvalid
@@ -82,11 +92,12 @@ func (postgres *Postgres) SessionDirectory(ctx context.Context, identity UserIde
 	 and g.revoked_at is null and (g.expires_at is null or g.expires_at>statement_timestamp()) and g.scope->'actions' ? 'session.list'
 	)
 	select a.id::text,coalesce((select jsonb_agg(row_to_json(p) order by p.session_id) from (
-	 select s.id session_id,s.runtime_id,s.workspace_id,s.state,s.last_persisted_seq,s.updated_at
+	 select s.id session_id,s.runtime_id,s.workspace_id,s.state,s.last_persisted_seq,s.updated_at,
+	 case when $9::boolean and a.scope->'actions' ? 'session.metadata.read' then s.directory_metadata else null end metadata
 	 from sessions s where s.runtime_id=$5 and ($7::uuid is null or s.id>$7) and (
 	 coalesce(a.scope->'sessions','[]'::jsonb) @> jsonb_build_array(s.id::text) or
 	 (s.workspace_id is not null and coalesce(a.scope->'workspaces','[]'::jsonb) @> jsonb_build_array(s.workspace_id::text)))
-	 order by s.id limit $8) p),'[]'::jsonb) from access a`, identity.Issuer, identity.Subject, deviceID, proofJKT, runtimeID, cursorUser, after, limit+1).Scan(&actor, &raw)
+	 order by s.id limit $8) p),'[]'::jsonb) from access a`, identity.Issuer, identity.Subject, deviceID, proofJKT, runtimeID, cursorUser, after, limit+1, names).Scan(&actor, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return page, ErrAccessDenied
 	}
@@ -98,7 +109,7 @@ func (postgres *Postgres) SessionDirectory(ctx context.Context, identity UserIde
 	}
 	for index, item := range page.Items {
 		page.Items[index].RuntimeID = runtimeID
-		if item.LastPersistedSeq < -1 || item.LastPersistedSeq > 9007199254740991 || item.UpdatedAt.IsZero() {
+		if item.LastPersistedSeq < -1 || item.LastPersistedSeq > 9007199254740991 || item.UpdatedAt.IsZero() || !item.Metadata.Valid() {
 			return SessionDirectory{}, ErrDatabaseUnavailable
 		}
 	}

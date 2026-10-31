@@ -2,8 +2,28 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dsh-mobile-ustc.invalid/contracts/ws/v1/relay.schema.json",
   "title": "DSH Mobile Relay v1 frames",
-  "description": "Strict challenge, heartbeat, commands, scoped session reads, and blocking/timed question frames. File message parts require message.files.v1 on both peers, current Host file.handoff.v1, and atomic database authorization of every reference. Runtime validators reject duplicate file IDs. Archive settlement confirms registry durability, not activity settlement. Fragmented projected payloads are at most 2 MiB.",
+  "description": "Strict challenge, heartbeat, commands, scoped session reads and negotiated feature frames. Metadata requires session.metadata.v1 plus explicit metadata_version=1 and independent session.metadata.read; legacy catalog and model catalog/select shapes remain unchanged. Image parts require message.images.v1 and all existing file gates. Media references require session.media.v1/current reader and never grant independent export/download authority. Changes and message previews are bounded current-reader queries. Forks require session.fork.v1 and preserve source session_id, exact anchor/workspace and original-once partial outcomes. Runtime validators enforce cross-field identities, byte/pixel limits and current authorization. Fragmented projected payloads are at most 2 MiB.",
   "oneOf": [
+    { "$ref": "#/$defs/messagePreviewGet" },
+    { "$ref": "#/$defs/hostMessagePreviewGet" },
+    { "$ref": "#/$defs/messagePreviewConfirm" },
+    { "$ref": "#/$defs/hostMessagePreviewConfirm" },
+    { "$ref": "#/$defs/messagePreviewResult" },
+    { "$ref": "#/$defs/messagePreviewError" },
+    { "$ref": "#/$defs/sessionFork" },
+    { "$ref": "#/$defs/sessionForkToHost" },
+    { "$ref": "#/$defs/hostForkReceipt" },
+    { "$ref": "#/$defs/deviceForkReceipt" },
+    { "$ref": "#/$defs/changesGet" },
+    { "$ref": "#/$defs/changesPatchGet" },
+    { "$ref": "#/$defs/changesResult" },
+    { "$ref": "#/$defs/changesPatchResult" },
+    { "$ref": "#/$defs/changesError" },
+    { "$ref": "#/$defs/changesPatchError" },
+    { "$ref": "#/$defs/mediaResolve" },
+    { "$ref": "#/$defs/hostMediaResolve" },
+    { "$ref": "#/$defs/mediaResult" },
+    { "$ref": "#/$defs/mediaError" },
     {"$ref":"#/$defs/hostObservations"},
     {"$ref":"#/$defs/questionReferencesAck"},
     {"$ref":"#/$defs/questionReferences"},
@@ -71,6 +91,2562 @@
     {"$ref": "#/$defs/sessionClosed"}
   ],
   "$defs": {
+    "forkAnchor": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "subscription_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "native_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "message_version_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "anchor_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "v",
+        "subscription_id",
+        "sync_id",
+        "native_seq",
+        "message_version_sha256",
+        "anchor_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "forkPayload": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "anchor": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "subscription_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "sync_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "message_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "anchor_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "v",
+            "subscription_id",
+            "sync_id",
+            "native_seq",
+            "message_version_sha256",
+            "anchor_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "workspace_id",
+        "anchor"
+      ],
+      "additionalProperties": false
+    },
+    "forkOutcome": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "workspace_attachment": {
+          "type": "string",
+          "enum": [
+            "attached",
+            "failed",
+            "unknown"
+          ]
+        },
+        "checkpoint": {
+          "type": "string",
+          "enum": [
+            "persisted",
+            "unavailable",
+            "failed",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "workspace_attachment",
+        "checkpoint"
+      ],
+      "additionalProperties": false
+    },
+    "messagePreviewRequest": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "native_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "sync_id",
+        "native_seq"
+      ],
+      "additionalProperties": false
+    },
+    "messagePreviewConfirmRequest": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "anchor": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "subscription_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "sync_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "message_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "anchor_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "v",
+            "subscription_id",
+            "sync_id",
+            "native_seq",
+            "message_version_sha256",
+            "anchor_sha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sync_id",
+        "anchor"
+      ],
+      "additionalProperties": false
+    },
+    "messagePreview": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "anchor": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "subscription_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "sync_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "message_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "anchor_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "v",
+            "subscription_id",
+            "sync_id",
+            "native_seq",
+            "message_version_sha256",
+            "anchor_sha256"
+          ],
+          "additionalProperties": false
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shareable": {
+          "type": "boolean"
+        },
+        "complete": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "v",
+        "anchor",
+        "text",
+        "shareable",
+        "complete"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "shareable"
+            ],
+            "properties": {
+              "shareable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "text": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Exact authorized persisted visible subset; <=32768 UTF-8 text bytes and <=48KiB serialized payload. Image/file-only messages retain real anchors with text=null/shareable=false. Share confirmation requires unchanged current-reader authorization; no invented text."
+    },
+    "messagePreviewGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.message.preview.get"
+        },
+        "payload": {
+          "$ref": "#/$defs/messagePreviewRequest"
+        }
+      }
+    },
+    "hostMessagePreviewGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "user_id",
+        "device_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.message.preview.get"
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/messagePreviewRequest"
+        }
+      }
+    },
+    "messagePreviewConfirm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.message.preview.confirm"
+        },
+        "payload": {
+          "$ref": "#/$defs/messagePreviewConfirmRequest"
+        }
+      }
+    },
+    "hostMessagePreviewConfirm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "user_id",
+        "device_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.message.preview.confirm"
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/messagePreviewConfirmRequest"
+        }
+      }
+    },
+    "messagePreviewResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.message.preview.result"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/messagePreview"
+        }
+      }
+    },
+    "messagePreviewError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.message.preview.error"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/readerErrorPayload"
+        }
+      }
+    },
+    "sessionFork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.fork"
+        },
+        "payload": {
+          "$ref": "#/$defs/forkPayload"
+        }
+      }
+    },
+    "sessionForkToHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "user_id",
+        "device_id",
+        "payload_sha256",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.fork"
+        },
+        "user_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "payload": {
+          "$ref": "#/$defs/forkPayload"
+        }
+      }
+    },
+    "hostForkReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "device_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "command.receipt"
+        },
+        "device_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/hostForkReceiptPayload"
+        }
+      }
+    },
+    "deviceForkReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "command.receipt"
+        },
+        "payload": {
+          "$ref": "#/$defs/deviceForkReceiptPayload"
+        }
+      }
+    },
+    "hostForkReceiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_type",
+        "workspace_id",
+        "state",
+        "payload_sha256"
+      ],
+      "properties": {
+        "command_type": {
+          "const": "session.fork"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "enum": [
+            "host_accepted",
+            "dispatching",
+            "settled",
+            "rejected",
+            "outcome_unknown"
+          ]
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "fork_outcome": {
+          "$ref": "#/$defs/forkOutcome"
+        },
+        "created_session": {
+          "$ref": "#/$defs/sessionCatalogItem"
+        }
+      },
+      "dependentRequired": {
+        "child_session_id": [
+          "fork_outcome"
+        ],
+        "fork_outcome": [
+          "child_session_id"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "child_session_id",
+              "fork_outcome",
+              "created_session"
+            ],
+            "properties": {
+              "child_session_id": {},
+              "created_session": {},
+              "fork_outcome": {
+                "type": "object",
+                "properties": {
+                  "checkpoint": {
+                    "const": "persisted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "rejected"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "child_session_id"
+                  ],
+                  "properties": {
+                    "child_session_id": {}
+                  }
+                },
+                {
+                  "required": [
+                    "fork_outcome"
+                  ],
+                  "properties": {
+                    "fork_outcome": {}
+                  }
+                },
+                {
+                  "required": [
+                    "created_session"
+                  ],
+                  "properties": {
+                    "created_session": {}
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "created_session"
+            ],
+            "properties": {
+              "created_session": {}
+            }
+          },
+          "then": {
+            "required": [
+              "child_session_id",
+              "fork_outcome"
+            ],
+            "properties": {
+              "child_session_id": {},
+              "fork_outcome": {
+                "type": "object",
+                "properties": {
+                  "checkpoint": {
+                    "const": "persisted"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Negotiated session.fork.v1 only. Envelope session_id always remains the source; child differs from source. Runtime enforces exact anchor/workspace, original-once journal, monotone retained outcome, child catalog identity and checkpoint evidence. Unknown outcome must never replay the native fork."
+    },
+    "deviceForkReceiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_type",
+        "workspace_id",
+        "state",
+        "payload_sha256",
+        "updated_at"
+      ],
+      "properties": {
+        "command_type": {
+          "const": "session.fork"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "enum": [
+            "received",
+            "host_accepted",
+            "dispatching",
+            "settled",
+            "rejected",
+            "outcome_unknown"
+          ]
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "fork_outcome": {
+          "$ref": "#/$defs/forkOutcome"
+        }
+      },
+      "dependentRequired": {
+        "child_session_id": [
+          "fork_outcome"
+        ],
+        "fork_outcome": [
+          "child_session_id"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "child_session_id",
+              "fork_outcome"
+            ],
+            "properties": {
+              "child_session_id": {},
+              "fork_outcome": {
+                "type": "object",
+                "properties": {
+                  "checkpoint": {
+                    "const": "persisted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "rejected"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "child_session_id"
+                  ],
+                  "properties": {
+                    "child_session_id": {}
+                  }
+                },
+                {
+                  "required": [
+                    "fork_outcome"
+                  ],
+                  "properties": {
+                    "fork_outcome": {}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Negotiated session.fork.v1 only. Envelope session_id always remains the source; child differs from source. Runtime enforces exact anchor/workspace, original-once journal, monotone retained outcome, child catalog identity and checkpoint evidence. Unknown outcome must never replay the native fork."
+    },
+    "changesRequest": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cursor": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "sync_id",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "changesPatchRequest": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "file_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "cursor": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "sync_id",
+        "snapshot_id",
+        "file_id"
+      ],
+      "additionalProperties": false
+    },
+    "changesPage": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "source": {
+          "type": "string",
+          "const": "configured_workspace_git"
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "git_head"
+            },
+            "oid": {
+              "type": "string",
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            }
+          },
+          "required": [
+            "kind",
+            "oid"
+          ],
+          "additionalProperties": false
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "scope": {
+          "type": "string",
+          "const": "tracked_head_to_index_worktree"
+        },
+        "excluded": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "string",
+              "const": "untracked"
+            },
+            {
+              "type": "string",
+              "const": "ignored"
+            },
+            {
+              "type": "string",
+              "const": "submodule_contents"
+            }
+          ],
+          "minItems": 3,
+          "maxItems": 3,
+          "items": false
+        },
+        "complete": {
+          "type": "boolean",
+          "const": true
+        },
+        "truncated": {
+          "type": "boolean",
+          "const": false
+        },
+        "files": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "added",
+                  "modified",
+                  "deleted",
+                  "renamed",
+                  "type_changed"
+                ]
+              },
+              "old_path": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "bytes_base64": {
+                        "type": "string",
+                        "maxLength": 16384,
+                        "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                      },
+                      "display": {
+                        "type": "string",
+                        "maxLength": 16384
+                      }
+                    },
+                    "required": [
+                      "bytes_base64",
+                      "display"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "new_path": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "bytes_base64": {
+                        "type": "string",
+                        "maxLength": 16384,
+                        "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                      },
+                      "display": {
+                        "type": "string",
+                        "maxLength": 16384
+                      }
+                    },
+                    "required": [
+                      "bytes_base64",
+                      "display"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "old_mode": {
+                "type": "string",
+                "pattern": "^[0-7]{6}$"
+              },
+              "new_mode": {
+                "type": "string",
+                "pattern": "^[0-7]{6}$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "binary",
+                  "symlink",
+                  "gitlink"
+                ]
+              },
+              "patch_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1048576
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "copyable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "file_id",
+              "status",
+              "old_path",
+              "new_path",
+              "old_mode",
+              "new_mode",
+              "kind",
+              "patch_bytes",
+              "complete",
+              "copyable"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "sync_id",
+        "snapshot_id",
+        "source",
+        "base",
+        "version",
+        "manifest_sha256",
+        "expires_at",
+        "scope",
+        "excluded",
+        "complete",
+        "truncated",
+        "files",
+        "next_cursor"
+      ],
+      "additionalProperties": false,
+      "description": "Current configured-workspace Git HEAD to tracked index/worktree snapshot, never attributed to a turn. Maximum 32768 serialized UTF-8 bytes per page; version/manifest and connection-local cursors expire after 30 seconds. Runtime checks current reader/grant, exact source and byte budgets."
+    },
+    "changesPatch": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "file_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "text",
+            "binary",
+            "symlink",
+            "gitlink"
+          ]
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "copyable": {
+          "type": "boolean"
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "patch_base64": {
+          "type": "string",
+          "maxLength": 22000
+        },
+        "patch_utf8": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 16384
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hunks": {
+          "maxItems": 20000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "old_start": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "old_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "new_start": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "new_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "lines": {
+                "maxItems": 20000,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "context",
+                        "add",
+                        "delete",
+                        "no_final_newline"
+                      ]
+                    },
+                    "bytes_base64": {
+                      "type": "string",
+                      "maxLength": 22000
+                    },
+                    "text": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 16384
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "old_line": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "new_line": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "bytes_base64",
+                    "text",
+                    "old_line",
+                    "new_line"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "old_start",
+              "old_count",
+              "new_start",
+              "new_count",
+              "lines"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "sync_id",
+        "snapshot_id",
+        "file_id",
+        "version",
+        "kind",
+        "complete",
+        "copyable",
+        "partial",
+        "patch_base64",
+        "patch_utf8",
+        "hunks",
+        "next_cursor"
+      ],
+      "additionalProperties": false,
+      "description": "At most 16384 serialized UTF-8 bytes per page and 20000 lines across the bounded snapshot. Byte-exact full copy only when complete, nonbinary, not partial, with no next cursor and exact UTF-8 patch bytes.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "copyable"
+            ],
+            "properties": {
+              "copyable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "complete": {
+                "const": true
+              },
+              "partial": {
+                "const": false
+              },
+              "next_cursor": {
+                "type": "null"
+              },
+              "patch_utf8": {
+                "type": "string",
+                "maxLength": 16384
+              },
+              "kind": {
+                "enum": [
+                  "text",
+                  "symlink",
+                  "gitlink"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "readerErrorPayload": {
+      "type": "object", "additionalProperties": false, "required": ["code"], "properties": { "code": { "enum": ["session.not_found", "runtime.changed", "runtime.offline", "access.denied", "protocol.invalid", "protocol.snapshot_too_large", "protocol.resync_required", "rate.limited", "message.stale", "message.unavailable", "message.not_persisted", "changes.stale", "changes.unavailable", "changes.not_git", "changes.limit"] } }
+    },
+    "changesGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.get"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesRequest"
+        }
+      }
+    },
+    "changesPatchGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.patch.get"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesPatchRequest"
+        }
+      }
+    },
+    "changesResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.result"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesPage"
+        }
+      }
+    },
+    "changesPatchResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.patch.result"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/changesPatch"
+        }
+      }
+    },
+    "changesError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.error"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/readerErrorPayload"
+        }
+      }
+    },
+    "changesPatchError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.changes.patch.error"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/readerErrorPayload"
+        }
+      }
+    },
+    "mediaResolvePayload": {
+      "type": "object",
+      "properties": {
+        "sync_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "reference": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "origin": {
+              "type": "string",
+              "const": "session_attachment"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "part_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4095
+            },
+            "event_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "manifest": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16777216
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "media_type": {
+              "type": "string",
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif"
+              ]
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            }
+          },
+          "required": [
+            "v",
+            "origin",
+            "native_seq",
+            "part_index",
+            "event_version_sha256",
+            "manifest",
+            "media_type",
+            "width",
+            "height"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sync_id",
+        "reference"
+      ],
+      "additionalProperties": false
+    },
+    "mediaResolve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.media.resolve"
+        },
+        "payload": {
+          "$ref": "#/$defs/mediaResolvePayload"
+        }
+      }
+    },
+    "hostMediaResolve": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "type": {
+          "type": "string",
+          "const": "session.media.resolve"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "runtime_epoch": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "subscription_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "device_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "key_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "grant_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "allow_workspace": {
+              "type": "boolean",
+              "const": false
+            },
+            "lease_until": {
+              "type": "string",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "sync_id": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "reference": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "origin": {
+                  "type": "string",
+                  "const": "session_attachment"
+                },
+                "native_seq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "part_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4095
+                },
+                "event_version_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "manifest": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512,
+                      "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+                    },
+                    "size_bytes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 16777216
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "size_bytes",
+                    "sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "media_type": {
+                  "type": "string",
+                  "enum": [
+                    "image/png",
+                    "image/jpeg",
+                    "image/webp",
+                    "image/gif"
+                  ]
+                },
+                "width": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16384
+                },
+                "height": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16384
+                }
+              },
+              "required": [
+                "v",
+                "origin",
+                "native_seq",
+                "part_index",
+                "event_version_sha256",
+                "manifest",
+                "media_type",
+                "width",
+                "height"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "user_id",
+            "device_id",
+            "key_version",
+            "grant_version",
+            "allow_workspace",
+            "lease_until",
+            "expires_at",
+            "sync_id",
+            "reference"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "mediaResultPayload": {
+      "type": "object",
+      "properties": {
+        "reference": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "origin": {
+              "type": "string",
+              "const": "session_attachment"
+            },
+            "native_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "part_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4095
+            },
+            "event_version_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "manifest": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 16777216
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "media_type": {
+              "type": "string",
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif"
+              ]
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            }
+          },
+          "required": [
+            "v",
+            "origin",
+            "native_seq",
+            "part_index",
+            "event_version_sha256",
+            "manifest",
+            "media_type",
+            "width",
+            "height"
+          ],
+          "additionalProperties": false
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "kind",
+            "origin",
+            "name",
+            "size_bytes",
+            "expires_at"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "kind": {
+              "const": "file"
+            },
+            "origin": {
+              "const": "session_attachment"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16777216
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          }
+        }
+      },
+      "required": [
+        "reference",
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "Source name and size must exactly equal the current reference manifest. No unavailable/directory source, native attachment identity, path or URL. A source reference is not export or download authority."
+    },
+    "mediaErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "access.denied",
+            "runtime.changed",
+            "runtime.offline",
+            "protocol.unsupported",
+            "protocol.invalid",
+            "protocol.resync_required",
+            "rate.limited",
+            "file.export_unavailable",
+            "file.export_changed",
+            "file.export_unsupported",
+            "file.too_large",
+            "file.unavailable",
+            "file.state_changed",
+            "session.persistence_unavailable"
+          ]
+        }
+      }
+    },
+    "mediaResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.media.result"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/mediaResultPayload"
+        }
+      }
+    },
+    "mediaError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "session_id",
+        "subscription_id",
+        "type",
+        "sync_id",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "subscription_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "type": {
+          "const": "session.media.error"
+        },
+        "sync_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/mediaErrorPayload"
+        }
+      }
+    },
+    "imageContent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "image"
+        },
+        "file_id": {
+          "type": "string",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "type",
+        "file_id"
+      ],
+      "additionalProperties": false
+    },
+    "visibleMediaReference": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "origin": {
+          "type": "string",
+          "const": "session_attachment"
+        },
+        "native_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "part_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "event_version_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\\\/\\p{Cc}\\p{Cs}]+$"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16777216
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "name",
+            "size_bytes",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "media_type": {
+          "type": "string",
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif"
+          ]
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      },
+      "required": [
+        "v",
+        "origin",
+        "native_seq",
+        "part_index",
+        "event_version_sha256",
+        "manifest",
+        "media_type",
+        "width",
+        "height"
+      ],
+      "additionalProperties": false,
+      "description": "Versioned visible-event provenance, not download authority. At most 16 MiB, 32 million pixels and 16384 pixels per dimension; runtime validates event/manifest digests, current reader sync/epoch, MIME, bytes and independently authorized export/download."
+    },
+    "visibleImageBlock": {
+      "type": "object", "additionalProperties": false, "required": ["type", "reference"],
+      "properties": { "type": { "const": "image" }, "reference": { "$ref": "#/$defs/visibleMediaReference" } }
+    },
+    "projectedTextBlock": {
+      "type": "object", "additionalProperties": false, "required": ["type", "text"],
+      "properties": { "type": { "enum": ["text", "reasoning"] }, "text": { "type": "string" } }
+    },
+    "projectedContent": {
+      "type": "array", "items": { "oneOf": [{ "$ref": "#/$defs/projectedTextBlock" }, { "$ref": "#/$defs/visibleImageBlock" }] }
+    },
+    "directoryMetadata": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069])(?!\\s*$)[\\s\\S]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace_title": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069])(?!\\s*$)[\\s\\S]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title_source": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "cached",
+                "sequenced"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title_as_of_seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "title",
+        "workspace_title",
+        "title_source",
+        "title_as_of_seq"
+      ],
+      "additionalProperties": false,
+      "description": "Plain untrusted native projection names, never paths or first-message fallbacks. Runtime enforces scalar Unicode, <=256 UTF-16 code units and <=1024 UTF-8 bytes; title source/cut describe cached or sequenced evidence, not live freshness.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "title"
+            ],
+            "properties": {
+              "title": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "title_source": {
+                "type": "null"
+              },
+              "title_as_of_seq": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "title_source": {
+                "enum": [
+                  "cached",
+                  "sequenced"
+                ]
+              },
+              "title_as_of_seq": {
+                "type": "integer",
+                "minimum": -1,
+                "maximum": 9007199254740991
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sessionCatalogMetadataItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "dsh_session_id", "workspace_id", "state", "last_persisted_seq", "metadata"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/uuid" }, "dsh_session_id": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "workspace_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] }, "state": { "enum": ["available", "running", "archived", "unavailable"] },
+        "last_persisted_seq": { "type": "integer", "minimum": -1 }, "metadata": { "$ref": "#/$defs/directoryMetadata" }
+      },
+      "allOf": [
+        { "if": { "required": ["workspace_id"], "properties": { "workspace_id": { "type": "null" } } }, "then": { "properties": { "metadata": { "type": "object", "properties": { "workspace_title": { "type": "null" } } } } } },
+        { "if": { "required": ["state"], "properties": { "state": { "const": "unavailable" } } }, "then": { "properties": { "metadata": { "type": "object", "properties": { "title": { "type": "null" }, "workspace_title": { "type": "null" }, "title_source": { "type": "null" }, "title_as_of_seq": { "type": "null" } } } } } }
+      ]
+    },
     "hostObservations": {
       "type": "object",
       "properties": {
@@ -616,7 +3192,7 @@
         "payload_sha256": { "$ref": "#/$defs/sha256" },
         "payload": { "allOf": [
           { "$ref": "#/$defs/submitPayload" },
-          { "type": "object", "properties": { "content": { "type": "array", "contains": { "$ref": "#/$defs/fileContent" } } }, "required": ["content"] }
+          { "type": "object", "properties": { "content": { "type": "array", "contains": { "anyOf": [{ "$ref": "#/$defs/fileContent" }, { "$ref": "#/$defs/imageContent" }] } } }, "required": ["content"] }
         ] }
       },
       "description": "Host-only message.files.reconcile.v1 query for an already reserved original. Digest remains that of message.submit. It cannot admit a new native prompt. Phone clients cannot send this frame."
@@ -2324,7 +4900,7 @@
       "type": "object", "additionalProperties": false, "required": ["mode", "content"],
       "properties": {
         "mode": { "enum": ["queue", "steer"] },
-        "content": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "oneOf": [{ "$ref": "#/$defs/textContent" }, { "$ref": "#/$defs/fileContent" }] } }
+        "content": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "oneOf": [{ "$ref": "#/$defs/textContent" }, { "$ref": "#/$defs/fileContent" }, { "$ref": "#/$defs/imageContent" }] } }
       }
     },
     "sessionCatalogItem": {
@@ -2339,23 +4915,106 @@
       }
     },
     "hostSessionCatalog": {
-      "type": "object", "additionalProperties": false,
-      "required": ["v", "type", "request_id", "runtime_id", "runtime_epoch", "payload"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "runtime_id",
+        "runtime_epoch",
+        "payload"
+      ],
       "properties": {
-        "v": { "const": 1 }, "type": { "const": "session.catalog" },
-        "request_id": { "$ref": "#/$defs/uuid" }, "runtime_id": { "$ref": "#/$defs/uuid" },
-        "runtime_epoch": { "$ref": "#/$defs/uuid" },
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "session.catalog"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "runtime_epoch": {
+          "$ref": "#/$defs/uuid"
+        },
         "payload": {
-          "type": "object", "additionalProperties": false,
-          "required": ["mode", "index", "complete", "items"],
-          "properties": {
-            "mode": { "enum": ["snapshot", "delta"] },
-            "index": { "type": "integer", "minimum": 0 },
-            "complete": { "type": "boolean" },
-            "items": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/sessionCatalogItem" } }
-          }
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "index",
+                "complete",
+                "items"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "snapshot",
+                    "delta"
+                  ]
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "items": {
+                  "type": "array",
+                  "maxItems": 256,
+                  "items": {
+                    "$ref": "#/$defs/sessionCatalogItem"
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "index",
+                "complete",
+                "metadata_version",
+                "items"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "snapshot",
+                    "delta"
+                  ]
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "metadata_version": {
+                  "const": 1
+                },
+                "items": {
+                  "type": "array",
+                  "maxItems": 256,
+                  "items": {
+                    "$ref": "#/$defs/sessionCatalogMetadataItem"
+                  }
+                }
+              }
+            }
+          ]
         }
-      }
+      },
+      "description": "Identifier-only legacy shape unless session.metadata.v1 is negotiated and metadata_version=1 is explicit. Version remains invariant across a catalog chunk sequence. Names do not grant session.metadata.read or replace current authorization."
     },
     "hostSessionCatalogAck": {
       "type": "object", "additionalProperties": false,
@@ -2483,7 +5142,8 @@
             },
             "timed_questions": {
               "type": "boolean"
-            }
+            },
+            "media_refs": { "type": "boolean" }
           }
         }
       }
@@ -2566,7 +5226,7 @@
         "native_seq": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
         "time": {"type": "number"},
         "type": {"type": "string", "minLength": 1},
-        "data": {"type": "object"},
+        "data": { "type": "object", "properties": { "content": { "$ref": "#/$defs/projectedContent" }, "message": { "type": "object", "properties": { "content": { "$ref": "#/$defs/projectedContent" } } } } },
         "surface_op": {},
         "source_event_seqs": {}
       }

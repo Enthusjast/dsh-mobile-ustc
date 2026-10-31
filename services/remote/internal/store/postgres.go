@@ -87,23 +87,27 @@ type RuntimeAccess struct {
 }
 
 type Session struct {
-	RuntimeID        string    `json:"-"`
-	WorkspaceID      *string   `json:"workspace_id"`
-	ID               string    `json:"session_id"`
-	State            string    `json:"state"`
-	LastPersistedSeq int64     `json:"last_persisted_seq"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	RuntimeID        string             `json:"-"`
+	WorkspaceID      *string            `json:"workspace_id"`
+	ID               string             `json:"session_id"`
+	State            string             `json:"state"`
+	LastPersistedSeq int64              `json:"last_persisted_seq"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	Metadata         *DirectoryMetadata `json:"metadata,omitempty"`
 }
 
 type CommandStatus struct {
 	// Current dispatch attempt only; this flag grants no new file admission.
-	ReconcileFiles bool      `json:"-"`
-	RequestID      string    `json:"request_id"`
-	SessionID      string    `json:"session_id,omitempty"`
-	WorkspaceID    string    `json:"workspace_id,omitempty"`
-	State          string    `json:"state"`
-	PayloadSHA256  string    `json:"payload_sha256"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ReconcileFiles bool                `json:"-"`
+	RequestID      string              `json:"request_id"`
+	SessionID      string              `json:"session_id,omitempty"`
+	WorkspaceID    string              `json:"workspace_id,omitempty"`
+	ChildSessionID string              `json:"child_session_id,omitempty"`
+	ForkOutcome    *SessionForkOutcome `json:"fork_outcome,omitempty"`
+	CommandType    string              `json:"command_type,omitempty"`
+	State          string              `json:"state"`
+	PayloadSHA256  string              `json:"payload_sha256"`
+	UpdatedAt      time.Time           `json:"updated_at"`
 }
 
 type DeviceRegistration struct {
@@ -354,8 +358,11 @@ func (postgres *Postgres) ListSessions(ctx context.Context, identity UserIdentit
 
 func (postgres *Postgres) CommandStatus(ctx context.Context, identity UserIdentity, deviceID, requestID string) (CommandStatus, error) {
 	var status CommandStatus
+	var forkOutcome []byte
 	err := postgres.DB.QueryRowContext(ctx, `
-		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,
+		       coalesce(c.child_session_id::text, ''), c.fork_outcome,
+		       case when c.action = 'session.fork' then 'session.fork' else '' end
 		from users u
 		join devices d on d.user_id = u.id and d.id = $3 and d.revoked_at is null
 		join commands c on c.device_id = d.id and c.user_id = u.id and c.request_id = $4::uuid
@@ -370,18 +377,28 @@ func (postgres *Postgres) CommandStatus(ctx context.Context, identity UserIdenti
 		  and g.revoked_at is null and (g.expires_at is null or g.expires_at > now())
 		  and g.scope->'actions' ? 'command.status'
 		  and (
-		      (c.workspace_id is not null and w.id is not null
-		        and (c.session_id is null or s.workspace_id = c.workspace_id)
-		        and g.scope->'workspaces' @> jsonb_build_array(w.id::text))
-		      or (c.workspace_id is null and (
-		        g.scope->'sessions' @> jsonb_build_array(s.id::text)
-		        or (s.workspace_id is not null and g.scope->'workspaces' @> jsonb_build_array(s.workspace_id::text))))
+		      (c.action = 'session.fork' and s.id is not null and w.id is not null
+		        and s.workspace_id = c.workspace_id
+		        and g.scope->'workspaces' @> jsonb_build_array(w.id::text)
+		        and (g.scope->'sessions' @> jsonb_build_array(s.id::text)
+		          or g.scope->'workspaces' @> jsonb_build_array(s.workspace_id::text)))
+		      or (c.action is distinct from 'session.fork' and (
+		        (c.workspace_id is not null and w.id is not null
+		          and (c.session_id is null or s.workspace_id = c.workspace_id)
+		          and g.scope->'workspaces' @> jsonb_build_array(w.id::text))
+		        or (c.workspace_id is null and (
+		          g.scope->'sessions' @> jsonb_build_array(s.id::text)
+		          or (s.workspace_id is not null and g.scope->'workspaces' @> jsonb_build_array(s.workspace_id::text))))))
 		  )`,
 		identity.Issuer, identity.Subject, deviceID, requestID).
-		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt)
+		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &status.ChildSessionID, &forkOutcome, &status.CommandType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrDeviceNotFound
 	}
+	if err != nil {
+		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+	status.ForkOutcome, err = DecodeSessionForkOutcome(forkOutcome)
 	if err != nil {
 		return CommandStatus{}, ErrDatabaseUnavailable
 	}

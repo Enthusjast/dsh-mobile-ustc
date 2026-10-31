@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "runtime_id": "66666666-6666-4666-8666-666666666666",
+  "runtime_epoch": "99999999-9999-4999-8999-999999999999",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "type": "command.receipt",
+  "payload": {
+    "command_type": "session.fork",
+    "workspace_id": "88888888-8888-4888-8888-888888888888",
+    "state": "outcome_unknown",
+    "payload_sha256": "79e716f704a57558f659ae7ca83657f4741fccd1817b29ccfb33c1a1f5047d51",
+    "child_session_id": "33333333-3333-4333-8333-333333333333",
+    "fork_outcome": {
+      "v": 1,
+      "workspace_attachment": "failed",
+      "checkpoint": "persisted"
+    },
+    "updated_at": "2026-10-31T12:00:01.000Z"
+  }
+}

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { RelaySessions, encodeSessionFrames, type SessionReaderRuntime } from '../src/relay-sessions.js'
-import type { Frame } from '../src/protocol.js'
+import { ProbeError, type Frame } from '../src/protocol.js'
 
 const runtimeId = randomUUID(), epoch = randomUUID(), sessionId = randomUUID(), subscriptionId = randomUUID(), requestId = randomUUID(), syncId = randomUUID()
 const subscribe = {
@@ -48,7 +48,10 @@ test('host session reads retain sync identity, page on the same cut, and abort o
         session_id: sessionId, sync_id: syncId, payload: { cursor: 7, has_more: true, records: [], assistant: null } }
       await once(signal, 'abort')
     },
-    async dispatch(command) { pages.push(command); return { payload: { records: [], has_more: false, through_seq: 7 } } },
+    async dispatch(command) {
+      if (command.type === 'session.page' && command.payload.through_seq !== 7) throw new ProbeError('protocol.resync_required')
+      pages.push(command); return { payload: { records: [], has_more: false, through_seq: 7 } }
+    },
   }
   const transport = new RelaySessions(runtime, async frame => { sent.push(frame) })
   try {
@@ -63,6 +66,14 @@ test('host session reads retain sync identity, page on the same cut, and abort o
     assert.equal(sent[1].request_id, pageId)
     assert.deepEqual(pages, [{ v: 0, type: 'session.page', request_id: pageId, runtime_epoch: epoch, session_id: sessionId,
       payload: { sync_id: syncId, through_seq: 7, before_seq: 8, max_messages: 5 } }])
+    const rejectedPage = randomUUID()
+    transport.handle({ ...subscribe, type: 'session.page', request_id: rejectedPage,
+      payload: { sync_id: syncId, through_seq: 6, before_seq: 7, max_messages: 5 } })
+    await waitFor(() => sent.some(frame => frame.type === 'session.error' && frame.request_id === rejectedPage))
+    const rejected = sent.find(frame => frame.type === 'session.error' && frame.request_id === rejectedPage)
+    assert.equal(rejected.payload.code, 'protocol.resync_required')
+    assert.equal('sync_id' in rejected, false, 'Legacy page errors must not acquire extension-only sync fields')
+    assert.equal(signals[0]?.aborted, false, 'A rejected page must not retire its valid reader')
     transport.handle({ ...subscribe, request_id: randomUUID(), subscription_id: randomUUID() })
     await waitFor(() => signals.length === 2)
     transport.handle({ ...subscribe, type: 'session.unsubscribe', payload: {} })

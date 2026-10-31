@@ -181,7 +181,7 @@ async function applyOwned(ctx: Context, config: Config, parentFiber: Context['fi
           ...(signed ? { approvals: binding => new RelayApprovals(signed!, binding) } : {}),
           questionReferences: binding => new RelayQuestionReferences(interactions, binding),
           files: binding => new RelayFiles(runtime!.files, binding),
-          ...(exportSupported?{exports:binding=>new RelayExports(runtime!.exports,client,epoch,binding)}:{}),
+          ...(exportSupported?{exports:binding=>new RelayExports(runtime!.exports,client,epoch,binding,(session,sync)=>runtime!.mediaCurrent(session,sync))}:{}),
         })
       } catch (error) {
         await relay?.close()

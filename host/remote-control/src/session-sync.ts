@@ -5,11 +5,15 @@ import { ProbeError } from './protocol.js'
 import { projectChunk, projectEvent, projectStream } from './projection.js'
 import type { QuestionSource, TimedQuestionSource } from './questions.js'
 
-interface Sync { session: string; through: number }
+interface Sync { session: string; through: number; media: boolean; signal: AbortSignal }
 
 export class SessionSync {
   private readonly cuts = new Map<string, Sync>()
   constructor(private readonly client: DshClient, private readonly epoch: string, private readonly questions?: QuestionSource, private readonly timed?: TimedQuestionSource) {}
+  mediaCurrent(session: string, syncId: string): boolean {
+    const cut = this.cuts.get(syncId)
+    return cut?.session === session && cut.media && !cut.signal.aborted
+  }
 
   async *follow(command: Extract<Command, { type: 'session.subscribe' }>, signal: AbortSignal): AsyncIterable<Frame> {
     if (!this.questions) { yield* this.nativeFollow(command, signal); return }
@@ -84,9 +88,9 @@ export class SessionSync {
     try {
       for await (const source of this.client.follow(native, command.payload.max_messages, signal)) {
         if (source.type === 'snapshot') {
-          this.cuts.set(syncId, { session: command.session_id, through: source.cursor })
+          this.cuts.set(syncId, { session: command.session_id, through: source.cursor, media: command.payload.media_refs === true, signal })
           yield frame('session.snapshot', {
-            cursor: source.cursor, has_more: source.hasMore, records: source.records.map(record => projectEvent(record.event)),
+            cursor: source.cursor, has_more: source.hasMore, records: source.records.map(record => projectEvent(record.event, command.payload.media_refs === true)),
             assistant: source.assistantStream === undefined ? null : {
               revision: source.assistantStream.revision,
               ...(source.assistantStream.activeAttempt === undefined ? {} : { activeAttempt: {
@@ -96,7 +100,7 @@ export class SessionSync {
           })
           yield frame('session.checkpoint', await this.client.checkpoint(native))
         } else if (source.type === 'event') {
-          yield frame('session.event', projectEvent(source.event))
+          yield frame('session.event', projectEvent(source.event, command.payload.media_refs === true))
           // turn/end is an observation until its own flush barrier has succeeded.
           if (source.event.type === 'turn/end') yield frame('session.checkpoint', await this.client.checkpoint(native))
         } else {
@@ -114,6 +118,6 @@ export class SessionSync {
     const page = await this.client.page(native, {
       throughSeq: cut.through, beforeSeq: command.payload.before_seq, maxMessages: command.payload.max_messages,
     }, signal)
-    return { records: page.records.map(record => projectEvent(record.event)), has_more: page.hasMore, through_seq: cut.through }
+    return { records: page.records.map(record => projectEvent(record.event, cut.media)), has_more: page.hasMore, through_seq: cut.through }
   }
 }

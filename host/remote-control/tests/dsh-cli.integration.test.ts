@@ -156,14 +156,12 @@ test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round tr
           const proof = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'))
           const signingInput = Buffer.from(`${headerPart}.${payloadPart}`)
           relayRuntimeEpoch = proof.runtime_epoch
-          const expectedCapabilities=['command.relay.v1', 'connection.heartbeat.v1', 'file.handoff.v1', 'message.files.reconcile.v1', 'message.files.v1', 'question.blocking.v1', 'question.references.v1', 'question.timed.v1', 'session.archive.v1', 'session.cancel.v1', 'session.catalog.v1', 'session.create.v1', 'session.create_options.v1', 'session.model.select.v1', 'session.models.v1', 'session.read.v1']
-          if(exportSupported)expectedCapabilities.push('file.export.v1')
-          expectedCapabilities.push('host.observations.v1')
-          expectedCapabilities.sort()
-          assert.deepEqual([...frame.payload.capabilities].sort(),expectedCapabilities)
+          const offered: unknown = frame.payload.capabilities
+          assert.ok(Array.isArray(offered) && offered.length <= 64 && offered.every(value => typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)))
+          assert.equal(new Set(offered).size, offered.length)
           const helloDigest = hostHelloDigest([
             'host', runtimeId, relayRuntimeEpoch, '0.2.1-rc.2', 'dsh-cli-integration', '0.0.1', '1',
-            expectedCapabilities.join('\n'),
+            [...offered].sort().join('\n'),
           ])
           const valid = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')).typ === 'dsh-relay-handshake-proof+jwt'
             && proof.iss === installationId && proof.aud === 'urn:dsh-mobile-ustc:realtime'

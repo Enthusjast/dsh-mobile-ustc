@@ -6,6 +6,7 @@ import { HostExportFrame, exportErrors } from './export-protocol.js'
 import type { FileTransportBinding } from './relay-files.js'
 import { putExportSource } from './export-upload.js'
 import { ProbeError } from './protocol.js'
+import { hostMediaFrame, mediaErrors, mediaResolveResult, type HostMediaResolveFrame } from './media-protocol.js'
 
 export interface HostExportPeer { handle(value: unknown): boolean | Promise<boolean>; close(): void | Promise<void> }
 interface Job { id: string; session: string; source?: string; phase: 'listing' | 'preparing' | 'manifest' | 'uploading' | 'committing';
@@ -17,11 +18,13 @@ export class RelayExports implements HostExportPeer {
   #jobs = new Map<string, Job>()
   #tasks = new Set<Promise<void>>()
   #closed = false
+  #media = new Map<string, AbortController>()
   #timer: NodeJS.Timeout
   #renew: { id: string; ids: string[]; until: number } | undefined
   #lastRenew = 0
-  constructor(private readonly registry: FileExportRegistry, client: DshClient, private readonly epoch: string, private readonly binding: FileTransportBinding) {
-    this.#catalog = new ExportCatalog(client, registry)
+  constructor(private readonly registry: FileExportRegistry, client: DshClient, private readonly epoch: string, private readonly binding: FileTransportBinding,
+    mediaCurrent?: (session: string, sync: string) => boolean) {
+    this.#catalog = new ExportCatalog(client, registry, mediaCurrent)
     this.runtimeId = client.runtimeId
     this.#timer = setInterval(() => this.#tick(), 250); this.#timer.unref()
   }
@@ -46,6 +49,18 @@ export class RelayExports implements HostExportPeer {
   handle(value: unknown): boolean {
     if (!value || typeof value !== 'object') return false
     const type = String((value as { type?: unknown }).type)
+    if (type === 'session.media.resolve') {
+      if (this.#closed) return true
+      const frame = hostMediaFrame.parse(value)
+      if (frame.runtime_id !== this.runtimeId || frame.runtime_epoch !== this.epoch) throw new ProbeError('runtime.changed')
+      if (this.#jobs.size + this.#media.size >= 8 || this.#media.has(frame.request_id) || this.#jobs.has(frame.request_id)) throw new ProbeError('rate.limited')
+      const abort = new AbortController()
+      this.#media.set(frame.request_id, abort)
+      let task!: Promise<void>
+      task = this.#resolveMedia(frame, abort).finally(() => { this.#media.delete(frame.request_id); this.#tasks.delete(task) })
+      this.#tasks.add(task)
+      return true
+    }
     if (type === 'error' && this.#renew && (value as { request_id?: unknown }).request_id === this.#renew.id) {
       for (const id of this.#renew.ids) { const job = this.#jobs.get(id); if (job) this.#end(job) }
       this.#renew = undefined; return true
@@ -118,6 +133,31 @@ export class RelayExports implements HostExportPeer {
     }
     throw new ProbeError('protocol.invalid')
   }
+  async #resolveMedia(frame: HostMediaResolveFrame, abort: AbortController): Promise<void> {
+    const payload = frame.payload, created = Date.now(), started = performance.now()
+    const until = Date.parse(payload.lease_until), expires = Date.parse(payload.expires_at)
+    const signal = AbortSignal.any([abort.signal, this.binding.signal])
+    const timer = setTimeout(() => abort.abort(), Math.max(1, Math.min(5000, until - created)))
+    timer.unref()
+    const reply = (type: string, body: unknown) => this.binding.send({ v: 1, type, request_id: frame.request_id, runtime_id: this.runtimeId,
+      runtime_epoch: this.epoch, session_id: frame.session_id, subscription_id: frame.subscription_id, sync_id: payload.sync_id, payload: body })
+    const current = () => {
+      signal.throwIfAborted()
+      if (this.#closed || this.#media.get(frame.request_id) !== abort || Date.now() < created || Date.now() >= until - 100 ||
+        performance.now() - started >= until - created - 100) throw new ProbeError('access.denied')
+    }
+    try {
+      if (until <= created + 100 || until > expires || until - created > 5500 || expires - created > 330_000) throw new ProbeError('access.denied')
+      const authority: CatalogAuthority = { owner: { userId: payload.user_id, deviceId: payload.device_id }, keyVersion: payload.key_version,
+        grantVersion: payload.grant_version, allowWorkspace: false, expiresAt: expires, signal, current }
+      const source = await this.#catalog.resolveMedia(frame.session_id, payload.sync_id, payload.reference, authority)
+      current()
+      await reply('session.media.result', mediaResolveResult.parse({ reference: payload.reference, source }))
+    } catch (error) {
+      const code = error instanceof ProbeError && mediaErrors.safeParse(error.code).success ? error.code : 'file.export_unavailable'
+      if (!this.#closed && !this.binding.signal.aborted) await reply('session.media.error', { code }).catch(() => this.binding.fail())
+    } finally { clearTimeout(timer); abort.abort() }
+  }
   #tick() {
     if (this.#closed) return
     for (const job of this.#jobs.values()) if (!this.#valid(job)) this.#end(job)
@@ -131,5 +171,5 @@ export class RelayExports implements HostExportPeer {
       void this.binding.send({ v: 1, type: 'file.export.renew', request_id: pending.id, runtime_id: this.runtimeId, runtime_epoch: this.epoch, payload: { operation_ids: pending.ids } }).catch(() => this.binding.fail())
     }
   }
-  async close() { this.#closed = true; clearInterval(this.#timer); for (const job of this.#jobs.values()) this.#end(job); await this.#catalog.close(); await Promise.allSettled([...this.#tasks]) }
+  async close() { this.#closed = true; clearInterval(this.#timer); for (const abort of this.#media.values()) abort.abort(); this.#media.clear(); for (const job of this.#jobs.values()) this.#end(job); await this.#catalog.close(); await Promise.allSettled([...this.#tasks]) }
 }

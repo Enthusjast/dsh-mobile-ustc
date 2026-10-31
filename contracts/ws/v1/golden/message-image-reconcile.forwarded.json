@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "type": "message.files.reconcile",
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "runtime_id": "66666666-6666-4666-8666-666666666666",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "payload": {
+    "mode": "queue",
+    "content": [
+      {
+        "type": "text",
+        "text": "Describe this image"
+      },
+      {
+        "type": "image",
+        "file_id": "44444444-4444-4444-8444-444444444444"
+      }
+    ]
+  },
+  "runtime_epoch": "99999999-9999-4999-8999-999999999999",
+  "user_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "device_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "payload_sha256": "6b62db7b38a57b71c15abd9bdf48ec4ffa040c60f55864a9e05809c17aaeb559"
+}

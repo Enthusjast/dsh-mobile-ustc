@@ -8,6 +8,7 @@ import { PersistentApprovalJournal, migrateApprovalJournal } from './approval-jo
 import { encryptJournalBytes, decryptJournalBytes, type Ciphertext } from './journal-crypto.js'
 import { finalizeProtectedKey, hasProtectedKey, loadProtectedKey, type JournalKeyOptions, type ProtectedKey } from './journal-key-protection.js'
 import { configureJournalCapacity, journalCapacityBytes } from './journal-capacity.js'
+import { forkOutcomeSchema } from './fork-protocol.js'
 
 export const MAX_JOURNAL_COMMANDS = 100_000
 const MAX_PENDING_JOURNAL_COMMANDS = 4096
@@ -30,6 +31,8 @@ export interface CommandJournal {
   lookup(command: Command, owner: CommandOwner): JournalAdmission | undefined
   admit(command: Command, owner: CommandOwner): JournalAdmission
   start(requestId: string, owner: CommandOwner): void
+  /** Save known native side effects while dispatching; this does not authorize another dispatch. */
+  noteResult(requestId: string, owner: CommandOwner, result: unknown): void
   complete(requestId: string, owner: CommandOwner, state: 'agent_queued' | 'settled', result: unknown): void
   fail(requestId: string, owner: CommandOwner, state: 'rejected' | 'outcome_unknown', errorCode: string): void
   close(): void
@@ -57,6 +60,17 @@ const allowedTransitions: Record<CommandState, ReadonlySet<CommandState>> = {
   outcome_unknown: new Set(),
 }
 
+function validatePartialResult(previous: unknown, next: unknown): void {
+  const candidate = next as { child_session_id?: unknown; fork_outcome?: unknown } | null
+  if (!candidate || typeof candidate.child_session_id !== 'string' || !RUNTIME_ID.test(candidate.child_session_id) || !forkOutcomeSchema.safeParse(candidate.fork_outcome).success) throw new ProbeError('journal.integrity_failed')
+  if (previous !== undefined) {
+    const known = previous as { child_session_id?: unknown; fork_outcome?: { checkpoint?: unknown; workspace_attachment?: unknown } }
+    const outcome = forkOutcomeSchema.parse(candidate.fork_outcome)
+    if (known.child_session_id !== candidate.child_session_id || known.fork_outcome?.checkpoint === 'persisted' && outcome.checkpoint !== 'persisted' ||
+      known.fork_outcome?.workspace_attachment !== 'unknown' && known.fork_outcome?.workspace_attachment !== outcome.workspace_attachment) throw new ProbeError('journal.integrity_failed')
+  }
+}
+
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue)
   if (typeof value !== 'object' || value === null) return value
@@ -68,7 +82,7 @@ function canonicalValue(value: unknown): unknown {
 export function commandDigest(command: Command): string {
   const body = {
     type: command.type,
-    ...(command.type === 'session.cancel' || command.type === 'session.archive' || command.type === 'session.model.select' || command.type === 'question.answer' || command.type === 'question.timed.answer' || (command.type === 'session.create' && 'workspace_id' in command.payload)
+    ...(command.type === 'session.fork' || command.type === 'session.cancel' || command.type === 'session.archive' || command.type === 'session.model.select' || command.type === 'question.answer' || command.type === 'question.timed.answer' || (command.type === 'session.create' && 'workspace_id' in command.payload)
       ? { runtime_epoch: command.runtime_epoch } : {}),
     ...('session_id' in command ? { session_id: command.session_id } : {}),
     payload: command.payload,
@@ -332,7 +346,9 @@ export class PersistentCommandJournal implements CommandJournal {
       migrateApprovalJournal(database)
       if (protectedKey) await finalizeProtectedKey(path, protectedKey, options.signal)
       if (options.signal?.aborted) throw new Error('command journal key protection unavailable')
-      return new PersistentCommandJournal(database, key, runtimeId)
+      const journal = new PersistentCommandJournal(database, key, runtimeId)
+      journal.recoverInterruptedForks()
+      return journal
     } catch (error) {
       if (database?.isOpen) {
         if (database.isTransaction) {
@@ -344,6 +360,28 @@ export class PersistentCommandJournal implements CommandJournal {
       key.fill(0)
       throw error
     }
+  }
+
+  private recoverInterruptedForks(): void {
+    this.transaction(() => {
+      const rows = this.database.prepare(`SELECT user_id,device_id,request_id,payload_sha256,payload_nonce,payload_ciphertext,payload_tag,
+        result_nonce,result_ciphertext,result_tag,state,error_code FROM commands WHERE runtime_id=? AND state='dispatching'`)
+      let count = 0
+      for (const value of rows.iterate(this.runtimeId)) {
+        if (++count > MAX_PENDING_JOURNAL_COMMANDS) throw new ProbeError('journal.integrity_failed')
+        const row = value as JournalRow & { device_id: string; request_id: string }
+        const encrypted = rowCiphertext(row, 'command')
+        if (!encrypted) throw new ProbeError('journal.integrity_failed')
+        const owner = { userId: row.user_id, deviceId: row.device_id }
+        const command = decrypt<Command>(this.key, this.runtimeId, owner, row.request_id, 'command', row.payload_sha256, encrypted)
+        if (command.type !== 'session.fork') continue
+        // The native API has no request-id recovery. Even a crash before the call may only be classified unknown.
+        // Preserve encrypted child evidence; startup never performs a native fork or clears its original payload.
+        this.database.prepare(`UPDATE commands SET state='outcome_unknown',error_code='command.outcome_unknown',updated_at=?
+          WHERE runtime_id=? AND device_id=? AND request_id=? AND state='dispatching'`)
+          .run(Date.now(), this.runtimeId, row.device_id, row.request_id)
+      }
+    })
   }
 
   approvals(epoch: string, now: () => number = Date.now): PersistentApprovalJournal {
@@ -400,6 +438,18 @@ export class PersistentCommandJournal implements CommandJournal {
 
   start(requestId: string, owner: CommandOwner): void {
     this.transition(requestId, owner, 'dispatching')
+  }
+
+  noteResult(requestId: string, owner: CommandOwner, result: unknown): void {
+    this.transaction(() => {
+      const row = this.select(requestId, owner)
+      if (row.state !== 'dispatching') throw new ProbeError('journal.invalid_transition')
+      validatePartialResult(this.get(requestId, owner)?.result, result)
+      const encrypted = encrypt(this.key, this.runtimeId, owner, requestId, 'result', row.digest, result)
+      this.database.prepare(`UPDATE commands SET result_nonce=?,result_ciphertext=?,result_tag=?,updated_at=?
+        WHERE runtime_id=? AND user_id=? AND device_id=? AND request_id=?`)
+        .run(encrypted.nonce, encrypted.ciphertext, encrypted.tag, Date.now(), this.runtimeId, owner.userId, owner.deviceId, requestId)
+    })
   }
 
   complete(requestId: string, owner: CommandOwner, state: 'agent_queued' | 'settled', result: unknown): void {
@@ -524,6 +574,12 @@ export class MemoryCommandJournal implements CommandJournal {
   }
 
   start(requestId: string, owner: CommandOwner): void { this.transition(requestId, owner, 'dispatching') }
+  noteResult(requestId: string, owner: CommandOwner, result: unknown): void {
+    const row = this.find(requestId, owner)
+    if (row.state !== 'dispatching') throw new ProbeError('journal.invalid_transition')
+    validatePartialResult(row.result, result)
+    row.result = result
+  }
   complete(requestId: string, owner: CommandOwner, state: 'agent_queued' | 'settled', result: unknown): void {
     const row = this.find(requestId, owner)
     if (!transitionAllowed(row.state, state)) {
