@@ -51,5 +51,9 @@ SQLite 分配失败/自动回滚；不是 monkeypatch journal 方法或伪造抛
 写入后原 request ID 可完成创建，重复请求返回同一结果，不再创建第二个会话。
 
 完整 Host/契约/类型/构建检查及本机 npm DSH `0.2.1-rc.2` 双节点正常链路分别回归。
+
+独立的 [WAL/VFS 错误夹具](host-journal-io-faults.md)另验证自有 Linux 子进程中的 ENOSPC
+与同步 EIO，以及失败回执、guard 和原 ID 恢复边界。
+
 这些是主库容量耗尽证据，不替代操作系统 ENOSPC、WAL/fsync/EIO、断电或目标平台文件系统
 验收。本轮不修改 Android APP，不尝试其他运行时，不执行大负载、真机或厂商推送配置。

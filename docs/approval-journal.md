@@ -4,6 +4,8 @@ The host now has a durable approval state machine in the same private SQLite WAL
 
 The shared [main-database capacity](host-journal-capacity.md) defaults to 1 GiB and is reapplied on every open. Real SQLITE_FULL tests cover register, decision, final consumption and settlement: storage failure returns no new execution permit, and restart retains invalidated/unknown facts without replaying the old callback. WAL and filesystem quotas remain separate operational controls.
 
+The isolated Linux [WAL I/O fault fixture](host-journal-io-faults.md) also injects ENOSPC during decision persistence and EIO during final consumption. Neither returns a new guard permit; the failed owner stays closed and reopening cannot replay the old execution. These syscall-level fixtures do not establish physical disk or power-loss durability.
+
 This is the host persistence/guard-consumption boundary. The [normal plugin](approval-native.md) now connects it to signed transport and the service lease provider. Native tests and the combined real CLI/Go test use local identity/model/key fixtures; they do not establish school identity, Android user verification or production acceptance.
 
 SQLite schema version 2 added `approval_runs` and `approval_records`; [schema 3](approval-outbox.md) now adds durable report/acknowledgement metadata. Version-one command databases migrate only after their existing encryption key check succeeds; their encrypted command bodies/receipts retain the same AAD and remain readable. Missing key-check metadata cannot be recreated when either commands or approvals already exist. Older readers refuse unsupported schema versions. No automatic downgrade or evidence deletion is provided.
