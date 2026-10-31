@@ -38,10 +38,10 @@ func (repository *FileStore) Expire(ctx context.Context, limit int) (int, error)
 		return 0, files.ErrUnavailable
 	}
 	for _, record := range records {
-		if _, err := transaction.ExecContext(ctx, `update files set state='expired' where id=$1`, record.ID); err != nil {
+		if err := fileSingleWrite(transaction.ExecContext(ctx, `update files set state='expired' where id=$1`, record.ID)); err != nil {
 			return 0, files.ErrUnavailable
 		}
-		if _, err := transaction.ExecContext(ctx, `update file_transfers set error_code='expired' where file_id=$1`, record.ID); err != nil {
+		if err := fileSingleWrite(transaction.ExecContext(ctx, `update file_transfers set error_code='expired' where file_id=$1`, record.ID)); err != nil {
 			return 0, files.ErrUnavailable
 		}
 		if _, err := transaction.ExecContext(ctx, `update file_scan_attempts set state='abandoned',finished_at=clock_timestamp() where file_id=$1 and state='active'`, record.ID); err != nil {
@@ -61,20 +61,51 @@ func (repository *FileStore) Expire(ctx context.Context, limit int) (int, error)
 	return len(records), nil
 }
 
+const deletionEligibilitySQL = `o.cleanup_after<=clock_timestamp() and (o.lease_until is null or o.lease_until<=clock_timestamp())
+ and (f.state in ('expired','rejected') or o.kind='quarantine'
+ or (o.attempt_id is distinct from t.committed_attempt_id and not exists(
+ select 1 from file_scan_attempts a where a.id=o.attempt_id and a.state='active' and a.lease_until>clock_timestamp())))`
+
+func checkDeletionDeadline(ctx context.Context, tx *sql.Tx, until time.Time) error {
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !until.After(now) {
+		return files.ErrStale
+	}
+	return nil
+}
+
 func (repository *FileStore) ClaimDeletion(ctx context.Context) (*files.DeletionClaim, error) {
 	transaction, err := repository.database.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, files.ErrUnavailable
 	}
 	defer transaction.Rollback()
+	// Pin the file before the object, matching scan and acknowledgement lock
+	// order. An old snapshot must not turn a valid, still-committing renewal's
+	// candidate into deletion authority.
+	var fileID string
+	err = transaction.QueryRowContext(ctx, `select f.id::text from files f
+	 join file_transfers t on t.file_id=f.id join file_objects o on o.file_id=f.id
+	 where `+deletionEligibilitySQL+` order by o.cleanup_after,o.file_id,o.kind,o.attempt_id limit 1
+	 for update of f,t skip locked`).Scan(&fileID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, files.ErrUnavailable
+	}
 	var claim files.DeletionClaim
 	var stored string
+	// This separate READ COMMITTED statement sees changes committed while the
+	// file claim was selected. Normal producers now cannot change eligibility
+	// until this transaction releases the file.
 	err = transaction.QueryRowContext(ctx, `select f.id::text,t.org_id::text,f.session_id::text,o.kind,o.attempt_id::text,o.object_key
 	 from file_objects o join files f on f.id=o.file_id join file_transfers t on t.file_id=f.id
-	 where o.cleanup_after<=clock_timestamp() and (o.lease_until is null or o.lease_until<=clock_timestamp())
-	 and (f.state in ('expired','rejected') or o.kind='quarantine'
-	   or (o.attempt_id is distinct from t.committed_attempt_id and not exists(select 1 from file_scan_attempts a where a.id=o.attempt_id and a.state='active' and a.lease_until>clock_timestamp())))
-	 order by o.cleanup_after,o.file_id,o.kind,o.attempt_id limit 1 for update of o skip locked`).Scan(&claim.FileID, &claim.OrganizationID, &claim.SessionID, &claim.Kind, &claim.AttemptID, &stored)
+	 where f.id=$1 and `+deletionEligibilitySQL+`
+	 order by o.cleanup_after,o.file_id,o.kind,o.attempt_id limit 1 for update of o skip locked`, fileID).Scan(&claim.FileID, &claim.OrganizationID, &claim.SessionID, &claim.Kind, &claim.AttemptID, &stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -94,8 +125,11 @@ func (repository *FileStore) ClaimDeletion(ctx context.Context) (*files.Deletion
 		return nil, err
 	}
 	claim.LeaseUntil = now.Add(fileScanLease)
-	if _, err := transaction.ExecContext(ctx, `update file_objects set lease_id=$4,lease_until=$5 where file_id=$1 and kind=$2 and attempt_id=$3`, claim.FileID, claim.Kind, claim.AttemptID, claim.LeaseID, claim.LeaseUntil); err != nil {
+	if err := transaction.QueryRowContext(ctx, `update file_objects set lease_id=$4,lease_until=$5 where file_id=$1 and kind=$2 and attempt_id=$3 returning lease_until`, claim.FileID, claim.Kind, claim.AttemptID, claim.LeaseID, claim.LeaseUntil).Scan(&claim.LeaseUntil); err != nil {
 		return nil, files.ErrUnavailable
+	}
+	if err := checkDeletionDeadline(ctx, transaction, claim.LeaseUntil); err != nil {
+		return nil, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return nil, files.ErrUnavailable
@@ -143,11 +177,11 @@ func (repository *FileStore) CompleteDeletion(ctx context.Context, claim files.D
 		return files.ErrStale
 	}
 	if !success {
-		if _, err := transaction.ExecContext(ctx, `update file_objects set lease_id=null,lease_until=null,deleted_at=null,cleanup_after=clock_timestamp()+interval '1 minute' where file_id=$1 and kind=$2 and attempt_id=$3`, claim.FileID, claim.Kind, claim.AttemptID); err != nil {
+		if err := fileSingleWrite(transaction.ExecContext(ctx, `update file_objects set lease_id=null,lease_until=null,deleted_at=null,cleanup_after=clock_timestamp()+interval '1 minute' where file_id=$1 and kind=$2 and attempt_id=$3`, claim.FileID, claim.Kind, claim.AttemptID)); err != nil {
 			return files.ErrUnavailable
 		}
 	} else {
-		if _, err := transaction.ExecContext(ctx, `update file_objects set lease_id=null,lease_until=null,deleted_at=clock_timestamp(),cleanup_after=clock_timestamp()+interval '1 day' where file_id=$1 and kind=$2 and attempt_id=$3`, claim.FileID, claim.Kind, claim.AttemptID); err != nil {
+		if err := fileSingleWrite(transaction.ExecContext(ctx, `update file_objects set lease_id=null,lease_until=null,deleted_at=clock_timestamp(),cleanup_after=clock_timestamp()+interval '1 day' where file_id=$1 and kind=$2 and attempt_id=$3`, claim.FileID, claim.Kind, claim.AttemptID)); err != nil {
 			return files.ErrUnavailable
 		}
 		if record.State == "expired" || record.State == "rejected" {
@@ -165,11 +199,11 @@ func (repository *FileStore) CompleteDeletion(ctx context.Context, claim files.D
 					if quota.bytes < record.SizeBytes || quota.count < 1 {
 						return files.ErrUnavailable
 					}
-					if _, err := transaction.ExecContext(ctx, `update file_quota_usage set reserved_bytes=reserved_bytes-$4,reserved_files=reserved_files-1 where org_id=$1 and kind=$2 and bucket_id=$3`, record.OrganizationID, quota.kind, quota.id, record.SizeBytes); err != nil {
+					if err := fileSingleWrite(transaction.ExecContext(ctx, `update file_quota_usage set reserved_bytes=reserved_bytes-$4,reserved_files=reserved_files-1 where org_id=$1 and kind=$2 and bucket_id=$3`, record.OrganizationID, quota.kind, quota.id, record.SizeBytes)); err != nil {
 						return files.ErrUnavailable
 					}
 				}
-				if _, err := transaction.ExecContext(ctx, `update file_transfers set quota_released_at=clock_timestamp() where file_id=$1`, record.ID); err != nil {
+				if err := fileSingleWrite(transaction.ExecContext(ctx, `update file_transfers set quota_released_at=clock_timestamp() where file_id=$1`, record.ID)); err != nil {
 					return files.ErrUnavailable
 				}
 				if err := fileSystemAudit(ctx, transaction, record, "file.quota_released", "success"); err != nil {
@@ -177,6 +211,9 @@ func (repository *FileStore) CompleteDeletion(ctx context.Context, claim files.D
 				}
 			}
 		}
+	}
+	if err := checkDeletionDeadline(ctx, transaction, until); err != nil {
+		return err
 	}
 	if err := transaction.Commit(); err != nil {
 		return files.ErrUnavailable

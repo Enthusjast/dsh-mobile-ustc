@@ -374,6 +374,12 @@ func (service *Service) DeleteNext(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, ErrInvalid
 	}
+	if ctx.Err() != nil {
+		return true, ctx.Err()
+	}
+	if !claim.LeaseUntil.Add(-100 * time.Millisecond).After(time.Now()) {
+		return true, ErrStale
+	}
 	until := min(time.Now().Add(10*time.Second).UnixNano(), claim.LeaseUntil.Add(-100*time.Millisecond).UnixNano())
 	remove, stop := context.WithDeadline(ctx, time.Unix(0, until))
 	err = service.storage.Delete(remove, key)
