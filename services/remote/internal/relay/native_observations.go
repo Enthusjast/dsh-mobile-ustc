@@ -31,6 +31,13 @@ func (server *Server) routeHostObservations(ctx context.Context, live *liveConne
 		server.metrics.HostObservationReport("rejected")
 		return
 	}
+	for _, series := range report.Series {
+		if (series.Operation == "journal_command" || series.Operation == "journal_approval") && !live.supports(hostmetrics.JournalCapability) {
+			server.metrics.HostObservationReport("rejected")
+			return
+		}
+	}
+
 	delta, err := hostmetrics.Difference(live.nativeReport, report)
 	if err != nil {
 		server.metrics.HostObservationReport("rejected")

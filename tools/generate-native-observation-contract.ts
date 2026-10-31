@@ -8,9 +8,17 @@ function plain(value: unknown): any {
   return value
 }
 const definition = plain(z.toJSONSchema(hostObservationsFrame, { target: 'draft-2020-12' }))
-definition.properties.payload.properties.series.items.allOf = [{ if: { required: ['operation'], properties: { operation: { enum: ['checkpoint', 'cold_checkpoint'] } } },
-  then: { properties: { result: { enum: ['persisted', 'failed', 'unavailable'] } } }, else: { properties: { result: { enum: ['ok', 'error', 'cancelled'] } } } }]
-definition.description = 'Optional host.observations.v1, installation-only, current connection/epoch. Self-reported fixed native operations; never authority or command acceptance. Runtime validators also check unique cells, histogram arithmetic and monotone counter deltas.'
+const resultRule = (operations: string[], results: string[]) => ({
+  if: { required: ['operation'], properties: { operation: { enum: operations } } },
+  then: { properties: { result: { enum: results } } },
+})
+definition.properties.payload.properties.series.items.allOf = [
+  resultRule(['checkpoint', 'cold_checkpoint'], ['persisted', 'failed', 'unavailable']),
+  resultRule(['prompt', 'create', 'prompt_reconcile'], ['ok', 'error', 'cancelled']),
+  resultRule(['journal_command', 'journal_approval'], ['persisted', 'failed']),
+]
+
+definition.description = 'Optional host.observations.v1, installation-only, current connection/epoch. Journal cells additionally require host.journal.observations.v1. Self-reported fixed operations; never authority or command acceptance. Runtime validators also check unique cells, histogram arithmetic and monotone counter deltas.'
 const path = new URL('../contracts/ws/v1/relay.schema.json', import.meta.url)
 let text = await readFile(path, 'utf8')
 const root = JSON.parse(text), name = 'hostObservations', ref = `#/$defs/${name}`
@@ -30,7 +38,9 @@ window.record('checkpoint', 'persisted', 1500)
 const first = { v: 1, type: 'host.observations', ...identity, payload: window.snapshot(connection) }
 window.record('checkpoint', 'failed', 2000); window.record('prompt', 'ok', 200)
 const next = { ...first, payload: window.snapshot(connection) }
-for (const [name, value] of [['host-observations', first], ['host-observations-next', next]] as const) {
+window.record('journal_command', 'persisted', 7000); window.record('journal_approval', 'failed', 12000)
+const journal = { ...first, payload: window.snapshot(connection) }
+for (const [name, value] of [['host-observations', first], ['host-observations-next', next], ['host-observations-journal', journal]] as const) {
   hostObservationsFrame.parse(value)
   const path = new URL(`../contracts/ws/v1/golden/${name}.json`, import.meta.url), body = JSON.stringify(value, null, 2) + '\n'
   if (process.argv.includes('--check')) { if (await readFile(path, 'utf8').catch(() => '') !== body) { console.error(`${name} golden is stale`); process.exitCode = 1 } }

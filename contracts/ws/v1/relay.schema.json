@@ -2684,7 +2684,7 @@
               "maximum": 1000000000
             },
             "series": {
-              "maxItems": 15,
+              "maxItems": 19,
               "type": "array",
               "items": {
                 "type": "object",
@@ -2696,7 +2696,9 @@
                       "cold_checkpoint",
                       "prompt",
                       "create",
-                      "prompt_reconcile"
+                      "prompt_reconcile",
+                      "journal_command",
+                      "journal_approval"
                     ]
                   },
                   "result": {
@@ -2764,14 +2766,55 @@
                           ]
                         }
                       }
+                    }
+                  },
+                  {
+                    "if": {
+                      "required": [
+                        "operation"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "enum": [
+                            "prompt",
+                            "create",
+                            "prompt_reconcile"
+                          ]
+                        }
+                      }
                     },
-                    "else": {
+                    "then": {
                       "properties": {
                         "result": {
                           "enum": [
                             "ok",
                             "error",
                             "cancelled"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "if": {
+                      "required": [
+                        "operation"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "enum": [
+                            "journal_command",
+                            "journal_approval"
+                          ]
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "result": {
+                          "enum": [
+                            "persisted",
+                            "failed"
                           ]
                         }
                       }
@@ -2798,7 +2841,7 @@
         "payload"
       ],
       "additionalProperties": false,
-      "description": "Optional host.observations.v1, installation-only, current connection/epoch. Self-reported fixed native operations; never authority or command acceptance. Runtime validators also check unique cells, histogram arithmetic and monotone counter deltas."
+      "description": "Optional host.observations.v1, installation-only, current connection/epoch. Journal cells additionally require host.journal.observations.v1. Self-reported fixed operations; never authority or command acceptance. Runtime validators also check unique cells, histogram arithmetic and monotone counter deltas."
     },
     "questionReferencesAck": {
       "type": "object",

@@ -337,7 +337,7 @@ func New(database Repository, approvalConfigs ...ApprovalConfig) *Server {
 func (server *Server) capabilities() []string {
 	capabilities := append([]string{}, supportedCapabilities...)
 	if server.metrics != nil {
-		capabilities = append(capabilities, hostmetrics.Capability)
+		capabilities = append(capabilities, hostmetrics.Capability, hostmetrics.JournalCapability)
 	}
 	if server.questionReferences != nil {
 		capabilities = append(capabilities, questionReferencesCapability)
@@ -887,7 +887,7 @@ func (server *Server) finishDeviceHandshake(parent context.Context, live *liveCo
 	defer cancel()
 	accepted := intersectCapabilities(hello.Capabilities, server.capabilities())
 	accepted = slices.DeleteFunc(accepted, func(capability string) bool {
-		return capability == files.HandoffCapability || capability == files.ReconcileCapability || capability == hostmetrics.Capability
+		return capability == files.HandoffCapability || capability == files.ReconcileCapability || capability == hostmetrics.Capability || capability == hostmetrics.JournalCapability
 	})
 	if live.sendHello(leaseCtx, map[string]any{
 		"v": 1, "type": "hello.ok", "payload": map[string]any{

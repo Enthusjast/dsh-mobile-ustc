@@ -62,3 +62,30 @@ func TestNativeCounterDeltasMatchTypeScriptGoldensAndRejectRewrites(t *testing.T
 		}
 	}
 }
+
+func TestJournalCounterDeltasMatchTypeScriptAndCannotRewriteResultPairs(t *testing.T) {
+	previous, current := golden(t, "host-observations-next"), golden(t, "host-observations-journal")
+	delta, err := Difference(&previous, current)
+	if err != nil || len(delta.Series) != 2 {
+		t.Fatal("journal delta", delta, err)
+	}
+	for _, series := range delta.Series {
+		want := uint64(7000)
+		if series.Operation == "journal_approval" {
+			want = 12000
+		}
+		if series.Count != 1 || series.SumMicros != want {
+			t.Fatal("journal duration or count", series)
+		}
+	}
+	for _, operation := range []string{"journal_command", "journal_approval"} {
+		for _, result := range []string{"ok", "error", "cancelled", "unavailable"} {
+			if Pair(operation, result) {
+				t.Fatal("non-transaction outcome accepted", operation, result)
+			}
+		}
+	}
+	if duplicate, err := Difference(&current, clone(t, current)); err != nil || !duplicate.Duplicate {
+		t.Fatal("journal duplicate was not idempotent", err)
+	}
+}

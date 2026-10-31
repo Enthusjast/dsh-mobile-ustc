@@ -106,10 +106,10 @@ func TestNativeObservationsAreOptionalHostOnlyAndConnectionScoped(t *testing.T) 
 	if readEnvelope(t, host).Type != "pong" {
 		t.Fatal("rejected observation interrupted ordinary Host traffic")
 	}
-	phone := dialRelayDevice(t, server.URL, key, fake.ticket, runtime, "connection.heartbeat.v1", hostmetrics.Capability)
+	phone := dialRelayDevice(t, server.URL, key, fake.ticket, runtime, "connection.heartbeat.v1", hostmetrics.Capability, hostmetrics.JournalCapability)
 	defer phone.CloseNow()
 	peers := relay.devicesForRuntime(runtime, fake.ticket.DeviceID)
-	if len(peers) != 1 || peers[0].supports(hostmetrics.Capability) {
+	if len(peers) != 1 || peers[0].supports(hostmetrics.Capability) || peers[0].supports(hostmetrics.JournalCapability) {
 		t.Fatal("phone obtained Host-only capability")
 	}
 	writeWireFrame(t, phone, frame(next))
@@ -154,5 +154,55 @@ func TestNativeObservationsCannotReplaceCurrentOwnershipCheck(t *testing.T) {
 	relay.routeHostObservations(t.Context(), live, wireEnvelope{Type: "host.observations", RuntimeID: live.runtimeID, RuntimeEpoch: live.runtimeEpoch, Payload: raw})
 	if nativeOperationCount(t, metrics, "checkpoint", "persisted") != 0 || live.nativeReport != nil {
 		t.Fatal("stale installation reported fresh native observations")
+	}
+}
+
+func TestJournalObservationsRequireBothCapabilitiesOnAnAuthenticatedHost(t *testing.T) {
+	for _, extension := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "journal"}[extension], func(t *testing.T) {
+			key := relayTestKey(t)
+			jwk, jkt := relayTestPublicJWK(t, key)
+			const installation = "11111111-1111-4111-8111-111111111111"
+			const runtime = "33333333-3333-4333-8333-333333333333"
+			const epoch = "44444444-4444-4444-8444-444444444444"
+			fake := &relayTestStore{hostCredential: store.HostCredentialIdentity{InstallationID: installation, KeyVersion: 1, PublicJWK: jwk, KeyThumbprint: jkt, ExpiresAt: time.Now().Add(time.Minute)}, detached: make(chan store.RuntimeConnection, 4)}
+			if slices.Contains(New(fake).capabilities(), hostmetrics.JournalCapability) {
+				t.Fatal("disabled metrics advertised journal observations")
+			}
+			relay := New(fake)
+			metrics := observability.New()
+			relay.ConfigureMetrics(metrics)
+			server := httptest.NewServer(relay)
+			t.Cleanup(server.Close)
+			offered := []string{"connection.heartbeat.v1", hostmetrics.Capability}
+			if extension {
+				offered = append(offered, hostmetrics.JournalCapability)
+			}
+			host := dialRelayHost(t, server.URL, key, installation, runtime, epoch, offered...)
+			defer host.CloseNow()
+			live := relay.hostForRuntime(runtime)
+			if live.supports(hostmetrics.JournalCapability) != extension {
+				t.Fatal("incorrect journal capability negotiation")
+			}
+			report := nativeGolden(t, "host-observations-journal")
+			report.ConnectionID = live.connectionID
+			writeWireFrame(t, host, map[string]any{"v": 1, "type": "host.observations", "runtime_id": runtime, "runtime_epoch": epoch, "payload": report})
+			if extension {
+				metricUntil(t, func() bool {
+					return nativeOperationCount(t, metrics, "journal_command", "persisted") == 1 && nativeOperationCount(t, metrics, "journal_approval", "failed") == 1
+				})
+			} else {
+				metricUntil(t, func() bool {
+					return metricValue(t, metricsSnapshot(t, metrics), "host_observation_reports_total", map[string]string{"result": "rejected"}) == 1
+				})
+				if nativeOperationCount(t, metrics, "journal_command", "persisted") != 0 || nativeOperationCount(t, metrics, "checkpoint", "persisted") != 0 {
+					t.Fatal("partially applied an unnegotiated journal report")
+				}
+			}
+			writeEnvelope(t, host, "ping", map[string]any{})
+			if readEnvelope(t, host).Type != "pong" {
+				t.Fatal("journal observation interrupted Host traffic")
+			}
+		})
 	}
 }

@@ -17,7 +17,7 @@ import { FILE_HANDOFF_CAPABILITY, FILE_MESSAGE_CAPABILITY, FILE_RECONCILE_CAPABI
 import type { FileTransportBinding, HostFilePeer } from './relay-files.js'
 import type { HostExportPeer } from './relay-exports.js'
 import { EXPORT_CAPABILITY } from './export-protocol.js'
-import { bindNativeObservations, HOST_OBSERVATIONS_CAPABILITY, type NativeObservations } from './native-observations.js'
+import { bindNativeObservations, HOST_OBSERVATIONS_CAPABILITY, HOST_JOURNAL_OBSERVATIONS_CAPABILITY, type NativeObservations } from './native-observations.js'
 import { MODEL_CATALOG_CAPABILITY, type ModelPage, type ModelPageBinding, type ModelPageRequest } from './model-catalog.js'
 import { HostConnectionLease } from './connection-lease.js'
 import { HostReconnectBackoff } from './relay-backoff.js'
@@ -502,7 +502,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
     if (options.files && options.runtime.reconcileFileMessage) offered.push(FILE_RECONCILE_CAPABILITY)
     if(options.exports)offered.push(EXPORT_CAPABILITY)
     if (options.runtime.client.modelPage) offered.push(MODEL_CATALOG_CAPABILITY)
-    if (options.runtime.client.observations) offered.push(HOST_OBSERVATIONS_CAPABILITY)
+    if (options.runtime.client.observations) offered.push(HOST_OBSERVATIONS_CAPABILITY, HOST_JOURNAL_OBSERVATIONS_CAPABILITY)
     connection.signal.throwIfAborted()
     const proof = await withAbort(proofForHello(credential, challenge, options.runtime.client.runtimeId, options.runtime.epoch, options, offered), connection.signal)
     await sendFrame(socket, {
@@ -547,7 +547,7 @@ async function connectOnce(options: HostRelayOptions, url: string, credential: H
         const encoded = JSON.stringify(frame)
         if (socket.readyState !== 1 || socket.bufferedAmount > MAX_BUFFERED_BYTES / 4 || Buffer.byteLength(encoded) > 16 * 1024) return false
         try { socket.send(encoded, () => {}); return true } catch { return false }
-      })
+      }, ack.data.payload.capabilities.includes(HOST_JOURNAL_OBSERVATIONS_CAPABILITY))
     }
     if (options.files && ack.data.payload.capabilities.includes(FILE_HANDOFF_CAPABILITY)) {
       if (!ack.data.payload.capabilities.includes('session.catalog.v1')) throw new ProbeError('protocol.unsupported')

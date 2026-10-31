@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import { host } from '../harness.js'
 import { journalDatabase } from '../journal-capacity-fixture.js'
 import { PersistentCommandJournal } from '../../src/command-journal.js'
+import { NativeObservations, NativeObservationWindow } from '../../src/native-observations.js'
 import { DshClient } from '../../src/dsh-client.js'
 import { ProbeRuntime } from '../../src/runtime.js'
 import { parseCommand } from '../../src/protocol.js'
@@ -26,7 +27,9 @@ const activate = async (fault: string) => {
   assert.equal(await readFile(join(root, 'unrelated'), 'utf8'), 'unaffected')
 }
 const fixture = await host({ probe: false, directory: join(root, 'native') })
-let journal = await PersistentCommandJournal.open(path, fixture.runtimeId)
+const observations = new NativeObservations(), window = new NativeObservationWindow()
+const dispose = observations.listen((operation, result, micros) => window.record(operation, result, micros), true)
+let journal = await PersistentCommandJournal.open(path, fixture.runtimeId, { observations })
 let client = new DshClient(fixture.ctx, fixture.runtimeId, [{ id: 'fixture', cwd: fixture.cwd }], ['fixture'])
 let runtime = new ProbeRuntime(client, { close() {} } as InteractionRouter, journal)
 const signal = new AbortController(), owner = { userId: randomUUID(), deviceId: randomUUID() }
@@ -87,8 +90,9 @@ try {
   }
   await agent.whenIdle()
   assert.equal(messages().length, 1, 'I/O recovery or original-ID retry duplicated native work')
-  process.stdout.write(JSON.stringify({ mode, before, after: messages().length, restored: restored ?? null, receipts, faults: faults.length, code: code ?? null, closedWithError }) + '\n')
+  process.stdout.write(JSON.stringify({ mode, before, after: messages().length, restored: restored ?? null, receipts, faults: faults.length, code: code ?? null, closedWithError, journalFailed: window.snapshot(randomUUID())!.series.filter(item => item.operation === 'journal_command' && item.result === 'failed').reduce((sum, item) => sum + item.count, 0) }) + '\n')
 } finally {
+  dispose()
   await disable()
   signal.abort(); runtime.close()
   try { journal.close() } finally { await fixture.close() }

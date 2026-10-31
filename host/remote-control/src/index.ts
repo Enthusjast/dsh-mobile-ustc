@@ -158,6 +158,7 @@ async function applyOwned(ctx: Context, config: Config, parentFiber: Context['fi
     const journalPath = options.commandJournalPath || defaultCommandJournalPath(options.runtimeId!)
     const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!, {
       maxDatabaseBytes: options.commandJournalMaxBytes!,
+      observations: client.observations,
       ...(journalKeyProtector ? { protector: journalKeyProtector, signal: keyOpen.signal } : {}),
     })
     let runtime: ProbeRuntime | undefined

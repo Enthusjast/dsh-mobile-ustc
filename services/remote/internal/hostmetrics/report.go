@@ -8,6 +8,7 @@ import (
 )
 
 const Capability = "host.observations.v1"
+const JournalCapability = "host.journal.observations.v1"
 const MaxCount uint64 = 1_000_000_000
 const MaxSum uint64 = 9_007_199_254_740_991
 
@@ -40,6 +41,8 @@ type Delta struct {
 
 func Pair(operation, result string) bool {
 	switch operation {
+	case "journal_command", "journal_approval":
+		return result == "persisted" || result == "failed"
 	case "checkpoint", "cold_checkpoint":
 		return result == "persisted" || result == "failed" || result == "unavailable"
 	case "prompt", "create", "prompt_reconcile":
@@ -51,7 +54,7 @@ func Pair(operation, result string) bool {
 func key(series Series) string { return series.Operation + ":" + series.Result }
 
 func (report Report) valid() bool {
-	if report.Sequence < 1 || report.Sequence > MaxCount || report.Dropped == nil || *report.Dropped > MaxCount || report.Series == nil || len(report.Series) > 15 {
+	if report.Sequence < 1 || report.Sequence > MaxCount || report.Dropped == nil || *report.Dropped > MaxCount || report.Series == nil || len(report.Series) > 19 {
 		return false
 	}
 	seen := map[string]bool{}

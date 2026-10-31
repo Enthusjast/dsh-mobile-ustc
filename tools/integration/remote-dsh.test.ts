@@ -1314,6 +1314,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(metricSample(finalMetrics, 'host_observation_reports_total', { result: 'accepted' }) > 0)
   assert.ok(metricSample(finalMetrics, 'host_native_operations_total', { operation: 'checkpoint', result: 'persisted' }) > 0)
   assert.ok(metricSample(finalMetrics, 'host_native_operation_duration_seconds_count', { operation: 'prompt', result: 'ok' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'host_native_operations_total', { operation: 'journal_command', result: 'persisted' }) > 0)
+  assert.ok(metricSample(finalMetrics, 'host_native_operation_duration_seconds_count', { operation: 'journal_approval', result: 'persisted' }) > 0)
   assert.ok(metricSample(finalMetrics, 'approval_host_transitions_total', { to: 'settled', outcome: 'succeeded' }, true) > 0)
   assert.ok(metricSample(finalMetrics, 'approval_host_transitions_total', { to: 'denied' }, true) > 0)
   assert.ok(metricSample(finalMetrics, 'approval_lease_lifetime_seconds_count', { decision: 'allow_once' }) > 0)

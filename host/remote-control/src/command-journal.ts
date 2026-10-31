@@ -8,6 +8,7 @@ import { PersistentApprovalJournal, migrateApprovalJournal } from './approval-jo
 import { encryptJournalBytes, decryptJournalBytes, type Ciphertext } from './journal-crypto.js'
 import { finalizeProtectedKey, hasProtectedKey, loadProtectedKey, type JournalKeyOptions, type ProtectedKey } from './journal-key-protection.js'
 import { configureJournalCapacity, journalCapacityBytes } from './journal-capacity.js'
+import type { NativeObservations } from './native-observations.js'
 import { forkOutcomeSchema } from './fork-protocol.js'
 
 export const MAX_JOURNAL_COMMANDS = 100_000
@@ -18,7 +19,7 @@ const RUNTIME_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 
 export type CommandState = 'host_accepted' | 'dispatching' | 'agent_queued' | 'settled' | 'rejected' | 'outcome_unknown'
 export interface CommandOwner { userId: string; deviceId: string }
-export interface CommandJournalOptions extends JournalKeyOptions { maxDatabaseBytes?: number }
+export interface CommandJournalOptions extends JournalKeyOptions { maxDatabaseBytes?: number; observations?: NativeObservations }
 export interface JournalAdmission {
   inserted: boolean
   state: CommandState
@@ -237,7 +238,7 @@ function transitionAllowed(from: CommandState, to: CommandState): boolean {
  */
 export class PersistentCommandJournal implements CommandJournal {
   private approvalLog: PersistentApprovalJournal | undefined
-  private constructor(private readonly database: DatabaseSync, private readonly key: Buffer, private readonly runtimeId: string) {}
+  private constructor(private readonly database: DatabaseSync, private readonly key: Buffer, private readonly runtimeId: string, private readonly observations?: NativeObservations) {}
 
   static async open(path: string, runtimeId: string, options: CommandJournalOptions = {}): Promise<PersistentCommandJournal> {
     const maxDatabaseBytes = journalCapacityBytes(options.maxDatabaseBytes)
@@ -346,7 +347,7 @@ export class PersistentCommandJournal implements CommandJournal {
       migrateApprovalJournal(database)
       if (protectedKey) await finalizeProtectedKey(path, protectedKey, options.signal)
       if (options.signal?.aborted) throw new Error('command journal key protection unavailable')
-      const journal = new PersistentCommandJournal(database, key, runtimeId)
+      const journal = new PersistentCommandJournal(database, key, runtimeId, options.observations)
       journal.recoverInterruptedForks()
       return journal
     } catch (error) {
@@ -386,7 +387,7 @@ export class PersistentCommandJournal implements CommandJournal {
 
   approvals(epoch: string, now: () => number = Date.now): PersistentApprovalJournal {
     if (this.approvalLog && this.approvalLog.epoch !== epoch) throw new Error('approval journal already owns another epoch')
-    this.approvalLog ??= PersistentApprovalJournal.attach(this.database, this.key, this.runtimeId, epoch, now)
+    this.approvalLog ??= PersistentApprovalJournal.attach(this.database, this.key, this.runtimeId, epoch, now, this.observations)
     return this.approvalLog
   }
 
@@ -535,12 +536,16 @@ export class PersistentCommandJournal implements CommandJournal {
   }
 
   private transaction(callback: () => void): void {
-    this.database.exec('BEGIN IMMEDIATE')
+    const finish = this.observations?.start('journal_command')
+    let began = false
     try {
+      this.database.exec('BEGIN IMMEDIATE'); began = true
       callback()
       this.database.exec('COMMIT')
+      finish?.('persisted')
     } catch (error) {
-      try { this.database.exec('ROLLBACK') } catch { /* Preserve the original failure. */ }
+      if (began) { try { this.database.exec('ROLLBACK') } catch { /* Preserve the original failure. */ } }
+      finish?.('failed')
       throw error
     }
   }

@@ -3,6 +3,7 @@ import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { lstat, readFile, realpath, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { CompactSign, calculateJwkThumbprint } from 'jose'
+import { NativeObservations, NativeObservationWindow } from '../../src/native-observations.js'
 import { PersistentCommandJournal } from '../../src/command-journal.js'
 import { canonicalObject } from '../../src/canonical.js'
 import { approvalBinding, approvalKeyID, APPROVAL_JWS_TYPE, type ApprovalContext, type ApprovalDecision } from '../../src/approval-contract.js'
@@ -16,7 +17,9 @@ const metadata = await lstat(root)
 assert.equal(metadata.uid, process.getuid!()); assert.equal(metadata.mode & 0o777, 0o700)
 const path = join(root, 'state', 'commands.sqlite'), flag = join(root, 'inject')
 const runtime = randomUUID(), epoch = randomUUID(), now = Date.now()
-let parent = await PersistentCommandJournal.open(path, runtime)
+const observations = new NativeObservations(), window = new NativeObservationWindow()
+const dispose = observations.listen((operation, result, micros) => window.record(operation, result, micros), true)
+let parent = await PersistentCommandJournal.open(path, runtime, { observations })
 let ledger = parent.approvals(epoch, () => now)
 const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }), jwk = pair.publicKey.export({ format: 'jwk' })
 const actor: RegisteredApprovalKey = { user_id: randomUUID(), device_id: randomUUID(), key_version: 1,
@@ -57,8 +60,9 @@ try {
   assert.ok(restored === 'invalidated' || restored === 'outcome_unknown')
   assert.throws(() => ledger.consume(context.approval_id, context, authority), /approval.stale/)
   assert.equal(executions, 0)
-  process.stdout.write(JSON.stringify({ phase, executions, restored, faults: faults.length }) + '\n')
+  process.stdout.write(JSON.stringify({ phase, executions, restored, faults: faults.length, journalFailed: window.snapshot(randomUUID())!.series.filter(item => item.operation === 'journal_approval' && item.result === 'failed').reduce((sum, item) => sum + item.count, 0) }) + '\n')
 } finally {
+  dispose()
   await unlink(flag).catch(error => { if (error.code !== 'ENOENT') throw error })
   parent.close()
 }

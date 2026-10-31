@@ -1,3 +1,4 @@
+import type { NativeObservations } from './native-observations.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { ApprovalDecision, approvalBinding, approvalDecisionCurrent, type ApprovalContext } from './approval-contract.js'
@@ -76,11 +77,11 @@ export class PersistentApprovalJournal {
   private poisoned = false
   private lastClock = -Infinity
   private readonly operations = new Set<AbortController>()
-  private constructor(private readonly database: DatabaseSync, private readonly key: Buffer, readonly runtimeId: string, readonly epoch: string, private readonly now: () => number) {}
+  private constructor(private readonly database: DatabaseSync, private readonly key: Buffer, readonly runtimeId: string, readonly epoch: string, private readonly now: () => number, private readonly observations?: NativeObservations) {}
 
-  static attach(database: DatabaseSync, key: Buffer, runtimeId: string, epoch: string, now: () => number = Date.now): PersistentApprovalJournal {
+  static attach(database: DatabaseSync, key: Buffer, runtimeId: string, epoch: string, now: () => number = Date.now, observations?: NativeObservations): PersistentApprovalJournal {
     if (!UUID.test(runtimeId) || !UUID.test(epoch) || key.length !== 32 || database.prepare('PRAGMA journal_mode').get()?.journal_mode !== 'wal' || database.prepare('PRAGMA synchronous').get()?.synchronous !== 2) throw failure('approval.storage_unavailable')
-    const journal = new PersistentApprovalJournal(database, key, runtimeId, epoch, now)
+    const journal = new PersistentApprovalJournal(database, key, runtimeId, epoch, now, observations)
     journal.transaction(() => {
       const time = journal.clock()
       database.prepare(`UPDATE approval_records SET state=CASE WHEN state='consumed' THEN 'outcome_unknown' ELSE 'invalidated' END, updated_at=?,report_pending=remote_registered,report_due_at=0
@@ -373,14 +374,17 @@ export class PersistentApprovalJournal {
   }
   private transaction<T>(operation: () => T, closing = false): T {
     if ((!closing && (this.closed || this.poisoned)) || !this.database.isOpen) throw failure('approval.storage_unavailable')
+    const finish = this.observations?.start('journal_approval')
     let began = false
     try {
       this.database.exec('BEGIN IMMEDIATE'); began = true
       const value = operation()
       this.database.exec('COMMIT')
+      finish?.('persisted')
       return value
     } catch (error) {
       if (began) { try { this.database.exec('ROLLBACK') } catch {} }
+      finish?.('failed')
       if (error instanceof ApprovalJournalError) throw error
       this.poisoned = true
       for (const operation of this.operations) operation.abort(failure('approval.storage_unavailable'))

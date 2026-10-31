@@ -24,12 +24,15 @@ test('Linux WAL ENOSPC and sync EIO preserve honest native receipts and restart 
       const env = { ...process.env, LD_PRELOAD: library, DSH_JOURNAL_IO_ROOT: root }
       const result = spawnSync(process.execPath, ['--import', 'tsx', child, mode], { env, encoding: 'utf8', timeout: 15_000, maxBuffer: 128 * 1024 })
       assert.equal(result.status, 0, result.stderr)
-      const facts = JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { mode: string; before: number; after: number; restored: string | null; faults: number; receipts: string[]; code: number | null }
+      const facts = JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { mode: string; before: number; after: number; restored: string | null; faults: number; receipts: string[]; code: number | null; journalFailed: number }
       assert.equal(facts.mode, mode)
       assert.equal(facts.after, 1)
       assert.ok(facts.faults > 0)
       assert.equal(facts.before, mode === 'admit-write' || mode === 'start-sync' ? 0 : 1)
-      if (mode !== 'checkpoint-sync') assert.equal(facts.receipts.includes('agent_queued'), false)
+      if (mode !== 'checkpoint-sync') {
+        assert.equal(facts.receipts.includes('agent_queued'), false)
+        assert.ok(facts.journalFailed > 0, 'failed durable transaction missing from observations')
+      } else assert.equal(facts.journalFailed, 0, 'raw checkpoint is outside transaction timing')
       if (mode.endsWith('write')) assert.equal(facts.code! % 256, 13)
       t.diagnostic(JSON.stringify(facts))
     })
@@ -42,9 +45,10 @@ test('Linux WAL ENOSPC and sync EIO preserve honest native receipts and restart 
         env: { ...process.env, LD_PRELOAD: library, DSH_JOURNAL_IO_ROOT: root }, encoding: 'utf8', timeout: 10_000, maxBuffer: 128 * 1024,
       })
       assert.equal(result.status, 0, result.stderr)
-      const facts = JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { phase: string; executions: number; restored: string; faults: number }
+      const facts = JSON.parse(result.stdout.trim().split('\n').at(-1)!) as { phase: string; executions: number; restored: string; faults: number; journalFailed: number }
       assert.equal(facts.phase, phase); assert.equal(facts.executions, 0); assert.ok(facts.faults > 0)
       assert.ok(['invalidated', 'outcome_unknown'].includes(facts.restored))
+      assert.ok(facts.journalFailed > 0, 'failed approval transaction missing from observations')
       t.diagnostic(JSON.stringify(facts))
     })
   }
