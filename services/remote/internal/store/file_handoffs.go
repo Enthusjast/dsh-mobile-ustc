@@ -120,6 +120,26 @@ func loadHandoff(ctx context.Context, transaction *sql.Tx, id string) (files.Han
 func sameFileHost(left, right files.HostBinding) bool {
 	return left.InstallationID == right.InstallationID && left.KeyVersion == right.KeyVersion && left.RuntimeID == right.RuntimeID && left.RuntimeEpoch == right.RuntimeEpoch && left.ConnectionID == right.ConnectionID
 }
+
+// Current resource locks pin identity and scope, but not deadlines. Recheck
+// after all mutation/trigger/audit waits. Renewal also passes the old lease so
+// a write waiting past its expiry cannot resurrect that authority.
+func checkHandoffDeadlines(ctx context.Context, transaction *sql.Tx, record files.Record, host files.HostBinding, authority fileAuthority, deadlines ...time.Time) error {
+	now, err := databaseTime(ctx, transaction)
+	if err != nil {
+		return err
+	}
+	if !host.CredentialExpiresAt.After(now) || !record.ExpiresAt.After(now) || authority.grantExpires.Valid && !authority.grantExpires.Time.After(now) {
+		return files.ErrAccess
+	}
+	for _, deadline := range deadlines {
+		if !deadline.After(now) {
+			return files.ErrStale
+		}
+	}
+	return nil
+}
+
 func validHandoff(ctx context.Context, transaction *sql.Tx, handoff files.Handoff, host files.HostBinding, policy string) (fileAuthority, error) {
 	if !sameFileHost(handoff.Host, host) || handoff.PolicySHA256 != policy || handoff.File.RuntimeID != host.RuntimeID {
 		return fileAuthority{}, files.ErrAccess
@@ -134,14 +154,10 @@ func validHandoff(ctx context.Context, transaction *sql.Tx, handoff files.Handof
 	if err != nil {
 		return authority, err
 	}
-	now, err := databaseTime(ctx, transaction)
-	if err != nil {
-		return authority, err
-	}
-	if handoff.State != "offered" && handoff.State != "downloading" && handoff.State != "staged" || !handoff.LeaseUntil.After(now) || !handoff.ExpiresAt.After(now) {
+	if handoff.State != "offered" && handoff.State != "downloading" && handoff.State != "staged" {
 		return authority, files.ErrStale
 	}
-	return authority, nil
+	return authority, checkHandoffDeadlines(ctx, transaction, handoff.File, handoff.Host, authority, handoff.LeaseUntil, handoff.ExpiresAt)
 }
 
 func (repository *FileStore) IssueHandoff(ctx context.Context, host files.HostBinding, id, policy string) (*files.FileOffer, error) {
@@ -231,9 +247,12 @@ func (repository *FileStore) issueHandoff(ctx context.Context, host files.HostBi
 	if !until.After(now) {
 		return nil, files.ErrAccess
 	}
-	if _, err := transaction.ExecContext(ctx, `insert into file_handoffs(id,file_id,installation_id,installation_key_version,runtime_id,runtime_epoch,connection_id,scanner_policy_sha256,token_sha256,state,lease_until,expires_at,credential_expires_at)
-	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,'offered',$10,$11,$12)`, handoffID, id, host.InstallationID, host.KeyVersion, host.RuntimeID, host.RuntimeEpoch, host.ConnectionID, policy, digest[:], until, expires, host.CredentialExpiresAt); err != nil {
+	if err := transaction.QueryRowContext(ctx, `insert into file_handoffs(id,file_id,installation_id,installation_key_version,runtime_id,runtime_epoch,connection_id,scanner_policy_sha256,token_sha256,state,lease_until,expires_at,credential_expires_at)
+	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,'offered',$10,$11,$12) returning lease_until,expires_at`, handoffID, id, host.InstallationID, host.KeyVersion, host.RuntimeID, host.RuntimeEpoch, host.ConnectionID, policy, digest[:], until, expires, host.CredentialExpiresAt).Scan(&until, &expires); err != nil {
 		return nil, files.ErrUnavailable
+	}
+	if err := checkHandoffDeadlines(ctx, transaction, record, host, authority, until, expires); err != nil {
+		return nil, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return nil, files.ErrUnavailable
@@ -301,19 +320,24 @@ func (repository *FileStore) renewHandoff(ctx context.Context, host files.HostBi
 	if err != nil {
 		return handoff, err
 	}
-	if _, err := validHandoff(ctx, transaction, handoff, host, policy); err != nil {
+	authority, err := validHandoff(ctx, transaction, handoff, host, policy)
+	if err != nil {
 		return handoff, err
 	}
 	now, err := databaseTime(ctx, transaction)
 	if err != nil {
 		return handoff, err
 	}
+	previousLease := handoff.LeaseUntil
 	handoff.LeaseUntil = now.Add(fileHandoffLease)
 	if handoff.ExpiresAt.Before(handoff.LeaseUntil) {
 		handoff.LeaseUntil = handoff.ExpiresAt
 	}
-	if _, err := transaction.ExecContext(ctx, `update file_handoffs set lease_until=$2 where id=$1`, id, handoff.LeaseUntil); err != nil {
+	if err := transaction.QueryRowContext(ctx, `update file_handoffs set lease_until=$2 where id=$1 returning lease_until`, id, handoff.LeaseUntil).Scan(&handoff.LeaseUntil); err != nil {
 		return handoff, files.ErrUnavailable
+	}
+	if err := checkHandoffDeadlines(ctx, transaction, handoff.File, handoff.Host, authority, previousLease, handoff.LeaseUntil, handoff.ExpiresAt); err != nil {
+		return handoff, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return handoff, files.ErrUnavailable
@@ -366,7 +390,8 @@ func (repository *FileStore) redeemFileRead(ctx context.Context, id, token, poli
 	if verify(permit) != nil {
 		return files.ReadPermit{}, files.ErrAccess
 	}
-	if _, err := validHandoff(ctx, transaction, handoff, handoff.Host, policy); err != nil {
+	authority, err := validHandoff(ctx, transaction, handoff, handoff.Host, policy)
+	if err != nil {
 		return files.ReadPermit{}, err
 	}
 	var createdAt, readStartedAt time.Time
@@ -374,6 +399,9 @@ func (repository *FileStore) redeemFileRead(ctx context.Context, id, token, poli
 		return files.ReadPermit{}, files.ErrUnavailable
 	}
 	if err := fileHostAudit(ctx, transaction, handoff, "file.host_read"); err != nil {
+		return files.ReadPermit{}, err
+	}
+	if err := checkHandoffDeadlines(ctx, transaction, handoff.File, handoff.Host, authority, handoff.LeaseUntil, handoff.ExpiresAt); err != nil {
 		return files.ReadPermit{}, err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -426,7 +454,8 @@ func (repository *FileStore) stageHandoff(ctx context.Context, host files.HostBi
 	if err != nil {
 		return err
 	}
-	if _, err := validHandoff(ctx, transaction, handoff, host, policy); err != nil {
+	authority, err := validHandoff(ctx, transaction, handoff, host, policy)
+	if err != nil {
 		return err
 	}
 	if handoff.File.SHA256 != sha || handoff.File.SizeBytes != size {
@@ -459,6 +488,9 @@ func (repository *FileStore) stageHandoff(ctx context.Context, host files.HostBi
 		if _, err := transaction.ExecContext(ctx, `update control_outbox set published_at=clock_timestamp() where topic='file.clean' and payload->>'file_id'=$1 and published_at is null`, handoff.File.ID); err != nil {
 			return files.ErrUnavailable
 		}
+	}
+	if err := checkHandoffDeadlines(ctx, transaction, handoff.File, handoff.Host, authority, handoff.LeaseUntil, handoff.ExpiresAt); err != nil {
+		return err
 	}
 	if err := transaction.Commit(); err != nil {
 		return files.ErrUnavailable

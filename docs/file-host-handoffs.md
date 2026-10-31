@@ -38,6 +38,9 @@ Host 映射还绑定原始上传用户、设备、目标会话和实际原生 re
 
 ## 本地验证
 
+[交接提交前期限检查](file-handoff-admission-expiry.md)覆盖状态、触发器、审计和完成标记
+等待。读取消费与 staged 确认不能在等待过期后提交，续租也不能让已经到期的旧租约复活。
+
 - `npm run verify`：201 项 Host / 契约测试通过，包含实际 npm DSH Loader 的内容校验、设备 / 会话隔离、确认关联、重定向、丢失续租、断线清理、原生会话释放后重新暂存，以及共享 Schema / 签名夹具。
 - `npm run test:remote-dsh`：完整 Go race、真实 PostgreSQL、TLS HTTP / WSS 与正常 npm DSH CLI 回归通过。新增文件联调使用真实 DSH Loader 组件及正常远控插件，验证 clean → offer → 安装签名读取 → 原生 receipt → staged ack → grant 撤销后 receipt 回收。
 - `npm run test:remote-kotlin`：完整 Go / PostgreSQL / DSH 回归与实际 Kotlin TLS Relay 客户端组合通过，手机既有能力保持兼容。
