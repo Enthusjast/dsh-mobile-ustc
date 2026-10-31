@@ -11,7 +11,7 @@ test('relay crash requires an explicit independent two-node native composition b
   const base = ['--relay-crash', '--cross-node', '--dsh-only']
   for (const args of [
     ['--relay-crash'], ['--relay-crash', '--dsh-only'], ['--relay-crash', '--cross-node'],
-    ...['--host-renewal', '--installation-revoke', '--host-account-retire', '--database-outage', '--kotlin-relay'].map(flag => [...base, flag]),
+    ...['--host-renewal', '--installation-revoke', '--host-account-retire', '--database-outage', '--relay-certificate-renewal', '--kotlin-relay'].map(flag => [...base, flag]),
     [...base, '--go-run', '^Test'], [...base, '--relay-load', '4', '--load-output', '/never-create-relay-crash-load'],
   ]) {
     const result = spawnSync('python3', [runner, ...args], { encoding: 'utf8', timeout: 5000 })
@@ -25,7 +25,7 @@ test('relay crash requires an explicit independent two-node native composition b
 test('terminal crash wrapper rejects combinations before creating its output or terminal child', () => {
   const output = '/never-create-native-relay-crash-guard.log'
   assert.equal(existsSync(output), false)
-  for (const mode of ['--renewal', '--installation-revoke', '--host-account-retire', '--database-outage']) {
+  for (const mode of ['--renewal', '--installation-revoke', '--host-account-retire', '--database-outage', '--relay-certificate-renewal']) {
     const result = spawnSync('python3', [terminal, '--relay-crash', mode, '--output', output], { encoding: 'utf8', timeout: 5000 })
     assert.equal(result.status, 2)
     assert.match(result.stderr, /separate composition runs/)

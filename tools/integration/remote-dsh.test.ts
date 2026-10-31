@@ -123,7 +123,7 @@ class FrameCollector {
   }
 }
 
-test('real Go service and npm DSH share authorized sessions through PostgreSQL and signed peers', { timeout: process.env.REMOTE_TEST_HOST_RENEWAL === '1' ? 420_000 : 90_000 }, async t => {
+test('real Go service and npm DSH share authorized sessions through PostgreSQL and signed peers', { timeout: process.env.REMOTE_TEST_HOST_RENEWAL === '1' ? 420_000 : process.env.REMOTE_TEST_RELAY_CERTIFICATE_RENEWAL === '1' ? 180_000 : 90_000 }, async t => {
   const cluster = process.env.REMOTE_TEST_CLUSTER_ROOT
   const database = process.env.REMOTE_TEST_DATABASE_URL
   const psql = process.env.REMOTE_TEST_PSQL
@@ -209,7 +209,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   }
   const nodeIDs = crossNode ? [randomUUID(), randomUUID()] : []
   const privateAddresses = crossNode ? [await reserveAddress(), await reserveAddress()] : []
-  const relayConfigs = crossNode ? await relayNodeFixtures(root, nodeIDs.map((id, i) => ({ id, address: privateAddresses[i]! }))) : []
+  const relayCredentials = crossNode ? await relayNodeFixtures(root, nodeIDs.map((id, i) => ({ id, address: privateAddresses[i]! }))) : undefined
+  const relayConfigs = relayCredentials?.configs ?? []
   const phoneAddress = crossNode ? await reserveAddress() : undefined
   if (phoneAddress) phoneOrigin = `http://${phoneAddress}`
   const metricsReserved = createTCPServer()
@@ -1459,6 +1460,87 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await ownerReader.wait(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
   t.diagnostic('The installation owner paged both profiles and retired the fixture sibling through the scoped API. Exact retry wrote one audit, every relay acknowledged, and the same real DSH Host connection served a new owner-phone native snapshot afterward. The shared installation and primary profile stayed active.')
   t.diagnostic('The retired fixture profile name was enrolled again under the same installation with a fresh runtime UUID and no inherited grants. Both confirmations activated the replacement; a delayed DELETE for the historical UUID left it active and preserved the primary real DSH connection.')
+  if (process.env.REMOTE_TEST_RELAY_CERTIFICATE_RENEWAL === '1') {
+    assert.ok(crossNode && phoneService && relayCredentials, 'certificate renewal requires two owned fixture nodes')
+    const marker = `CERTIFICATE_RENEWAL_NATIVE_${randomUUID()}`, requestId = randomUUID()
+    const original = { v: 1, type: 'message.submit', request_id: requestId, runtime_id: enrollment.runtime_id,
+      session_id: sessionId, payload: { mode: 'queue', content: [{ type: 'text', text: marker }] } }
+    ownerReader.send(original)
+    await ownerReader.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued')
+    const nativeBefore = query(`select dsh_session_id from sessions where id='${sessionId}'`)
+    let reader = ownerReader, previousSnapshot = ownerReader.frames.find(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
+    const markers = [marker], authorities: string[] = []
+    for (const index of [1, 0]) {
+      const role = index === 1 ? 'phone ingress' : 'Host owner'
+      const fingerprintBefore = await relayCredentials.peerFingerprint(index, 1 - index)
+      const connectionBefore = query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`)
+      const generationBefore = query(`select generation from control_consumers where node_id='${nodeIDs[index]}'`)
+      const survivorGeneration = query(`select generation from control_consumers where node_id='${nodeIDs[1 - index]}'`)
+      dsh.check()
+      const started = Date.now()
+      const stopped: [number | null, NodeJS.Signals | null] = await (index === 1 ? phoneService : service).stop('SIGTERM')
+      assert.equal(stopped[0], 0); assert.equal(stopped[1], null)
+      await until(async () => reader.closed ? true : undefined, 'old routed phone closed during certificate renewal', 5000)
+      assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch)
+      const renewed = await relayCredentials.renew(index)
+      assert.equal(renewed.previousFingerprint, fingerprintBefore)
+      authorities.push(renewed.authorityFingerprint)
+      if (index === 1) phoneService = await startProcess(serviceBin, [], phoneServiceEnv)
+      else service = await startProcess(serviceBin, [], serviceEnv)
+      await until(async () => {
+        service.check(); phoneService!.check(); dsh.check()
+        try { const response = await fetch((index === 1 ? phoneOrigin : origin) + '/readyz', { signal: AbortSignal.timeout(500) }); await response.arrayBuffer(); return response.status === 204 ? true : undefined } catch { return undefined }
+      }, 'renewed node readiness', 10000)
+      // Each probe makes a fresh TLS 1.3 connection with the surviving peer's
+      // current certificate. The routed business connection below checks the
+      // other direction, URI identity, generation and normal device proof.
+      assert.equal(await relayCredentials.peerFingerprint(index, 1 - index), renewed.fingerprint)
+      assert.notEqual(renewed.fingerprint, fingerprintBefore)
+      assert.notEqual(query(`select generation from control_consumers where node_id='${nodeIDs[index]}'`), generationBefore)
+      assert.equal(query(`select generation='${survivorGeneration}'::uuid and lease_until>clock_timestamp() from control_consumers where node_id='${nodeIDs[1 - index]}'`), 't')
+      if (index === 1) assert.equal(query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`), connectionBefore)
+      else await until(async () => {
+        service.check(); phoneService!.check(); dsh.check()
+        const connection = query(`select coalesce(connection_id::text,'') from runtimes where id='${enrollment.runtime_id}'`)
+        return connection && connection !== connectionBefore ? true : undefined
+      }, 'same native Host reconnects with the renewed owner certificate', 30000)
+      assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch)
+      assert.equal(query(`select dsh_session_id from sessions where id='${sessionId}'`), nativeBefore)
+      const current = await connectPhone(ownerPhone, ownerDevice.device_id, ownerPhoneKey)
+      const staleRead = randomUUID()
+      current.send({ v: 1, type: 'session.page', request_id: staleRead, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+        session_id: sessionId, subscription_id: previousSnapshot.subscription_id,
+        payload: { sync_id: previousSnapshot.sync_id, through_seq: previousSnapshot.payload.cursor, before_seq: previousSnapshot.payload.cursor + 1, max_messages: 5 } })
+      await current.wait(frame => frame.type === 'error' && frame.request_id === staleRead && frame.payload.code === 'protocol.resync_required')
+      const subscribe = { v: 1, type: 'session.subscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 100 } }
+      current.send(subscribe)
+      const snapshot = await current.wait(frame => frame.type === 'session.snapshot' && frame.request_id === subscribe.request_id)
+      assert.notEqual(snapshot.sync_id, previousSnapshot.sync_id); assert.notEqual(snapshot.subscription_id, previousSnapshot.subscription_id)
+      const retryFrom = current.frames.length
+      current.send(original)
+      await current.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', retryFrom)
+      current.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch, session_id: sessionId, subscription_id: snapshot.subscription_id, payload: {} })
+      await current.wait(frame => frame.type === 'session.unsubscribed' && frame.subscription_id === snapshot.subscription_id)
+      const nextId = randomUUID(), nextMarker = `CERTIFICATE_RENEWAL_STAGE_${index}_${randomUUID()}`
+      markers.push(nextMarker)
+      current.send({ ...original, request_id: nextId, payload: { mode: 'queue', content: [{ type: 'text', text: nextMarker }] } })
+      await current.wait(frame => frame.type === 'command.receipt' && frame.request_id === nextId && frame.payload.state === 'agent_queued')
+      const freshRead = randomUUID()
+      current.send({ ...subscribe, request_id: freshRead })
+      previousSnapshot = await current.wait(frame => frame.type === 'session.snapshot' && frame.request_id === freshRead)
+      for (const value of markers) assert.equal(previousSnapshot.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(value)).length, 1,
+        'certificate renewal or explicit reconciliation duplicated a native message')
+      reader = current
+      t.diagnostic(`Renewed the isolated ${role} leaf certificate and private key under the unchanged fixture CA. A fresh TLS 1.3 handshake presented the replacement fingerprint; the other node kept its generation and lease. Fresh phone proof/snapshot, old-sync rejection, original-ID reconciliation and a new native message passed in ${Date.now() - started} ms.`)
+    }
+    assert.equal(authorities[0], authorities[1])
+    assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
+    const dump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+    for (const value of markers) assert.equal(dump.includes(value), false, 'certificate drill persisted command text')
+    service.check(); phoneService.check(); dsh.check()
+    t.diagnostic('Both owned Relay nodes drained and restarted explicitly; the native DSH process, epoch and session stayed intact. This drills same-CA leaf/key renewal, not CA replacement, credential revocation, automatic reload or production availability.')
+    return
+  }
   if (process.env.REMOTE_TEST_RELAY_CRASH === '1') {
     assert.ok(crossNode && phoneService, 'native relay crash requires two owned relay children')
     const marker = `RELAY_CRASH_NATIVE_${randomUUID()}`, requestId = randomUUID()

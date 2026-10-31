@@ -146,3 +146,8 @@ Restoring the shared database requires the separate [recovery isolation
 procedure](database-recovery.md). Node generation alone cannot detect a database
 and deployment configuration both rolled back to an old backup. The current
 production entrypoint also fences its externally configured database epoch.
+
+The separate [leaf certificate/key renewal drill](relay-certificate-renewal-drill.md)
+restarts the owned ingress and owner one at a time under the same fixture CA,
+checks fresh TLS peer fingerprints and reconciles the same installed DSH session.
+It does not provide hot reload, CA replacement or certificate revocation evidence.
