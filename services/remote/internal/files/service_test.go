@@ -135,7 +135,7 @@ func (*serviceScan) Close() error { return nil }
 
 func serviceFile(data []byte) Record {
 	return Record{ID: "33333333-3333-4333-8333-333333333333", OrganizationID: "11111111-1111-4111-8111-111111111111", RuntimeID: "66666666-6666-4666-8666-666666666666", SessionID: "22222222-2222-4222-8222-222222222222",
-		QuarantineAttempt: "44444444-4444-4444-8444-444444444444", Name: "fixture.bin", SizeBytes: int64(len(data)), SHA256: digest(data), Direction: "to_host", State: "uploading", UploadExpiresAt: time.Now().Add(time.Minute), ExpiresAt: time.Now().Add(time.Hour)}
+		QuarantineAttempt: "44444444-4444-4444-8444-444444444444", Name: "fixture.bin", SizeBytes: int64(len(data)), SHA256: digest(data), Direction: "to_host", State: "uploading", UploadExpiresAt: time.Now().Add(time.Minute), ExpiresAt: time.Now().Add(time.Hour), RetainUntil: time.Now().Add(24 * time.Hour)}
 }
 
 func TestServiceScannerProbeNeverAcceptsAnAlwaysCleanImplementation(t *testing.T) {

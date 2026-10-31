@@ -45,6 +45,24 @@ func databaseTime(ctx context.Context, transaction *sql.Tx) (time.Time, error) {
 	return now.UTC(), nil
 }
 
+func fileAuthorityTime(ctx context.Context, tx *sql.Tx, authority fileAuthority) (time.Time, error) {
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if authority.grantExpires.Valid && !authority.grantExpires.Time.After(now) {
+		return time.Time{}, files.ErrAccess
+	}
+	return now, nil
+}
+
+func fileWindow(record files.Record, now time.Time) error {
+	if !record.ExpiresAt.After(now) || !record.RetainUntil.After(now) {
+		return files.ErrAccess
+	}
+	return nil
+}
+
 func authorizeFile(ctx context.Context, transaction *sql.Tx, actor files.Actor, runtimeID, sessionID string, mutate bool) (fileAuthority, error) {
 	return authorizeFileAction(ctx, transaction, actor, runtimeID, sessionID, "file.upload", mutate)
 }
@@ -153,11 +171,8 @@ func fileUUID() (string, error) {
 
 func fileAudit(ctx context.Context, transaction *sql.Tx, record files.Record, action, result string) error {
 	metadata, _ := json.Marshal(map[string]any{"file_id": record.ID, "request_id": record.RequestID, "size_bytes": record.SizeBytes, "sha256": record.SHA256, "state": record.State})
-	if _, err := transaction.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,session_id,action,result,metadata)
-		values($1,'device',$2::uuid::text,$2,$3,$4,$5,$6,$7::jsonb)`, record.OrganizationID, record.DeviceID, record.RuntimeID, record.SessionID, action, result, string(metadata)); err != nil {
-		return files.ErrUnavailable
-	}
-	return nil
+	return fileSingleWrite(transaction.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,session_id,action,result,metadata)
+		values($1,'device',$2::uuid::text,$2,$3,$4,$5,$6,$7::jsonb)`, record.OrganizationID, record.DeviceID, record.RuntimeID, record.SessionID, action, result, string(metadata)))
 }
 
 func (repository *FileStore) RegisterUpload(ctx context.Context, actor files.Actor, input files.UploadRegistration) (files.Record, error) {
@@ -190,6 +205,9 @@ func (repository *FileStore) RegisterUpload(ctx context.Context, actor files.Act
 		if existing.Direction != "to_host" || existing.UploaderID != authority.user || existing.RuntimeID != input.RuntimeID || existing.SessionID != input.SessionID || existing.RequestSHA256 != digest {
 			return files.Record{}, files.ErrConflict
 		}
+		if _, err := fileAuthorityTime(ctx, transaction, authority); err != nil {
+			return files.Record{}, err
+		}
 		if err := transaction.Commit(); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
@@ -219,8 +237,8 @@ func (repository *FileStore) RegisterUpload(ctx context.Context, actor files.Act
 	if err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	if _, err := transaction.ExecContext(ctx, `insert into files(id,session_id,uploader_id,direction,name,size_bytes,sha256,object_key,state,expires_at,created_at)
-		values($1,$2,$3,'to_host',$4,$5,$6,$7,'uploading',$8,$9)`, id, input.SessionID, authority.user, input.Name, input.SizeBytes, input.SHA256, key.StorageKey(), record.ExpiresAt, now); err != nil {
+	if err := fileSingleWrite(transaction.ExecContext(ctx, `insert into files(id,session_id,uploader_id,direction,name,size_bytes,sha256,object_key,state,expires_at,created_at)
+		values($1,$2,$3,'to_host',$4,$5,$6,$7,'uploading',$8,$9)`, id, input.SessionID, authority.user, input.Name, input.SizeBytes, input.SHA256, key.StorageKey(), record.ExpiresAt, now)); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
 	var inserted string
@@ -233,16 +251,30 @@ func (repository *FileStore) RegisterUpload(ctx context.Context, actor files.Act
 	if err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	if _, err := transaction.ExecContext(ctx, `insert into file_objects(file_id,kind,attempt_id,object_key,cleanup_after) values($1,'quarantine',$2,$3,$4)`, id, attempt, key.StorageKey(), record.ExpiresAt); err != nil {
+	if err := fileSingleWrite(transaction.ExecContext(ctx, `insert into file_objects(file_id,kind,attempt_id,object_key,cleanup_after) values($1,'quarantine',$2,$3,$4)`, id, attempt, key.StorageKey(), record.ExpiresAt)); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
 	for _, quota := range quotas {
-		if _, err := transaction.ExecContext(ctx, `update file_quota_usage set reserved_bytes=reserved_bytes+$4,reserved_files=reserved_files+1 where org_id=$1 and kind=$2 and bucket_id=$3`, authority.org, quota.kind, quota.id, input.SizeBytes); err != nil {
+		if err := fileSingleWrite(transaction.ExecContext(ctx, `update file_quota_usage set reserved_bytes=reserved_bytes+$4,reserved_files=reserved_files+1 where org_id=$1 and kind=$2 and bucket_id=$3`, authority.org, quota.kind, quota.id, input.SizeBytes)); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
 	}
 	if err := fileAudit(ctx, transaction, record, "file.registered", "success"); err != nil {
 		return files.Record{}, err
+	}
+	record, err = loadFile(ctx, transaction, id, "")
+	if err != nil {
+		return files.Record{}, files.ErrUnavailable
+	}
+	now, err = fileAuthorityTime(ctx, transaction, authority)
+	if err != nil {
+		return files.Record{}, err
+	}
+	if err := fileWindow(record, now); err != nil {
+		return files.Record{}, err
+	}
+	if !record.UploadExpiresAt.After(now) {
+		return files.Record{}, files.ErrStale
 	}
 	if err := transaction.Commit(); err != nil {
 		return files.Record{}, files.ErrUnavailable
@@ -277,11 +309,11 @@ func (repository *FileStore) Status(ctx context.Context, actor files.Actor, id s
 	if err := verifyFileOwner(record, authority, actor, false); err != nil {
 		return files.Record{}, err
 	}
-	now, err := databaseTime(ctx, transaction)
+	now, err := fileAuthorityTime(ctx, transaction, authority)
 	if err != nil {
 		return files.Record{}, err
 	}
-	if !record.ExpiresAt.After(now) {
+	if !record.ExpiresAt.After(now) || !record.RetainUntil.After(now) {
 		record.State, record.ErrorCode = "expired", "expired"
 	}
 	if err := transaction.Commit(); err != nil {
@@ -335,16 +367,28 @@ func (repository *FileStore) uploadOperation(ctx context.Context, actor files.Ac
 		return files.Record{}, files.ErrStale
 	}
 	if commit && record.State == "uploading" {
-		if _, err := transaction.ExecContext(ctx, `update files set state='scanning' where id=$1;`, id); err != nil {
+		if err := fileSingleWrite(transaction.ExecContext(ctx, `update files set state='scanning' where id=$1;`, id)); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
 		record.State = "scanning"
-		if _, err := transaction.ExecContext(ctx, `update file_transfers set scan_ready_at=clock_timestamp(),error_code=null where file_id=$1`, id); err != nil {
+		if err := fileSingleWrite(transaction.ExecContext(ctx, `update file_transfers set scan_ready_at=clock_timestamp(),error_code=null where file_id=$1`, id)); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
 		if err := fileAudit(ctx, transaction, record, "file.scan_requested", "success"); err != nil {
 			return files.Record{}, err
 		}
+	}
+	now, err = fileAuthorityTime(ctx, transaction, authority)
+	if err != nil {
+		return files.Record{}, err
+	}
+	if err := fileWindow(record, now); err != nil {
+		return files.Record{}, err
+	}
+	// The PUT URL deadline only controls URL issuance. An already uploaded
+	// object can still be committed within its current file window.
+	if !commit && !record.UploadExpiresAt.After(now) {
+		return files.Record{}, files.ErrStale
 	}
 	if err := transaction.Commit(); err != nil {
 		return files.Record{}, files.ErrUnavailable

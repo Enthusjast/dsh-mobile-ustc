@@ -39,6 +39,9 @@ scanner policy 读取实际部署的 clamd 配置（或内容一致的受保护�
 
 上传 body 直接 PUT 到对象服务，按返回的已签名 header 和已声明长度发送；不要附带学校 OAuth / DPoP 凭据。capability 是短期秘密，不能放入 URL 日志、审计或持久手机记录。签名地址不能承诺立即撤销。
 
+[上传/导出准入期限](file-rest-admission-expiry.md)还覆盖账本与审计等待、预签名完成后的
+有效窗口及下载 opened 检查，保留已上传对象晚提交与历史结果对账的原有语义。
+
 协议和共享样例见 `contracts/openapi/remote.yaml`、`contracts/files/v1/golden/`。原始登记 ID 跨网络重试保持不变；URL 失败或丢失回执可重新对账 / 获取同一文件的 capability，不新建一个上传意图。
 
 ## worker 生命周期

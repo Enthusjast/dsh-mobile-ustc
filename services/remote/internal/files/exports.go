@@ -83,7 +83,7 @@ func (controller *Exports) Upload(ctx context.Context, actor Actor, host HostBin
 	if err != nil {
 		return UploadPrepared{}, ErrUnavailable
 	}
-	ttl := min(time.Until(record.UploadExpiresAt).Truncate(time.Second), 5*time.Minute)
+	ttl := min(time.Until(uploadDeadline(record)).Truncate(time.Second), 5*time.Minute)
 	if ttl < time.Second {
 		return UploadPrepared{}, ErrStale
 	}
@@ -93,6 +93,9 @@ func (controller *Exports) Upload(ctx context.Context, actor Actor, host HostBin
 	}
 	if ctx.Err() != nil || controller.lifetime.Err() != nil {
 		return UploadPrepared{}, ErrAccess
+	}
+	if !currentUploadCapability(record, capability) {
+		return UploadPrepared{}, ErrStale
 	}
 	return UploadPrepared{File: record.Status(), Upload: &capability}, nil
 }
@@ -218,6 +221,9 @@ func (controller *Exports) Open(parent context.Context, actor Actor, id string) 
 	request := hex.EncodeToString(entropy[:])
 	if err := controller.repository.AuditExportDownload(parent, actor, permit, request, "opened"); err != nil {
 		return nil, err
+	}
+	if parent.Err() != nil || controller.lifetime.Err() != nil || !permit.LeaseUntil.After(time.Now()) || !permit.File.ExpiresAt.After(time.Now()) {
+		return nil, ErrAccess
 	}
 	ctx, deadline := context.WithDeadline(parent, minTime(permit.File.ExpiresAt, time.Now().Add(5*time.Minute)))
 	ctx, stop := context.WithCancel(ctx)

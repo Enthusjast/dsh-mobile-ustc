@@ -101,6 +101,14 @@ type UploadPrepared struct {
 	Upload *UploadURL `json:"upload,omitempty"`
 }
 
+func uploadDeadline(record Record) time.Time {
+	return minTime(record.UploadExpiresAt, minTime(record.ExpiresAt, record.RetainUntil))
+}
+
+func currentUploadCapability(record Record, capability UploadURL) bool {
+	return capability.ExpiresAt.After(time.Now()) && !capability.ExpiresAt.After(uploadDeadline(record))
+}
+
 func (service *Service) Register(ctx context.Context, actor Actor, input UploadRegistration) (UploadPrepared, error) {
 	if !service.Ready() {
 		return UploadPrepared{}, ErrScanUnavailable
@@ -123,7 +131,7 @@ func (service *Service) Upload(ctx context.Context, actor Actor, id string) (Upl
 	if err != nil {
 		return UploadPrepared{}, err
 	}
-	lifetime := time.Until(record.UploadExpiresAt).Truncate(time.Second)
+	lifetime := time.Until(uploadDeadline(record)).Truncate(time.Second)
 	if lifetime < time.Second {
 		return UploadPrepared{}, ErrStale
 	}
@@ -140,6 +148,9 @@ func (service *Service) Upload(ctx context.Context, actor Actor, id string) (Upl
 	}
 	if ctx.Err() != nil {
 		return UploadPrepared{}, ErrUnavailable
+	}
+	if !currentUploadCapability(record, capability) {
+		return UploadPrepared{}, ErrStale
 	}
 	return UploadPrepared{File: record.Status(), Upload: &capability}, nil
 }

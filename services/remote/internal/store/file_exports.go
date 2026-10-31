@@ -49,6 +49,7 @@ func (repository *FileStore) AuditExportDownload(ctx context.Context, actor file
 		return files.ErrUnavailable
 	}
 	defer tx.Rollback()
+	var authority fileAuthority
 	record, err := loadFile(ctx, tx, permit.File.ID, "for share of f,t")
 	if err != nil {
 		return files.ErrUnavailable
@@ -57,7 +58,7 @@ func (repository *FileStore) AuditExportDownload(ctx context.Context, actor file
 		return files.ErrAccess
 	}
 	if outcome == "opened" {
-		authority, err := authorizeExportOwner(ctx, tx, actor, record, false)
+		authority, err = authorizeExportOwner(ctx, tx, actor, record, false)
 		if err != nil {
 			return err
 		}
@@ -70,9 +71,18 @@ func (repository *FileStore) AuditExportDownload(ctx context.Context, actor file
 		}
 	}
 	metadata, _ := json.Marshal(map[string]any{"file_id": record.ID, "download_id": request, "sha256": record.SHA256, "size_bytes": record.SizeBytes})
-	if _, err := tx.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,session_id,action,result,metadata)
-	 values($1,'system','file-service',$2,$3,$4,'file.export_download',$5,$6::jsonb)`, record.OrganizationID, record.DeviceID, record.RuntimeID, record.SessionID, outcome, string(metadata)); err != nil {
+	if err := fileSingleWrite(tx.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,session_id,action,result,metadata)
+	 values($1,'system','file-service',$2,$3,$4,'file.export_download',$5,$6::jsonb)`, record.OrganizationID, record.DeviceID, record.RuntimeID, record.SessionID, outcome, string(metadata))); err != nil {
 		return files.ErrUnavailable
+	}
+	if outcome == "opened" {
+		now, err := fileAuthorityTime(ctx, tx, authority)
+		if err != nil {
+			return err
+		}
+		if fileWindow(record, now) != nil || !permit.LeaseUntil.After(now) {
+			return files.ErrAccess
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return files.ErrUnavailable
@@ -188,6 +198,13 @@ func (repository *FileStore) RegisterExport(ctx context.Context, actor files.Act
 		if err := verifyFileOwner(existing, authority, actor, true); err != nil {
 			return files.Record{}, err
 		}
+		now, err := fileAuthorityTime(ctx, tx, authority)
+		if err != nil {
+			return files.Record{}, err
+		}
+		if !host.CredentialExpiresAt.After(now) {
+			return files.Record{}, files.ErrAccess
+		}
 		if err := tx.Commit(); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
@@ -225,37 +242,61 @@ func (repository *FileStore) RegisterExport(ctx context.Context, actor files.Act
 	if err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	if _, err := tx.ExecContext(ctx, `insert into files(id,session_id,uploader_id,direction,name,size_bytes,sha256,object_key,state,expires_at,created_at)
-	 values($1,$2,$3,'from_host',$4,$5,$6,$7,'uploading',$8,$9)`, id, input.SessionID, authority.user, input.Name, input.SizeBytes, input.SHA256, key.StorageKey(), until, now); err != nil {
+	if err := fileSingleWrite(tx.ExecContext(ctx, `insert into files(id,session_id,uploader_id,direction,name,size_bytes,sha256,object_key,state,expires_at,created_at)
+	 values($1,$2,$3,'from_host',$4,$5,$6,$7,'uploading',$8,$9)`, id, input.SessionID, authority.user, input.Name, input.SizeBytes, input.SHA256, key.StorageKey(), until, now)); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	if _, err := tx.ExecContext(ctx, `insert into file_transfers(file_id,org_id,runtime_id,uploader_device_id,device_key_version,proof_key_jkt,grant_version,request_id,request_sha256,quarantine_attempt_id,upload_expires_at,retain_until)
-	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, id, authority.org, input.RuntimeID, actor.DeviceID, authority.keyVersion, actor.ProofKeyJKT, authority.grantVersion, input.RequestID, digest, attempt, until, record.RetainUntil); err != nil {
+	if err := fileSingleWrite(tx.ExecContext(ctx, `insert into file_transfers(file_id,org_id,runtime_id,uploader_device_id,device_key_version,proof_key_jkt,grant_version,request_id,request_sha256,quarantine_attempt_id,upload_expires_at,retain_until)
+	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, id, authority.org, input.RuntimeID, actor.DeviceID, authority.keyVersion, actor.ProofKeyJKT, authority.grantVersion, input.RequestID, digest, attempt, until, record.RetainUntil)); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
 	var workspace any
 	if input.Origin == "workspace_artifact" {
 		workspace = authority.workspace.String
 	}
-	if _, err := tx.ExecContext(ctx, `insert into file_exports(file_id,source_id,installation_id,installation_key_version,runtime_epoch,connection_id,credential_expires_at,source_expires_at,origin,workspace_id)
-	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, id, input.SourceID, host.InstallationID, host.KeyVersion, host.RuntimeEpoch, host.ConnectionID, host.CredentialExpiresAt, until, input.Origin, workspace); err != nil {
+	if err := fileSingleWrite(tx.ExecContext(ctx, `insert into file_exports(file_id,source_id,installation_id,installation_key_version,runtime_epoch,connection_id,credential_expires_at,source_expires_at,origin,workspace_id)
+	 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, id, input.SourceID, host.InstallationID, host.KeyVersion, host.RuntimeEpoch, host.ConnectionID, host.CredentialExpiresAt, until, input.Origin, workspace)); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	if _, err := tx.ExecContext(ctx, `insert into file_objects(file_id,kind,attempt_id,object_key,cleanup_after) values($1,'quarantine',$2,$3,$4)`, id, attempt, key.StorageKey(), until.Add(fileCleanupGrace)); err != nil {
+	if err := fileSingleWrite(tx.ExecContext(ctx, `insert into file_objects(file_id,kind,attempt_id,object_key,cleanup_after) values($1,'quarantine',$2,$3,$4)`, id, attempt, key.StorageKey(), until.Add(fileCleanupGrace))); err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
 	for _, quota := range quotas {
-		if _, err := tx.ExecContext(ctx, `update file_quota_usage set reserved_bytes=reserved_bytes+$4,reserved_files=reserved_files+1 where org_id=$1 and kind=$2 and bucket_id=$3`, authority.org, quota.kind, quota.id, input.SizeBytes); err != nil {
+		if err := fileSingleWrite(tx.ExecContext(ctx, `update file_quota_usage set reserved_bytes=reserved_bytes+$4,reserved_files=reserved_files+1 where org_id=$1 and kind=$2 and bucket_id=$3`, authority.org, quota.kind, quota.id, input.SizeBytes)); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
 	}
 	if err := fileAudit(ctx, tx, record, "file.export_registered", "success"); err != nil {
 		return files.Record{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,session_id,action,result,metadata)
+	if err := fileSingleWrite(tx.ExecContext(ctx, `insert into audit_log(org_id,actor_type,actor_id,device_id,runtime_id,session_id,action,result,metadata)
 	 values($1,'installation',$2,$3,$4,$5,'file.export_source','success',jsonb_build_object('file_id',$6::text,'source_id',$7::text,'runtime_epoch',$8::text,'connection_id',$9::text))`,
-		record.OrganizationID, host.InstallationID, record.DeviceID, record.RuntimeID, record.SessionID, id, input.SourceID, host.RuntimeEpoch, host.ConnectionID); err != nil {
+		record.OrganizationID, host.InstallationID, record.DeviceID, record.RuntimeID, record.SessionID, id, input.SourceID, host.RuntimeEpoch, host.ConnectionID)); err != nil {
 		return files.Record{}, files.ErrUnavailable
+	}
+	record, err = loadFile(ctx, tx, id, "")
+	if err != nil {
+		return files.Record{}, files.ErrUnavailable
+	}
+	origin, err := loadExportOrigin(ctx, tx, record)
+	if err != nil {
+		return files.Record{}, err
+	}
+	now, err = fileAuthorityTime(ctx, tx, authority)
+	if err != nil {
+		return files.Record{}, err
+	}
+	if !host.CredentialExpiresAt.After(now) {
+		return files.Record{}, files.ErrAccess
+	}
+	if !input.SourceExpiresAt.After(now) || !origin.expires.After(now) {
+		return files.Record{}, files.ErrStale
+	}
+	if err := fileWindow(record, now); err != nil {
+		return files.Record{}, err
+	}
+	if !record.UploadExpiresAt.After(now) {
+		return files.Record{}, files.ErrStale
 	}
 	if err := tx.Commit(); err != nil {
 		return files.Record{}, files.ErrUnavailable
@@ -295,7 +336,8 @@ func (repository *FileStore) exportUpload(ctx context.Context, actor files.Actor
 	if err != nil {
 		return files.Record{}, files.ErrUnavailable
 	}
-	if _, err := authorizeExportOwner(ctx, tx, actor, record, true); err != nil {
+	authority, err := authorizeExportOwner(ctx, tx, actor, record, true)
+	if err != nil {
 		return files.Record{}, err
 	}
 	origin, err := loadExportOrigin(ctx, tx, record)
@@ -309,6 +351,13 @@ func (repository *FileStore) exportUpload(ctx context.Context, actor files.Actor
 		return files.Record{}, err
 	}
 	if commit && origin.uploaded.Valid {
+		now, err := fileAuthorityTime(ctx, tx, authority)
+		if err != nil {
+			return files.Record{}, err
+		}
+		if !origin.host.CredentialExpiresAt.After(now) {
+			return files.Record{}, files.ErrAccess
+		}
 		if err := tx.Commit(); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
@@ -321,23 +370,37 @@ func (repository *FileStore) exportUpload(ctx context.Context, actor files.Actor
 	if record.State != "uploading" || !origin.expires.After(now) || !record.UploadExpiresAt.After(now) || !record.ExpiresAt.After(now) {
 		return files.Record{}, files.ErrStale
 	}
+	sourceWindow := record
 	if commit {
 		// The current Host's durable attestation ends source admission. Scanning
 		// may finish while the Host is offline; current device/grant authority is
 		// still rechecked for every worker lease and final publication.
 		record.State, record.ExpiresAt = "scanning", minTime(record.RetainUntil, now.Add(repository.limits.AbandonAfter))
-		if _, err := tx.ExecContext(ctx, `update files set state='scanning',expires_at=$2 where id=$1`, id, record.ExpiresAt); err != nil {
+		if err := fileSingleWrite(tx.ExecContext(ctx, `update files set state='scanning',expires_at=$2 where id=$1`, id, record.ExpiresAt)); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
-		if _, err := tx.ExecContext(ctx, `update file_exports set uploaded_at=clock_timestamp() where file_id=$1`, id); err != nil {
+		if err := fileSingleWrite(tx.ExecContext(ctx, `update file_exports set uploaded_at=clock_timestamp() where file_id=$1`, id)); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
-		if _, err := tx.ExecContext(ctx, `update file_transfers set scan_ready_at=clock_timestamp(),error_code=null where file_id=$1`, id); err != nil {
+		if err := fileSingleWrite(tx.ExecContext(ctx, `update file_transfers set scan_ready_at=clock_timestamp(),error_code=null where file_id=$1`, id)); err != nil {
 			return files.Record{}, files.ErrUnavailable
 		}
 		if err := fileAudit(ctx, tx, record, "file.export_scan_requested", "success"); err != nil {
 			return files.Record{}, err
 		}
+	}
+	now, err = fileAuthorityTime(ctx, tx, authority)
+	if err != nil {
+		return files.Record{}, err
+	}
+	if !origin.host.CredentialExpiresAt.After(now) {
+		return files.Record{}, files.ErrAccess
+	}
+	if !origin.expires.After(now) || !sourceWindow.UploadExpiresAt.After(now) {
+		return files.Record{}, files.ErrStale
+	}
+	if fileWindow(sourceWindow, now) != nil || fileWindow(record, now) != nil {
+		return files.Record{}, files.ErrAccess
 	}
 	if err := tx.Commit(); err != nil {
 		return files.Record{}, files.ErrUnavailable
@@ -385,14 +448,14 @@ func (repository *FileStore) AuthorizeExportDownload(ctx context.Context, actor 
 	if err != nil || actual != policy || stored != key.StorageKey() {
 		return files.DownloadPermit{}, files.ErrAccess
 	}
-	now, err := databaseTime(ctx, tx)
+	now, err := fileAuthorityTime(ctx, tx, authority)
 	if err != nil {
 		return files.DownloadPermit{}, err
 	}
-	if !record.ExpiresAt.After(now) {
+	if fileWindow(record, now) != nil {
 		return files.DownloadPermit{}, files.ErrAccess
 	}
-	until := minTime(now.Add(5*time.Second), record.ExpiresAt)
+	until := minTime(now.Add(5*time.Second), record.ExpiresAt, record.RetainUntil)
 	if authority.grantExpires.Valid {
 		until = minTime(until, authority.grantExpires.Time)
 	}
