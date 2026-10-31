@@ -27,6 +27,8 @@ var relayMetricDescriptions = []*prometheus.Desc{
 	relayDesc("proxy_tunnels", "Current ingress proxy tunnels, including pending owner admission; distinct from owner sockets."),
 	relayDesc("proxy_inflight_bytes", "Proxy payload bytes held between read and write; no user-space backlog.", "direction"),
 	relayDesc("owner_http_forwards", "Current ingress HTTP requests forwarded to a host owner; budget 128."),
+	relayDesc("send_reserved_bytes", "Node payload bytes reserved by waiting and in-flight writes, including retiring writers.", "lane"),
+	relayDesc("send_limit_bytes", "Configured node payload reservation limit, independent for ordinary and control lanes.", "lane"),
 }
 
 // ConfigureMetrics is called once before serving; the registry and collector
@@ -101,7 +103,9 @@ func (server *Server) Collect(out chan<- prometheus.Metric) {
 	if server.draining {
 		draining = 1
 	}
+	budget := server.sendBudget
 	server.mu.Unlock()
+	reserved, limits := budget.snapshot()
 	// Never hold application locks while emitting to the scrape channel.
 	for i, role := range roles {
 		snapshot := snapshots[i]
@@ -124,4 +128,12 @@ func (server *Server) Collect(out chan<- prometheus.Metric) {
 		out <- prometheus.MustNewConstMetric(relayMetricDescriptions[11], prometheus.GaugeValue, float64(inflight[i]), label)
 	}
 	out <- prometheus.MustNewConstMetric(relayMetricDescriptions[12], prometheus.GaugeValue, float64(httpForwards))
+	for i, lane := range []string{"ordinary", "control"} {
+		limit := limits.OrdinaryBytes
+		if i == 1 {
+			limit = limits.ControlBytes
+		}
+		out <- prometheus.MustNewConstMetric(relayMetricDescriptions[13], prometheus.GaugeValue, float64(reserved[i]), lane)
+		out <- prometheus.MustNewConstMetric(relayMetricDescriptions[14], prometheus.GaugeValue, float64(limit), lane)
+	}
 }

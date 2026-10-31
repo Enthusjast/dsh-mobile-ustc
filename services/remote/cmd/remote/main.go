@@ -32,6 +32,8 @@ func main() {
 			operation = func() error { return runCommandRateCommand(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "connection-limits" {
 			operation = func() error { return runConnectionLimitCommand(os.Args[2:], os.Stdout) }
+		} else if os.Args[1] == "queue-limits" {
+			operation = func() error { return runSendQueueDescription(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "identities" {
 			operation = func() error { return runIdentityCommand(os.Args[2:], os.Stdout) }
 		} else {
@@ -55,6 +57,10 @@ func run() error {
 		return err
 	}
 	connectionLimits, err := loadConnectionLimits(os.Getenv("REMOTE_CONNECTION_LIMITS_FILE"))
+	if err != nil {
+		return err
+	}
+	queueLimits, err := loadSendQueueLimits(os.Getenv("REMOTE_RELAY_QUEUE_LIMITS_FILE"))
 	if err != nil {
 		return err
 	}
@@ -191,6 +197,9 @@ func run() error {
 	handler := httpapi.New(directory, verifier, apiConfig)
 	if err := handler.ConfigurePendingHandshakes(connectionLimits.PendingHandshakes); err != nil {
 		return errConnectionLimitConfiguration
+	}
+	if err := handler.ConfigureSendQueueLimits(queueLimits); err != nil {
+		return errSendQueueConfiguration
 	}
 	routingConfig := relay.RoutingConfig{Directory: directory}
 	if relayConfig != nil {

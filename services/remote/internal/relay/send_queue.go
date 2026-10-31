@@ -47,6 +47,10 @@ func (live *liveConnection) queueFrame(ctx context.Context, frame outboundFrame)
 		}
 		queue = live.controlQueue
 	}
+	if !live.sendBudget.reserve(len(frame.body), frame.control) {
+		return errRelayQueueFull
+	}
+	frame.budget = live.sendBudget
 	select {
 	case queue <- frame:
 		live.queuedMessages++
@@ -60,6 +64,7 @@ func (live *liveConnection) queueFrame(ctx context.Context, frame outboundFrame)
 		}
 		return nil
 	default:
+		frame.budget.release(len(frame.body), frame.control)
 		return errRelayQueueFull
 	}
 }
@@ -124,7 +129,8 @@ func (live *liveConnection) clearQueuedFramesLocked() {
 	for _, queue := range []chan outboundFrame{live.controlQueue, live.sendQueue} {
 		for {
 			select {
-			case <-queue:
+			case frame := <-queue:
+				frame.budget.release(len(frame.body), frame.control)
 				continue
 			default:
 			}

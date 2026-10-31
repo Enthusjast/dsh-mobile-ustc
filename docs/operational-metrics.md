@@ -23,6 +23,7 @@ REMOTE_METRICS_LISTEN_ADDR=127.0.0.1:9090 go run ./cmd/remote
 | `relay_connections{role,phase}` | 当前已升级 socket 数；phase 为 handshaking / active / closing，尚未完成密钥证明的 socket 不算 active |
 | `relay_queued_messages{role}` / `relay_queued_bytes{role}` | 当前等待 writer 的消息数及其序列化 UTF-8 payload 字节 |
 | `relay_inflight_bytes{role}` | writer 当前持有的 payload 字节，独立于等待队列 |
+| `relay_send_reserved_bytes{lane}` / `relay_send_limit_bytes{lane}` | 节点当前已编码 payload 占用与配置额度；ordinary/control 分别限额，包含等待及正在退出的 writer |
 | `relay_max_connection_queued_bytes{role}` | 当前单条连接的最大等待字节，非历史峰值 |
 | `relay_queued_connections{role,bytes_le}` | 当前队列字节不超过各固定边界的连接数；是累计边界 gauge，连接关闭后会减少，不能对它使用 counter 的 rate |
 | `relay_subscriptions` / `relay_catalog_assembly_bytes` / `relay_creation_options_bytes` | 当前读取订阅、目录分片缓冲及创建选项缓冲 |

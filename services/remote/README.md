@@ -1,5 +1,7 @@
 # Remote service foundation
 
+Node-local [send payload budgets](../../docs/relay-node-send-budgets.md) bound queued and in-flight encoded bytes across all connections, with independent ordinary/control reserves. Defaults are 256 MiB/16 MiB; optional protected `REMOTE_RELAY_QUEUE_LIMITS_FILE` configures them once before admission. `remote queue-limits describe` works offline, and private fixed-label gauges include retiring writers until their write finishes. Existing frame/queue limits and failure/reconciliation paths remain in force.
+
 The independent [approval expiry worker](../../docs/approval-expiry-worker.md) terminates expired v1 metadata without another Host registration. Bounded runtime-first claims support concurrent nodes; state, audit and outbox commit together while signed evidence and native execution facts are retained. It runs separately from consumer renewal, routing and authority checks. Apply migration 044 for the active-expiry index.
 
 Signed [approval admission deadlines](../../docs/approval-admission-expiry.md) are rechecked after evidence/audit/outbox waits and before commit. Registration and decision retries also recheck current Host heartbeat after locks. Expiry rolls back new state, immutable evidence and events; valid bounded waits and exact retries remain supported without changing TTLs or schema.

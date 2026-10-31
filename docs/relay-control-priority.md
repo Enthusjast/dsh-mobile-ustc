@@ -4,6 +4,9 @@ Relay 每条连接仍只有一个 WebSocket writer。它从两条有界 FIFO 中
 16 帧、每帧最多 64 KiB；控制队列有独立的 8 帧、合计 128 KiB 预算。普通队列满时，
 当前审批和撤权通知仍能申请控制预算；控制队列满时也不会占用普通内容的槽位。
 
+[节点发送字节预算](relay-node-send-budgets.md)进一步限制所有连接合计的等待与 writer
+占用，普通与控制额度独立；正在退出的 writer 也不会因移出路由而提前归还其额度。
+
 控制类型使用固定白名单：`access.revoked`、`runtime.changed`、`server.draining`，以及
 `approval.invalidate`、`approval.decision`、`approval.reference`、`approval.snapshot`、
 `approval.registered`、`approval.result.ack`、`approval.details.get`、`approval.unsubscribed`。

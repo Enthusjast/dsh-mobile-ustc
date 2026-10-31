@@ -75,6 +75,9 @@ type sharedConnectionSlots interface {
 }
 
 type Server struct {
+	sendBudget           *sendQueueBudget
+	sendBudgetConfigured bool
+	sendBudgetStarted    bool
 	pendingHandshakes    int
 	database             Repository
 	mu                   sync.Mutex
@@ -98,6 +101,7 @@ type Server struct {
 }
 
 type liveConnection struct {
+	sendBudget             *sendQueueBudget
 	conn                   *websocket.Conn
 	closeTransport         func() error
 	peer                   peer
@@ -138,6 +142,7 @@ type liveConnection struct {
 }
 
 type outboundFrame struct {
+	budget      *sendQueueBudget
 	control     bool
 	body        []byte
 	result      chan error
@@ -269,7 +274,8 @@ type normalizedMessageSubmit struct {
 
 func New(database Repository, approvalConfigs ...ApprovalConfig) *Server {
 	server := &Server{
-		database: database, connections: make(map[*websocket.Conn]*liveConnection),
+		sendBudget: &sendQueueBudget{limits: DefaultSendQueueLimits()},
+		database:   database, connections: make(map[*websocket.Conn]*liveConnection),
 		hosts: make(map[string]*liveConnection), devices: make(map[string]map[string]map[*liveConnection]struct{}),
 		subscriptions: make(map[string]*sessionSubscription),
 	}
@@ -322,6 +328,7 @@ func (live *liveConnection) writeLoop() {
 		cancel()
 		live.queueMu.Lock()
 		live.inflightBytes = 0
+		frame.budget.release(len(frame.body), frame.control)
 		live.queueMu.Unlock()
 		live.metrics.Written(live.peer.role, len(frame.body), time.Since(frame.queuedAt), err)
 		frame.result <- err
@@ -555,7 +562,8 @@ func (server *Server) registerConnection(connection *websocket.Conn, identity pe
 		return nil, false
 	}
 
-	live := &liveConnection{conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, ordinaryQueueFrames), controlQueue: make(chan outboundFrame, controlQueueFrames), queueWake: make(chan struct{}, 1), done: make(chan struct{}), metrics: server.metrics}
+	server.sendBudgetStarted = true
+	live := &liveConnection{sendBudget: server.sendBudget, conn: connection, closeTransport: closeTransport, peer: identity, sendQueue: make(chan outboundFrame, ordinaryQueueFrames), controlQueue: make(chan outboundFrame, controlQueueFrames), queueWake: make(chan struct{}, 1), done: make(chan struct{}), metrics: server.metrics}
 	server.active.Add(1)
 	server.connections[connection] = live
 	server.mu.Unlock()
