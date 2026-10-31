@@ -7,6 +7,7 @@ import { ProbeError, type Command } from './protocol.js'
 import { PersistentApprovalJournal, migrateApprovalJournal } from './approval-journal.js'
 import { encryptJournalBytes, decryptJournalBytes, type Ciphertext } from './journal-crypto.js'
 import { finalizeProtectedKey, hasProtectedKey, loadProtectedKey, type JournalKeyOptions, type ProtectedKey } from './journal-key-protection.js'
+import { configureJournalCapacity, journalCapacityBytes } from './journal-capacity.js'
 
 export const MAX_JOURNAL_COMMANDS = 100_000
 const MAX_PENDING_JOURNAL_COMMANDS = 4096
@@ -16,6 +17,7 @@ const RUNTIME_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 
 export type CommandState = 'host_accepted' | 'dispatching' | 'agent_queued' | 'settled' | 'rejected' | 'outcome_unknown'
 export interface CommandOwner { userId: string; deviceId: string }
+export interface CommandJournalOptions extends JournalKeyOptions { maxDatabaseBytes?: number }
 export interface JournalAdmission {
   inserted: boolean
   state: CommandState
@@ -223,7 +225,8 @@ export class PersistentCommandJournal implements CommandJournal {
   private approvalLog: PersistentApprovalJournal | undefined
   private constructor(private readonly database: DatabaseSync, private readonly key: Buffer, private readonly runtimeId: string) {}
 
-  static async open(path: string, runtimeId: string, options: JournalKeyOptions = {}): Promise<PersistentCommandJournal> {
+  static async open(path: string, runtimeId: string, options: CommandJournalOptions = {}): Promise<PersistentCommandJournal> {
+    const maxDatabaseBytes = journalCapacityBytes(options.maxDatabaseBytes)
     if (!isAbsolute(path) || !RUNTIME_ID.test(runtimeId)) throw new Error('command journal requires an absolute path and runtime UUID')
     if (options.signal?.aborted) throw new Error('command journal key protection unavailable')
     if (process.platform === 'win32') {
@@ -266,6 +269,7 @@ export class PersistentCommandJournal implements CommandJournal {
         || database.prepare('PRAGMA synchronous').get()?.synchronous !== 2) {
         throw new Error('command journal requires SQLite WAL mode and FULL synchronization')
       }
+      configureJournalCapacity(database, maxDatabaseBytes)
       const version = database.prepare('PRAGMA user_version').get()?.user_version
       if (version === 0) {
         database.exec(`

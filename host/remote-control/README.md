@@ -2,6 +2,10 @@
 
 本包是默认关闭的 Cordis 函数插件，导出 `name / inject / Config / apply`，使用当前进程的服务，不启动 SDK 子进程。运行 `npm run build` 后装配 `lib/index.js`。
 
+命令和审批日志共享[SQLite 主库容量预算](../../docs/host-journal-capacity.md)，默认 1 GiB，
+可通过 `commandJournalMaxBytes` 配置。容量不足不会淘汰未知记录或签名证据，也不会先执行
+再伪造持久回执；WAL 和文件系统总空间仍须独立管理。
+
 M0 支持工作区白名单内根会话的列表、创建、文本 queue / steer、中断、可用模型列表和选择、快照、固定切点历史分页和 assistant 流，以及本地单次工具审批、普通提问和计划确认。模型选项从当前桌面目录校验；不接受手机指定桌面未注册的 provider、model 或 reasoning effort。DSH 原生会话 ID 保留在映射层，对外用按 profile 隔离的稳定 UUID。
 
 本机 IPC 是显式选择的调试入口；仅使用 Relay 时可省略 `socketPath`。启用 IPC 时：Linux / macOS 使用权限 0700 父目录内的 Unix socket，Windows 使用按 runtime 隔离、`readableAll` 与 `writableAll` 均关闭的命名管道。修改示例配置为实际 profile 的稳定 UUID、绝对路径和已存在 preset：

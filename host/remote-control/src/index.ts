@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
 import { DshClient, type Workspace } from './dsh-client.js'
 import { defaultCommandJournalPath, PersistentCommandJournal } from './command-journal.js'
+import { DEFAULT_COMMAND_JOURNAL_MAX_BYTES, MIN_COMMAND_JOURNAL_MAX_BYTES, MAX_COMMAND_JOURNAL_MAX_BYTES } from './journal-capacity.js'
 import { InteractionRouter } from './interaction-router.js'
 import { ProbeRuntime } from './runtime.js'
 import { startDebugServer } from './debug-server.js'
@@ -56,6 +57,7 @@ export interface Config {
   highRiskTools?: string[]
   interactionTimeoutMs?: number
   commandJournalPath?: string
+  commandJournalMaxBytes?: number
   requireProtectedJournalKey?: boolean
   relayUrl?: string
   applicationVersion?: string
@@ -71,6 +73,7 @@ export const Config: z<Config> = z.object({
   highRiskTools: z.array(String).default(['bash', 'pwsh', 'run_code']),
   interactionTimeoutMs: z.number().min(100).max(600_000).default(180_000),
   commandJournalPath: z.string().default(''),
+  commandJournalMaxBytes: z.number().min(MIN_COMMAND_JOURNAL_MAX_BYTES).max(MAX_COMMAND_JOURNAL_MAX_BYTES).default(DEFAULT_COMMAND_JOURNAL_MAX_BYTES),
   requireProtectedJournalKey: z.boolean().default(false),
   relayUrl: z.string().default(''),
   applicationVersion: z.string().default(''),
@@ -153,7 +156,10 @@ async function applyOwned(ctx: Context, config: Config, parentFiber: Context['fi
       if (keyOpen.signal.aborted) throw new HostEnrolledRuntimeError('host.enrolled_runtime.cancelled')
     }
     const journalPath = options.commandJournalPath || defaultCommandJournalPath(options.runtimeId!)
-    const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!, journalKeyProtector ? { protector: journalKeyProtector, signal: keyOpen.signal } : {})
+    const journal = await PersistentCommandJournal.open(journalPath, options.runtimeId!, {
+      maxDatabaseBytes: options.commandJournalMaxBytes!,
+      ...(journalKeyProtector ? { protector: journalKeyProtector, signal: keyOpen.signal } : {}),
+    })
     let runtime: ProbeRuntime | undefined
     let signed: SignedApprovals | undefined
     try {

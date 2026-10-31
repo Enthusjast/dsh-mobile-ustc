@@ -2,6 +2,8 @@
 
 The host now has a durable approval state machine in the same private SQLite WAL database as command receipts. The existing key check, user-owned paths and AES-256-GCM key are reused with a separate approval AAD domain. `PersistentCommandJournal.approvals(runtimeEpoch)` opens one approval owner for that journal handle; it supplies no memory-only fallback or default authority.
 
+The shared [main-database capacity](host-journal-capacity.md) defaults to 1 GiB and is reapplied on every open. Real SQLITE_FULL tests cover register, decision, final consumption and settlement: storage failure returns no new execution permit, and restart retains invalidated/unknown facts without replaying the old callback. WAL and filesystem quotas remain separate operational controls.
+
 This is the host persistence/guard-consumption boundary. The [normal plugin](approval-native.md) now connects it to signed transport and the service lease provider. Native tests and the combined real CLI/Go test use local identity/model/key fixtures; they do not establish school identity, Android user verification or production acceptance.
 
 SQLite schema version 2 added `approval_runs` and `approval_records`; [schema 3](approval-outbox.md) now adds durable report/acknowledgement metadata. Version-one command databases migrate only after their existing encryption key check succeeds; their encrypted command bodies/receipts retain the same AAD and remain readable. Missing key-check metadata cannot be recreated when either commands or approvals already exist. Older readers refuse unsupported schema versions. No automatic downgrade or evidence deletion is provided.
