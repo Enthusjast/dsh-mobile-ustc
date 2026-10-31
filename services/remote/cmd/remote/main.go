@@ -31,7 +31,7 @@ func main() {
 		} else if os.Args[1] == "command-limits" {
 			operation = func() error { return runCommandRateCommand(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "connection-limits" {
-			operation = func() error { return runConnectionLimitDescription(os.Args[2:], os.Stdout) }
+			operation = func() error { return runConnectionLimitCommand(os.Args[2:], os.Stdout) }
 		} else if os.Args[1] == "identities" {
 			operation = func() error { return runIdentityCommand(os.Args[2:], os.Stdout) }
 		} else {

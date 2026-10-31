@@ -151,7 +151,7 @@ func (postgres *Postgres) ReplaceCommandRatePolicy(parent context.Context, epoch
 	}
 	// Serialize new replacements with consumer insert/renew/release. Production
 	// startup registers its consumer before validating its command policy.
-	if _, err := tx.ExecContext(ctx, `lock table control_consumers in share row exclusive mode`); err != nil {
+	if err := lockLimitPolicyConsumers(ctx, tx); err != nil {
 		return CommandRatePolicyChange{}, ErrDatabaseUnavailable
 	}
 	if result, err := prior(); err == nil {
@@ -169,16 +169,7 @@ func (postgres *Postgres) ReplaceCommandRatePolicy(parent context.Context, epoch
 	if hex.EncodeToString(hash) != expected || expected == encoded {
 		return CommandRatePolicyChange{}, ErrCommandRatePolicyConflict
 	}
-	quiet := func() error {
-		var active bool
-		if err := tx.QueryRowContext(ctx, `select exists(select 1 from control_consumers where lease_until>clock_timestamp())`).Scan(&active); err != nil {
-			return ErrDatabaseUnavailable
-		}
-		if active {
-			return ErrCommandRatePolicyBusy
-		}
-		return nil
-	}
+	quiet := func() error { return requireQuietPolicyConsumers(ctx, tx, ErrCommandRatePolicyBusy) }
 	if err := quiet(); err != nil {
 		return CommandRatePolicyChange{}, err
 	}

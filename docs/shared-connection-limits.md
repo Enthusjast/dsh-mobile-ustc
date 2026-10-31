@@ -23,8 +23,8 @@
 .local/remote connection-limits describe --policy-file /受控目录/connection-limits.json
 ```
 
-连接策略与命令速率策略独立；`command-limits replace` 只管理命令预算。连接策略的改变须
-排空节点并通过受控前向迁移一致更新内容/摘要，不能删除策略或占用行来修改限制。策略缺失
+连接策略与命令速率策略独立；`command-limits replace` 只管理命令预算。连接策略变更使用[离线状态查询与比较替换](connection-policy-operations.md)，另需迁移 043。
+先排空节点，再一致更新内容/摘要；不能删除策略或占用行来修改限制。策略缺失
 而仍有设备占用或有效 Host 路由时，新节点不会自行补建。没有连接策略热重载接口。
 初次上线也应排空尚不理解共享连接配额的旧节点。
 

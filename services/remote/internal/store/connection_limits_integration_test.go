@@ -232,8 +232,8 @@ func TestConnectionLimitsProtectCapacityThroughCredentialAuditWaitAndMigration(t
 	if err := db.DB.QueryRowContext(ctx, `select count(*) from relay_runtime_routes`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatal("expired attachment retained routing", rows, err)
 	}
-	for _, direction := range []string{"down", "up"} {
-		raw, err := os.ReadFile("../../../../deploy/sql/041_connection_limits." + direction + ".sql")
+	for _, direction := range []string{"043_connection_policy_changes.down", "041_connection_limits.down", "041_connection_limits.up", "043_connection_policy_changes.up"} {
+		raw, err := os.ReadFile("../../../../deploy/sql/" + direction + ".sql")
 		if err != nil {
 			t.Fatal(err)
 		}
