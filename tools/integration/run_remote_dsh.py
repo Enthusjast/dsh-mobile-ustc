@@ -36,7 +36,13 @@ def main():
     arguments.add_argument("--load-events-per-second", type=int)
     arguments.add_argument("--load-payload-bytes", type=int)
     arguments.add_argument("--load-race", action="store_true", help="Race-instrument both service and probe; use only for protocol smoke, not capacity measurements")
+    arguments.add_argument("--host-bundle-directory", type=Path, help="Use a protected, offline-verified Host npm bundle in the native composition")
+    arguments.add_argument("--host-bundle-manifest-sha256", help="Independently trusted manifest digest for the explicit Host bundle")
     options = arguments.parse_args()
+    if (options.host_bundle_directory is None) != (options.host_bundle_manifest_sha256 is None):
+        arguments.error("Host bundle directory and manifest digest must be supplied together")
+    if options.host_bundle_directory is not None and (not options.dsh_only or not options.host_bundle_directory.is_absolute() or not re.fullmatch(r"[0-9a-f]{64}", options.host_bundle_manifest_sha256)):
+        arguments.error("Host bundle requires --dsh-only, an absolute directory and a pinned manifest digest")
     if options.cross_node and (options.go_run or options.relay_load or options.android_relay or options.android_upgrade or options.kotlin_relay):
         arguments.error("--cross-node requires its own native DSH composition invocation")
     if options.dsh_only and (options.go_run or options.relay_load is not None or options.android_relay or options.android_upgrade or options.kotlin_relay):
@@ -84,6 +90,12 @@ def main():
     if options.android_relay and options.go_run:
         arguments.error("The Android composition selects its own Go case")
     repo = Path(__file__).resolve().parents[2]
+    if options.host_bundle_directory is not None:
+        checked = subprocess.run([sys.executable, str(repo / "tools/release/host_bundle.py"), "verify", "--directory", str(options.host_bundle_directory),
+                                  "--expected-manifest-sha256", options.host_bundle_manifest_sha256], capture_output=True, timeout=15)
+        if checked.returncode != 0:
+            arguments.error("Host bundle failed offline verification before opening composition resources")
+
     if options.relay_load is not None:
         options.load_output = options.load_output.resolve()
         if not options.load_output.is_relative_to((repo / ".local").resolve()) or options.load_output == (repo / ".local").resolve() or options.load_output.exists():
@@ -134,8 +146,11 @@ def main():
             env = dict(os.environ, REMOTE_TEST_CLUSTER_ROOT=root, REMOTE_TEST_DATABASE_URL=dsn,
                        REMOTE_TEST_PSQL=str(pg_bin / "psql"), REMOTE_TEST_PG_DUMP=str(pg_bin / "pg_dump"), REMOTE_TEST_SERVICE_BIN=str(binary))
             # Activation is explicit per invocation, never inherited from a prior run.
-            for field in ("REMOTE_TEST_CROSS_NODE", "REMOTE_TEST_HOST_RENEWAL", "REMOTE_TEST_INSTALLATION_REVOKE", "REMOTE_TEST_HOST_ACCOUNT_RETIRE", "REMOTE_TEST_DATABASE_OUTAGE", "REMOTE_TEST_RELAY_CRASH", "REMOTE_TEST_RELAY_CERTIFICATE_RENEWAL", "REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC", "REMOTE_TEST_ANDROID_UPGRADE_SERIAL", "REMOTE_TEST_ANDROID_UPGRADE_RECEIPT", "REMOTE_TEST_RELAY_CAPACITY_CONFIG", "REMOTE_TEST_RELAY_CAPACITY_OUTPUT"):
+            for field in ("REMOTE_TEST_CROSS_NODE", "REMOTE_TEST_HOST_RENEWAL", "REMOTE_TEST_INSTALLATION_REVOKE", "REMOTE_TEST_HOST_ACCOUNT_RETIRE", "REMOTE_TEST_DATABASE_OUTAGE", "REMOTE_TEST_RELAY_CRASH", "REMOTE_TEST_RELAY_CERTIFICATE_RENEWAL", "REMOTE_TEST_HOST_BUNDLE_DIRECTORY", "REMOTE_TEST_HOST_BUNDLE_MANIFEST_SHA256", "REMOTE_TEST_KOTLIN_CLASSPATH", "REMOTE_TEST_ANDROID_SERIAL", "REMOTE_TEST_ANDROID_BIOMETRIC", "REMOTE_TEST_ANDROID_UPGRADE_SERIAL", "REMOTE_TEST_ANDROID_UPGRADE_RECEIPT", "REMOTE_TEST_RELAY_CAPACITY_CONFIG", "REMOTE_TEST_RELAY_CAPACITY_OUTPUT"):
                 env.pop(field, None)
+            if options.host_bundle_directory is not None:
+                env["REMOTE_TEST_HOST_BUNDLE_DIRECTORY"] = str(options.host_bundle_directory)
+                env["REMOTE_TEST_HOST_BUNDLE_MANIFEST_SHA256"] = options.host_bundle_manifest_sha256
             if options.cross_node:
                 env["REMOTE_TEST_CROSS_NODE"] = "1"
             if options.host_renewal:

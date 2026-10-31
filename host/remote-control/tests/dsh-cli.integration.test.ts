@@ -1,3 +1,4 @@
+import { hostPackageEntry } from '../../../tools/integration/host-package-entry.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PinnedExportSource } from '../src/file-export-source.js'
@@ -21,7 +22,6 @@ const WebSocketServer = createRequire(import.meta.url)('ws').WebSocketServer as 
 const require = createRequire(import.meta.url)
 const dshPackage = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
 const dshBin = join(dshPackage, 'lib/bin.js')
-const pluginEntry = resolve('host/remote-control/lib/index.js')
 const modelFixture = fileURLToPath(new URL('./fixtures/dsh-local-model.mjs', import.meta.url))
 const RESPONSE = 'DSH local integration fixture response'
 const relayValidator = new Ajv2020({ strict: true }).compile(JSON.parse(await readFile('contracts/ws/v1/relay.schema.json', 'utf8')))
@@ -93,6 +93,7 @@ async function waitForInteraction(command: (type: string, payload: unknown, sess
 }
 
 test('DSH CLI 0.2.1-rc.2 loads the plugin and completes a local session round trip', async t => {
+  const pluginEntry = await hostPackageEntry(t)
   const exportSupported = await PinnedExportSource.supported()
   const root = await mkdtemp(join(tmpdir(), 'dsh-mobile-cli-integration-'))
   const home = join(root, 'dsh-home')

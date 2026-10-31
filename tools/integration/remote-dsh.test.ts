@@ -1,3 +1,4 @@
+import { hostPackageEntry } from './host-package-entry.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
@@ -133,7 +134,8 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   assert.ok(database.startsWith(`host=${cluster} `), 'Only the disposable Unix-socket cluster is allowed')
   const root = await mkdtemp(join(cluster, 'clients-'))
   const query = (sql: string) => execFileSync(psql, ['-X', '--dbname', database, '-v', 'ON_ERROR_STOP=1', '-At'], { input: sql, encoding: 'utf8' }).trim()
-  const hostPackage = await import(pathToFileURL(resolve('host/remote-control/lib/index.js')).href) as typeof import('../../host/remote-control/src/index.js')
+  const packagedEntry = await hostPackageEntry(t)
+  const hostPackage = await import(pathToFileURL(packagedEntry).href) as typeof import('../../host/remote-control/src/index.js')
   const installationOwner = new AbortController(), installationReference = join(root, 'installation-identity', 'installation.json')
   const installationTool = join(root, 'installation-secret-tool'), installationCalls = join(root, 'installation-secret-tool-calls')
   let installationKey: ReturnType<typeof key>, installationStore: InstanceType<typeof hostPackage.LinuxInstallationKeyStore> | undefined
@@ -592,7 +594,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
 
   const workspace = join(root, 'workspace'), socketPath = join(root, 'ipc', 'host.sock')
   await mkdir(workspace)
-  const plugin = pathToFileURL(resolve('host/remote-control/lib/index.js')).href
+  const plugin = pathToFileURL(packagedEntry).href
   const wrapper = join(root, 'plugin.mjs')
   const accessFile = join(root, 'host-resource-session.json')
   await writeFile(accessFile, JSON.stringify({ token: hostAccess.token, tokenType: hostAccess.tokenType }), { mode: 0o600 })

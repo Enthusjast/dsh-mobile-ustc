@@ -23,7 +23,13 @@ def main():
     parser.add_argument("--database-outage", action="store_true", help="Exercise isolated PostgreSQL connection outage, relay restart and native DSH reconciliation")
     parser.add_argument("--relay-crash", action="store_true", help="Kill only the owned Host relay child and restart it after its natural lease expiry")
     parser.add_argument("--relay-certificate-renewal", action="store_true", help="Renew disposable inter-node leaf certificates and private keys through owned node restarts")
+    parser.add_argument("--host-bundle-directory", type=Path, help="Use a verified Host npm artifact instead of working-tree lib")
+    parser.add_argument("--host-bundle-manifest-sha256", help="Independently trusted Host bundle manifest digest")
     options = parser.parse_args()
+    if (options.host_bundle_directory is None) != (options.host_bundle_manifest_sha256 is None):
+        parser.error("Host bundle directory and manifest digest must be supplied together")
+    if options.host_bundle_directory is not None and (not options.host_bundle_directory.is_absolute() or not re.fullmatch(r"[0-9a-f]{64}", options.host_bundle_manifest_sha256)):
+        parser.error("Host bundle requires an absolute directory and a pinned manifest digest")
     if sum((options.renewal, options.installation_revoke, options.host_account_retire, options.database_outage, options.relay_crash, options.relay_certificate_renewal)) > 1:
         parser.error("renewal, installation revocation, account retirement, database outage, relay crash and certificate renewal select separate composition runs")
     repo = Path(__file__).resolve().parents[2]
@@ -57,6 +63,8 @@ def main():
             command.append("--relay-crash")
         if options.relay_certificate_renewal:
             command.append("--relay-certificate-renewal")
+        if options.host_bundle_directory is not None:
+            command.extend(["--host-bundle-directory", str(options.host_bundle_directory), "--host-bundle-manifest-sha256", options.host_bundle_manifest_sha256])
         child = subprocess.Popen(command,
                                  cwd=repo, env=environment, stdin=slave, stdout=log, stderr=log,
                                  preexec_fn=controlling_terminal, pass_fds=(slave,))
