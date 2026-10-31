@@ -12,6 +12,7 @@ dependencies {
 }
 
 tasks.test {
+    inputs.dir(rootProject.file("../contracts/ws/v1"))
     inputs.dir(rootProject.file("../contracts/security"))
     inputs.dir(rootProject.file("../contracts/files/v1"))
     inputs.dir(rootProject.file("../contracts/push/v1"))

@@ -73,6 +73,40 @@ class RelayNetworkTest {
     }
     private fun time(offset: Long) = Instant.ofEpochMilli(System.currentTimeMillis() + offset).toString().json()
     private fun json(root: JsonObject) = MockResponse().setHeader("Content-Type", "application/json").setBody(JsonDocument.of(root).canonicalText())
+
+    @Test fun directoryNamesOptInPagesCurrentMetadataWhileLegacyUsesTheOldEndpoint(): Unit = runBlocking {
+        val second = "77777777-7777-4777-8777-777777777777"
+        fun row(id: String, named: Boolean) = jsonObject("session_id" to id.json(), "workspace_id" to JsonNull,
+            "state" to "available".json(), "last_persisted_seq" to 7L.json(), "updated_at" to "2026-10-30T12:00:00Z".json()).let {
+            if (!named) it else it.with("metadata" to jsonObject("v" to 1L.json(), "title" to "native title".json(),
+                "workspace_title" to JsonNull, "title_source" to "cached".json(), "title_as_of_seq" to 4L.json()))
+        }
+        fun page(id: String, cursor: JsonValue) = json(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("runtime_id" to runtime.json(),
+            "items" to JsonArray(listOf(row(id, true))), "next_cursor" to cursor)))
+        server.enqueue(page(sessionId, "opaque".json())); server.enqueue(page(second, JsonNull))
+        val resource = api()
+        val named = resource.directorySessions(runtime, true)
+        assertEquals(listOf(sessionId, second), named.map { it.id }); assertEquals("native title", named[0].metadata!!.title)
+        assertEquals("/v1/runtimes/$runtime/session-directory?projection=names.v1&limit=25", server.takeRequest().path)
+        assertEquals("/v1/runtimes/$runtime/session-directory?projection=names.v1&limit=25&cursor=opaque", server.takeRequest().path)
+        server.enqueue(json(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("items" to JsonArray(listOf(row(sessionId, false)))))))
+        val legacy = resource.directorySessions(runtime, false)
+        assertEquals(sessionId, legacy.single().id); assertNull(legacy.single().metadata)
+        assertEquals("/v1/runtimes/$runtime/sessions", server.takeRequest().path)
+    }
+
+    @Test fun cancelledDirectoryReadCannotPublishTheFirstPageOrFetchAnotherPage(): Unit = runBlocking {
+        val row = jsonObject("session_id" to sessionId.json(), "workspace_id" to JsonNull, "state" to "available".json(),
+            "last_persisted_seq" to 7L.json(), "updated_at" to "2026-10-30T12:00:00Z".json())
+        server.enqueue(json(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("runtime_id" to runtime.json(),
+            "items" to JsonArray(listOf(row)), "next_cursor" to "opaque".json()))))
+        var fences = 0
+        try {
+            api().directorySessions(runtime, true) { if (++fences == 3) throw CancellationException() }
+            fail("cancelled directory was returned")
+        } catch (_: CancellationException) { }
+        assertEquals(1, server.requestCount)
+    }
     private val bindingId = "88888888-8888-4888-8888-888888888888"
     private val bindingCode = "H".repeat(42) + "A"
     private fun bindingData() = jsonObject("enrollment_id" to bindingId.json(), "request_id" to sessionId.json(), "organization_id" to "11111111-1111-4111-8111-111111111111".json(), "organization_name" to "学校夹具".json(),
@@ -232,12 +266,60 @@ class RelayNetworkTest {
             assertEquals(runtime, body.string("runtime_id")); assertTrue(scope.same(RelayScope.parse(body.obj("scope"))))
         }
     }
+    @Test fun modelCatalogTicketAdmissionPreservesExplicitActionsWithoutRequiringCommandStatusForReadOnlyCatalogUse(): Unit = runBlocking {
+        val remote = api()
+        for (actions in listOf(listOf("session.read", "session.model.select"), listOf("session.read", "session.model.select", "command.status"))) {
+            val requested = RelayScope(actions, emptyList(), listOf(sessionId))
+            server.enqueue(bindingReply(jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(),
+                "scope" to requested.json(), "expires_at" to time(30_000))))
+            val issued = remote.sessionTicket(runtime, device, requested)
+            assertTrue(requested.same(issued.scope))
+            val traffic = server.takeRequest()
+            assertEquals("POST", traffic.method); assertEquals("/v1/realtime/tickets", traffic.path)
+            val body = JsonDocument.parse(traffic.body.readByteArray()).root
+            assertTrue(requested.same(RelayScope.parse(body.obj("scope"))))
+        }
+        val beforeRejected = server.requestCount
+        for (rejected in listOf(
+            RelayScope(listOf("session.model.select", "command.status"), emptyList(), listOf(sessionId)),
+            RelayScope(listOf("session.read", "session.model.select"), emptyList(), emptyList()),
+            RelayScope(listOf("session.read", "session.model.select", "grant.manage"), emptyList(), listOf(sessionId)),
+            RelayScope(listOf("session.read", "message.submit"), emptyList(), listOf(sessionId)))) {
+            assertThrows(RemoteRequestException::class.java) { runBlocking { remote.sessionTicket(runtime, device, rejected) } }
+        }
+        assertThrows(RemoteRequestException::class.java) { runBlocking {
+            remote.readTicket(runtime, device, RelayScope(listOf("session.read", "session.model.select"), emptyList(), listOf(sessionId)))
+        } }
+        assertEquals(beforeRejected, server.requestCount)
+    }
+    @Test fun nativeFeatureTicketsKeepReadOnlyChangesSeparateFromCompleteForkCreationAuthority(): Unit = runBlocking {
+        val remote = api()
+        for (requested in listOf(
+            RelayScope(listOf("session.read", "session.changes.read"), emptyList(), listOf(sessionId)),
+            RelayScope(listOf("session.read", "session.fork", "session.create", "command.status"), listOf(runtime), listOf(sessionId)))) {
+            server.enqueue(bindingReply(jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(),
+                "scope" to requested.json(), "expires_at" to time(30_000))))
+            assertTrue(requested.same(remote.sessionTicket(runtime, device, requested).scope))
+            val traffic = server.takeRequest()
+            assertTrue(requested.same(RelayScope.parse(JsonDocument.parse(traffic.body.readByteArray()).root.obj("scope"))))
+        }
+        val before = server.requestCount
+        for (invalid in listOf(
+            RelayScope(listOf("session.read", "session.fork", "command.status"), listOf(runtime), listOf(sessionId)),
+            RelayScope(listOf("session.read", "session.fork", "session.create"), listOf(runtime), listOf(sessionId)),
+            RelayScope(listOf("session.read", "session.fork", "session.create", "command.status"), emptyList(), listOf(sessionId)),
+            RelayScope(listOf("session.read", "session.create", "command.status"), listOf(runtime), emptyList()),
+            RelayScope(listOf("session.read", "session.metadata.read"), emptyList(), listOf(sessionId)))) {
+            assertThrows(RemoteRequestException::class.java) { runBlocking { remote.sessionTicket(runtime, device, invalid) } }
+        }
+        assertEquals(before, server.requestCount)
+    }
     private fun challenge() = jsonObject("v" to 1L.json(), "type" to "challenge".json(), "payload" to jsonObject("role" to "device".json(), "connection_id" to connection.json(), "challenge_id" to challengeId.json(), "nonce" to "B".repeat(42).plus("A").json(), "expires_at" to time(9000)))
     private fun helloOk() = jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
         "role" to "device".json(), "connection_id" to connection.json(), "device_id" to device.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to scope.json(),
         "protocols" to JsonArray(listOf(1L.json())), "capabilities" to JsonArray(listOf("connection.heartbeat.v1".json(), "session.read.v1".json())),
         "server_time" to time(0), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(), "lease_expires_at" to time(299_000)))
-    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL, expectedCapabilities: List<String> = listOf("connection.heartbeat.v1", "session.read.v1","question.blocking.v1","question.timed.v1"), onContent: ((WebSocket, JsonObject) -> Unit)? = null): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+    private fun peer(challenge: JsonObject = challenge(), accepted: JsonObject = helloOk(), protocol: String = RELAY_SUBPROTOCOL, expectedCapabilities: List<String> = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", SESSION_MESSAGE_ACTIONS_CAPABILITY), onContent: ((WebSocket, JsonObject) -> Unit)? = null): MockResponse = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
         override fun onOpen(socket: WebSocket, response: Response) { socket.send(JsonDocument.of(challenge).canonicalText()) }
         override fun onMessage(socket: WebSocket, text: String) {
             try {
@@ -274,6 +356,7 @@ class RelayNetworkTest {
         var onClaim: (WebSocket,JsonObject)->Unit={_,_->error("unexpected claim")}
         var onApproval: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected approval") }
         var onExport: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected export") }
+        var onModels: (WebSocket, JsonObject) -> Unit = { _, _ -> error("unexpected model query") }
         var offline = false
         fun receive(socket: WebSocket, frame: JsonObject) {
             this.socket = socket
@@ -293,10 +376,11 @@ class RelayNetworkTest {
                     assertEquals(subscription, frame.string("subscription_id")); assertEquals(epoch, frame.string("runtime_epoch"))
                     onPage(frame)
                 }
-                "message.submit", "session.cancel", "session.archive", "question.answer","question.timed.answer" -> onCommand(socket, frame)
+                "message.submit", "session.cancel", "session.archive", "session.model.select", "question.answer","question.timed.answer" -> onCommand(socket, frame)
                 "question.claim","question.release"->onClaim(socket,frame)
                 "approval.subscribe", "approval.status.get", "approval.details.get" -> onApproval(socket, frame)
                 "file.exports.list", "file.export.request", "file.export.cancel" -> onExport(socket, frame)
+                "session.models.get" -> onModels(socket, frame)
                 else -> error("unexpected client frame")
             }
         }
@@ -314,15 +398,17 @@ class RelayNetworkTest {
     }
     private suspend fun SessionReader.await(test: (SessionReadState) -> Boolean) = withTimeout(5000) { state.first(test) }.also { peerFailure.get()?.let { throw AssertionError(it) } }
 
-    private inner class CommandPeer(questions: Boolean=false, archive: Boolean=false, archiveOnly: Boolean=false, advertiseFiles: Boolean=true) {
+    private inner class CommandPeer(questions: Boolean=false, archive: Boolean=false, archiveOnly: Boolean=false, advertiseFiles: Boolean=true, models: Boolean=false, advertiseModels: Boolean=true) {
         val granted = RelayScope(listOf("session.read", "command.status") + (if (archiveOnly) emptyList() else listOf("message.submit", "session.cancel")) +
-            (if (archive) listOf("session.archive") else emptyList()) + (if(questions) listOf("question.answer") else emptyList()), emptyList(), listOf(sessionId))
+            (if (archive) listOf("session.archive") else emptyList()) + (if(questions) listOf("question.answer") else emptyList()) +
+            (if (models) listOf("session.model.select") else emptyList()), emptyList(), listOf(sessionId))
         val journal = MemoryCommandJournal(CommandOwner("99999999-9999-4999-8999-999999999999", config.organizationId, config.fingerprint, "77777777-7777-4777-8777-777777777777", device))
         val feed = ReadPeer(listOf(user(0, "opening")), 0)
         val statuses = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
         val fileHints = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
         val fileLookups = java.util.concurrent.atomic.AtomicInteger()
         val writes = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
+        val modelQueries = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
         var advertisedState = RemoteCommandState.AGENT_QUEUED
         var denyTickets = false
         var leaseMillis = 299_000L
@@ -331,15 +417,16 @@ class RelayNetworkTest {
         var readLeaseMillis = 299_000L
         val accessReads = java.util.concurrent.atomic.AtomicInteger()
         init {
-            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1") +
-                (if ("message.submit" in granted.actions) listOf(FILE_MESSAGE_CAPABILITY) else emptyList()) +
-                (if (archiveOnly) emptyList() else listOf("session.cancel.v1")) + (if (archive) listOf("session.archive.v1") else emptyList())
+            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", SESSION_MESSAGE_ACTIONS_CAPABILITY, "command.relay.v1") +
+                (if ("message.submit" in granted.actions) listOf(FILE_MESSAGE_CAPABILITY, IMAGE_MESSAGE_CAPABILITY) else emptyList()) +
+                (if (archiveOnly) emptyList() else listOf("session.cancel.v1")) + (if (archive) listOf("session.archive.v1") else emptyList()) +
+                (if (models) listOf(SESSION_MODEL_SELECT_CAPABILITY, SESSION_MODELS_CAPABILITY) else emptyList())
             server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when {
                     request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
                         "user_id" to journal.owner.userId.json(), "memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json())))))
                     request.path == "/v1/realtime/tickets" -> if (denyTickets) json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "access.denied".json()))).setResponseCode(403) else ticketResponse().setBody(JsonDocument.of(jsonObject("ok" to JsonBoolean(true), "data" to jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))).canonicalText())
-                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.filter { advertiseFiles || it != FILE_MESSAGE_CAPABILITY }.map(String::json)), "lease_expires_at" to time(leaseMillis))), expectedCapabilities = capabilities, onContent = feed::receive)
+                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.filter { (advertiseFiles || it != FILE_MESSAGE_CAPABILITY && it != IMAGE_MESSAGE_CAPABILITY) && (advertiseModels || it !in setOf(SESSION_MODELS_CAPABILITY, SESSION_MODEL_SELECT_CAPABILITY)) }.map(String::json)), "lease_expires_at" to time(leaseMillis))), expectedCapabilities = capabilities, onContent = feed::receive)
                     request.path == "/v1/runtimes/$runtime/sessions/$sessionId/read-access" -> {
                         accessReads.incrementAndGet()
                         if (accessUnavailable) json(jsonObject("ok" to JsonBoolean(false), "error" to jsonObject("code" to "internal".json()))).setResponseCode(503)
@@ -360,6 +447,12 @@ class RelayNetworkTest {
                     else -> MockResponse().setResponseCode(404)
                 }
             }
+            feed.onModels = { _, frame ->
+                SessionModelsGet.parse(frame)
+                modelQueries += frame
+                val payload = JsonDocument.parse(java.io.File(System.getProperty("contracts.root"), "ws/v1/golden/session-models.result.json").readBytes()).root.obj("payload")
+                feed.send("session.models.result", payload, frame.string("request_id"))
+            }
             feed.onCommand = { socket, frame ->
                 writes += frame
                 val intent = CommandIntent.parse(frame)
@@ -371,6 +464,110 @@ class RelayNetworkTest {
             }
         }
         fun reader(owner: CoroutineScope, transcripts: TranscriptCache? = null) = api().chatReader(device, runtime, sessionId, granted, journal, owner, transcripts = transcripts)
+    }
+    @Test fun modelDirectoryAndTranscriptShareOneReceiverAndSelectionUsesTheEncryptedOriginalJournalPath(): Unit = runBlocking {
+        val fixture = CommandPeer(models = true); fixture.advertisedState = RemoteCommandState.SETTLED
+        val query = CompletableDeferred<JsonObject>()
+        fixture.feed.onModels = { _, frame -> fixture.modelQueries += frame; query.complete(frame) }
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            assertEquals(SessionModelCatalogPhase.IDLE, reader.models.state.value.phase)
+            assertTrue(fixture.modelQueries.isEmpty()); assertTrue(fixture.journal.list(runtime, sessionId).isEmpty())
+            assertTrue(reader.models.loadInitial(1)); assertFalse(reader.models.reload())
+            val originalQuery = withTimeout(5000) { query.await() }
+            val decoded = SessionModelsGet.parse(originalQuery)
+            assertEquals(fixture.feed.subscription, decoded.binding.subscriptionId); assertEquals(fixture.feed.sync, decoded.binding.syncId)
+            fixture.feed.start(); fixture.feed.chunk()
+            reader.await { it.window?.items?.any { item -> item.blocks.any { block -> block.text.contains("streamed text") } } == true }
+            val payload = JsonDocument.parse(java.io.File(System.getProperty("contracts.root"), "ws/v1/golden/session-models.result.json").readBytes()).root.obj("payload")
+            fixture.feed.send("session.models.result", payload, UUID.randomUUID().toString())
+            fixture.feed.send("session.models.result", payload, decoded.requestId)
+            val catalog = withTimeout(5000) { reader.models.state.first { it.phase == SessionModelCatalogPhase.PARTIAL } }
+            assertEquals(1, catalog.unavailableProviderCount); assertTrue(catalog.canSelect)
+            assertThrows(CommandDataException::class.java) { runBlocking { reader.models.select("fixture", "missing") } }
+            assertThrows(CommandDataException::class.java) { runBlocking { reader.models.select("fixture", "offline", "invented") } }
+            assertTrue(fixture.journal.list(runtime, sessionId).isEmpty())
+            val id = reader.models.select("fixture", "offline", "high")
+            val settled = withTimeout(5000) { reader.commands!!.state.first { it.records.singleOrNull()?.remote == RemoteCommandState.SETTLED } }.records.single()
+            assertEquals(id, settled.intent.requestId); assertEquals(CommandKind.MODEL_SELECT, settled.intent.kind)
+            assertEquals(SessionModelSelection("fixture", "offline", "high"), settled.intent.modelSelection())
+            assertEquals(decoded.binding.epoch, settled.intent.epoch); assertEquals(1L, settled.attempts)
+            assertTrue(settled.everHostSaved); assertFalse(settled.everAgentQueued)
+            assertEquals(1, fixture.writes.size); assertEquals(1, fixture.modelQueries.size)
+        }
+    }
+    @Test fun unknownModelSelectionOnlyQueriesOriginalResultAndCannotBecomeANewIdReplayAfterReconnect(): Unit = runBlocking {
+        val fixture = CommandPeer(models = true); fixture.advertisedState = RemoteCommandState.OUTCOME_UNKNOWN
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }; reader.models.loadInitial()
+            withTimeout(5000) { reader.models.state.first { it.canSelect } }
+            val id = reader.models.select("fixture", "offline")
+            withTimeout(5000) { reader.commands!!.state.first { it.records.singleOrNull()?.remote == RemoteCommandState.OUTCOME_UNKNOWN } }
+            assertThrows(CommandDataException::class.java) { runBlocking { reader.models.select("fixture", "offline") } }
+            reader.models.querySelection()
+            val generation = reader.models.state.value.contextId
+            fixture.feed.socket.close(1001, "fixture model reconnect")
+            withTimeout(7000) { reader.models.state.first { it.contextId > generation && it.phase == SessionModelCatalogPhase.IDLE } }
+            assertTrue(reader.models.state.value.items.isEmpty()); assertEquals(1, fixture.modelQueries.size)
+            reader.models.loadInitial(); withTimeout(5000) { reader.models.state.first { it.canSelect } }
+            reader.commands!!.sendPending(id)
+            withTimeout(5000) { reader.commands!!.state.first { it.error == "command.reconcile_required" } }
+            val original = fixture.journal.list(runtime, sessionId).single()
+            assertEquals(id, original.intent.requestId); assertEquals(1L, original.attempts); assertEquals(1, fixture.writes.size)
+            assertEquals(RemoteCommandState.OUTCOME_UNKNOWN, original.remote)
+        }
+    }
+    @Test fun oldModelPeerDoesNotReceiveNewQueriesAndExistingTranscriptStillReads(): Unit = runBlocking {
+        val fixture = CommandPeer(models = true, advertiseModels = false)
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            assertEquals(SessionModelCatalogPhase.UNAVAILABLE, reader.models.state.value.phase)
+            assertFalse(reader.models.loadInitial()); assertFalse(reader.models.reload())
+            assertThrows(CommandDataException::class.java) { runBlocking { reader.models.select("fixture", "offline") } }
+            assertTrue(fixture.modelQueries.isEmpty()); assertTrue(fixture.journal.list(runtime, sessionId).isEmpty())
+        }
+    }
+    @Test fun ordinaryChatAuthorityDoesNotImplyCatalogAuthorityAndOfflineNeverQueuesASelection(): Unit = runBlocking {
+        val fixture = CommandPeer()
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }
+            assertEquals(SessionModelCatalogPhase.DENIED, reader.models.state.value.phase)
+            assertFalse(reader.models.loadInitial()); assertTrue(fixture.modelQueries.isEmpty())
+            fixture.feed.offline = true; fixture.feed.socket.close(1001, "fixture host offline")
+            reader.await { it.phase == SessionReadPhase.OFFLINE }
+            assertThrows(CommandDataException::class.java) { runBlocking { reader.models.select("fixture", "offline") } }
+            assertTrue(fixture.journal.list(runtime, sessionId).isEmpty()); assertTrue(fixture.writes.isEmpty())
+        }
+    }
+    @Test fun replacementSnapshotAndRevocationRetireCatalogRequestsChoicesAndLateResponses(): Unit = runBlocking {
+        val fixture = CommandPeer(models = true)
+        val queries = kotlinx.coroutines.channels.Channel<JsonObject>(2)
+        fixture.feed.onModels = { _, frame -> fixture.modelQueries += frame; check(queries.trySend(frame).isSuccess) }
+        val payload = JsonDocument.parse(java.io.File(System.getProperty("contracts.root"), "ws/v1/golden/session-models.result.json").readBytes()).root.obj("payload")
+        fun result(query: JsonObject) = query.with("type" to "session.models.result".json(),
+            "sync_id" to query.obj("payload").string("sync_id").json(), "payload" to payload)
+        fixture.reader(this).use { reader ->
+            reader.await { it.phase == SessionReadPhase.READY }; reader.models.loadInitial()
+            val old = withTimeout(5000) { queries.receive() }; val generation = reader.models.state.value.contextId
+            val sync = UUID.randomUUID().toString()
+            val snapshot = old.with("type" to "session.snapshot".json(), "request_id" to fixture.feed.request.json(), "sync_id" to sync.json(),
+                "payload" to jsonObject("cursor" to 0L.json(), "has_more" to JsonBoolean(false), "records" to JsonArray(listOf(user(0, "replacement"))), "assistant" to jsonObject("revision" to 0L.json())))
+            check(fixture.feed.socket.send(JsonDocument.of(snapshot).canonicalText()))
+            withTimeout(5000) { reader.models.state.first { it.contextId > generation && it.phase == SessionModelCatalogPhase.IDLE } }
+            assertTrue(reader.models.state.value.items.isEmpty()); assertFalse(reader.models.state.value.canSelect)
+            reader.models.loadInitial(); val current = withTimeout(5000) { queries.receive() }
+            assertEquals(sync, SessionModelsGet.parse(current).binding.syncId)
+            check(fixture.feed.socket.send(JsonDocument.of(result(old)).canonicalText()))
+            check(fixture.feed.socket.send(JsonDocument.of(result(current)).canonicalText()))
+            withTimeout(5000) { reader.models.state.first { it.canSelect } }
+            val accepted = reader.models.state.value.contextId
+            fixture.feed.control("access.revoked", jsonObject("code" to "access.revoked".json()))
+            reader.await { it.phase == SessionReadPhase.REVOKED }
+            assertEquals(SessionModelCatalogPhase.DENIED, reader.models.state.value.phase)
+            assertTrue(reader.models.state.value.contextId > accepted); assertTrue(reader.models.state.value.items.isEmpty())
+            assertFalse(reader.models.loadInitial()); assertTrue(fixture.journal.list(runtime, sessionId).isEmpty())
+        }
+        queries.cancel()
     }
 
     private inner class ExportPeer(private val advertise: Boolean = true) {
@@ -389,13 +586,13 @@ class RelayNetworkTest {
             "name" to "PRIVATE_export.txt".json(), "size_bytes" to 3L.json(), "sha256" to "a".repeat(64).json(), "state" to "scanning".json(),
             "created_at" to time(-1000), "upload_expires_at" to time(120_000), "expires_at" to time(3_600_000))
         init {
-            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", FILE_EXPORT_CAPABILITY)
+            val capabilities = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", SESSION_MESSAGE_ACTIONS_CAPABILITY, FILE_EXPORT_CAPABILITY, SESSION_MEDIA_CAPABILITY)
             server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when {
                     request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(), "scopes" to JsonArray(listOf("remote.access".json())),
                         "user_id" to commands.owner.userId.json(), "memberships" to JsonArray(listOf(jsonObject("organization_id" to config.organizationId.json(), "role" to "member".json())))))
                     request.path == "/v1/realtime/tickets" -> bindingReply(jsonObject("ticket" to token.json(), "runtime_id" to runtime.json(), "grant_version" to 7L.json(), "scope" to granted.json(), "expires_at" to time(30_000)))
-                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.filter { advertise || it != FILE_EXPORT_CAPABILITY }.map(String::json)))), expectedCapabilities = capabilities, onContent = feed::receive)
+                    request.path == "/v1/realtime" -> peer(accepted = helloOk().with("payload" to helloOk().obj("payload").with("scope" to granted.json(), "capabilities" to JsonArray(capabilities.filter { advertise || it != FILE_EXPORT_CAPABILITY && it != SESSION_MEDIA_CAPABILITY }.map(String::json)))), expectedCapabilities = capabilities, onContent = feed::receive)
                     request.path!!.startsWith("/v1/file-exports/") || request.path == "/v1/files/$file" -> {
                         assertEquals("GET", request.method); restores += request.path!!
                         if (dishonestManifest) bindingReply(jsonObject("file" to metadata().with("sha256" to "b".repeat(64).json()))) else bindingReply(jsonObject("file" to metadata()))
@@ -517,7 +714,7 @@ class RelayNetworkTest {
         private var watch: String? = null
         private lateinit var socket: WebSocket
         init {
-            val requested = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", SIGNED_APPROVAL_CAPABILITY)
+            val requested = listOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", SESSION_MESSAGE_ACTIONS_CAPABILITY, SIGNED_APPROVAL_CAPABILITY)
             server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = try { when {
                     request.path == "/v1/me" -> bindingReply(jsonObject("issuer" to config.issuer.json(), "subject" to "school-user".json(), "client_id" to config.clientId.json(),

@@ -45,22 +45,36 @@ class FileSelectionTest {
     }
     @Test fun pickerCancellationRestoresOnlyTheOriginalDraftAcrossForegroundReopen() {
         val owner = controller!!
-        main { owner.pickDocument(null, "PICKER_PRIVATE_DRAFT", "steer") }
+        main { owner.pickFixtureDocument(null, "PICKER_PRIVATE_DRAFT", "steer") }
         val token = owner.state.value.documentPicker!!.id
         main { owner.documentPicked(UUID.randomUUID().toString(), null) }
         assertEquals(token, owner.state.value.documentPicker!!.id)
         main { owner.foreground(false); owner.documentPicked(token, null); owner.foreground(true) }
         await { owner.state.value.let { it.reader?.phase == SessionReadPhase.READY && it.uploads != null } }
         assertNull(owner.state.value.documentPicker)
-        assertEquals("PICKER_PRIVATE_DRAFT", owner.state.value.composerRestore!!.text)
-        assertEquals("steer", owner.state.value.composerRestore!!.mode)
+        assertEquals("PICKER_PRIVATE_DRAFT", owner.state.value.composer!!.value.text)
+        assertEquals("steer", owner.state.value.composer!!.mode)
         assertTrue(owner.state.value.uploads!!.rows.isEmpty()); assertEquals(0, fixture!!.commandWrites.get())
         main { owner.back() }
-        assertNull(owner.state.value.composerRestore)
+        assertNull(owner.state.value.composer)
+    }
+    @Test fun aPickerCancellationCannotRestoreItsSnapshotOverANewerEdit() {
+        val owner = controller!!
+        main { owner.pickFixtureDocument(null, "picker snapshot", "queue") }
+        val token = owner.state.value.documentPicker!!.id
+        main {
+            owner.editFixtureComposer("newer foreground edit", "steer")
+            owner.documentPicked(token, null)
+        }
+        assertNull(owner.state.value.documentPicker)
+        assertEquals("newer foreground edit", owner.state.value.composer!!.value.text)
+        assertEquals("steer", owner.state.value.composer!!.mode)
+        assertTrue(owner.state.value.uploads!!.rows.isEmpty())
+        assertEquals(0, fixture!!.commandWrites.get())
     }
     @Test fun aProviderResultUploadsAnonymouslyAndLinksAFileOnlyMessageAcrossReopen() {
         val owner = controller!!; val server = fixture!!
-        main { owner.pickDocument(null, "", "queue") }
+        main { owner.pickFixtureDocument(null, "", "queue") }
         val token = owner.state.value.documentPicker!!.id
         main { owner.foreground(false); owner.documentPicked(token, FixtureDocumentProvider.URI); owner.foreground(true) }
         await { owner.state.value.uploads?.let { !it.busy && it.rows.singleOrNull()?.phase == UploadPhase.SCANNING } == true }
@@ -74,7 +88,7 @@ class FileSelectionTest {
         assertTrue(owner.state.value.uploads!!.selected.isEmpty())
         server.fileReady = true
         await { owner.state.value.uploads?.rows?.singleOrNull()?.ready() == true && owner.state.value.outbox?.connected == true }
-        main { owner.toggleUpload(original.intent.requestId); owner.submitMessage("queue", "") }
+        main { owner.toggleUpload(original.intent.requestId); owner.submitFixtureMessage("queue", "") }
         await { owner.state.value.outbox?.records?.singleOrNull()?.remote == RemoteCommandState.AGENT_QUEUED }
         val message = server.fileMessage.get()!!
         assertEquals(listOf(original.fileId), message.fileIds())
@@ -87,12 +101,13 @@ class FileSelectionTest {
     }
     @Test fun aLatePickerResultAfterLocalExitCannotOpenAnyNewUploadContext() {
         val owner = controller!!
-        main { owner.pickDocument(null, "old context", "queue") }
+        main { owner.pickFixtureDocument(null, "old context", "queue") }
         val token = owner.state.value.documentPicker!!.id
         main { owner.cancel() }
         await { owner.state.value.phase == HomePhase.SIGNED_OUT }
         main { owner.documentPicked(token, Uri.parse("content://must-not-open/late")) }
         assertEquals(HomePhase.SIGNED_OUT, owner.state.value.phase)
-        assertNull(owner.state.value.uploads); assertNull(owner.state.value.documentPicker); assertNull(owner.state.value.composerRestore)
+        assertNull(owner.state.value.uploads); assertNull(owner.state.value.documentPicker); assertNull(owner.state.value.composer)
+        assertNull(owner.state.value.presentationOwner)
     }
 }

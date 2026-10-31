@@ -8,10 +8,13 @@ enum class ConversationRole { USER, ASSISTANT, TOOL, NOTICE }
 class ConversationItem(val id: String, val role: ConversationRole, val blocks: List<DisplayBlock>, val live: Boolean, val persisted: Boolean, val interrupted: Boolean = false) {
     override fun toString() = "ConversationItem($role, live=$live)"
 }
-class SessionRecord private constructor(val seq: Long, val type: String, val data: JsonObject, val raw: JsonObject, val blocks: List<DisplayBlock>, val replacement: Boolean) {
+class SessionRecord private constructor(val seq: Long, val type: String, val data: JsonObject, val raw: JsonObject, val blocks: List<DisplayBlock>, val replacement: Boolean,
+    private val versionRoot: JsonObject, initialVersion: String?) {
     val weight = SessionJson.weight(raw)
+    private var cachedVersion = initialVersion
+    val messageVersionSha256: String get() = synchronized(this) { cachedVersion ?: mediaEventSha256(SessionJson.encode(versionRoot)).also { cachedVersion = it } }
     companion object {
-        fun parse(root: JsonObject): SessionRecord {
+        fun parse(root: JsonObject, mediaRefs: Boolean = false): SessionRecord {
             SessionJson.fields(root, setOf("native_seq", "time", "type", "data"), setOf("surface_op", "source_event_seqs"))
             val seq = root.integer("native_seq", 0)
             val time = (root["time"] as? JsonNumber)?.value ?: throw SessionDataException()
@@ -28,10 +31,20 @@ class SessionRecord private constructor(val seq: Long, val type: String, val dat
                 }
             }
             var blocks: List<DisplayBlock> = emptyList()
+            var lastMediaIndex = -1
             fun content(source: JsonObject): List<DisplayBlock> = source.array("content").map { value ->
                 val block = value as? JsonObject ?: throw SessionDataException()
-                block.exactKeys("type", "text")
-                DisplayBlock(when (block.string("type")) { "text" -> BlockKind.TEXT; "reasoning" -> BlockKind.REASONING; else -> throw SessionDataException("protocol.unsupported") }, block.string("text"), complete = true)
+                if (block.string("type") == "image") {
+                    if (!mediaRefs) throw SessionDataException("protocol.unsupported")
+                    block.exactKeys("type", "reference")
+                    val reference = VisibleMediaReference.parse(block.obj("reference"))
+                    if (reference.nativeSeq != seq || reference.partIndex <= lastMediaIndex) throw SessionDataException()
+                    lastMediaIndex = reference.partIndex
+                    DisplayBlock(BlockKind.IMAGE, "", reference.manifest.name, complete = true, media = reference)
+                } else {
+                    block.exactKeys("type", "text")
+                    DisplayBlock(when (block.string("type")) { "text" -> BlockKind.TEXT; "reasoning" -> BlockKind.REASONING; else -> throw SessionDataException("protocol.unsupported") }, block.string("text"), complete = true)
+                }
             }
             when (type) {
                 "cursor" -> data.exactKeys()
@@ -57,7 +70,21 @@ class SessionRecord private constructor(val seq: Long, val type: String, val dat
             }
             for (number in listOf("turn", "step")) if (number in data.fields) data.integer(number, 0)
             if ("interrupted" in data.fields) SessionJson.boolean(data, "interrupted")
-            return SessionRecord(seq, type, data, root, Collections.unmodifiableList(blocks), replacement)
+            val references = blocks.mapNotNull { it.media }
+            var ordinary = root
+            var version: String? = null
+            if (references.isNotEmpty()) {
+                val message = if (type == "user/message") data else data.obj("message")
+                val legacy = JsonArray(message.array("content").map { value ->
+                    val block = value as JsonObject
+                    if (block.string("type") == "image") jsonObject("type" to "text".json(), "text" to LEGACY_IMAGE_NOTICE.json()) else block
+                })
+                val legacyData = if (type == "user/message") data.with("content" to legacy) else data.with("message" to message.with("content" to legacy))
+                ordinary = root.with("data" to legacyData)
+                version = mediaEventSha256(SessionJson.encode(ordinary))
+                if (references.any { it.eventVersionSha256 != version }) throw SessionDataException()
+            }
+            return SessionRecord(seq, type, data, root, Collections.unmodifiableList(blocks), replacement, ordinary, version)
         }
     }
 }
@@ -72,7 +99,7 @@ class SessionTranscript internal constructor(
 class SessionPageRequest(val requestId: String, val payload: JsonObject)
 
 /** One acknowledged subscription/sync. A replacement snapshot discards old transient and observation state. */
-class SessionWindow(private val subscribeRequest: String) {
+class SessionWindow(private val subscribeRequest: String, private val mediaRefs: Boolean = false) {
     companion object { const val MAX_RECORDS = 4096; const val MAX_RETAINED_WEIGHT = 8L * 1024 * 1024 }
     private class Attempt(val id: String, val after: Long, val turn: Long, val step: Long, var next: Long, val blocks: StreamBlocks)
     private class Page(val id: String, val before: Long)
@@ -115,7 +142,7 @@ class SessionWindow(private val subscribeRequest: String) {
         val payload = content.payload
         when (content.type) {
             "session.event" -> {
-                val record = SessionRecord.parse(payload)
+                val record = SessionRecord.parse(payload, mediaRefs)
                 if (record.seq <= cursor) {
                     records[record.seq]?.let { if (!SessionJson.same(it.raw, record.raw)) throw SessionDataException() }
                     return false
@@ -175,7 +202,7 @@ class SessionWindow(private val subscribeRequest: String) {
     }
     private fun parseRecords(values: List<JsonValue>): List<SessionRecord> {
         if (values.size > MAX_RECORDS) throw SessionDataException("client.history_limit")
-        val result = values.map { SessionRecord.parse(it as? JsonObject ?: throw SessionDataException()) }
+        val result = values.map { SessionRecord.parse(it as? JsonObject ?: throw SessionDataException(), mediaRefs) }
         for (index in 1 until result.size) if (result[index].seq != result[index - 1].seq + 1) throw SessionDataException()
         return result
     }

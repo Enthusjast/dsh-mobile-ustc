@@ -29,26 +29,32 @@ import javax.inject.Singleton
 enum class HomePhase { LOADING, UNCONFIGURED, INVALID_CONFIGURATION, SIGNED_OUT, RECOVERING, RECOVERY_ERROR, REAUTHENTICATE, RENEWING, CLEARING, STARTING, BROWSER, EXCHANGING, ENROLL, PREPARING, AUTHENTICATING, REGISTERING, RECONCILING, REGISTRATION_UNKNOWN, READY }
 class BrowserLaunch(val id: Long, val uri: Uri)
 class BiometricLaunch(val id: Long, val operation: AuthenticatedKeyOperation<*>, val title: String = "确认登记此设备", val subtitle: String = "将这部手机的独立密钥登记到学校账号")
-class DocumentPickLaunch(val id: String)
+class DocumentPickLaunch(val id: String, val purpose: DocumentPickPurpose = DocumentPickPurpose.FILE, val output: Uri? = null)
 class ExportSaveLaunch(val id: String, val name: String) { override fun toString() = "ExportSaveLaunch" }
-class MessageDraft(val text: String, val mode: String, val runtimeId: String, val sessionId: String) { override fun toString() = "MessageDraft" }
 enum class ApprovalUiStage { IDLE, PREPARING, AUTHENTICATING, SENDING }
 data class RuntimeRow(val id: String, val hostId: String, val version: String, val hostAlias: String, val access: RuntimeDirectoryEntry? = null)
 data class HomeState(
     val phase: HomePhase = HomePhase.LOADING, val issuer: String = "", val error: String? = null,
     val subject: String = "", val deviceId: String = "", val runtimes: List<RuntimeRow> = emptyList(),
+    val presentationOwner: CommandOwner? = null,
     val browser: BrowserLaunch? = null, val biometric: BiometricLaunch? = null, val authenticationId: Long? = null,
     val securitySetupRequired: Boolean = false, val refreshing: Boolean = false, val deviceName: String? = null,
     val selectedRuntimeId: String? = null, val selectedSessionId: String? = null,
     val sessions: List<SessionDirectoryEntry> = emptyList(), val loadingSessions: Boolean = false, val sessionError: String? = null,
     val reader: SessionReadState? = null,
+    val modelCatalog: SessionModelCatalogState? = null, val modelSelectionOpen: Boolean = false,
+    val modelBusy: Boolean = false, val modelError: String? = null,
+    val changes: SessionChangesState? = null, val changesOpen: Boolean = false,
+    val messageActions: SessionMessageActionState? = null, val messageActionsOpen: Boolean = false, val sessionActionError: String? = null,
     val knownTarget: SessionTarget? = null,
     val notifications: NotificationUiState? = null, val notificationSettings: Boolean = false, val notificationNote: String? = null, val notificationQuestion: QuestionHandle? = null,
     val appUpdates: AppUpdateUiState? = null, val appUpdateSettings: Boolean = false,
     val exports: SessionExportState? = null, val exportSavePicker: ExportSaveLaunch? = null, val exportSaving: Boolean = false, val exportSaved: Boolean = false, val exportSaveError: String? = null, val exportBytes: Long = 0,
-    val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composerRestore: MessageDraft? = null,
+    val uploads: SessionUploadState? = null, val documentPicker: DocumentPickLaunch? = null, val composer: MessageComposerState? = null,
+    val images: SessionImageState? = null,
+    val failedInput: MessageComposerState? = null,
     val binding: HostBindingState? = null, val pendingBindingId: String? = null,
-    val outbox: CommandOutboxState? = null, val commandError: String? = null, val submitting: Boolean = false, val composerRevision: Long = 0,
+    val outbox: CommandOutboxState? = null, val commandError: String? = null, val submitting: Boolean = false,
     val creation: SessionCreationState? = null,
     val approvals: ApprovalClientState? = null, val reviewingApprovalId: String? = null, val approvalStage: ApprovalUiStage = ApprovalUiStage.IDLE, val approvalError: String? = null,
 )
@@ -76,6 +82,7 @@ class LoginController internal constructor(private val context: Context, private
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutable = MutableStateFlow(HomeState())
+    private val drafts = ConversationDrafts()
     val state: StateFlow<HomeState> = mutable.asStateFlow()
     private val updateLaunches = Channel<AppUpdateLaunch>(4)
     val appUpdateEvents = updateLaunches.receiveAsFlow()
@@ -118,15 +125,24 @@ class LoginController internal constructor(private val context: Context, private
     private var creationCollector: Job? = null
     private var commandJournal: SqlCommandJournal? = null
     private var commandCollector: Job? = null
+    private var modelCollector: Job? = null
+    private var modelJob: Job? = null
+    private var changesCollector: Job? = null
+    private var messageActionsCollector: Job? = null
+    private var sessionActionJob: Job? = null
     private var uploads: SessionUploads? = null
     private var uploadCollector: Job? = null
+    private var images: SessionImageCoordinator? = null
+    private var imageCollector: Job? = null
     private var exportCollector: Job? = null
     private var exportSaveJob: Job? = null
     private class PendingExportSave(val id: String, val generation: Long, val runtime: String, val session: String, val request: String, val file: RemoteExportStatus) { var result: Uri? = null }
     private var pendingExportSave: PendingExportSave? = null
     private val abandonedSavePickers = linkedSetOf<String>()
-    private class PendingDocument(val id: String, val generation: Long, val runtime: String, val session: String, val resume: String?, val draft: MessageDraft) { var result: Uri? = null }
+    private class PendingDocument(val id: String, val generation: Long, val runtime: String, val session: String, val resume: String?, val draft: MessageComposerState,
+        val purpose: DocumentPickPurpose = DocumentPickPurpose.FILE, val camera: CameraCapture? = null) { var result: Uri? = null }
     private var pendingDocument: PendingDocument? = null
+    private var cameraPreparation: Job? = null
     private var commandJob: Job? = null
     private var questionScope: CoroutineScope?=null
     private var approvalCollector: Job? = null
@@ -331,7 +347,9 @@ class LoginController internal constructor(private val context: Context, private
             current(stamp)
             if (device != null) {
                 persist(saved.deviceAccepted(device.deviceId, device.keyVersion, now()), stamp)
-                mutable.value = HomeState(HomePhase.READY, session!!.issuer, subject = session!!.subject, deviceId = device.deviceId)
+                val accepted = checkpoint!!
+                val presentationOwner = CommandOwner(accepted.accountId, accepted.organizationId, configuration!!.fingerprint, accepted.userId, accepted.deviceId!!)
+                mutable.value = HomeState(HomePhase.READY, session!!.issuer, subject = session!!.subject, deviceId = device.deviceId, presentationOwner = presentationOwner)
                 scheduleRenewal(stamp, session!!)
                 fetchDirectory(stamp)
                 return
@@ -552,12 +570,28 @@ class LoginController internal constructor(private val context: Context, private
             val removedRead = mutable.value.runtimes.filter { old ->
                 old.access?.scope?.actions?.contains("session.read") == true && contexts[old.id]?.scope?.actions?.contains("session.read") != true
             }.map { it.id }
-            mutable.value = mutable.value.copy(runtimes = items, knownTarget = known, error = null)
+            val retiredDraftRuntimes = mutable.value.runtimes.filter { old ->
+                val previous = old.access
+                val next = contexts[old.id]
+                previous != null && (next == null || next.role != previous.role || next.grantVersion != previous.grantVersion ||
+                    next.expiresAt?.let { it <= now() } == true || next.scope?.let { previous.scope?.same(it) } != true)
+            }.map { it.id }
+            retiredDraftRuntimes.forEach(drafts::revokeRuntime)
+            if (pendingDocument?.runtime in retiredDraftRuntimes) clearPendingDocument()
+            mutable.value = mutable.value.copy(runtimes = items, knownTarget = known, error = null,
+                sessions = if (contexts[mutable.value.selectedRuntimeId]?.canReadMetadata() == true) mutable.value.sessions
+                    else mutable.value.sessions.map { it.withoutMetadata() })
             val activeAccess = contexts[selectedContext]
-            if (oldAccess != null && activeAccess != null && (oldAccess.role != activeAccess.role || oldAccess.grantVersion != activeAccess.grantVersion || activeAccess.scope?.let { oldAccess.scope?.same(it) } != true)) retireNavigation(true)
+            if (oldAccess != null && activeAccess != null && (oldAccess.role != activeAccess.role || oldAccess.grantVersion != activeAccess.grantVersion || activeAccess.scope?.let { oldAccess.scope?.same(it) } != true)) {
+                drafts.revokeRuntime(oldAccess.id)
+                clearPendingDocument()
+                mutable.value = mutable.value.copy(composer = null, documentPicker = null)
+                retireNavigation(true)
+            }
             if (removedRead.isNotEmpty()) {
                 val saved = checkpoint!!
                 val owner = CommandOwner(saved.accountId, saved.organizationId, configuration!!.fingerprint, saved.userId, saved.deviceId!!)
+                removedRead.forEach(drafts::revokeRuntime)
                 if (mutable.value.selectedRuntimeId in removedRead) {
                     retireNavigation(false)
                     mutable.value = mutable.value.copy(selectedRuntimeId = null, selectedSessionId = null, reader = null, outbox = null, commandError = null, submitting = false)
@@ -603,7 +637,15 @@ class LoginController internal constructor(private val context: Context, private
         retireAppUpdates(keepDesired)
         pendingNotificationReference?.let { ref -> if (!keepDesired || desired != (ref.runtimeId to ref.sessionId)) dismissNotificationNavigation() }
         navigationGeneration++; navigationJob?.cancel(); navigationJob = null; readerJob?.cancel(); readerJob = null
+        cameraPreparation?.cancel(); cameraPreparation = null
         commandJob?.cancel(); commandJob = null; commandCollector?.cancel(); commandCollector = null
+        modelJob?.cancel(); modelJob = null; modelCollector?.cancel(); modelCollector = null
+        mutable.value = mutable.value.copy(modelCatalog = null, modelSelectionOpen = false, modelBusy = false, modelError = null)
+        sessionActionJob?.cancel(); sessionActionJob = null
+        changesCollector?.cancel(); changesCollector = null; messageActionsCollector?.cancel(); messageActionsCollector = null
+        mutable.value = mutable.value.copy(changes = null, changesOpen = false, messageActions = null, messageActionsOpen = false, sessionActionError = null)
+        imageCollector?.cancel(); imageCollector = null; images?.close(); images = null
+        mutable.value = mutable.value.copy(images = null)
         uploadCollector?.cancel(); uploadCollector = null; uploads?.close(); uploads = null
         exportCollector?.cancel(); exportCollector = null; exportSaveJob?.cancel(); exportSaveJob = null
         if (!keepDesired || pendingExportSave?.let { it.generation != generation || desired != (it.runtime to it.session) } == true) {
@@ -613,8 +655,8 @@ class LoginController internal constructor(private val context: Context, private
             }
             pendingExportSave = null
         }
-        if (!keepDesired || pendingDocument?.let { it.runtime != desired?.first || it.session != desired?.second } == true) { pendingDocument = null }
-        if (!keepDesired || mutable.value.composerRestore?.let { desired != (it.runtimeId to it.sessionId) } == true) mutable.value = mutable.value.copy(composerRestore = null)
+        if (!keepDesired || pendingDocument?.let { it.runtime != desired?.first || it.session != desired?.second } == true) clearPendingDocument()
+        mutable.value = mutable.value.copy(composer = null, failedInput = null)
         abortApprovalAuthentication(null)
         approvalCollector?.cancel(); approvalCollector = null; approvalActionJob?.cancel(); approvalActionJob = null
         questionScope?.cancel();questionScope=null
@@ -633,9 +675,11 @@ class LoginController internal constructor(private val context: Context, private
         if (!active) {
             pendingNotificationReference = null; notificationDeadline?.cancel()
             closeNotificationFlow()
+            val exception = pendingDocument?.takeIf { it.generation == generation && desired == (it.runtime to it.session) && it.draft.resource.owner.fingerprint == mutable.value.presentationOwner?.fingerprint }?.draft
+            drafts.clear(exception)
             retireNavigation(true)
             mutable.value = mutable.value.copy(reader = mutable.value.reader?.copy(phase = SessionReadPhase.CLOSED, window = null, questions = SessionQuestionState()), loadingSessions = false, binding = binding?.state?.value,
-                outbox = null, commandError = null, submitting = false, composerRevision = mutable.value.composerRevision + 1, composerRestore = pendingDocument?.draft)
+                outbox = null, commandError = null, submitting = false, composer = null)
         } else if (mutable.value.phase == HomePhase.READY) {
             attachNotifications()
             if (mutable.value.appUpdateSettings) attachAppUpdates()
@@ -712,16 +756,17 @@ class LoginController internal constructor(private val context: Context, private
         knownSelection = false
         desired = id to resumeSession
         if (session!!.accessExpiresAt - now() <= environment.minimumValidityMillis) { renew(); return }
+        val retained = mutable.value.sessions.takeIf { mutable.value.selectedRuntimeId == id && mutable.value.knownTarget == null }.orEmpty()
         retireNavigation(true)
         val stamp = generation; val view = navigationGeneration; val resource = api!!
-        mutable.value = mutable.value.copy(selectedRuntimeId = id, selectedSessionId = null, sessions = emptyList(), loadingSessions = true, sessionError = null, reader = null)
+        mutable.value = mutable.value.copy(selectedRuntimeId = id, selectedSessionId = null, sessions = retained, loadingSessions = true, sessionError = null, reader = null)
         navigation {
             try {
-                val response = resource.sessions(id)
+                val entries = resource.directorySessions(id, row.access.canReadMetadata()) {
+                    current(stamp)
+                    if (view != navigationGeneration || !foreground) throw CancellationException()
+                }
                 current(stamp); if (view != navigationGeneration) return@navigation
-                if (response["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
-                val entries = response.obj("data").array("items").map { SessionDirectoryEntry.parse(it as? JsonObject ?: throw RemoteRequestException("network.invalid_response")) }
-                if (entries.map { it.id }.toSet().size != entries.size) throw RemoteRequestException("network.invalid_response")
                 mutable.value = mutable.value.copy(sessions = entries, loadingSessions = false)
                 if (resumeSession != null && entries.any { it.id == resumeSession }) { navigationJob = null; openSessionInternal(resumeSession) }
             } catch (error: CancellationException) { throw error }
@@ -758,9 +803,13 @@ class LoginController internal constructor(private val context: Context, private
         mutable.value = mutable.value.copy(knownTarget = target, selectedRuntimeId = target.runtime.id, selectedSessionId = target.session.id, sessions = listOf(target.session), loadingSessions = false)
         openSessionInternal(target.session.id)
     }
-    fun openSession(id: String) { dismissNotificationNavigation(); openSessionInternal(id) }
+    fun openSession(id: String) {
+        if (mutable.value.loadingSessions || mutable.value.refreshing) return
+        dismissNotificationNavigation(); openSessionInternal(id)
+    }
     private fun openSessionInternal(id: String) {
         if (!foreground || mutable.value.phase != HomePhase.READY) return
+        if (mutable.value.loadingSessions) return
         val runtimeId = mutable.value.selectedRuntimeId ?: return
         val runtime = mutable.value.runtimeRow(runtimeId)?.access ?: return
         val selected = mutable.value.sessions.firstOrNull { it.id == id } ?: return
@@ -772,7 +821,8 @@ class LoginController internal constructor(private val context: Context, private
         val resource = api!!
         val saved = checkpoint!!
         val owner = CommandOwner(saved.accountId, saved.organizationId, configuration!!.fingerprint, saved.userId, saved.deviceId!!)
-        mutable.value = mutable.value.copy(selectedSessionId = id, reader = SessionReadState(SessionReadPhase.CONNECTING), sessionError = null, outbox = null, commandError = null, submitting = false)
+        val composer = drafts.open(ConversationResource(owner, runtime.hostId, runtimeId, id))
+        mutable.value = mutable.value.copy(selectedSessionId = id, reader = SessionReadState(SessionReadPhase.CONNECTING), sessionError = null, outbox = null, commandError = null, submitting = false, composer = composer, failedInput = drafts.recoverable(composer.resource))
         navigation {
             var database: SqlCommandJournal? = null
             try {
@@ -794,12 +844,20 @@ class LoginController internal constructor(private val context: Context, private
                 val opened = if (database != null) resource.chatReader(saved.deviceId!!, runtimeId, id, allowed, database!!, scope, transcripts = database, workspaceId = selected.workspaceId, approvalAccount = approvalAccount, exportJournal = database.takeIf { "file.download" in allowed.actions })
                     else resource.reader(saved.deviceId!!, runtimeId, id, runtime.scope!!.readSession(id, selected.workspaceId), scope)
                 commandJournal = database; database = null; reader = opened
+                val imageFlow = SessionImageCoordinator(context, scope)
+                images = imageFlow
+                imageCollector = scope.launch {
+                    imageFlow.state.collect { value ->
+                        if (generation == stamp && navigationGeneration == view && reader === opened && foreground)
+                            mutable.value = mutable.value.copy(images = value)
+                    }
+                }
                 if (commandJournal != null && selected.state != "archived" && runtime.role in setOf("operator", "owner") && runtime.scope?.actions?.contains("file.upload") == true) {
                     val files = resource.fileUploads(runtimeId, id, selected.workspaceId, runtime.scope!!, commandJournal!!, scope)
                     uploads = files
                     uploadCollector = scope.launch { files.state.collect { value -> if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(uploads = value) } }
                     drainDocument()
-                } else { pendingDocument = null; mutable.value = mutable.value.copy(uploads = null, documentPicker = null) }
+                } else { clearPendingDocument(); mutable.value = mutable.value.copy(uploads = null, documentPicker = null) }
                 drainExportSave()
                 opened.exports?.let { exports -> exportCollector = scope.launch {
                     exports.state.collect { value -> if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(exports = value) }
@@ -818,13 +876,41 @@ class LoginController internal constructor(private val context: Context, private
                 } }
                 opened.commands?.let { commands -> commandCollector = scope.launch {
                     commands.state.collect { outbox ->
-                        if (generation == stamp && navigationGeneration == view && foreground) mutable.value = mutable.value.copy(outbox = outbox)
+                        if (generation == stamp && navigationGeneration == view && foreground) {
+                            mutable.value = mutable.value.copy(outbox = outbox)
+                            if (outbox.connected) drainDocument()
+                        }
                     }
                 } }
+                modelCollector = scope.launch {
+                    opened.models.state.collect { catalog ->
+                        if (generation == stamp && navigationGeneration == view && reader === opened && foreground)
+                            mutable.value = mutable.value.copy(modelCatalog = catalog)
+                    }
+                }
+                changesCollector = scope.launch {
+                    opened.changes.state.collect { value ->
+                        if (generation == stamp && navigationGeneration == view && reader === opened && foreground)
+                            mutable.value = mutable.value.copy(changes = value)
+                    }
+                }
+                messageActionsCollector = scope.launch {
+                    opened.messageActions.state.collect { value ->
+                        if (generation == stamp && navigationGeneration == view && reader === opened && foreground)
+                            mutable.value = mutable.value.copy(messageActions = value)
+                    }
+                }
                 readerJob = scope.launch {
             opened.state.collect { state ->
                 if (generation != stamp || view != navigationGeneration || !foreground) return@collect
                 mutable.value = mutable.value.copy(reader = state)
+                if (state.phase == SessionReadPhase.READY) drainDocument()
+                if (state.phase in setOf(SessionReadPhase.AUTH_REQUIRED, SessionReadPhase.REVOKED)) {
+                    drafts.revokeRuntime(runtimeId)
+                    clearPendingDocument()
+                    images?.foreground(false)
+                    mutable.value = mutable.value.copy(composer = null, documentPicker = null, failedInput = null)
+                }
                 deliverNotificationReference()
                 if (state.phase == SessionReadPhase.AUTH_REQUIRED && mutable.value.phase == HomePhase.READY) renew()
                 else if (state.phase == SessionReadPhase.REVOKED && mutable.value.phase == HomePhase.READY) refresh()
@@ -836,40 +922,227 @@ class LoginController internal constructor(private val context: Context, private
             } finally { database?.close() }
         }
     }
-    fun submitMessage(mode: String, text: String, sendNow: Boolean = true) {
-        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.submitting) return
-        if (mutable.value.sessions.firstOrNull { it.id == mutable.value.selectedSessionId }?.state == "archived") return
+    fun openChanges() {
+        val opened = reader ?: return
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        mutable.value = mutable.value.copy(changesOpen = true, changes = opened.changes.state.value, sessionActionError = null)
+        loadChanges()
+    }
+    fun closeChanges() { mutable.value = mutable.value.copy(changesOpen = false, sessionActionError = null) }
+    fun loadChanges() = sessionAction { it.changes.loadInitial() }
+    fun loadNextChanges() = sessionAction { it.changes.loadNext() }
+    fun reloadChanges() = sessionAction { it.changes.reload() }
+    fun loadChangePatch(id: String) = sessionAction { it.changes.loadPatch(id) }
+    fun loadNextChangePatch() = sessionAction { it.changes.loadNextPatch() }
+    fun copyChangePatch() {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        val text = reader?.changes?.completePatch() ?: return
+        try {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("patch", text))
+            android.widget.Toast.makeText(context, R.string.session_actions_patch_copied, android.widget.Toast.LENGTH_SHORT).show()
+        } catch (error: Exception) { mutable.value = mutable.value.copy(sessionActionError = code(error)) }
+    }
+    fun previewMessage(id: String) {
+        val opened = reader ?: return
+        if (!foreground || mutable.value.phase != HomePhase.READY || !opened.messageActions.canPreview) return
+        mutable.value = mutable.value.copy(messageActionsOpen = true, messageActions = opened.messageActions.state.value, sessionActionError = null)
+        sessionAction { it.messageActions.previewMessage(id) }
+    }
+    fun dismissMessageActions() {
+        sessionActionJob?.cancel(); sessionActionJob = null
+        reader?.messageActions?.dismiss()
+        mutable.value = mutable.value.copy(messageActionsOpen = false, sessionActionError = null)
+    }
+    fun forkMessage(anchor: SessionForkAnchor) = sessionAction { it.messageActions.fork(anchor) }
+    fun shareMessage(anchor: SessionForkAnchor) = sessionAction { opened ->
+        val share = opened.messageActions.confirmShare(anchor)
+        if (foreground && reader === opened && share.current()) launchAuthorizedMessageShare(context, share)
+    }
+    fun queryFork() = sessionAction { it.messageActions.queryFork() }
+    fun openForkChild(childId: String) {
+        val state = mutable.value
+        if (!foreground || state.phase != HomePhase.READY) return
+        val runtimeId = state.selectedRuntimeId ?: return
+        if (state.outbox?.records?.none { it.intent.kind == CommandKind.FORK && it.createdSessionId == childId } != false) return
+        if (state.runtimeRow(runtimeId)?.access?.canList() == true) navigateRuntime(runtimeId, childId)
+        else navigateKnownSession(runtimeId, childId)
+    }
+    private fun sessionAction(action: suspend (SessionReader) -> Unit) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || sessionActionJob?.isActive == true) return
+        val opened = reader ?: return
+        val stamp = generation; val view = navigationGeneration
+        mutable.value = mutable.value.copy(sessionActionError = null)
+        sessionActionJob = scope.launch {
+            try { action(opened) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp && navigationGeneration == view && reader === opened && foreground)
+                    mutable.value = mutable.value.copy(sessionActionError = code(error))
+            }
+        }
+    }
+    fun openModelSelection() {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.selectedSessionId == null) return
+        val opened = reader ?: return
+        mutable.value = mutable.value.copy(modelSelectionOpen = true, modelCatalog = opened.models.state.value, modelError = null)
+        modelWork { it.models.loadInitial() }
+    }
+    fun closeModelSelection() {
+        // Closing a view is not cancellation of an already persisted selection.
+        mutable.value = mutable.value.copy(modelSelectionOpen = false, modelError = null)
+    }
+    fun loadModels() = modelWork { it.models.loadInitial() }
+    fun loadNextModels() = modelWork { it.models.loadNext() }
+    fun reloadModels() = modelWork { it.models.reload() }
+    fun selectModel(selection: SessionModelSelection) = modelWork { opened ->
+        val unresolved = opened.commands?.state?.value?.records?.any { record ->
+            record.intent.kind == CommandKind.MODEL_SELECT && record.remote !in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)
+        } == true
+        if (unresolved) throw CommandDataException("command.reconcile_required")
+        opened.models.select(selection.providerId, selection.modelId, selection.reasoningEffortId)
+    }
+    fun queryModelSelection() = modelWork { it.models.querySelection() }
+    fun discardUnsentModelSelection(id: String) = modelWork { opened ->
+        val commands = opened.commands ?: throw CommandDataException("command.not_found")
+        val record = commands.state.value.records.firstOrNull { it.intent.requestId == id }
+            ?: throw CommandDataException("command.not_found")
+        if (record.intent.kind != CommandKind.MODEL_SELECT || record.attempts != 0L || record.remote != null ||
+            record.delivery != CommandDelivery.PENDING || record.everHostSaved || record.everAgentQueued)
+            throw CommandDataException("command.reconcile_required")
+        commands.discard(id)
+    }
+    private fun modelWork(action: suspend (SessionReader) -> Unit) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || !mutable.value.modelSelectionOpen || mutable.value.modelBusy) return
+        val opened = reader ?: return
+        val stamp = generation; val view = navigationGeneration
+        mutable.value = mutable.value.copy(modelBusy = true, modelError = null)
+        val next = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                action(opened)
+                current(stamp)
+                if (navigationGeneration == view && reader === opened && foreground)
+                    mutable.value = mutable.value.copy(modelCatalog = opened.models.state.value, outbox = opened.commands?.state?.value)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (generation == stamp && navigationGeneration == view && reader === opened && foreground)
+                    mutable.value = mutable.value.copy(modelError = code(error))
+            } finally {
+                if (generation == stamp && navigationGeneration == view && reader === opened)
+                    mutable.value = mutable.value.copy(modelBusy = false)
+            }
+        }
+        modelJob = next; next.start()
+    }
+    fun editComposer(candidate: MessageComposerState) {
+        if (!foreground || mutable.value.phase != HomePhase.READY || mutable.value.composer?.resource != candidate.resource) return
+        drafts.edit(candidate)?.let { mutable.value = mutable.value.copy(composer = it) }
+    }
+    fun resolveFailedInput(original: MessageComposerState, restore: Boolean) {
+        val state = mutable.value
+        if (!foreground || state.phase != HomePhase.READY || state.submitting || state.failedInput !== original || state.composer?.resource != original.resource) return
+        val authority = state.runtimeRow(original.resource.runtimeId)?.access ?: return
+        val selected = state.sessions.firstOrNull { it.id == original.resource.sessionId } ?: return
+        if (selected.viewScope(authority) == null || selected.state == "archived") return
+        drafts.resolveFailure(original, restore)?.let { mutable.value = state.copy(composer = it, failedInput = null) }
+    }
+    fun submitMessage(submission: MessageSubmission) {
+        val original = submission.draft
+        val state = mutable.value
+        val currentDraft = state.composer ?: return
+        if (!foreground || state.phase != HomePhase.READY || state.submitting || currentDraft != original) return
+        if (state.presentationOwner?.fingerprint != original.resource.owner.fingerprint || state.selectedRuntimeId != original.resource.runtimeId || state.selectedSessionId != original.resource.sessionId) return
+        if (state.sessions.firstOrNull { it.id == state.selectedSessionId }?.state == "archived") return
         val opened = reader ?: return
         if (opened.state.value.phase in setOf(SessionReadPhase.AUTH_REQUIRED, SessionReadPhase.REVOKED, SessionReadPhase.CLOSED)) return
         val commands = opened.commands ?: return
+        val files = uploads
+        val selected = state.uploads?.selected?.toSet()
+        val attachments = try { files?.selectedFiles()?.toList() ?: emptyList() }
+        catch (error: Exception) { mutable.value = state.copy(commandError = code(error)); return }
+        val imageAttachments = try { files?.selectedImages()?.toList() ?: emptyList() }
+        catch (error: Exception) { mutable.value = state.copy(commandError = code(error)); return }
         val stamp = generation; val view = navigationGeneration
-        mutable.value = mutable.value.copy(submitting = true, commandError = null)
+        drafts.dismissFailure()
+        mutable.value = state.copy(submitting = true, commandError = null, failedInput = null)
         commandJob = scope.launch {
+            var persisted = false
             try {
-                val attachments = uploads?.selectedFiles() ?: emptyList()
-                commands.submit(mode, text, sendNow, attachments)
-                current(stamp); if (view != navigationGeneration) return@launch
-                uploads?.messageSaved()
-                mutable.value = mutable.value.copy(composerRevision = mutable.value.composerRevision + 1, composerRestore = null)
+                // Do not lose the persistence completion to a navigation cancellation.
+                // This never revives a draft cleared by background, logout, or authority loss.
+                val id = withContext(NonCancellable) {
+                    val request = commands.submit(original.mode, original.value.text, false, attachments, imageFileIds = imageAttachments)
+                    persisted = true
+                    if (generation == stamp && mutable.value.presentationOwner?.fingerprint == original.resource.owner.fingerprint) {
+                        val cleared = drafts.saved(original)
+                        if (cleared != null && mutable.value.composer?.resource == original.resource && mutable.value.composer?.revision == original.revision) mutable.value = mutable.value.copy(composer = cleared)
+                        if (cleared != null && uploads === files && mutable.value.uploads?.selected == selected) files?.messageSaved()
+                    }
+                    request
+                }
+                current(stamp)
+                if (foreground && view == navigationGeneration && reader === opened && submission.sendNow) commands.sendPending(id)
             } catch (error: CancellationException) { throw error }
-            catch (error: Exception) { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(commandError = if (error is CommandDataException) error.code else "command.invalid") }
+            catch (error: Exception) {
+                if (generation == stamp && view == navigationGeneration && foreground) {
+                    val recovery = if (!persisted) drafts.retainFailed(original) else null
+                    mutable.value = mutable.value.copy(commandError = if (error is CommandDataException) error.code else "command.invalid", failedInput = recovery)
+                }
+            }
             finally { if (generation == stamp && view == navigationGeneration) mutable.value = mutable.value.copy(submitting = false) }
         }
     }
     fun sendPending(id: String) { reader?.commands?.sendPending(id) }
-    fun pickDocument(resume: String?, text: String, mode: String) {
+    private fun clearPendingDocument() {
+        val capture = pendingDocument?.camera
+        pendingDocument = null
+        cameraPreparation?.cancel(); cameraPreparation = null
+        if (capture != null) scope.launch(NonCancellable + Dispatchers.IO) { capture.close() }
+    }
+    fun pickDocument(resume: String?) = prepareDocument(resume, DocumentPickPurpose.FILE)
+    fun pickImage(resume: String? = null) = prepareDocument(resume, DocumentPickPurpose.IMAGE)
+    fun pickCamera() = prepareDocument(null, DocumentPickPurpose.CAMERA)
+    private fun prepareDocument(resume: String?, purpose: DocumentPickPurpose) {
         val state = mutable.value
-        if (!foreground || state.phase != HomePhase.READY || uploads == null || state.uploads?.busy == true) return
+        if (!foreground || state.phase != HomePhase.READY || uploads == null || state.uploads?.busy == true || pendingDocument != null) return
+        val draft = state.composer ?: return
+        if (purpose != DocumentPickPurpose.FILE && state.outbox?.canAttachImages != true) {
+            mutable.value = state.copy(commandError = "protocol.unsupported"); return
+        }
         val runtime = state.selectedRuntimeId ?: return; val selected = state.selectedSessionId ?: return
         val token = UUID.randomUUID().toString()
-        pendingDocument = PendingDocument(token, generation, runtime, selected, resume, MessageDraft(text, mode, runtime, selected))
-        mutable.value = state.copy(documentPicker = DocumentPickLaunch(token))
+        val pending = PendingDocument(token, generation, runtime, selected, resume, draft, purpose)
+        pendingDocument = pending
+        if (purpose != DocumentPickPurpose.CAMERA) {
+            mutable.value = state.copy(documentPicker = DocumentPickLaunch(token, purpose))
+            return
+        }
+        cameraPreparation = scope.launch {
+            var capture: CameraCapture? = null
+            var attached = false
+            try {
+                withContext(NonCancellable + Dispatchers.IO) { capture = CameraCaptureStore(context).create(token) }
+                ensureActive()
+                if (pendingDocument !== pending || !foreground || generation != pending.generation || desired != (runtime to selected)) return@launch
+                pendingDocument = PendingDocument(token, pending.generation, runtime, selected, resume, draft, purpose, capture)
+                mutable.value = mutable.value.copy(documentPicker = DocumentPickLaunch(token, purpose, capture!!.uri))
+                attached = true
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { if (pendingDocument === pending) mutable.value = mutable.value.copy(commandError = code(error)) }
+            finally {
+                if (!attached) {
+                    if (pendingDocument === pending) pendingDocument = null
+                    withContext(NonCancellable + Dispatchers.IO) { capture?.close() }
+                }
+            }
+        }
     }
     fun documentPicked(token: String, uri: Uri?) {
         val pending = pendingDocument ?: return
         if (pending.id != token || pending.generation != generation || desired != (pending.runtime to pending.session)) return
-        mutable.value = mutable.value.copy(documentPicker = null, composerRestore = pending.draft, composerRevision = mutable.value.composerRevision + 1)
-        if (uri == null) { pendingDocument = null; return }
+        mutable.value = mutable.value.copy(documentPicker = null)
+        if (uri == null) { clearPendingDocument(); return }
+        if (pending.purpose == DocumentPickPurpose.CAMERA && (uri != pending.camera?.uri || pending.camera?.current() != true)) { clearPendingDocument(); return }
         pending.result = uri
         drainDocument()
     }
@@ -878,10 +1151,41 @@ class LoginController internal constructor(private val context: Context, private
         val source = pending.result ?: return
         val files = uploads ?: return
         if (!foreground || pending.generation != generation || desired != (pending.runtime to pending.session)) return
+        if (pending.purpose != DocumentPickPurpose.FILE) {
+            if (reader?.state?.value?.phase != SessionReadPhase.READY || mutable.value.outbox?.connected != true) return
+            if (mutable.value.outbox?.canAttachImages != true) {
+                clearPendingDocument()
+                mutable.value = mutable.value.copy(commandError = "protocol.unsupported")
+                return
+            }
+        }
         pendingDocument = null
-        try { files.select(DocumentFileSource(context, source), pending.resume) }
-        catch (error: Exception) { mutable.value = mutable.value.copy(commandError = code(error)) }
+        if (pending.purpose == DocumentPickPurpose.FILE) {
+            try { files.select(DocumentFileSource(context, source), pending.resume) }
+            catch (error: Exception) { mutable.value = mutable.value.copy(commandError = code(error)) }
+        } else {
+            val opened = reader
+            val imageFlow = images
+            if (opened == null || imageFlow == null) { pending.camera?.close(); return }
+            val view = navigationGeneration
+            imageFlow.select(source, files, pending.resume, current = {
+                foreground && generation == pending.generation && navigationGeneration == view && reader === opened && uploads === files &&
+                    desired == (pending.runtime to pending.session) && mutable.value.composer?.resource == pending.draft.resource &&
+                    mutable.value.composer?.revision == pending.draft.revision && mutable.value.outbox?.canAttachImages == true &&
+                    (pending.camera?.current() != false)
+            }, finished = { pending.camera?.close() })
+        }
     }
+    fun previewImage(reference: VisibleMediaReference) {
+        if (!foreground || mutable.value.phase != HomePhase.READY) return
+        val opened = reader ?: return
+        val stamp = generation; val view = navigationGeneration
+        images?.open(reference, opened) {
+            foreground && generation == stamp && navigationGeneration == view && reader === opened && mutable.value.phase == HomePhase.READY
+        }
+    }
+    fun dismissImagePreview() { images?.dismissPreview() }
+    fun cancelImage() { images?.cancel(); uploads?.cancelTransfer() }
     fun toggleUpload(id: String) = uploads?.toggle(id)
     fun queryUpload(id: String) = uploads?.query(id)
     fun removeUpload(id: String) = uploads?.remove(id)
@@ -1134,11 +1438,12 @@ class LoginController internal constructor(private val context: Context, private
                     // catalog determines current state; desktop actions can race.
                     var pollsRemaining = 20
                     do {
-                        val response = resource.sessions(runtimeId)
+                        val names = mutable.value.runtimeRow(runtimeId)?.access?.canReadMetadata() == true
+                        val rows = resource.directorySessions(runtimeId, names) {
+                            current(stamp)
+                            if (view != navigationGeneration || !foreground) throw CancellationException()
+                        }
                         current(stamp); if (view != navigationGeneration) return@launch
-                        if (response["ok"] != JsonBoolean(true)) throw RemoteRequestException("network.invalid_response")
-                        val rows = response.obj("data").array("items").map { SessionDirectoryEntry.parse(it as? JsonObject ?: throw RemoteRequestException("network.invalid_response")) }
-                        if (rows.map { it.id }.toSet().size != rows.size) throw RemoteRequestException("network.invalid_response")
                         mutable.value = mutable.value.copy(sessions = rows)
                         if (rows.firstOrNull { it.id == sessionId }?.state.let { if (archived) it == "archived" else it in setOf("available", "running") } || --pollsRemaining <= 0) break
                         delay(250)
@@ -1313,6 +1618,9 @@ class LoginController internal constructor(private val context: Context, private
     fun retryRead() = reader?.retry()
     fun refreshSessions() { desired?.let { if (knownSelection && it.second != null) navigateKnownSession(it.first, it.second!!) else navigateRuntime(it.first, it.second) } }
     fun back() {
+        if (mutable.value.messageActionsOpen) { dismissMessageActions(); return }
+        if (mutable.value.changesOpen) { closeChanges(); return }
+        if (mutable.value.modelSelectionOpen) { closeModelSelection(); return }
         if (mutable.value.appUpdateSettings) { closeAppUpdates(); return }
         dismissNotificationNavigation()
         if (mutable.value.notificationSettings) { closeNotificationSettings(); return }
@@ -1337,8 +1645,9 @@ class LoginController internal constructor(private val context: Context, private
     }
     private fun fence(closeKeys: Boolean, preserveSelection: Boolean = false): Long {
         closeNotificationFlow(); pendingNotificationReference = null; notificationDeadline?.cancel()
-        pendingDocument = null
-        mutable.value = mutable.value.copy(documentPicker = null, composerRestore = null)
+        clearPendingDocument()
+        drafts.clear()
+        mutable.value = mutable.value.copy(documentPicker = null, composer = null, presentationOwner = null)
         retireNavigation(preserveSelection)
         retireBinding(preserveSelection)
         generation++; job?.cancel(); deadline?.cancel(); pending?.cancel(); pending = null; discardRegistration()
@@ -1474,9 +1783,38 @@ class HomeViewModel @Inject constructor(private val login: LoginController) : Vi
     fun retryRead() = login.retryRead()
     fun refreshSessions() = login.refreshSessions()
     fun back() = login.back()
-    fun submitMessage(mode: String, text: String, sendNow: Boolean = true) = login.submitMessage(mode, text, sendNow)
+    fun openModelSelection() = login.openModelSelection()
+    fun closeModelSelection() = login.closeModelSelection()
+    fun loadModels() = login.loadModels()
+    fun loadNextModels() = login.loadNextModels()
+    fun reloadModels() = login.reloadModels()
+    fun selectModel(selection: SessionModelSelection) = login.selectModel(selection)
+    fun queryModelSelection() = login.queryModelSelection()
+    fun discardUnsentModelSelection(id: String) = login.discardUnsentModelSelection(id)
+    fun openChanges() = login.openChanges()
+    fun closeChanges() = login.closeChanges()
+    fun loadChanges() = login.loadChanges()
+    fun loadNextChanges() = login.loadNextChanges()
+    fun reloadChanges() = login.reloadChanges()
+    fun loadChangePatch(id: String) = login.loadChangePatch(id)
+    fun loadNextChangePatch() = login.loadNextChangePatch()
+    fun copyChangePatch() = login.copyChangePatch()
+    fun previewMessage(id: String) = login.previewMessage(id)
+    fun dismissMessageActions() = login.dismissMessageActions()
+    fun forkMessage(anchor: SessionForkAnchor) = login.forkMessage(anchor)
+    fun shareMessage(anchor: SessionForkAnchor) = login.shareMessage(anchor)
+    fun queryFork() = login.queryFork()
+    fun openForkChild(id: String) = login.openForkChild(id)
+    fun editComposer(candidate: MessageComposerState) = login.editComposer(candidate)
+    fun resolveFailedInput(original: MessageComposerState, restore: Boolean) = login.resolveFailedInput(original, restore)
+    fun submitMessage(submission: MessageSubmission) = login.submitMessage(submission)
     fun sendPending(id: String) = login.sendPending(id)
-    fun pickDocument(resume: String?, text: String, mode: String) = login.pickDocument(resume, text, mode)
+    fun pickDocument(resume: String?) = login.pickDocument(resume)
+    fun pickImage(resume: String? = null) = login.pickImage(resume)
+    fun pickCamera() = login.pickCamera()
+    fun previewImage(reference: VisibleMediaReference) = login.previewImage(reference)
+    fun dismissImagePreview() = login.dismissImagePreview()
+    fun cancelImage() = login.cancelImage()
     fun documentPicked(token: String, uri: Uri?) = login.documentPicked(token, uri)
     fun toggleUpload(id: String) = login.toggleUpload(id)
     fun queryUpload(id: String) = login.queryUpload(id)

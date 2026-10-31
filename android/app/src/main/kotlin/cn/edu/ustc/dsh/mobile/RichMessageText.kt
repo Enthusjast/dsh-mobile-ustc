@@ -29,10 +29,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
+import cn.edu.ustc.dsh.ui.LocalDshReadingStyle
+
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+@Composable
+private fun readingBodyStyle(style: TextStyle = MaterialTheme.typography.bodyLarge): TextStyle {
+    val scale = LocalDshReadingStyle.current.bodyScale
+    return style.copy(fontSize = style.fontSize * scale, lineHeight = style.lineHeight * scale)
+}
 
 private fun safeWebTarget(value: String): Boolean = runCatching {
     val uri = Uri.parse(value)
@@ -83,11 +90,11 @@ internal fun RichMessageText(text: String, initial: Int = 16 * 1024) {
     val uriHandler = LocalUriHandler.current
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (current == null || raw) {
-            SelectionContainer { Text(text.substring(0, end), style = MaterialTheme.typography.bodyLarge) }
+            SelectionContainer { Text(text.substring(0, end), style = readingBodyStyle()) }
         } else for (block in current.document.blocks) key(block.range.start) {
             when (block) {
                 is MessageMarkdownBlock.Paragraph -> MessageInlineText(current, block.spans, onLink = { requestedLink = it })
-                is MessageMarkdownBlock.Plain -> SelectionContainer { Text(block.range.text(text), style = MaterialTheme.typography.bodyLarge) }
+                is MessageMarkdownBlock.Plain -> SelectionContainer { Text(block.range.text(text), style = readingBodyStyle()) }
                 is MessageMarkdownBlock.Heading -> MessageInlineText(current, block.spans,
                     Modifier.semantics { heading() }, when (block.level) {
                         1 -> MaterialTheme.typography.titleLarge
@@ -95,7 +102,7 @@ internal fun RichMessageText(text: String, initial: Int = 16 * 1024) {
                         else -> MaterialTheme.typography.titleSmall
                     }, onLink = { requestedLink = it })
                 is MessageMarkdownBlock.ListItem -> Row(Modifier.padding(start = (block.depth * 12).dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(block.marker, style = MaterialTheme.typography.bodyLarge)
+                    Text(block.marker, style = readingBodyStyle())
                     MessageInlineText(current, block.spans, Modifier.weight(1f), onLink = { requestedLink = it })
                 }
                 is MessageMarkdownBlock.Quote -> {
@@ -132,14 +139,15 @@ private fun MessageInlineText(message: PreparedMessage, spans: List<MessageInlin
     val color = MaterialTheme.colorScheme.primary
     val context = LocalContext.current
     val latestLink by rememberUpdatedState(onLink)
-    val formatted = remember(message, spans, color) {
+    val reading = LocalDshReadingStyle.current
+    val formatted = remember(message, spans, color, reading.codeScale, style.fontSize) {
         buildAnnotatedString {
             spans.forEach { span ->
                 val start = length
                 append(message.document.source, span.range.start, span.range.end)
                 if (span.style and MESSAGE_BOLD != 0) addStyle(SpanStyle(fontWeight = FontWeight.SemiBold), start, length)
                 if (span.style and MESSAGE_ITALIC != 0) addStyle(SpanStyle(fontStyle = FontStyle.Italic), start, length)
-                if (span.style and MESSAGE_CODE != 0) addStyle(SpanStyle(fontFamily = FontFamily.Monospace), start, length)
+                if (span.style and MESSAGE_CODE != 0) addStyle(SpanStyle(fontFamily = FontFamily.Monospace, fontSize = style.fontSize * reading.codeScale), start, length)
                 message.links[span.link]?.let { target ->
                     addLink(LinkAnnotation.Clickable(target,
                         TextLinkStyles(SpanStyle(color = color, textDecoration = TextDecoration.Underline)),
@@ -153,13 +161,14 @@ private fun MessageInlineText(message: PreparedMessage, spans: List<MessageInlin
             CustomAccessibilityAction(context.getString(R.string.chat_link_accessibility, target)) { latestLink(target); true }
         }
     }
-    SelectionContainer { Text(formatted, modifier.semantics { customActions = actions }, style = style) }
+    SelectionContainer { Text(formatted, modifier.semantics { customActions = actions }, style = readingBodyStyle(style)) }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MessageCode(source: String, block: MessageMarkdownBlock.Code, truncated: Boolean) {
     val clipboard = LocalClipboardManager.current
+    val reading = LocalDshReadingStyle.current
     val content = remember(source, block.content) { block.content.text(source) }
     var copied by remember(content) { mutableStateOf(false) }
     var copyFailed by remember(content) { mutableStateOf(false) }
@@ -180,8 +189,8 @@ private fun MessageCode(source: String, block: MessageMarkdownBlock.Code, trunca
                     Text(stringResource(if (copied) R.string.chat_copied else if (block.closed) R.string.chat_copy_code else R.string.chat_copy_visible_code))
                 }
             }
-            SelectionContainer { Text(content, Modifier.horizontalScroll(rememberScrollState()),
-                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, softWrap = false) }
+            SelectionContainer { Text(content, if (reading.wrapCode) Modifier.fillMaxWidth() else Modifier.horizontalScroll(rememberScrollState()),
+                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall.let { it.copy(fontSize = it.fontSize * reading.codeScale, lineHeight = it.lineHeight * reading.codeScale) }, softWrap = reading.wrapCode) }
             if (!complete) Text(stringResource(R.string.chat_code_incomplete), style = MaterialTheme.typography.bodySmall)
             if (copyFailed) Text(stringResource(R.string.chat_copy_failed), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -192,7 +201,7 @@ private fun MessageCode(source: String, block: MessageMarkdownBlock.Code, trunca
 @Composable
 private fun MessageTable(message: PreparedMessage, block: MessageMarkdownBlock.Table, onLink: (String) -> Unit) {
     if (block.headers.isEmpty()) {
-        SelectionContainer { Text(block.range.text(message.document.source), style = MaterialTheme.typography.bodyLarge) }
+        SelectionContainer { Text(block.range.text(message.document.source), style = readingBodyStyle()) }
         return
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {

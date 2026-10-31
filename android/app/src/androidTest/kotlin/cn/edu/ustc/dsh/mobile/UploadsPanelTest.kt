@@ -47,7 +47,9 @@ class UploadsPanelTest {
     private fun base(): HomeState {
         val access = RuntimeDirectoryEntry.parse(jsonObject("id" to id.json(), "host_id" to id.json(), "organization_id" to id.json(), "protocol_version" to 1L.json(), "access" to jsonObject("role" to "operator".json(),
             "grant_version" to 1L.json(), "scope" to RelayScope(listOf("session.list", "session.read", "message.submit", "command.status", "file.upload"), emptyList(), listOf(id)).json())))
-        return HomeState(HomePhase.READY, runtimes = listOf(RuntimeRow(id, id, "0.2.1-rc.2", "电脑夹具", access)), selectedRuntimeId = id, selectedSessionId = id,
+        val owner = CommandOwner(id, id, "a".repeat(64), id, id)
+        return HomeState(HomePhase.READY, presentationOwner = owner, composer = MessageComposerState(ConversationResource(owner, id, id, id)),
+            runtimes = listOf(RuntimeRow(id, id, "0.2.1-rc.2", "电脑夹具", access)), selectedRuntimeId = id, selectedSessionId = id,
             reader = SessionReadState(SessionReadPhase.READY), outbox = CommandOutboxState(connected = true, canAttachFiles = true))
     }
     @Test fun aCleanWaitingFileCannotBeSelectedOrClaimedAsAgentAdmission() {
@@ -62,10 +64,10 @@ class UploadsPanelTest {
     @Test fun readyFileOnlyMessagesUseTheExistingComposerWithoutInventingText() {
         var sent: Triple<String, String, Boolean>? = null
         rule.setContent { DshTheme {
-            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, { mode, text, online -> sent = Triple(mode, text, online) })
+            SessionsScreen(base().copy(uploads = SessionUploadState(listOf(row(UploadPhase.READY)), setOf(id))), {}, {}, {}, {}, { sent = Triple(it.draft.mode, it.draft.value.text, it.sendNow) })
         } }
         rule.onNodeWithText("已选择 1 个附件，发送时仍需电脑确认。").assertExists()
-        rule.onNodeWithContentDescription("发送").assertIsEnabled().performClick()
+        rule.onNodeWithContentDescription("发送 · 排队").assertIsEnabled().performClick()
         rule.runOnIdle { assertEquals(Triple("queue", "", true), sent) }
     }
     @Test fun boundFilesDisplayTheOriginalIntentWithoutCallingTheTaskComplete() {
@@ -176,7 +178,7 @@ class UploadsPanelTest {
             val composer = rule.onNodeWithTag("message-composer").fetchSemanticsNode().boundsInRoot
             assertTrue("The attachment composer must not cover the title-bar back action", back.bottom <= composer.top)
             rule.onNodeWithText("消息内容").assertIsDisplayed()
-            rule.onNodeWithContentDescription("发送").assertIsDisplayed().assertIsEnabled()
+            rule.onNodeWithContentDescription("发送 · 排队").assertIsDisplayed().assertIsEnabled()
             fun revealFileActions() {
                 val options = rule.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.VerticalScrollAxisRange) and
                     hasAnyDescendant(hasContentDescription("查看附件详情：$name")))

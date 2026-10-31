@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class CommandOutboxState(val records: List<PendingCommand> = emptyList(), val connected: Boolean = false, val sending: Boolean = false, val error: String? = null, val canArchive: Boolean = false, val canAttachFiles: Boolean = false)
+data class CommandOutboxState(val records: List<PendingCommand> = emptyList(), val connected: Boolean = false, val sending: Boolean = false, val error: String? = null, val canArchive: Boolean = false, val canAttachFiles: Boolean = false, val canAttachImages: Boolean = false)
 
 /** Shares the reader's authenticated socket; never writes automatically after a reconnect. */
 class SessionCommands internal constructor(private val api: RemoteApi, private val journal: CommandJournal, private val runtime: String, private val session: String?,
@@ -27,6 +27,8 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
     val state: StateFlow<CommandOutboxState> = mutable.asStateFlow()
     private val endpoint = AtomicReference<Endpoint?>()
     private val questionValidator=AtomicReference<(suspend (PendingCommand)->Unit)?>(null)
+    private val modelValidator = AtomicReference<(suspend (PendingCommand) -> Unit)?>(null)
+    private val forkValidator = AtomicReference<(suspend (PendingCommand) -> Unit)?>(null)
     private val generation = AtomicLong()
     private val sendQueue = Channel<Send>(8)
     private val refreshQueue = Channel<Unit>(Channel.CONFLATED)
@@ -43,15 +45,20 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         if (!scope.isActive) return
         endpoint.set(Endpoint(generation.incrementAndGet(), connection, epoch))
         update { it.copy(connected = canSend(connection), canArchive = supports(CommandKind.ARCHIVE, connection),
-            canAttachFiles = supports(CommandKind.MESSAGE, connection) && FILE_MESSAGE_CAPABILITY in connection.identity.capabilities) }; refreshQueue.trySend(Unit)
+            canAttachFiles = supports(CommandKind.MESSAGE, connection) && FILE_MESSAGE_CAPABILITY in connection.identity.capabilities,
+            canAttachImages = supports(CommandKind.MESSAGE, connection) && FILE_MESSAGE_CAPABILITY in connection.identity.capabilities && IMAGE_MESSAGE_CAPABILITY in connection.identity.capabilities) }; refreshQueue.trySend(Unit)
     }
     internal fun authorizeStatusReads() { statusAuthorized.set(true); query() }
     internal fun bindQuestions(validate: suspend (PendingCommand)->Unit) { questionValidator.set(validate) }
+    internal fun bindModels(validate: suspend (PendingCommand) -> Unit) { modelValidator.set(validate) }
+    internal fun bindForks(validate: suspend (PendingCommand) -> Unit) { forkValidator.set(validate) }
     internal fun disconnected() {
         generation.incrementAndGet(); endpoint.set(null)
         questionValidator.set(null)
+        modelValidator.set(null)
+        forkValidator.set(null)
         while (sendQueue.tryReceive().isSuccess) { /* Retire old-generation queued intent. */ }
-        update { it.copy(connected = false, sending = false, canArchive = false, canAttachFiles = false) }
+        update { it.copy(connected = false, sending = false, canArchive = false, canAttachFiles = false, canAttachImages = false) }
     }
     private fun supports(kind: CommandKind, connection: SessionRelayConnection): Boolean {
         val capability = when (kind) {
@@ -59,6 +66,8 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
             CommandKind.CANCEL -> "session.cancel.v1"
             CommandKind.ARCHIVE -> "session.archive.v1"
             CommandKind.CREATE -> "session.create.v1"
+            CommandKind.FORK -> SESSION_FORK_CAPABILITY
+            CommandKind.MODEL_SELECT -> SESSION_MODEL_SELECT_CAPABILITY
             CommandKind.QUESTION -> "question.blocking.v1"
             CommandKind.TIMED_QUESTION -> "question.timed.v1"
         }
@@ -66,16 +75,22 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
             "command.relay.v1" in connection.identity.capabilities && capability in connection.identity.capabilities
     }
     private fun canSend(connection: SessionRelayConnection) = if (session == null) supports(CommandKind.CREATE, connection)
-        else listOf(CommandKind.MESSAGE, CommandKind.CANCEL, CommandKind.ARCHIVE, CommandKind.QUESTION, CommandKind.TIMED_QUESTION).any { supports(it, connection) }
+        else listOf(CommandKind.MESSAGE, CommandKind.CANCEL, CommandKind.ARCHIVE, CommandKind.FORK, CommandKind.MODEL_SELECT, CommandKind.QUESTION, CommandKind.TIMED_QUESTION).any { supports(it, connection) }
     private suspend fun loadRecords() = if (session == null) journal.listCreations(runtime).filter { it.intent.workspaceId in scopeGrant.workspaces } else journal.list(runtime, session)
     private suspend fun localRecords() = recordsLock.withLock { loadRecords().also { rows -> update { it.copy(records=rows) } } }
     private suspend fun saveOriginal(intent: CommandIntent) = recordsLock.withLock {
         if(intent.kind.question && loadRecords().any {it.intent.kind==intent.kind && it.intent.payload.string("question_id")==intent.payload.string("question_id") && it.intent.questionDefinition==intent.questionDefinition && it.remote!=RemoteCommandState.REJECTED}) throw CommandDataException("question.reconcile_required")
+        if (intent.kind == CommandKind.MODEL_SELECT && loadRecords().any { it.intent.kind == CommandKind.MODEL_SELECT && it.remote !in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED) }) throw CommandDataException("command.reconcile_required")
+        if (intent.kind == CommandKind.FORK && loadRecords().any { it.intent.kind == CommandKind.FORK && it.remote !in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED) }) throw CommandDataException("command.reconcile_required")
         journal.create(intent);val rows=loadRecords();update {it.copy(records=rows)}
     }
-    suspend fun submit(mode: String, text: String, sendNow: Boolean = true, fileIds: List<String> = emptyList()): String {
+    suspend fun submit(mode: String, text: String, sendNow: Boolean = true, fileIds: List<String> = emptyList(), imageFileIds: List<String> = emptyList()): String {
         if (session == null || !scope.isActive || "message.submit" !in scopeGrant.actions || "command.status" !in scopeGrant.actions) throw RemoteRequestException("access.denied")
-        val intent = CommandIntent.message(UUID.randomUUID().toString(), runtime, session, mode, text, fileIds)
+        if (imageFileIds.isNotEmpty()) {
+            val target = endpoint.get() ?: throw RemoteRequestException("image.unsupported")
+            if (!supports(CommandKind.MESSAGE, target.connection) || IMAGE_MESSAGE_CAPABILITY !in target.connection.identity.capabilities || FILE_MESSAGE_CAPABILITY !in target.connection.identity.capabilities) throw RemoteRequestException("image.unsupported")
+        }
+        val intent = CommandIntent.message(UUID.randomUUID().toString(), runtime, session, mode, text, fileIds, imageFileIds)
         saveOriginal(intent); refreshQueue.trySend(Unit)
         if (sendNow) sendPending(intent.requestId)
         return intent.requestId
@@ -96,6 +111,28 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
         if (!supports(CommandKind.ARCHIVE, target.connection)) throw RemoteRequestException("access.denied")
         val intent = CommandIntent.archive(UUID.randomUUID().toString(), runtime, session, target.epoch, archived, stopActivity)
         saveOriginal(intent); query(); enqueue(intent.requestId, target)
+        return intent.requestId
+    }
+    internal suspend fun selectModel(provider: String, model: String, reasoningEffort: String?, expectedEpoch: String): String {
+        if (session == null || !scope.isActive) throw RemoteRequestException("access.denied")
+        val target = endpoint.get() ?: throw RelayException("runtime.offline")
+        if (target.epoch != expectedEpoch) throw CommandDataException("runtime.changed")
+        if (!supports(CommandKind.MODEL_SELECT, target.connection) || modelValidator.get() == null) throw RemoteRequestException("access.denied")
+        val intent = CommandIntent.selectModel(UUID.randomUUID().toString(), runtime, session, expectedEpoch, provider, model, reasoningEffort)
+        saveOriginal(intent); query()
+        if (endpoint.get() === target) enqueue(intent.requestId, target)
+        return intent.requestId
+    }
+    internal suspend fun forkSession(anchor: SessionForkAnchor, workspaceId: String, expectedEpoch: String): String {
+        if (session == null || !scope.isActive) throw RemoteRequestException("access.denied")
+        val target = endpoint.get() ?: throw RemoteRequestException("runtime.offline")
+        if (target.epoch != Contract.uuid(expectedEpoch)) throw CommandDataException("runtime.changed")
+        if (!supports(CommandKind.FORK, target.connection) || "session.create" !in scopeGrant.actions || workspaceId !in scopeGrant.workspaces) throw RemoteRequestException("access.denied")
+        val validate = forkValidator.get() ?: throw CommandDataException("message.stale")
+        val intent = CommandIntent.forkSession(UUID.randomUUID().toString(), runtime, session, target.epoch, workspaceId, anchor)
+        validate(CommandEvolution.created(intent, System.currentTimeMillis()))
+        saveOriginal(intent); query()
+        if (endpoint.get() === target) enqueue(intent.requestId, target)
         return intent.requestId
     }
     internal suspend fun createSession(workspace: String, preset: String, expectedEpoch: String): String {
@@ -146,6 +183,7 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
                 val known = loadRecords().firstOrNull { it.intent.requestId == event.id } ?: throw CommandDataException("command.not_found")
                 if (!supports(known.intent.kind, target.connection)) throw CommandDataException("access.denied")
                 if (known.intent.fileIds().isNotEmpty() && FILE_MESSAGE_CAPABILITY !in target.connection.identity.capabilities) throw CommandDataException("file.unsupported")
+                if (known.intent.imageFileIds().isNotEmpty() && IMAGE_MESSAGE_CAPABILITY !in target.connection.identity.capabilities) throw CommandDataException("image.unsupported")
                 if (known.intent.epoch != null && known.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 if (known.attempts > 0) {
                     val proof = try { status(known) }
@@ -161,11 +199,15 @@ class SessionCommands internal constructor(private val api: RemoteApi, private v
                     if (proof != null) { journal.record(proof); journal.rearm(event.id, proof) }
                 }
                 if(known.intent.kind.question) (questionValidator.get() ?: throw CommandDataException("question.stale"))(known)
+                if (known.intent.kind == CommandKind.MODEL_SELECT) (modelValidator.get() ?: throw CommandDataException("model.stale"))(known)
+                if (known.intent.kind == CommandKind.FORK) (forkValidator.get() ?: throw CommandDataException("message.stale"))(known)
                 val record = journal.beginAttempt(event.id); attempted = true
                 if (record.intent.runtimeId != runtime || record.intent.sessionId != session || record.intent.epoch != null && record.intent.epoch != target.epoch) throw CommandDataException("runtime.changed")
                 currentCoroutineContext().ensureActive()
                 if (endpoint.get() !== target) throw RelayException("relay.disconnected")
                 if(record.intent.kind.question) (questionValidator.get() ?: throw CommandDataException("question.stale"))(record)
+                if (record.intent.kind == CommandKind.MODEL_SELECT) (modelValidator.get() ?: throw CommandDataException("model.stale"))(record)
+                if (record.intent.kind == CommandKind.FORK) (forkValidator.get() ?: throw CommandDataException("message.stale"))(record)
                 update { it.copy(sending = true, error = null) }
                 target.connection.send(record.intent.frame()); query()
             } catch (error: CancellationException) { throw error }

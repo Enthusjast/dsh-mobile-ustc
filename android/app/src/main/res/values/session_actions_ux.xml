@@ -1,0 +1,13 @@
+<resources>
+    <string name="session_actions_patch_copied">已复制完整补丁</string>
+    <string name="session_actions_changes">工作区改动</string>
+    <string name="session_actions_images">图片与拍照</string>
+    <string name="session_actions_fork_checkpoint">分支检查点已确认</string>
+    <string name="session_actions_input_recovery">先前输入保存时遇到问题；当前新稿未被覆盖。</string>
+    <string name="session_actions_keep_current">保留当前</string>
+    <string name="session_actions_recover_input">取回原输入</string>
+    <string name="session_actions_replace_draft">替换当前未提交文字？</string>
+    <string name="session_actions_recovery_detail">只恢复先前的文字与发送模式，不恢复附件、不转交或重放原请求。当前新稿将被替换；恢复后仍需明确发送。</string>
+    <string name="session_actions_confirm_recovery">确认取回</string>
+    <string name="session_actions_directory_retained">上次已授权的目录；刷新核对期间暂不能打开。</string>
+</resources>

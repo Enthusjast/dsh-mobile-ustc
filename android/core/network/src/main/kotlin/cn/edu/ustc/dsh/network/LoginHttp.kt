@@ -238,6 +238,36 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         Contract.uuid(runtimeId)
         JsonDocument.parse(read("/v1/runtimes/$runtimeId/sessions")).root
     }
+    /** Metadata is requested only for a current explicit action; old grants keep the old endpoint. */
+    suspend fun directorySessions(runtimeId: String, names: Boolean, current: () -> Unit = {}): List<SessionDirectoryEntry> = mutex.withLock {
+        Contract.uuid(runtimeId)
+        current()
+        if (!names) {
+            val root = JsonDocument.parse(request("GET", "/v1/runtimes/$runtimeId/sessions", beforeSend = current)).root
+            current()
+            root.exactKeys("ok", "data")
+            if (root["ok"] != JsonBoolean(true)) throw ProtocolException()
+            val data = root.obj("data"); data.exactKeys("items")
+            val rows = data.array("items").map { SessionDirectoryEntry.parse(it as? JsonObject ?: throw ProtocolException()) }
+            val ids = HashSet<String>()
+            for (row in rows) if (!ids.add(row.id)) throw ProtocolException()
+            return@withLock rows
+        }
+        val rows = ArrayList<SessionDirectoryEntry>()
+        var cursor: String? = null
+        do {
+            // 25 rows also bound Go's HTML-safe JSON escaping below JsonDocument.MAX_BYTES.
+            val path = "/v1/runtimes/$runtimeId/session-directory?projection=names.v1&limit=25" + (cursor?.let { "&cursor=$it" } ?: "")
+            val page = SessionDirectoryPage.parse(JsonDocument.parse(request("GET", path, beforeSend = current)).root, runtimeId)
+            current()
+            for (row in page.items) {
+                if (rows.size >= 20_000 || rows.lastOrNull()?.id?.let { it >= row.id } == true) throw ProtocolException()
+                rows.add(row)
+            }
+            cursor = page.nextCursor
+        } while (cursor != null)
+        java.util.Collections.unmodifiableList(rows)
+    }
     suspend fun sessionTarget(runtime: String, session: String, current: () -> Unit = {}): SessionTarget = mutex.withLock {
         Contract.uuid(runtime); Contract.uuid(session)
         val root = JsonDocument.parse(request("GET", "/v1/runtimes/$runtime/sessions/$session", beforeSend = current)).root
@@ -476,8 +506,10 @@ class RemoteApi internal constructor(private val http: LoginHttp, private val co
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     suspend fun sessionTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {
-        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide", "file.download") } ||
-            scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel") } && "command.status" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
+        if ("session.read" !in scope.actions || scope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "session.model.select", "question.answer", "command.status", "approval.decide", "file.download", "session.changes.read", "session.fork", "session.create") } ||
+            scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel", "session.fork") } && "command.status" !in scope.actions ||
+            "session.fork" in scope.actions && ("session.create" !in scope.actions || scope.workspaces.isEmpty()) ||
+            "session.create" in scope.actions && "session.fork" !in scope.actions || scope.workspaces.isEmpty() && scope.sessions.isEmpty()) throw RemoteRequestException("access.denied")
         issueSessionTicket(runtimeId, deviceId, scope)
     }
     internal suspend fun creationTicket(runtimeId: String, deviceId: String, scope: RelayScope): RealtimeSessionTicket = mutex.withLock {

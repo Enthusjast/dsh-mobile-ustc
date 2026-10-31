@@ -10,6 +10,7 @@ internal data class CommandRow(
     @PrimaryKey val requestId: String, val runtimeId: String, val sessionId: String?, val intent: ByteArray, val digest: String,
     val delivery: String, val remote: String?, val attempts: Long, val revision: Long, val createdAt: Long, val updatedAt: Long,
     val remoteTimestamp: String?, val everHostSaved: Boolean, val everAgentQueued: Boolean, val error: String?, val workspaceId: String? = null, val createdSessionId: String? = null,
+    val forkOutcome: ByteArray? = null,
 )
 
 @Entity(tableName = "approval_decisions", indices = [Index(value = ["approvalId"], unique = true), Index(value = ["runtimeId", "sessionId", "createdAt"])])
@@ -71,17 +72,20 @@ internal data class FileExportRow(@PrimaryKey val requestId: String, val runtime
     @Query("DELETE FROM approval_decisions WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND workspaceId NOT IN (:workspaces)") fun restrictApprovals(runtime: String, sessions: List<String>, workspaces: List<String>)
     @Query("DELETE FROM approval_decisions WHERE requestId IN (SELECT requestId FROM approval_decisions WHERE finalized=1 ORDER BY createdAt,requestId LIMIT 32)") fun evictFinalApprovals()
     @Query("SELECT * FROM commands WHERE runtimeId=:runtime AND sessionId=:session ORDER BY createdAt,requestId") fun list(runtime: String, session: String): List<CommandRow>
-    @Query("SELECT * FROM commands WHERE runtimeId=:runtime AND workspaceId IS NOT NULL ORDER BY createdAt,requestId") fun creations(runtime: String): List<CommandRow>
+    @Query("SELECT * FROM commands WHERE runtimeId=:runtime AND sessionId IS NULL AND workspaceId IS NOT NULL ORDER BY createdAt,requestId") fun creations(runtime: String): List<CommandRow>
     @Query("SELECT COUNT(*) FROM commands") fun count(): Int
     @Query("SELECT COALESCE(SUM(length(intent)),0) FROM commands") fun bytes(): Long
     @Insert fun insert(row: CommandRow)
     @Update fun update(row: CommandRow): Int
     @Query("DELETE FROM commands WHERE requestId=:id") fun delete(id: String)
     @Query("DELETE FROM commands WHERE runtimeId=:runtime") fun revokeRuntime(runtime: String)
-    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND workspaceId IS NULL") fun revokeSessionCommands(runtime: String)
-    @Query("SELECT DISTINCT runtimeId FROM commands WHERE workspaceId IS NOT NULL") fun creationRuntimes(): List<String>
-    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND workspaceId IS NOT NULL") fun revokeCreations(runtime: String)
-    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND workspaceId IS NOT NULL AND workspaceId NOT IN (:workspaces)") fun restrictCreations(runtime: String, workspaces: List<String>)
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND sessionId IS NOT NULL") fun revokeSessionCommands(runtime: String)
+    @Query("SELECT DISTINCT runtimeId FROM commands WHERE sessionId IS NULL AND workspaceId IS NOT NULL") fun creationRuntimes(): List<String>
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND sessionId IS NULL AND workspaceId IS NOT NULL") fun revokeCreations(runtime: String)
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND sessionId IS NULL AND workspaceId IS NOT NULL AND workspaceId NOT IN (:workspaces)") fun restrictCreations(runtime: String, workspaces: List<String>)
+    @Query("SELECT DISTINCT runtimeId FROM commands WHERE sessionId IS NOT NULL AND workspaceId IS NOT NULL") fun forkRuntimes(): List<String>
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND sessionId IS NOT NULL AND workspaceId IS NOT NULL") fun revokeForks(runtime: String)
+    @Query("DELETE FROM commands WHERE runtimeId=:runtime AND sessionId IS NOT NULL AND workspaceId IS NOT NULL AND workspaceId NOT IN (:workspaces)") fun restrictForks(runtime: String, workspaces: List<String>)
     @Query("DELETE FROM commands WHERE requestId IN (SELECT requestId FROM commands WHERE delivery='CONFIRMED' AND remote IN ('AGENT_QUEUED','OBSERVED','SETTLED','REJECTED') ORDER BY createdAt,requestId LIMIT 32)") fun evictDelivered()
     @Query("SELECT * FROM cached_sessions WHERE runtimeId=:runtime AND sessionId=:session") fun cachedSession(runtime: String, session: String): CachedSessionRow?
     @Query("SELECT * FROM cached_records WHERE runtimeId=:runtime AND sessionId=:session ORDER BY seq") fun cachedRecords(runtime: String, session: String): List<CachedRecordRow>
@@ -98,5 +102,5 @@ internal data class FileExportRow(@PrimaryKey val requestId: String, val runtime
     @Query("DELETE FROM cached_sessions WHERE runtimeId=:runtime AND sessionId NOT IN (:sessions) AND (workspaceId IS NULL OR workspaceId NOT IN (:workspaces))") fun restrictCache(runtime: String, sessions: List<String>, workspaces: List<String>)
 }
 
-@Database(entities = [DatabaseIdentity::class, CommandRow::class, ApprovalDecisionRow::class, CachedSessionRow::class, CachedRecordRow::class, FileUploadRow::class, FileExportRow::class], version = 6, exportSchema = true)
+@Database(entities = [DatabaseIdentity::class, CommandRow::class, ApprovalDecisionRow::class, CachedSessionRow::class, CachedRecordRow::class, FileUploadRow::class, FileExportRow::class], version = 7, exportSchema = true)
 internal abstract class CommandDatabase : RoomDatabase() { abstract fun commands(): CommandDao }

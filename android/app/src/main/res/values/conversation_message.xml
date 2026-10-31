@@ -1,0 +1,20 @@
+<resources>
+    <string name="conversation_message_role_user">你</string>
+    <string name="conversation_message_role_assistant">助手</string>
+    <string name="conversation_message_role_tool">工具</string>
+    <string name="conversation_message_role_notice">状态</string>
+    <string name="conversation_message_more">更多</string>
+    <string name="conversation_message_more_description">更多消息操作</string>
+    <string name="conversation_message_copy">复制消息原文</string>
+    <string name="conversation_message_quote">引用到本地草稿</string>
+    <string name="conversation_message_copy_failed">复制失败，请通过“更多”重试。</string>
+    <string name="conversation_message_reasoning">思考过程</string>
+    <string name="conversation_message_tool">工具调用信息</string>
+    <string name="conversation_message_expanded">已展开</string>
+    <string name="conversation_message_collapsed">已收起</string>
+    <string name="conversation_message_call_id">调用标识：%1$s</string>
+    <string name="conversation_message_other">此内容请在电脑端查看。</string>
+    <string name="conversation_message_receiving">正在接收消息…</string>
+    <string name="conversation_message_interrupted">此次回复未完成。</string>
+    <string name="conversation_message_unconfirmed">尚未确认保存</string>
+</resources>

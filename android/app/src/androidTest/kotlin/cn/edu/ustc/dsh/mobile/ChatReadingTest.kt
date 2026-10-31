@@ -11,6 +11,11 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.semantics.SemanticsActions
 import org.junit.Assert.assertEquals
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.runtime.SideEffect
+import cn.edu.ustc.dsh.ui.DshReadingStyle
+import cn.edu.ustc.dsh.ui.LocalDshReadingStyle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -119,5 +124,31 @@ class ChatReadingTest {
         rule.onNodeWithText(target).performTouchInput { click() }
         rule.onNodeWithText("打开链接").performClick()
         rule.runOnIdle { assertEquals(target, opened) }
+    }
+    @Test fun readingPreferencesScaleBodyAndCodeIndependentlyWithoutReplacingSystemScale() {
+        val reading = mutableStateOf(DshReadingStyle(bodyScale = 1.2f, codeScale = 0.9f, wrapCode = false))
+        var systemScale = 0f
+        rule.setContent { DshTheme {
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDshReadingStyle provides reading.value) {
+                SideEffect { systemScale = density.fontScale }
+                RichMessageText("正文示例\n\n```kotlin\ncode-line\n```")
+            }
+        } }
+        rule.waitUntil(10_000) { rule.onAllNodesWithText("code-line\n").fetchSemanticsNodes().isNotEmpty() }
+        fun layout(text: String): TextLayoutResult {
+            val results = mutableListOf<TextLayoutResult>()
+            rule.onNodeWithText(text).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(results) }
+            return results.single()
+        }
+        val originalScale = systemScale
+        val body = layout("正文示例").layoutInput.style.fontSize.value
+        val code = layout("code-line\n").layoutInput.style.fontSize.value
+        org.junit.Assert.assertFalse(layout("code-line\n").layoutInput.softWrap)
+        rule.runOnIdle { reading.value = reading.value.copy(bodyScale = 1.6f, wrapCode = true) }
+        assertEquals(body * (1.6f / 1.2f), layout("正文示例").layoutInput.style.fontSize.value, 0.01f)
+        assertEquals(code, layout("code-line\n").layoutInput.style.fontSize.value, 0.01f)
+        org.junit.Assert.assertTrue(layout("code-line\n").layoutInput.softWrap)
+        assertEquals(originalScale, systemScale, 0f)
     }
 }

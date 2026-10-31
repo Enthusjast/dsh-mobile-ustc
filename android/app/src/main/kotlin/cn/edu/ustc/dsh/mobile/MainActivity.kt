@@ -14,7 +14,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import cn.edu.ustc.dsh.ui.DshTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -31,7 +30,7 @@ class MainActivity : FragmentActivity() {
         val biometrics = BiometricUi(this, model::promptOpened, model::authenticated, model::authenticationCancelled)
         biometrics.update(model.state.value.authenticationId, null)
         setContent {
-            DshTheme { HomeRoute(model, onSecuritySettings = ::securitySettings) { biometrics.cancel(); model.cancel() } }
+            AppearanceHost(model.state) { HomeRoute(model, onSecuritySettings = ::securitySettings) { biometrics.cancel(); model.cancel() } }
         }
         NotificationOpen.parse(intent)?.let { model.openNotification(it.bindingId, it.notificationId) }
         lifecycleScope.launch {

@@ -23,6 +23,7 @@ class CacheMigrationTest {
     @Test fun encryptedVersionOneDatabaseKeepsTheOriginalUncertainCommandAndGainsHistoryTables(): Unit = runBlocking { upgrade(1) }
     @Test fun encryptedVersionTwoKeepsHistoryAndIntentWhenCreationTargetsAreAdded(): Unit=runBlocking { upgrade(2) }
     @Test fun encryptedVersionThreeKeepsCommandsAndHistoryWhenApprovalStorageIsAdded(): Unit=runBlocking { upgrade(3) }
+    @Test fun encryptedVersionSixKeepsOriginalsAndPersistsPartialForkOutcome(): Unit = runBlocking { upgrade(6) }
     private suspend fun upgrade(version: Int) {
         val instrumentation = InstrumentationRegistry.getInstrumentation(); val context = instrumentation.targetContext
         assumeTrue("explicit owned account fixture required", InstrumentationRegistry.getArguments().getString("accountFixture") == "true")
@@ -38,6 +39,8 @@ class CacheMigrationTest {
         val directory = File(context.noBackupFilesDir, "mobile-data/${owner.scopeHash}/${owner.fingerprint}")
         check(directory.mkdirs()); System.loadLibrary("sqlcipher")
         val password = DatabaseKeyVault(context, owner, directory).open(false)
+        var forkOriginal: CommandIntent? = null
+        val forkChild = UUID.randomUUID().toString()
         try {
             val schema = JSONObject(instrumentation.context.assets.open("cn.edu.ustc.dsh.data.CommandDatabase/$version.json").bufferedReader().use { it.readText() }).getJSONObject("database")
             val factory = SupportOpenHelperFactory(password.copyOf(), null, true)
@@ -96,6 +99,24 @@ class CacheMigrationTest {
                 val epoch = UUID.randomUUID().toString()
                 migrated.saveTranscript(command.runtimeId, command.sessionId!!, null, epoch, CachedTranscript(epoch, System.currentTimeMillis(), emptyList()).transcript)
                 assertNotNull(migrated.loadTranscript(command.runtimeId, command.sessionId!!, null))
+                if (version == 6) {
+                    val fork = CommandIntent.forkSession(UUID.randomUUID().toString(), command.runtimeId, command.sessionId!!, epoch, workspace,
+                        SessionForkAnchor(UUID.randomUUID().toString(), UUID.randomUUID().toString(), 0, "d".repeat(64), "e".repeat(64)))
+                    migrated.create(fork); migrated.beginAttempt(fork.requestId)
+                    migrated.record(CommandReceipt(fork.requestId, fork.sessionId, fork.digest, RemoteCommandState.OUTCOME_UNKNOWN, java.time.Instant.now().toString(), epoch,
+                        workspace, "session.fork", forkChild, SessionForkOutcome("failed", "persisted")))
+                    assertTrue(migrated.listCreations(command.runtimeId).none { it.intent.requestId == fork.requestId })
+                    forkOriginal = fork
+                }
+            }
+            forkOriginal?.let { fork ->
+                SqlCommandJournal.open(context, owner).use { reopened ->
+                    val restored = reopened.list(fork.runtimeId, fork.sessionId!!).single { it.intent.requestId == fork.requestId }
+                    assertArrayEquals(fork.storageBytes(), restored.intent.storageBytes())
+                    assertEquals(forkChild, restored.createdSessionId); assertEquals(fork.sessionId, restored.intent.sessionId)
+                    assertEquals(RemoteCommandState.OUTCOME_UNKNOWN, restored.remote)
+                    assertEquals(SessionForkOutcome("failed", "persisted"), restored.forkOutcome)
+                }
             }
         } finally { password.fill(0); SqlCommandJournal.eraseAccount(context, owner.accountId, owner.organizationId) }
     }

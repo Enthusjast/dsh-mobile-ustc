@@ -123,6 +123,34 @@ class SessionExports internal constructor(private val api: RemoteApi, private va
             finally { preparing.set(false); update { it.copy(preparing = false) } }
         }
     }
+    /** Only SessionMedia supplies this current reader-bound source; a display reference itself grants nothing. */
+    internal suspend fun prepareMedia(source: ExportSource, reference: VisibleMediaReference, readerCurrent: () -> Unit): RemoteExportStatus {
+        val target = endpoint.get() ?: throw RemoteRequestException("file.export_stale")
+        fun currentMedia() {
+            current(target); readerCurrent()
+            if (!source.current()) throw RemoteRequestException("file.export_stale")
+        }
+        currentMedia()
+        if (source.directory || source.unavailable || source.origin != ExportOrigin.SESSION_ATTACHMENT || source.name != reference.manifest.name || source.sizeBytes != reference.manifest.sizeBytes) throw ProtocolException()
+        val intent = FileExportIntent(UUID.randomUUID().toString(), runtimeId, sessionId, target.epoch, source.id, workspace, source.origin, source.name, source.sizeBytes!!)
+        journal.createExport(intent)
+        currentCoroutineContext().ensureActive(); currentMedia()
+        var file = RemoteExportStatus.parse(exchange("file.export.request", intent.requestId, target, jsonObject("source_id" to source.id.json())).obj("file"))
+        mutations.withLock { journal.registeredExport(intent.requestId, file) }
+        try {
+            return withTimeout(300_000) {
+                do {
+                    currentCoroutineContext().ensureActive(); currentMedia()
+                    if (file.runtimeId != runtimeId || file.sessionId != sessionId || !file.manifest.same(reference.manifest)) throw RemoteRequestException("file.integrity_mismatch")
+                    if (file.downloadable()) break
+                    if (file.state == FileTransferState.REJECTED || file.state == FileTransferState.EXPIRED) throw RemoteRequestException(file.error ?: "file.state_changed")
+                    delay(500)
+                    file = api.exportStatus(file.id)
+                } while (true)
+                file
+            }
+        } finally { reload() }
+    }
     fun cancel(id: String) {
         Contract.uuid(id)
         scope.launch {

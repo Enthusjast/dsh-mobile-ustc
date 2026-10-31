@@ -9,7 +9,7 @@ class CommandDataException(val code: String) : IllegalStateException(code)
 typealias CommandOwner = LocalDataOwner
 
 enum class CommandKind(val wire: String) {
-    MESSAGE("message.submit"), CANCEL("session.cancel"), ARCHIVE("session.archive"), CREATE("session.create"), QUESTION("question.answer"), TIMED_QUESTION("question.timed.answer");
+    MESSAGE("message.submit"), CANCEL("session.cancel"), ARCHIVE("session.archive"), CREATE("session.create"), FORK("session.fork"), MODEL_SELECT("session.model.select"), QUESTION("question.answer"), TIMED_QUESTION("question.timed.answer");
     val action get()=if(this==TIMED_QUESTION) "question.answer" else wire
     val question get()=this==QUESTION || this==TIMED_QUESTION
 }
@@ -34,21 +34,33 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
     }
     fun storageBytes(): ByteArray = JsonDocument.of(if(questionDefinition==null) frame() else frame().with("local_context_sha256" to questionDefinition.json())).canonicalBytes()
     fun text(): String? = if (kind == CommandKind.MESSAGE) payload.array("content").map { it as JsonObject }.filter { it.string("type") == "text" }.joinToString("\n") { it.string("text") } else null
-    fun fileIds(): List<String> = if (kind == CommandKind.MESSAGE) payload.array("content").map { it as JsonObject }.filter { it.string("type") == "file" }.map { it.string("file_id") } else emptyList()
+    fun fileIds(): List<String> = if (kind == CommandKind.MESSAGE) payload.array("content").map { it as JsonObject }.filter { it.string("type") != "text" }.map { it.string("file_id") } else emptyList()
+    fun imageFileIds(): List<String> = if (kind == CommandKind.MESSAGE) payload.array("content").map { it as JsonObject }.filter { it.string("type") == "image" }.map { it.string("file_id") } else emptyList()
+    fun modelSelection(): SessionModelSelection? = if (kind == CommandKind.MODEL_SELECT) SessionModelSelection(payload.string("provider"),
+        payload.string("model"), (payload.fields["reasoning_effort"] as? JsonString)?.value) else null
     override fun toString() = "CommandIntent(${kind.wire})"
     companion object {
-        fun message(request: String, runtime: String, session: String, mode: String, text: String, fileIds: List<String> = emptyList()): CommandIntent =
+        fun message(request: String, runtime: String, session: String, mode: String, text: String, fileIds: List<String> = emptyList(), imageFileIds: List<String> = emptyList()): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "message.submit".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(),
                 "payload" to jsonObject("mode" to mode.json(), "content" to JsonArray((if (text.isBlank()) emptyList() else listOf(jsonObject("type" to "text".json(), "text" to text.json()))) +
-                    fileIds.map { jsonObject("type" to "file".json(), "file_id" to it.json()) }))))
+                    fileIds.map { jsonObject("type" to "file".json(), "file_id" to it.json()) } + imageFileIds.map { jsonObject("type" to "image".json(), "file_id" to it.json()) }))))
         fun cancel(request: String, runtime: String, session: String, epoch: String): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "session.cancel".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(), "runtime_epoch" to epoch.json(), "payload" to jsonObject()))
         fun archive(request: String, runtime: String, session: String, epoch: String, archived: Boolean, stopActivity: Boolean): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "session.archive".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(), "runtime_epoch" to epoch.json(),
                 "payload" to jsonObject("archived" to JsonBoolean(archived), "stop_activity" to JsonBoolean(stopActivity))))
+        fun selectModel(request: String, runtime: String, session: String, epoch: String, provider: String, model: String, reasoningEffort: String? = null): CommandIntent {
+            var payload = jsonObject("provider" to provider.json(), "model" to model.json())
+            if (reasoningEffort != null) payload = payload.with("reasoning_effort" to reasoningEffort.json())
+            return parse(jsonObject("v" to 1L.json(), "type" to "session.model.select".json(), "request_id" to request.json(),
+                "runtime_id" to runtime.json(), "session_id" to session.json(), "runtime_epoch" to epoch.json(), "payload" to payload))
+        }
         fun createSession(request: String, runtime: String, workspace: String, preset: String, epoch: String): CommandIntent =
             parse(jsonObject("v" to 1L.json(), "type" to "session.create".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "runtime_epoch" to epoch.json(),
                 "payload" to jsonObject("workspace_id" to workspace.json(), "preset" to preset.json())))
+        fun forkSession(request: String, runtime: String, session: String, epoch: String, workspace: String, anchor: SessionForkAnchor): CommandIntent =
+            parse(jsonObject("v" to 1L.json(), "type" to "session.fork".json(), "request_id" to request.json(), "runtime_id" to runtime.json(), "session_id" to session.json(),
+                "runtime_epoch" to epoch.json(), "payload" to jsonObject("workspace_id" to workspace.json(), "anchor" to anchor.json())))
         fun answerQuestion(request: String,runtime: String,session: String,epoch: String,timed: Boolean,answers: QuestionAnswers,definition: String): CommandIntent {
             val parsed=parse(jsonObject("v" to 1L.json(),"type" to (if(timed) "question.timed.answer" else "question.answer").json(),"request_id" to request.json(),"runtime_id" to runtime.json(),"session_id" to session.json(),"runtime_epoch" to epoch.json(),"payload" to answers.json()))
             return CommandIntent(parsed.requestId,parsed.runtimeId,parsed.sessionId,parsed.kind,parsed.epoch,parsed.payload,questionDefinition=Contract.digest(definition))
@@ -68,7 +80,13 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
             if (root.fields.keys != fields || root.integer("v", 1, 1) != 1L) throw ProtocolException()
             val payload = root.obj("payload")
             if(kind.question) { QuestionAnswers.parse(payload) }
-            else if (kind == CommandKind.CREATE) {
+            else if (kind == CommandKind.MODEL_SELECT) {
+                payload.exactKeys(*(setOf("provider", "model") + if ("reasoning_effort" in payload.fields) setOf("reasoning_effort") else emptySet()).toTypedArray())
+                SessionModelIdentifiers.id(payload.string("provider")); SessionModelIdentifiers.id(payload.string("model"))
+                if ("reasoning_effort" in payload.fields) SessionModelIdentifiers.id(payload.string("reasoning_effort"), 64)
+            } else if (kind == CommandKind.FORK) {
+                payload.exactKeys("workspace_id", "anchor"); Contract.uuid(payload.string("workspace_id")); SessionForkAnchor.parse(payload.obj("anchor"))
+            } else if (kind == CommandKind.CREATE) {
                 payload.exactKeys("workspace_id", "preset"); Contract.uuid(payload.string("workspace_id"))
                 if (!Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}").matches(payload.string("preset"))) throw ProtocolException()
             } else if (kind == CommandKind.ARCHIVE) {
@@ -84,7 +102,8 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
                 val files = hashSetOf<String>()
                 for (item in blocks) {
                     val block = item as? JsonObject ?: throw ProtocolException()
-                    if (block.string("type") == "file") {
+                    val type = block.string("type")
+                    if (type == "file" || type == "image") {
                         block.exactKeys("type", "file_id")
                         if (!files.add(Contract.uuid(block.string("file_id")))) throw ProtocolException()
                         continue
@@ -98,7 +117,7 @@ class CommandIntent private constructor(val requestId: String, val runtimeId: St
             // Enforce scalar Unicode independently of callers constructing JSON values.
             JsonDocument.of(root)
             return CommandIntent(root.string("request_id"), root.string("runtime_id"), if (kind == CommandKind.CREATE) null else root.string("session_id"), kind,
-                if (kind != CommandKind.MESSAGE) root.string("runtime_epoch") else null, payload, if (kind == CommandKind.CREATE) payload.string("workspace_id") else null)
+                if (kind != CommandKind.MESSAGE) root.string("runtime_epoch") else null, payload, if (kind == CommandKind.CREATE || kind == CommandKind.FORK) payload.string("workspace_id") else null)
         }
     }
 }
@@ -107,13 +126,20 @@ enum class RemoteCommandState(val wire: String) {
     RECEIVED("received"), HOST_ACCEPTED("host_accepted"), DISPATCHING("dispatching"), AGENT_QUEUED("agent_queued"), OBSERVED("observed"), SETTLED("settled"), REJECTED("rejected"), OUTCOME_UNKNOWN("outcome_unknown");
     companion object { fun parse(value: String) = entries.firstOrNull { it.wire == value } ?: throw ProtocolException() }
 }
-class CommandReceipt(val requestId: String, val sessionId: String?, val digest: String, val state: RemoteCommandState, val timestamp: String, val epoch: String? = null, val workspaceId: String? = null) {
+class CommandReceipt(val requestId: String, val sessionId: String?, val digest: String, val state: RemoteCommandState, val timestamp: String, val epoch: String? = null, val workspaceId: String? = null,
+    val commandType: String? = null, val childSessionId: String? = null, val forkOutcome: SessionForkOutcome? = null) {
     val instant: Instant
     val updatedAt: Long
     init {
-        listOfNotNull(requestId, sessionId, workspaceId).forEach(Contract::uuid); Contract.digest(digest); epoch?.let(Contract::uuid)
-        if (workspaceId == null && sessionId == null || workspaceId != null &&
-            (state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED) || (state == RemoteCommandState.SETTLED) != (sessionId != null))) throw ProtocolException()
+        listOfNotNull(requestId, sessionId, workspaceId, childSessionId).forEach(Contract::uuid); Contract.digest(digest); epoch?.let(Contract::uuid)
+        if (commandType == "session.fork") {
+            if (sessionId == null || workspaceId == null || childSessionId == sessionId || (childSessionId == null) != (forkOutcome == null) ||
+                state == RemoteCommandState.AGENT_QUEUED || state == RemoteCommandState.OBSERVED ||
+                state == RemoteCommandState.REJECTED && childSessionId != null || state == RemoteCommandState.SETTLED && (childSessionId == null || forkOutcome?.checkpoint != "persisted")) throw ProtocolException()
+        } else {
+            if (commandType != null || childSessionId != null || forkOutcome != null || workspaceId == null && sessionId == null || workspaceId != null &&
+                (state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED) || (state == RemoteCommandState.SETTLED) != (sessionId != null))) throw ProtocolException()
+        }
         updatedAt = relayTime(timestamp); instant = OffsetDateTime.parse(timestamp).toInstant()
     }
     companion object {
@@ -125,15 +151,18 @@ class CommandReceipt(val requestId: String, val sessionId: String?, val digest: 
             return body(frame.obj("payload"), frame.string("request_id"), frame.fields["session_id"]?.let { frame.string("session_id") }, actualEpoch)
         }
         fun status(root: JsonObject): CommandReceipt {
-            val fields = setOf("request_id", "state", "payload_sha256", "updated_at") + setOf("session_id", "workspace_id").filter { it in root.fields }
+            val fields = setOf("request_id", "state", "payload_sha256", "updated_at") + setOf("session_id", "workspace_id", "command_type", "child_session_id", "fork_outcome").filter { it in root.fields }
             root.exactKeys(*fields.toTypedArray())
             return body(JsonObject(root.fields.filterKeys { it !in setOf("request_id", "session_id") }), root.string("request_id"), root.fields["session_id"]?.let { root.string("session_id") }, null)
         }
         private fun body(payload: JsonObject, request: String, session: String?, epoch: String?): CommandReceipt {
-            val fields = setOf("state", "payload_sha256", "updated_at") + if ("workspace_id" in payload.fields) setOf("workspace_id") else emptySet()
+            val fork = payload.fields["command_type"] == "session.fork".json()
+            val fields = setOf("state", "payload_sha256", "updated_at") + if (fork) setOf("workspace_id", "command_type") +
+                setOf("child_session_id", "fork_outcome").filter { it in payload.fields } else if ("workspace_id" in payload.fields) setOf("workspace_id") else emptySet()
             payload.exactKeys(*fields.toTypedArray())
             return CommandReceipt(request, session, payload.string("payload_sha256"), RemoteCommandState.parse(payload.string("state")), payload.string("updated_at"), epoch,
-                payload.fields["workspace_id"]?.let { payload.string("workspace_id") })
+                payload.fields["workspace_id"]?.let { payload.string("workspace_id") }, if (fork) payload.string("command_type") else null,
+                payload.fields["child_session_id"]?.let { payload.string("child_session_id") }, payload.fields["fork_outcome"]?.let { SessionForkOutcome.parse(payload.obj("fork_outcome")) })
         }
     }
 }
@@ -141,7 +170,13 @@ class CommandReceipt(val requestId: String, val sessionId: String?, val digest: 
 /** Local delivery knowledge and remote persistence facts are separate axes. */
 enum class CommandDelivery { PENDING, RECONCILE, CONFIRMED, BLOCKED }
 class PendingCommand(val intent: CommandIntent, val delivery: CommandDelivery, val remote: RemoteCommandState?, val attempts: Long, val revision: Long, val createdAt: Long,
-    val updatedAt: Long, val remoteTimestamp: String?, val everHostSaved: Boolean, val everAgentQueued: Boolean, val error: String?, val createdSessionId: String? = null) {
+    val updatedAt: Long, val remoteTimestamp: String?, val everHostSaved: Boolean, val everAgentQueued: Boolean, val error: String?, val createdSessionId: String? = null,
+    val forkOutcome: SessionForkOutcome? = null) {
+    init {
+        if (forkOutcome != null && intent.kind != CommandKind.FORK || intent.kind == CommandKind.FORK &&
+            ((createdSessionId == null) != (forkOutcome == null) || remote == RemoteCommandState.AGENT_QUEUED || remote == RemoteCommandState.OBSERVED ||
+                remote == RemoteCommandState.REJECTED && createdSessionId != null)) throw ProtocolException()
+    }
     override fun toString() = "PendingCommand(${intent.kind}, $delivery, $remote)"
 }
 
@@ -168,28 +203,40 @@ object CommandEvolution {
         else copy(record, CommandDelivery.RECONCILE, now = now, error = code)
     fun receipt(record: PendingCommand, receipt: CommandReceipt): PendingCommand {
         val creation = record.intent.kind == CommandKind.CREATE
-        if (receipt.requestId != record.intent.requestId || receipt.workspaceId != record.intent.workspaceId || !creation && receipt.sessionId != record.intent.sessionId || receipt.digest != record.intent.digest ||
+        val fork = record.intent.kind == CommandKind.FORK
+        if (fork != (receipt.commandType == "session.fork") || receipt.requestId != record.intent.requestId || receipt.workspaceId != record.intent.workspaceId ||
+            !creation && receipt.sessionId != record.intent.sessionId || receipt.digest != record.intent.digest ||
             receipt.epoch != null && record.intent.epoch != null && receipt.epoch != record.intent.epoch) throw CommandDataException("command.request_conflict")
-        if (record.createdSessionId != null && receipt.sessionId != null && receipt.sessionId != record.createdSessionId) throw CommandDataException("command.request_conflict")
+        if (record.createdSessionId != null && (creation && receipt.sessionId != null && receipt.sessionId != record.createdSessionId ||
+            fork && receipt.childSessionId != null && receipt.childSessionId != record.createdSessionId)) throw CommandDataException("command.request_conflict")
         if (record.attempts == 0L) throw CommandDataException("command.unsent_receipt")
-        if(record.intent.kind in setOf(CommandKind.QUESTION,CommandKind.CANCEL,CommandKind.ARCHIVE) && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED,RemoteCommandState.OBSERVED)) throw CommandDataException("command.state_conflict")
+        if (record.intent.kind in setOf(CommandKind.QUESTION, CommandKind.CANCEL, CommandKind.ARCHIVE, CommandKind.MODEL_SELECT, CommandKind.FORK) &&
+            receipt.state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED)) throw CommandDataException("command.state_conflict")
         val previous = record.remoteTimestamp?.let { OffsetDateTime.parse(it).toInstant() }
         if (previous != null && receipt.instant < previous) return record
-        if (previous == receipt.instant && record.remote == receipt.state) return record
+        if (fork && receipt.state == RemoteCommandState.REJECTED && (record.createdSessionId != null || record.remote == RemoteCommandState.OUTCOME_UNKNOWN)) throw CommandDataException("command.state_conflict")
+        val child = record.createdSessionId ?: if (fork) receipt.childSessionId else if (creation && receipt.state == RemoteCommandState.SETTLED) receipt.sessionId else null
+        val outcome = if (fork) mergeForkOutcome(record.forkOutcome, receipt.forkOutcome) else null
+        if (previous == receipt.instant && record.remote == receipt.state && child == record.createdSessionId && outcome == record.forkOutcome) return record
         if (record.remote in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED) && record.remote != receipt.state) throw CommandDataException("command.state_conflict")
-        // A later weak status cannot erase a previously confirmed uncertain
-        // outcome and make an attempted command eligible for replay.
-        if (record.remote == RemoteCommandState.OUTCOME_UNKNOWN && receipt.state == RemoteCommandState.RECEIVED) return record
-        val saved = record.everHostSaved || receipt.state in setOf(RemoteCommandState.HOST_ACCEPTED, RemoteCommandState.DISPATCHING, RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED)
-        val queued = record.everAgentQueued || record.intent.kind == CommandKind.MESSAGE && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED) ||
-            record.intent.kind==CommandKind.TIMED_QUESTION && receipt.state in setOf(RemoteCommandState.AGENT_QUEUED,RemoteCommandState.OBSERVED)
-        if (saved && receipt.state == RemoteCommandState.RECEIVED || queued && receipt.state in setOf(RemoteCommandState.HOST_ACCEPTED, RemoteCommandState.DISPATCHING)) return record
-        return PendingCommand(record.intent, if (receipt.state == RemoteCommandState.OUTCOME_UNKNOWN) CommandDelivery.RECONCILE else CommandDelivery.CONFIRMED,
-            receipt.state, record.attempts, record.revision + 1, record.createdAt, maxOf(record.updatedAt, receipt.updatedAt), receipt.timestamp, saved, queued, null,
-            record.createdSessionId ?: if (creation && receipt.state == RemoteCommandState.SETTLED) receipt.sessionId else null)
+        if (!fork && record.remote == RemoteCommandState.OUTCOME_UNKNOWN && receipt.state == RemoteCommandState.RECEIVED) return record
+        val state = if (fork && record.remote == RemoteCommandState.OUTCOME_UNKNOWN && receipt.state in setOf(RemoteCommandState.RECEIVED, RemoteCommandState.HOST_ACCEPTED, RemoteCommandState.DISPATCHING)) RemoteCommandState.OUTCOME_UNKNOWN else receipt.state
+        val saved = record.everHostSaved || fork && child != null || state in setOf(RemoteCommandState.HOST_ACCEPTED, RemoteCommandState.DISPATCHING, RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED)
+        val queued = record.everAgentQueued || record.intent.kind == CommandKind.MESSAGE && state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED, RemoteCommandState.SETTLED) ||
+            record.intent.kind == CommandKind.TIMED_QUESTION && state in setOf(RemoteCommandState.AGENT_QUEUED, RemoteCommandState.OBSERVED)
+        if (saved && state == RemoteCommandState.RECEIVED || queued && state in setOf(RemoteCommandState.HOST_ACCEPTED, RemoteCommandState.DISPATCHING)) return record
+        return PendingCommand(record.intent, if (state == RemoteCommandState.OUTCOME_UNKNOWN) CommandDelivery.RECONCILE else CommandDelivery.CONFIRMED,
+            state, record.attempts, record.revision + 1, record.createdAt, maxOf(record.updatedAt, receipt.updatedAt), receipt.timestamp, saved, queued, null, child, outcome)
+    }
+    private fun mergeForkOutcome(previous: SessionForkOutcome?, next: SessionForkOutcome?): SessionForkOutcome? {
+        if (previous == null) return next
+        if (next == null) return previous
+        if (previous.workspaceAttachment != "unknown" && next.workspaceAttachment != "unknown" && previous.workspaceAttachment != next.workspaceAttachment) throw CommandDataException("command.state_conflict")
+        return SessionForkOutcome(if (previous.workspaceAttachment != "unknown") previous.workspaceAttachment else next.workspaceAttachment,
+            if (previous.checkpoint == "persisted" || next.checkpoint == "unknown") previous.checkpoint else next.checkpoint)
     }
     private fun copy(record: PendingCommand, delivery: CommandDelivery, attempts: Long = record.attempts, now: Long, error: String?) =
-        PendingCommand(record.intent, delivery, record.remote, attempts, record.revision + 1, record.createdAt, maxOf(now, record.updatedAt), record.remoteTimestamp, record.everHostSaved, record.everAgentQueued, error, record.createdSessionId)
+        PendingCommand(record.intent, delivery, record.remote, attempts, record.revision + 1, record.createdAt, maxOf(now, record.updatedAt), record.remoteTimestamp, record.everHostSaved, record.everAgentQueued, error, record.createdSessionId, record.forkOutcome)
 }
 
 interface CommandJournal : AutoCloseable {

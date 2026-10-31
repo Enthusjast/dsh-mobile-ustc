@@ -1,13 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="directory_search_label">搜索当前目录</string>
-    <string name="directory_search_scope">仅搜索所选运行环境已取得、当前获授权的会话 ID 和工作区 ID；不搜索消息正文。</string>
+    <string name="directory_search_scope">仅搜索所选运行环境已取得、当前获授权的会话 ID 和工作区 ID；另有名称读取权限时，也搜索原生会话与工作区名称。不搜索消息正文、路径或其他电脑。</string>
     <string name="directory_search_clear">清除搜索</string>
     <string name="directory_search_empty">当前目录没有匹配项</string>
-    <string name="directory_search_empty_detail">请核对会话或工作区 ID，或清除搜索。搜索不包含其他电脑和未取得的目录。</string>
+    <string name="directory_search_empty_detail">请核对会话、工作区名称或 ID，或重置筛选。名称可能未提供；搜索不包含其他电脑和未取得的目录。</string>
     <string name="directory_recent">最近访问</string>
     <string name="directory_recent_scope">仅记录本次使用中已打开的会话；入口以当前运行环境的目录和读取授权重新核对。</string>
     <string name="directory_organization">组织 %1$s</string>
     <string name="directory_scope_short">当前电脑 · 授权范围内</string>
     <string name="directory_scope_help">范围说明</string>
+    <string name="directory_filter_all">全部</string>
+    <string name="directory_filter_active">未归档</string>
+    <string name="directory_filter_archived">已归档</string>
+    <string name="directory_all_workspaces">全部工作区</string>
+    <string name="directory_choose_workspace">筛选工作区</string>
+    <string name="directory_reset_filters">重置筛选</string>
+    <string name="directory_filter_scope">状态和工作区筛选仅整理当前已取得、获授权的目录，不发起请求或读取正文。未归档包含可用、任务进行中和当前不可用的会话；工作区选项仅来自这些目录行。</string>
+    <string name="directory_account_details">账号与设备详情</string>
+    <string name="directory_account_id">账号 ID</string>
+    <string name="directory_user_id">用户 ID</string>
+    <string name="directory_deployment_hash">部署指纹（SHA-256）</string>
+    <string name="directory_settings_appearance">外观与阅读</string>
+    <string name="directory_appearance_entry">外观与阅读设置</string>
+    <string name="directory_appearance_detail">主题、对话正文字号与代码阅读方式</string>
+    <string name="directory_appearance_unavailable">尚未取得当前账号的展示设置归属信息，暂不能打开；请完成登录或刷新账号状态。</string>
+    <string name="directory_settings_reminders">提醒</string>
+    <string name="directory_settings_updates_about">更新与关于</string>
+    <string name="directory_named_identifier">%1$s · %2$s</string>
+    <string name="directory_names_registered">名称来自已登记的原生投影，可能滞后；刷新只重新取得登记目录。</string>
+    <string name="directory_cached_name_note">缓存标题，可能滞后</string>
 </resources>

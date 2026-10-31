@@ -26,6 +26,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import cn.edu.ustc.dsh.network.SessionDirectoryEntry
 import cn.edu.ustc.dsh.network.SessionReadPhase
+import cn.edu.ustc.dsh.network.DirectoryDisplayMetadata
+import cn.edu.ustc.dsh.network.directoryWorkspaceTitles
 import cn.edu.ustc.dsh.ui.DshSpacing
 import cn.edu.ustc.dsh.ui.DshStatusNotice
 import cn.edu.ustc.dsh.ui.DshTopBar
@@ -38,23 +40,79 @@ internal enum class HomeDestination(@get:StringRes val label: Int, @get:Drawable
     SETTINGS(R.string.nav_settings, R.drawable.ic_settings),
 }
 
+internal enum class DirectorySessionFilter(@get:StringRes val label: Int) {
+    ALL(R.string.directory_filter_all),
+    ACTIVE(R.string.directory_filter_active),
+    ARCHIVED(R.string.directory_filter_archived),
+}
+
 /** Presentation state only. No credentials, drafts, approval handles or restored authority. */
 @Stable
 internal class HomeNavigation {
     var destination by mutableStateOf(HomeDestination.SESSIONS)
     var directoryRuntimeId by mutableStateOf<String?>(null)
     var directoryFromComputer by mutableStateOf(false)
-    var directoryPosition = LazyListState()
+    var directoryPosition by mutableStateOf(LazyListState())
         private set
     var directoryQuery by mutableStateOf("")
+    var directorySessionFilter by mutableStateOf(DirectorySessionFilter.ALL)
+    var directoryWorkspaceId by mutableStateOf<String?>(null)
+    private var directoryIdentity: DirectoryIdentity? = null
     private var visited by mutableStateOf<List<VisitedSession>>(emptyList())
 
     fun selectRuntime(id: String) {
         if (directoryRuntimeId != id) {
-            directoryPosition = LazyListState()
-            directoryQuery = ""
+            resetDirectoryFilters()
+            directoryIdentity = null
         }
         directoryRuntimeId = id
+    }
+
+    fun resetDirectoryFilters() {
+        directoryPosition = LazyListState()
+        directoryQuery = ""
+        directorySessionFilter = DirectorySessionFilter.ALL
+        directoryWorkspaceId = null
+    }
+
+    /** Retire presentation hints, never fetch resources or restore authority. */
+    fun reconcileDirectory(state: HomeState) {
+        if (state.phase != HomePhase.READY || state.knownTarget != null) {
+            if (directoryIdentity != null || directoryQuery.isNotEmpty() ||
+                directorySessionFilter != DirectorySessionFilter.ALL || directoryWorkspaceId != null) resetDirectoryFilters()
+            directoryIdentity = null
+            visited = emptyList()
+            return
+        }
+        val row = state.runtimes.firstOrNull { it.id == directoryRuntimeId }
+        val identity = row?.takeIf { it.access?.organizationId != null && it.access.canList() }?.let {
+            DirectoryIdentity(state.issuer, state.subject, state.deviceId, state.presentationOwner?.fingerprint,
+                it.id, it.hostId, it.access!!.organizationId!!)
+        }
+        if (identity == null) {
+            if (!state.refreshing) {
+                if (directoryIdentity != null || directoryQuery.isNotEmpty() ||
+                    directorySessionFilter != DirectorySessionFilter.ALL || directoryWorkspaceId != null) resetDirectoryFilters()
+                directoryIdentity = null
+                visited = visited.filter { it.runtimeId != directoryRuntimeId }
+            }
+            return
+        }
+        if (directoryIdentity != null && directoryIdentity != identity) {
+            resetDirectoryFilters()
+            visited = emptyList()
+        }
+        directoryIdentity = identity
+        val runtime = state.directoryRuntime(directoryRuntimeId) ?: return
+        if (state.refreshing || state.loadingSessions || state.sessionError != null || state.error != null) return
+        val rows = state.directoryRows(runtime.id)
+        if (directoryWorkspaceId != null && rows.none { it.workspaceId == directoryWorkspaceId }) {
+            directoryWorkspaceId = null
+            directoryPosition = LazyListState()
+        }
+        visited = visited.filter { entry ->
+            entry.runtimeId != runtime.id || rows.any { it.id == entry.sessionId && it.viewScope(runtime.access!!) != null }
+        }
     }
 
     /** IDs are navigation hints, never cached rows or restored read authority. */
@@ -93,14 +151,19 @@ private data class VisitedSession(
     val runtimeId: String, val hostId: String, val organizationId: String, val sessionId: String,
 )
 
+private data class DirectoryIdentity(
+    val issuer: String, val subject: String, val deviceId: String, val ownerFingerprint: String?,
+    val runtimeId: String, val hostId: String, val organizationId: String,
+)
+
 private fun HomeState.directoryRuntime(id: String?): RuntimeRow? =
     runtimes.firstOrNull { phase == HomePhase.READY && knownTarget == null &&
         it.id == id && it.id == selectedRuntimeId && it.access?.organizationId != null && it.access.canList() }
 
 /** Only the current acquired directory; apply resource containment before searching or revisiting. */
-private fun HomeState.directoryRows(id: String?): List<SessionDirectoryEntry> {
+private fun HomeState.directoryRows(id: String?, retainDuringLoad: Boolean = false): List<SessionDirectoryEntry> {
     val runtime = directoryRuntime(id) ?: return emptyList()
-    if (loadingSessions || sessionError != null) return emptyList()
+    if (refreshing || loadingSessions && !retainDuringLoad || sessionError != null || error != null) return emptyList()
     val scope = runtime.access?.scope ?: return emptyList()
     return sessions.filter { it.id in scope.sessions || it.workspaceId?.let(scope.workspaces::contains) == true }
 }
@@ -117,6 +180,13 @@ private inline fun <T> stableLabel(id: String, rows: List<T>, idOf: (T) -> Strin
 private fun runtimeLabel(id: String, runtimes: List<RuntimeRow>): String = stableLabel(id, runtimes) { it.id }
 
 @Composable
+private fun directoryWorkspaceLabel(id: String, rows: List<SessionDirectoryEntry>, titles: Map<String, String?>): String {
+    val identifier = stableLabel(id, rows) { it.workspaceId.orEmpty() }
+    val title = titles[id]
+    return if (title == null) identifier else stringResource(R.string.directory_named_identifier, title, identifier)
+}
+
+@Composable
 internal fun DshAppShell(
     state: HomeState,
     navigation: HomeNavigation,
@@ -128,12 +198,14 @@ internal fun DshAppShell(
     onCreate: (String) -> Unit,
     onBinding: () -> Unit,
     onNotifications: () -> Unit,
+    onAppearance: () -> Unit,
     onAppUpdates: () -> Unit,
     onExit: () -> Unit,
     onBackToComputers: () -> Unit,
 ) {
     val destination = navigation.destination
     val runtime = state.directoryRuntime(navigation.directoryRuntimeId)
+    SideEffect { navigation.reconcileDirectory(state) }
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal),
         topBar = {
@@ -174,7 +246,7 @@ internal fun DshAppShell(
             when (destination) {
                 HomeDestination.SESSIONS -> SessionDirectoryScreen(state, navigation, onRuntime, onSession, onBinding)
                 HomeDestination.COMPUTERS -> ComputersScreen(state, onRuntime, onCreate, onBinding)
-                HomeDestination.SETTINGS -> SettingsScreen(state, onNotifications, onAppUpdates, onExit)
+                HomeDestination.SETTINGS -> SettingsScreen(state, onNotifications, onAppearance, onAppUpdates, onExit)
             }
         }
     }
@@ -191,21 +263,35 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
     val listable = state.runtimes.filter { it.access?.organizationId != null && it.access.canList() }
     val runtime = state.directoryRuntime(navigation.directoryRuntimeId)
     val staleSelection = navigation.directoryRuntimeId != null && runtime == null
-    val rows = state.directoryRows(navigation.directoryRuntimeId)
+    val rows = state.directoryRows(navigation.directoryRuntimeId, retainDuringLoad = true)
+    val workspaces = rows.mapNotNull { it.workspaceId }.distinct().sorted()
+    val workspaceTitles = remember(rows, runtime?.access) { directoryWorkspaceTitles(rows, runtime?.access) }
     val query = navigation.directoryQuery.trim()
-    val matches = if (query.isEmpty()) rows else rows.filter { it.id.contains(query, ignoreCase = true) ||
-        it.workspaceId?.contains(query, ignoreCase = true) == true }
-    val recent = if (query.isEmpty()) navigation.recentSession(state, rows) else null
+    val matches = rows.filter { session ->
+        (navigation.directoryWorkspaceId == null || session.workspaceId == navigation.directoryWorkspaceId) &&
+            when (navigation.directorySessionFilter) {
+                DirectorySessionFilter.ALL -> true
+                DirectorySessionFilter.ACTIVE -> session.state != "archived"
+                DirectorySessionFilter.ARCHIVED -> session.state == "archived"
+            } && (query.isEmpty() || session.id.contains(query, ignoreCase = true) ||
+                session.workspaceId?.contains(query, ignoreCase = true) == true ||
+                session.displayMetadata(runtime?.access)?.let { display ->
+                    display.title?.contains(query, ignoreCase = true) == true || display.workspaceTitle?.contains(query, ignoreCase = true) == true
+                } == true)
+    }
+    val recent = if (query.isEmpty()) navigation.recentSession(state, matches) else null
     var searchOpen by remember(navigation.directoryRuntimeId) { mutableStateOf(navigation.directoryQuery.isNotEmpty()) }
     var choosingComputer by remember { mutableStateOf(false) }
     var explainingScope by remember { mutableStateOf(false) }
-    val searchAvailable = runtime != null && !state.loadingSessions && state.sessionError == null
+    var choosingWorkspace by remember(navigation.directoryRuntimeId) { mutableStateOf(false) }
+    val searchAvailable = runtime != null && !state.refreshing && !state.loadingSessions && state.sessionError == null && state.error == null
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(runtime?.id, state.loadingSessions, state.sessionError) {
-        if (runtime == null || state.loadingSessions || state.sessionError != null) {
+    LaunchedEffect(runtime?.id, state.refreshing, state.loadingSessions, state.sessionError, state.error) {
+        if (runtime == null || state.refreshing || state.loadingSessions || state.sessionError != null || state.error != null) {
             focusManager.clearFocus()
             keyboard?.hide()
+            choosingWorkspace = false
             if (state.sessionError != null) navigation.directoryPosition.scrollToItem(0)
         }
     }
@@ -229,6 +315,35 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton({ explainingScope = true }, Modifier.heightIn(min = 48.dp)) {
                         Text(stringResource(R.string.directory_scope_help))
+                    }
+                    if (runtime?.access?.canReadMetadata() == true) Text(stringResource(R.string.directory_names_registered),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    DirectorySessionFilter.entries.forEach { filter ->
+                        FilterChip(
+                            selected = navigation.directorySessionFilter == filter,
+                            onClick = { navigation.directorySessionFilter = filter },
+                            enabled = searchAvailable,
+                            label = { Text(stringResource(filter.label)) },
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("directory-status-${filter.name}"),
+                        )
+                    }
+                }
+                OutlinedButton(
+                    { choosingWorkspace = true },
+                    enabled = searchAvailable && workspaces.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("directory-workspace-filter"),
+                ) {
+                    Text(navigation.directoryWorkspaceId?.let { id ->
+                        stringResource(R.string.session_workspace, directoryWorkspaceLabel(id, rows, workspaceTitles))
+                    } ?: stringResource(R.string.directory_all_workspaces), Modifier.weight(1f))
+                    ShellIcon(R.drawable.ic_chevron)
+                }
+                if (searchAvailable && (navigation.directorySessionFilter != DirectorySessionFilter.ALL ||
+                        navigation.directoryWorkspaceId != null || navigation.directoryQuery.isNotEmpty())) {
+                    TextButton({ navigation.resetDirectoryFilters() }, Modifier.heightIn(min = 48.dp).testTag("directory-reset-filters")) {
+                        Text(stringResource(R.string.directory_reset_filters))
                     }
                 }
                 if (!searchOpen || !searchAvailable) TextButton({ searchOpen = true }, enabled = searchAvailable, modifier = Modifier.heightIn(min = 48.dp).testTag("directory-open-search")) {
@@ -264,12 +379,12 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
             EmptyDirectory(R.string.session_no_computer, R.string.session_no_computer_detail)
             TextButton(onBinding, Modifier.heightIn(min = 48.dp)) { Text(stringResource(if (state.pendingBindingId == null) R.string.action_bind_computer else R.string.action_review_binding)) }
         }
-        if (runtime != null && !state.loadingSessions && state.sessionError == null) {
-            if (rows.isEmpty()) item("empty") { DshStatusNotice(stringResource(R.string.session_empty)) }
-            else if (matches.isEmpty()) item("no-matches") {
+        if (runtime != null && (searchAvailable || state.loadingSessions)) {
+            if (searchAvailable && rows.isEmpty()) item("empty") { DshStatusNotice(stringResource(R.string.session_empty)) }
+            else if (searchAvailable && matches.isEmpty()) item("no-matches") {
                 EmptyDirectory(R.string.directory_search_empty, R.string.directory_search_empty_detail)
             }
-            if (recent != null) item("recent") {
+            if (recent != null && searchAvailable) item("recent") {
                 OutlinedButton(
                     onClick = {
                         navigation.recentSession(state)?.takeIf { it.id == recent.id }?.let { onSession(it.id) }
@@ -278,17 +393,19 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
                 ) {
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
                         Text(stringResource(R.string.directory_recent))
+                        val title = recent.displayMetadata(runtime.access)?.title
+                        if (title != null) Text(title, style = MaterialTheme.typography.bodyMedium)
                         Text(stringResource(R.string.session_short_title, stableLabel(recent.id, rows) { it.id }),
-                            style = MaterialTheme.typography.bodyMedium)
+                            style = if (title == null) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall)
                     }
                     ShellIcon(R.drawable.ic_chevron)
                 }
             }
             items(matches, key = { it.id }) { session ->
                 SessionListItem(session, stableLabel(session.id, rows) { it.id },
-                    session.workspaceId?.let { stableLabel(it, rows) { entry -> entry.workspaceId.orEmpty() } },
-                    runtime.access?.let(session::viewScope) != null) {
-                    if (state.directoryRows(navigation.directoryRuntimeId).any { it.id == session.id } &&
+                    session.workspaceId?.let { directoryWorkspaceLabel(it, rows, workspaceTitles) },
+                    runtime.access?.let(session::viewScope) != null, session.displayMetadata(runtime.access), state.loadingSessions) {
+                    if (!state.loadingSessions && !state.refreshing && state.directoryRows(navigation.directoryRuntimeId).any { it.id == session.id } &&
                         runtime.access?.let(session::viewScope) != null) onSession(session.id)
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -302,10 +419,42 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(stringResource(R.string.session_scope))
                 Text(stringResource(R.string.directory_search_scope))
+                Text(stringResource(R.string.directory_filter_scope))
                 Text(stringResource(R.string.directory_recent_scope))
             }
         },
         confirmButton = { TextButton({ explainingScope = false }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.action_close)) } },
+    )
+    if (choosingWorkspace && searchAvailable) AlertDialog(
+        onDismissRequest = { choosingWorkspace = false },
+        title = { Text(stringResource(R.string.directory_choose_workspace)) },
+        text = {
+            LazyColumn {
+                item("all") {
+                    ListItem(
+                        headlineContent = { Text(stringResource(R.string.directory_all_workspaces)) },
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("directory-workspace-all").clickable(role = Role.Button) {
+                            navigation.directoryWorkspaceId = null
+                            choosingWorkspace = false
+                        },
+                    )
+                }
+                items(workspaces, key = { it }) { id ->
+                    ListItem(
+                        headlineContent = {
+                            val title = workspaceTitles[id]
+                            Text(stringResource(R.string.session_workspace,
+                                if (title == null) id else stringResource(R.string.directory_named_identifier, title, id)))
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("directory-workspace-$id").clickable(role = Role.Button) {
+                            navigation.directoryWorkspaceId = id
+                            choosingWorkspace = false
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton({ choosingWorkspace = false }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.action_close)) } },
     )
     if (choosingComputer) AlertDialog(
         onDismissRequest = { choosingComputer = false },
@@ -334,12 +483,17 @@ private fun SessionDirectoryScreen(state: HomeState, navigation: HomeNavigation,
 }
 
 @Composable
-private fun SessionListItem(session: SessionDirectoryEntry, label: String, workspaceLabel: String?, canRead: Boolean, onClick: () -> Unit) {
+private fun SessionListItem(session: SessionDirectoryEntry, label: String, workspaceLabel: String?, canRead: Boolean,
+    display: DirectoryDisplayMetadata?, refreshing: Boolean, onClick: () -> Unit) {
     val updated = remember(session.updatedAt) { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(session.updatedAt)) }
     ListItem(
-        headlineContent = { Text(stringResource(R.string.session_short_title, label)) },
+        headlineContent = { Text(display?.title ?: stringResource(R.string.session_short_title, label)) },
         supportingContent = {
             Column(verticalArrangement = Arrangement.spacedBy(DshSpacing.extraSmall)) {
+                if (display?.title != null) Text(stringResource(R.string.session_short_title, label),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (display?.titleSource == "cached") Text(stringResource(R.string.directory_cached_name_note),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.small) {
                     Text(stringResource(when (session.state) {
                         "running" -> R.string.session_running
@@ -354,20 +508,25 @@ private fun SessionListItem(session: SessionDirectoryEntry, label: String, works
                 }
                 Text(stringResource(R.string.session_updated, updated), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (!canRead) Text(stringResource(R.string.session_directory_only))
+                if (refreshing) Text(stringResource(R.string.session_actions_directory_retained))
+                else if (!canRead) Text(stringResource(R.string.session_directory_only))
             }
         },
-        trailingContent = { if (canRead) ShellIcon(R.drawable.ic_chevron) },
+        trailingContent = { if (canRead && !refreshing) ShellIcon(R.drawable.ic_chevron) },
         modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp).testTag("session-${session.id}")
-            .then(if (canRead) Modifier.clickable(role = Role.Button, onClick = onClick)
+            .then(if (canRead && !refreshing) Modifier.clickable(role = Role.Button, onClick = onClick)
                 else Modifier.semantics { disabled() }),
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surface),
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ComputersScreen(state: HomeState, onRuntime: (String) -> Unit, onCreate: (String) -> Unit, onBinding: () -> Unit) {
-    var detailId by remember { mutableStateOf<String?>(null) }
+    var detailId by remember(state.issuer, state.subject, state.deviceId, state.presentationOwner?.fingerprint) { mutableStateOf<String?>(null) }
+    LaunchedEffect(state.runtimes) {
+        if (state.runtimes.none { it.id == detailId }) detailId = null
+    }
     LazyColumn(Modifier.widthIn(max = 800.dp).fillMaxSize().testTag("computers-directory"), contentPadding = PaddingValues(DshSpacing.page), verticalArrangement = Arrangement.spacedBy(DshSpacing.medium)) {
         item("bind") {
             OutlinedButton(onBinding, Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
@@ -377,7 +536,7 @@ private fun ComputersScreen(state: HomeState, onRuntime: (String) -> Unit, onCre
         }
         if (state.refreshing) item("loading") { DirectoryProgress(R.string.directory_loading) }
         state.error?.let { item("error") { DshStatusNotice(errorText(it), isError = true) } }
-        if (!state.refreshing && state.runtimes.isEmpty()) item("empty") { EmptyDirectory(R.string.computer_empty, R.string.computer_empty_detail) }
+        if (!state.refreshing && state.error == null && state.runtimes.isEmpty()) item("empty") { EmptyDirectory(R.string.computer_empty, R.string.computer_empty_detail) }
         items(state.runtimes, key = { it.id }) { runtime ->
             OutlinedCard {
                 Column(Modifier.fillMaxWidth().padding(DshSpacing.page), verticalArrangement = Arrangement.spacedBy(DshSpacing.small)) {
@@ -385,10 +544,12 @@ private fun ComputersScreen(state: HomeState, onRuntime: (String) -> Unit, onCre
                     Text(stringResource(R.string.computer_runtime, runtimeLabel(runtime.id, state.runtimes)), style = MaterialTheme.typography.bodyMedium)
                     Text(stringResource(R.string.computer_presence_unknown), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     val canList = runtime.access?.organizationId != null && runtime.access.canList()
-                    if (canList) FilledTonalButton({ if (runtime.access.canList()) onRuntime(runtime.id) }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.action_open_sessions)) }
+                    if (canList) FilledTonalButton({ if (runtime.access.canList()) onRuntime(runtime.id) }, Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("computer-open-${runtime.id}")) { Text(stringResource(R.string.action_open_sessions)) }
                     else Text(stringResource(R.string.computer_no_directory), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (runtime.access?.creationScope() != null) TextButton({ if (runtime.access.creationScope() != null) onCreate(runtime.id) }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.action_create_session)) }
-                    TextButton({ detailId = runtime.id }, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(stringResource(R.string.action_computer_details)) }
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (runtime.access?.creationScope() != null) TextButton({ if (runtime.access.creationScope() != null) onCreate(runtime.id) }, Modifier.heightIn(min = 48.dp).testTag("computer-create-${runtime.id}")) { Text(stringResource(R.string.action_create_session)) }
+                        TextButton({ detailId = runtime.id }, Modifier.heightIn(min = 48.dp).testTag("computer-details-${runtime.id}")) { Text(stringResource(R.string.action_computer_details)) }
+                    }
                 }
             }
         }
@@ -413,28 +574,57 @@ private fun ComputersScreen(state: HomeState, onRuntime: (String) -> Unit, onCre
 }
 
 @Composable
-private fun SettingsScreen(state: HomeState, onNotifications: () -> Unit, onAppUpdates: () -> Unit, onExit: () -> Unit) {
-    var confirmExit by remember { mutableStateOf(false) }
+private fun SettingsScreen(state: HomeState, onNotifications: () -> Unit, onAppearance: () -> Unit, onAppUpdates: () -> Unit, onExit: () -> Unit) {
+    var confirmExit by remember(state.issuer, state.subject, state.deviceId, state.presentationOwner?.fingerprint) { mutableStateOf(false) }
+    var accountDetails by remember(state.issuer, state.subject, state.deviceId, state.presentationOwner?.fingerprint) { mutableStateOf(false) }
     LazyColumn(Modifier.widthIn(max = 800.dp).fillMaxSize().testTag("settings-list"), contentPadding = PaddingValues(DshSpacing.page), verticalArrangement = Arrangement.spacedBy(DshSpacing.page)) {
         item("account") {
             Text(stringResource(R.string.settings_account), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
-            DetailField(R.string.settings_subject, state.subject)
-            DetailField(R.string.settings_account_source, state.issuer)
-            DetailField(R.string.settings_device, state.deviceName ?: stringResource(R.string.settings_device_registered))
-            DetailField(R.string.settings_device_id, state.deviceId)
         }
-        item("notifications") { SettingsItem(R.string.settings_notifications, R.string.settings_notifications_detail, onNotifications) }
-        item("updates") { SettingsItem(R.string.settings_updates, R.string.settings_updates_detail, onAppUpdates) }
+        item("account-details") {
+            SettingsItem(R.string.directory_account_details, state.deviceName ?: stringResource(R.string.settings_device_registered), { accountDetails = true })
+        }
+        item("appearance-heading") { SettingsHeading(R.string.directory_settings_appearance) }
+        item("appearance") {
+            SettingsItem(
+                R.string.directory_appearance_entry,
+                stringResource(if (state.presentationOwner != null) R.string.directory_appearance_detail else R.string.directory_appearance_unavailable),
+                { if (state.presentationOwner != null) onAppearance() },
+                enabled = state.presentationOwner != null,
+                modifier = Modifier.testTag("settings-appearance"),
+            )
+        }
+        item("reminders-heading") { SettingsHeading(R.string.directory_settings_reminders) }
+        item("notifications") { SettingsItem(R.string.settings_notifications, stringResource(R.string.settings_notifications_detail), onNotifications) }
+        item("updates-heading") { SettingsHeading(R.string.directory_settings_updates_about) }
+        item("updates") { SettingsItem(R.string.settings_updates, stringResource(R.string.settings_updates_detail), onAppUpdates) }
         item("about") {
-            Text(stringResource(R.string.settings_about), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
             Text(stringResource(R.string.settings_version, BuildConfig.VERSION_NAME), style = MaterialTheme.typography.bodyMedium)
-            Text(stringResource(R.string.settings_appearance_system), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item("exit") {
             HorizontalDivider()
             TextButton({ confirmExit = true }, Modifier.fillMaxWidth().heightIn(min = 48.dp), colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.action_exit_account)) }
         }
     }
+    if (accountDetails) AlertDialog(
+        onDismissRequest = { accountDetails = false },
+        title = { Text(stringResource(R.string.directory_account_details)) },
+        text = {
+            LazyColumn(Modifier.testTag("account-detail-list"), verticalArrangement = Arrangement.spacedBy(DshSpacing.small)) {
+                item("subject") { DetailField(R.string.settings_subject, state.subject) }
+                item("issuer") { DetailField(R.string.settings_account_source, state.issuer) }
+                item("device-name") { DetailField(R.string.settings_device, state.deviceName ?: stringResource(R.string.settings_device_registered)) }
+                item("device-id") { DetailField(R.string.settings_device_id, state.deviceId) }
+                state.presentationOwner?.let { owner ->
+                    item("account-id") { DetailField(R.string.directory_account_id, owner.accountId) }
+                    item("organization") { DetailField(R.string.computer_organization, owner.organizationId) }
+                    item("user-id") { DetailField(R.string.directory_user_id, owner.userId) }
+                    item("deployment") { DetailField(R.string.directory_deployment_hash, owner.deploymentHash) }
+                }
+            }
+        },
+        confirmButton = { TextButton({ accountDetails = false }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.action_close)) } },
+    )
     if (confirmExit) AlertDialog(
         onDismissRequest = { confirmExit = false },
         title = { Text(stringResource(R.string.settings_exit_title)) },
@@ -445,14 +635,19 @@ private fun SettingsScreen(state: HomeState, onNotifications: () -> Unit, onAppU
 }
 
 @Composable
-private fun SettingsItem(@StringRes title: Int, @StringRes description: Int, onClick: () -> Unit) {
+private fun SettingsItem(@StringRes title: Int, description: String, onClick: () -> Unit, enabled: Boolean = true, modifier: Modifier = Modifier) {
     ListItem(
         headlineContent = { Text(stringResource(title)) },
-        supportingContent = { Text(stringResource(description)) },
-        trailingContent = { ShellIcon(R.drawable.ic_chevron) },
-        modifier = Modifier.clickable(role = Role.Button, onClick = onClick).heightIn(min = 64.dp),
+        supportingContent = { Text(description) },
+        trailingContent = { if (enabled) ShellIcon(R.drawable.ic_chevron) },
+        modifier = modifier.then(if (enabled) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier.semantics { disabled() }).heightIn(min = 64.dp),
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
     )
+}
+
+@Composable
+private fun SettingsHeading(@StringRes title: Int) {
+    Text(stringResource(title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
 }
 
 @Composable

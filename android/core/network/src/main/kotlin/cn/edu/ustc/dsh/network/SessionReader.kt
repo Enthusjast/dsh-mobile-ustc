@@ -32,11 +32,16 @@ class SessionReader internal constructor(
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob(owner.coroutineContext[Job]) + Dispatchers.Default)
     val commands: SessionCommands?
+    val models: SessionModels
     val approvals: SessionApprovalClient? = approvalAccount?.let { SessionApprovalClient(api, it, runtimeId, sessionId, scope) }
     val exports: SessionExports? = exportJournal?.let { SessionExports(api, it, runtimeId, sessionId, workspaceId, readScope, scope) }
+    val media = SessionMedia(api, exports, scope)
+    val changes = SessionChanges()
+    val messageActions: SessionMessageActions
     private val mutable = MutableStateFlow(SessionReadState(SessionReadPhase.CONNECTING))
     val state: StateFlow<SessionReadState> = mutable.asStateFlow()
     private val connection = AtomicReference<SessionRelayConnection?>()
+    private val modelSnapshot = AtomicReference<SessionModelBinding?>()
     private class QuestionEndpoint(val connection: SessionRelayConnection,val route: SessionRoute,val questions: SessionQuestions,val lock: Mutex,val lifetime: Job)
     private val questionEndpoint=AtomicReference<QuestionEndpoint?>()
     private val closed = AtomicBoolean()
@@ -61,10 +66,15 @@ class SessionReader internal constructor(
         listOf(deviceId, runtimeId, sessionId).forEach(Contract::uuid)
         workspaceId?.let(Contract::uuid)
         if (transcripts != null && (transcripts.owner.deviceId != deviceId || journal != null && transcripts.owner.fingerprint != journal.owner.fingerprint)) throw ProtocolException()
-        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "question.answer", "command.status", "approval.decide", "file.download") } || journal == null && readScope.actions != setOf("session.read") ||
+        if ("session.read" !in readScope.actions || readScope.actions.any { it !in setOf("session.read", "message.submit", "session.archive", "session.cancel", "session.model.select", "session.changes.read", "session.fork", "session.create", "question.answer", "command.status", "approval.decide", "file.download") } ||
+            journal == null && readScope.actions.any { it != "session.read" && it != "session.changes.read" } ||
             (approvalAccount != null) != ("approval.decide" in readScope.actions) || approvalAccount != null && approvalAccount.journal.owner.fingerprint != journal?.owner?.fingerprint) throw ProtocolException()
         if ((exportJournal != null) != ("file.download" in readScope.actions) || exportJournal != null && exportJournal.owner.fingerprint != journal?.owner?.fingerprint) throw ProtocolException()
+        if ("session.create" in readScope.actions && "session.fork" !in readScope.actions || "session.fork" in readScope.actions &&
+            (!readScope.actions.containsAll(setOf("session.create", "command.status")) || workspaceId == null || workspaceId !in readScope.workspaces)) throw ProtocolException()
         commands = journal?.let { SessionCommands(api, it, runtimeId, sessionId, readScope, scope) }
+        models = SessionModels(commands)
+        messageActions = SessionMessageActions(commands, workspaceId)
         scope.coroutineContext[Job]!!.invokeOnCompletion { close() }
         scope.launch {
             while (isActive) {
@@ -178,6 +188,11 @@ class SessionReader internal constructor(
                 connection.set(connected)
                 currentCoroutineContext().ensureActive()
                 approvals?.connected(connected)
+                models.connected(connected.identity.capabilities, "session.model.select" in readScope.actions &&
+                    (sessionId in readScope.sessions || workspaceId != null && workspaceId in readScope.workspaces))
+                changes.connected(connected.identity.capabilities, "session.changes.read" in readScope.actions)
+                messageActions.connected(connected.identity.capabilities, "session.read" in readScope.actions)
+                media.connected(connected.identity.capabilities, "file.download" in readScope.actions)
                 commands?.authorizeStatusReads()
                 var cacheUntil: Long? = connected.identity.leaseExpiresAt
                 if (transcripts != null) {
@@ -206,10 +221,11 @@ class SessionReader internal constructor(
                     } catch (error: CancellationException) { throw error }
                     catch (_: Exception) { cacheProblem.set("data.cache_unavailable") }
                 }
-                try { consume(connected, deadline, until, cacheUntil != null) } finally { exports?.disconnected(); approvals?.disconnected(); commands?.disconnected(); connection.compareAndSet(connected, null); connected.close() }
+                try { consume(connected, deadline, until, cacheUntil != null) } finally { modelSnapshot.set(null); models.disconnected(); exports?.disconnected(); approvals?.disconnected(); commands?.disconnected(); connection.compareAndSet(connected, null); connected.close() }
             } catch (error: CancellationException) { throw error }
             catch (_: RetryRead) { failures = 0; resyncs = 0 }
             catch (error: Stop) {
+                models.disconnected(error.reason)
                 if (error.phase in setOf(SessionReadPhase.REVOKED, SessionReadPhase.AUTH_REQUIRED)) {
                     cache.set(null); questionEndpoint.set(null);mutable.update { it.copy(window = null, runtimeEpoch = null,questions=SessionQuestionState()) }; commands?.close()
                     if (error.phase == SessionReadPhase.REVOKED) invalidateCache(true)
@@ -219,8 +235,10 @@ class SessionReader internal constructor(
                 failures = 0; resyncs = 0
                 pause(null)
             } catch (error: LoginException) {
+                models.disconnected("auth.expired")
                 cache.set(null); commands?.close(); mutable.value = SessionReadState(SessionReadPhase.AUTH_REQUIRED, error = "auth.expired"); return
             } catch (error: RemoteRequestException) {
+                models.disconnected(error.code)
                 val phase = if (error.code in setOf("access.denied", "access.revoked", "device.invalid", "auth.identity_mismatch", "access.organization_missing")) SessionReadPhase.REVOKED
                     else if (error.code in setOf("auth.expired", "auth.proof_invalid")) SessionReadPhase.AUTH_REQUIRED else null
                 if (phase != null) {
@@ -230,18 +248,22 @@ class SessionReader internal constructor(
                 }
                 mutable.value = cachedState(SessionReadPhase.BACKOFF, error.code); pause(options.backoffMillis(failures++))
             } catch (error: SessionDataException) {
+                models.disconnected(error.code)
                 if (error.code in setOf("protocol.snapshot_too_large", "client.history_limit") && maxMessages > 1) maxMessages = (maxMessages / 2).coerceAtLeast(1)
                 else if (error.code == "protocol.unsupported" || ++resyncs > 3) {
                     mutable.value = cachedState(SessionReadPhase.ERROR, error.code); pause(null); resyncs = 0; continue
                 }
                 mutable.value = cachedState(SessionReadPhase.BACKOFF, error.code); pause(options.backoffMillis(resyncs))
             } catch (_: ProtocolException) {
+                models.disconnected("protocol.invalid")
                 mutable.value = cachedState(SessionReadPhase.ERROR, "protocol.invalid"); pause(null)
             } catch (error: RelayException) {
+                models.disconnected(error.code)
                 if (error.code in setOf("network.proxy_unsupported", "network.insecure_endpoint", "protocol.invalid", "protocol.frame_too_large")) {
                     mutable.value = cachedState(SessionReadPhase.ERROR, error.code); pause(null)
                 } else { mutable.value = cachedState(SessionReadPhase.BACKOFF, error.code); pause(options.backoffMillis(failures++)) }
             } catch (_: Exception) {
+                models.disconnected("network.unavailable")
                 mutable.value = cachedState(SessionReadPhase.ERROR, "network.unavailable"); pause(null)
             } finally { exports?.disconnected(); approvals?.disconnected(); connection.getAndSet(null)?.close(); while (pages.tryReceive().isSuccess) { /* Retire old-generation page intents. */ } }
         }
@@ -260,7 +282,7 @@ class SessionReader internal constructor(
         var questions: SessionQuestions?=null
         var questionSync: String?=null
         var lastQuestionTick=0L
-        val window = SessionWindow(request)
+        val window = SessionWindow(request, SESSION_MEDIA_CAPABILITY in connected.identity.capabilities && FILE_EXPORT_CAPABILITY in connected.identity.capabilities)
         var dirty = false
         var offline = false
         var commandAttached = false
@@ -269,6 +291,7 @@ class SessionReader internal constructor(
         var pageDeadline = Long.MAX_VALUE
         var openingDeadline = System.nanoTime() + options.openingMillis * 1_000_000
         val lastPong = AtomicLong(System.nanoTime())
+        var actionBinding: SessionActionBinding? = null
         suspend fun publish() {
             if (offline || !window.ready || !scope.isActive) return
             val snapshot = window.snapshot()
@@ -283,8 +306,24 @@ class SessionReader internal constructor(
                 commandAttached = true
             }
             installQuestionEndpoint(QuestionEndpoint(connected,route!!,questions!!,lock,lifetime))
+            val modelBinding = modelSnapshot.get()?.takeIf { it.epoch == route!!.epoch && it.subscriptionId == route!!.subscriptionId && it.syncId == window.syncId }
+                ?: SessionModelBinding(runtimeId, route!!.epoch, sessionId, route!!.subscriptionId, window.syncId!!)
+            modelSnapshot.set(modelBinding)
+            models.ready(modelBinding, "session.model.select" in readScope.actions && "command.status" in readScope.actions &&
+                SESSION_MODEL_SELECT_CAPABILITY in connected.identity.capabilities && "command.relay.v1" in connected.identity.capabilities,
+                alive = { lifetime.isActive && !closed.get() && connection.get() === connected && modelSnapshot.get() == modelBinding }, send = connected::send)
+            commands?.bindModels(models::validate)
             approvals?.contentReady(route!!, window.syncId!!)
             exports?.ready(connected, route!!.epoch)
+            val actions = actionBinding?.takeIf { it.epoch == route!!.epoch && it.subscriptionId == route!!.subscriptionId && it.syncId == window.syncId }
+                ?: SessionActionBinding(runtimeId, route!!.epoch, sessionId, route!!.subscriptionId, window.syncId!!).also { actionBinding = it }
+            val alive = { lifetime.isActive && !closed.get() && connection.get() === connected && modelSnapshot.get() === modelBinding && runCatching { connected.checkCurrent() }.isSuccess }
+            changes.ready(actions, alive, connected::send)
+            messageActions.ready(actions, snapshot, commands != null && readScope.actions.containsAll(setOf("session.read", "session.fork", "session.create", "command.status")) &&
+                workspaceId != null && workspaceId in readScope.workspaces && SESSION_FORK_CAPABILITY in connected.identity.capabilities &&
+                SESSION_MESSAGE_ACTIONS_CAPABILITY in connected.identity.capabilities && "command.relay.v1" in connected.identity.capabilities, alive, connected::send)
+            commands?.bindForks(messageActions::validate)
+            media.ready(actions, snapshot, alive, connected::send)
             if (allowOfflineCache) lease(connected, leaseDeadline, cacheUntil)
             val durable = window.snapshot(durableOnly = true)
             if (durable.durableOnly) {
@@ -360,6 +399,8 @@ class SessionReader internal constructor(
         try {
             while (isActive) {
                 val timeout = lock.withLock {
+                    models.tick()
+                    changes.tick(); messageActions.tick(); media.tick()
                     if(questions?.timedOut()==true) throw SessionDataException()
                     if (System.nanoTime() >= pageDeadline) {
                         pageId?.let(window::pageFailed); pageId = null; pageDeadline = Long.MAX_VALUE
@@ -379,6 +420,22 @@ class SessionReader internal constructor(
                 } ?: continue
                 val type = frame.string("type")
                 when (type) {
+                    "session.media.result", "session.media.error" -> {
+                        if (SESSION_MEDIA_CAPABILITY !in connected.identity.capabilities || FILE_EXPORT_CAPABILITY !in connected.identity.capabilities || "file.download" !in readScope.actions) throw ProtocolException()
+                        media.accept(frame)
+                    }
+                    "session.changes.result", "session.changes.error", "session.changes.patch.result", "session.changes.patch.error" -> {
+                        if (SESSION_CHANGES_CAPABILITY !in connected.identity.capabilities || "session.changes.read" !in readScope.actions) throw ProtocolException()
+                        changes.accept(frame)
+                    }
+                    "session.message.preview.result", "session.message.preview.error" -> {
+                        if (SESSION_MESSAGE_ACTIONS_CAPABILITY !in connected.identity.capabilities) throw ProtocolException()
+                        messageActions.accept(frame)
+                    }
+                    "session.models.result", "session.models.error" -> {
+                        if (SESSION_MODELS_CAPABILITY !in connected.identity.capabilities) throw ProtocolException()
+                        models.accept(frame)
+                    }
                     "file.exports.result", "file.export.accepted", "file.export.error" -> {
                         if (FILE_EXPORT_CAPABILITY !in connected.identity.capabilities || exports == null) throw ProtocolException()
                         exports.accept(frame)
@@ -431,6 +488,8 @@ class SessionReader internal constructor(
                         val payload = frame.obj("payload"); payload.exactKeys("code")
                         val code = payload.string("code")
                         if (code !in setOf("access.revoked", "device.invalid", "auth.expired", "auth.proof_invalid")) {
+                            if (models.error(frame, code)) return@withLock
+                            if (changes.error(frame, code) || messageActions.error(frame, code) || media.error(frame, code)) return@withLock
                             if (exports?.error(frame, code) == true) return@withLock
                             try { if (approvals?.error(frame, code) == true) return@withLock }
                             catch (_: ApprovalStateException) { throw SessionDataException("protocol.resync_required") }
@@ -457,6 +516,8 @@ class SessionReader internal constructor(
                                     // absent. Keep heartbeat/control delivery so a
                                     // revoked cached view can be cleared promptly.
                                     offline = true; dirty = false; commands?.disconnected();questionEndpoint.set(null)
+                                    modelSnapshot.set(null); models.disconnected(code)
+                                    disconnectReadActions(code)
                                     approvals?.contentOffline(); exports?.disconnected()
                                     pageId?.let(window::pageFailed); pageId = null; pageDeadline = Long.MAX_VALUE
                                     mutable.value = cachedState(SessionReadPhase.OFFLINE, code)
@@ -475,6 +536,7 @@ class SessionReader internal constructor(
                             return@withLock
                         }
                         try {
+                            val previousModelSnapshot = if (assembled.type == "session.snapshot") modelSnapshot.getAndSet(null) else null
                             if (window.accept(assembled)) {
                                 if(assembled.type=="session.snapshot" && questionSync!=window.syncId) {
                                     if(questions!!.hasClaims) throw SessionDataException()
@@ -483,7 +545,7 @@ class SessionReader internal constructor(
                                 if (assembled.type in setOf("session.page.result", "session.snapshot")) { pageId = null; pageDeadline = Long.MAX_VALUE }
                                 dirty = true
                                 if (assembled.type != "assistant.chunk") publish()
-                            }
+                            } else if (assembled.type == "session.snapshot") modelSnapshot.compareAndSet(null, previousModelSnapshot)
                         } catch (error: SessionDataException) {
                             if (assembled.type != "session.page.result" || error.code != "client.history_limit") throw error
                             window.pageFailed(assembled.requestId); pageId = null; pageDeadline = Long.MAX_VALUE
@@ -492,13 +554,16 @@ class SessionReader internal constructor(
                     }
                 }
             }
-        } finally { questionEndpoint.set(null);receiver.cancel(); incoming.cancel(); heartbeat.cancel(); publisher.cancel(); pager.cancel(); retryer.cancel(); authority.cancel(); fragments?.clear() }
+        } finally { modelSnapshot.set(null); models.disconnected(); disconnectReadActions(); questionEndpoint.set(null);receiver.cancel(); incoming.cancel(); heartbeat.cancel(); publisher.cancel(); pager.cancel(); retryer.cancel(); authority.cancel(); fragments?.clear() }
     }
+    private fun disconnectReadActions(code: String = "runtime.offline") { media.disconnected(code); changes.disconnected(code); messageActions.disconnected(code) }
     private fun routed(kind: String, request: String, route: SessionRoute, payload: JsonObject) = jsonObject("v" to 1L.json(), "type" to kind.json(), "request_id" to request.json(),
         "runtime_id" to route.runtimeId.json(), "runtime_epoch" to route.epoch.json(), "session_id" to route.sessionId.json(), "subscription_id" to route.subscriptionId.json(), "payload" to payload)
     @Synchronized override fun close() {
         if (closed.compareAndSet(false, true)) {
             commands?.close()
+            modelSnapshot.set(null); models.close()
+            media.close(); changes.close(); messageActions.close()
             approvals?.close()
             exports?.close()
             questionEndpoint.set(null)

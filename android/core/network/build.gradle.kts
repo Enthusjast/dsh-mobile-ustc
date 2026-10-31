@@ -25,6 +25,7 @@ dependencies {
     testImplementation(libs.nimbus.jose)
 }
 tasks.test {
+    inputs.dir(rootProject.file("../contracts/ws/v1"))
     inputs.file(rootProject.file("../contracts/golden/app-release-selection.json"))
     systemProperty("contracts.root", rootProject.file("../contracts").absolutePath)
 }

@@ -27,3 +27,15 @@ interface TranscriptCache {
     /** Apply the current authoritative directory, including after process recovery. */
     suspend fun retainTranscripts(scopes: Map<String, RelayScope>)
 }
+
+/** New encrypted rows are self-versioned; unversioned rows migrate through the legacy strict grammar only. */
+fun SessionRecord.cacheBytes(): ByteArray = SessionJson.encode(jsonObject("cache_v" to 2L.json(),
+    "media_v" to (if (blocks.any { it.media != null }) 1L else 0L).json(), "record" to raw))
+
+fun parseCachedSessionRecord(bytes: ByteArray): SessionRecord {
+    val root = SessionJson.parse(bytes)
+    if ("cache_v" !in root.fields) return SessionRecord.parse(root, mediaRefs = false)
+    root.exactKeys("cache_v", "media_v", "record")
+    root.integer("cache_v", 2, 2)
+    return SessionRecord.parse(root.obj("record"), mediaRefs = root.integer("media_v", 0, 1) == 1L)
+}

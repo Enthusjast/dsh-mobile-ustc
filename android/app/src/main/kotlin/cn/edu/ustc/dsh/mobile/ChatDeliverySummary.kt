@@ -27,6 +27,8 @@ internal fun commandLabel(record: PendingCommand): Int {
             record.intent.kind == CommandKind.ARCHIVE -> if ((record.intent.payload["archived"] as? JsonBoolean)?.value == true) R.string.chat_delivery_archive_settled else R.string.chat_delivery_restore_settled
             record.intent.kind == CommandKind.CANCEL -> R.string.chat_delivery_cancel_settled
             record.intent.kind.question -> R.string.chat_delivery_answer_settled
+            record.intent.kind == CommandKind.MODEL_SELECT -> R.string.models_command_settled
+            record.intent.kind == CommandKind.FORK -> R.string.session_actions_fork_checkpoint
             else -> R.string.chat_delivery_message_settled
         }
         RemoteCommandState.REJECTED -> R.string.chat_delivery_rejected

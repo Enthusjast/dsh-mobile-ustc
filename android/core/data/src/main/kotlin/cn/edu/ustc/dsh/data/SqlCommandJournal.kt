@@ -41,12 +41,17 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             if (existing.digest != intent.digest || !existing.intent.contentEquals(intent.storageBytes())) throw CommandDataException("command.request_conflict")
             return@transaction existing.decode()
         }
+        if (intent.kind == CommandKind.FORK && dao.list(intent.runtimeId, intent.sessionId!!).any { row ->
+            val previous = row.decode(); previous.intent.kind == CommandKind.FORK && previous.remote !in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)
+        }) throw CommandDataException("command.reconcile_required")
         val bytes = intent.storageBytes()
         if (dao.count() >= 128 || dao.bytes() + bytes.size > 8L * 1024 * 1024) dao.evictDelivered()
         if (dao.count() >= 128 || dao.bytes() + bytes.size > 8L * 1024 * 1024) throw CommandDataException("data.outbox_limit")
+        val imageIds = intent.imageFileIds().toSet()
         for (file in intent.fileIds()) {
             val uploaded = dao.uploadByFile(file) ?: throw CommandDataException("file.upload_not_found")
             if (uploaded.runtimeId != intent.runtimeId || uploaded.sessionId != intent.sessionId || uploaded.messageId != null && uploaded.messageId != intent.requestId) throw CommandDataException("file.already_bound")
+            if ((file in imageIds) != (uploaded.decodeUpload().intent.image != null)) throw CommandDataException("image.purpose_mismatch")
             check(dao.updateUpload(uploaded.copy(messageId = intent.requestId, updatedAt = maxOf(now, uploaded.updatedAt))) == 1)
         }
         CommandEvolution.created(intent, now).also { dao.insert(it.encode()) }
@@ -146,6 +151,11 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             if(granted==null || "command.status" !in granted.actions) dao.revokeCreations(runtime)
             else dao.restrictCreations(runtime,granted.workspaces.toList())
         }
+        for (runtime in dao.forkRuntimes()) {
+            val granted = scopes[runtime]
+            if (granted == null || !granted.actions.containsAll(setOf("session.read", "session.fork", "session.create", "command.status"))) dao.revokeForks(runtime)
+            else dao.restrictForks(runtime, granted.workspaces.toList())
+        }
     }
     override suspend fun loadTranscript(runtime: String, session: String, workspace: String?): CachedTranscript? = transaction { dao ->
         Contract.uuid(runtime); Contract.uuid(session); workspace?.let(Contract::uuid)
@@ -156,7 +166,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         val records = dao.cachedRecords(runtime, session)
         if (records.size != row.recordCount || records.sumOf { it.body.size.toLong() } != row.bytes || row.bytes > CACHE_SESSION_BYTES) throw CommandDataException("data.corrupt")
         val parsed = records.map {
-            SessionRecord.parse(SessionJson.parse(it.body)).also { parsed -> if (parsed.seq != it.seq) throw CommandDataException("data.corrupt") }
+            parseCachedSessionRecord(it.body).also { parsed -> if (parsed.seq != it.seq) throw CommandDataException("data.corrupt") }
         }
         dao.touchCache(runtime, session, now)
         CachedTranscript(row.epoch, row.savedAt, parsed)
@@ -165,7 +175,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         Contract.uuid(runtime); Contract.uuid(session); Contract.uuid(epoch); workspace?.let(Contract::uuid)
         if (!transcript.durableOnly || transcript.records.any { it.seq > transcript.persistedThrough } || transcript.items.any { it.live || !it.persisted } || now < 0) throw CommandDataException("data.unconfirmed_history")
         withContext(Dispatchers.IO) {
-            val encoded = transcript.records.map { CachedRecordRow(runtime, session, it.seq, SessionJson.encode(it.raw)) }
+            val encoded = transcript.records.map { CachedRecordRow(runtime, session, it.seq, it.cacheBytes()) }
             var bytes = encoded.sumOf { it.body.size.toLong() }; var first = 0
             while (bytes > CACHE_SESSION_BYTES && first < encoded.size) bytes -= encoded[first++].body.size
             val retained = encoded.drop(first)
@@ -202,6 +212,9 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
         // transaction. Different journal instances must not publish different
         // wrapping envelopes while another caller creates the same database.
         private val setupLock = Any()
+        private val migration6To7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("ALTER TABLE commands ADD COLUMN forkOutcome BLOB") }
+        }
         private val migration5To6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE TABLE IF NOT EXISTS file_exports (requestId TEXT NOT NULL, runtimeId TEXT NOT NULL, sessionId TEXT NOT NULL, workspaceId TEXT, origin TEXT NOT NULL, intent BLOB NOT NULL, digest TEXT NOT NULL, fileId TEXT, manifest BLOB, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(requestId))")
@@ -255,7 +268,7 @@ class SqlCommandJournal private constructor(override val owner: CommandOwner, pr
             var database: CommandDatabase? = null
             try {
                 database = Room.databaseBuilder(context.applicationContext, CommandDatabase::class.java, file.absolutePath)
-                    .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5, migration5To6)
+                    .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5, migration5To6, migration6To7)
                     .openHelperFactory(SupportOpenHelperFactory(password, null, true))
                     .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING).build()
                 database.openHelper.writableDatabase.execSQL("PRAGMA synchronous=FULL")
@@ -286,7 +299,8 @@ private fun FileUploadRow.decodeUpload(): StoredFileUpload {
 }
 
 private fun PendingCommand.encode() = CommandRow(intent.requestId, intent.runtimeId, intent.sessionId, intent.storageBytes(), intent.digest, delivery.name, remote?.name,
-    attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, intent.workspaceId, createdSessionId)
+    attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, intent.workspaceId, createdSessionId,
+    forkOutcome?.let { JsonDocument.of(it.json()).canonicalBytes() })
 private fun CommandRow.decode(): PendingCommand {
     val parsed = CommandIntent.stored(intent)
     val unboundFileRetry = parsed.kind == CommandKind.MESSAGE && parsed.fileIds().isNotEmpty() && remote == null && !everHostSaved && !everAgentQueued
@@ -294,8 +308,13 @@ private fun CommandRow.decode(): PendingCommand {
     if (parsed.requestId != requestId || parsed.runtimeId != runtimeId || parsed.sessionId != sessionId || parsed.workspaceId != workspaceId || parsed.digest != digest || attempts < 0 || revision < 1 ||
         delivery == CommandDelivery.PENDING.name && attempts != 0L && remote != RemoteCommandState.RECEIVED.name && !unboundFileRetry) throw CommandDataException("data.corrupt")
     createdSessionId?.let(Contract::uuid)
-    if ((parsed.kind == CommandKind.CREATE && remote == RemoteCommandState.SETTLED.name) != (createdSessionId != null)) throw CommandDataException("data.corrupt")
-    return PendingCommand(parsed, CommandDelivery.valueOf(delivery), remote?.let(RemoteCommandState::valueOf), attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, createdSessionId)
+    val outcome = forkOutcome?.let { SessionForkOutcome.parse(JsonDocument.parse(it).root) }
+    if (parsed.kind == CommandKind.FORK) {
+        if ((createdSessionId == null) != (outcome == null) || createdSessionId == parsed.sessionId ||
+            remote == RemoteCommandState.SETTLED.name && (createdSessionId == null || outcome?.checkpoint != "persisted") ||
+            remote == RemoteCommandState.REJECTED.name && createdSessionId != null || remote == RemoteCommandState.AGENT_QUEUED.name || remote == RemoteCommandState.OBSERVED.name) throw CommandDataException("data.corrupt")
+    } else if (outcome != null || (parsed.kind == CommandKind.CREATE && remote == RemoteCommandState.SETTLED.name) != (createdSessionId != null)) throw CommandDataException("data.corrupt")
+    return PendingCommand(parsed, CommandDelivery.valueOf(delivery), remote?.let(RemoteCommandState::valueOf), attempts, revision, createdAt, updatedAt, remoteTimestamp, everHostSaved, everAgentQueued, error, createdSessionId, outcome)
 }
 
 private fun FileExportRow.decodeExport(): StoredFileExport {

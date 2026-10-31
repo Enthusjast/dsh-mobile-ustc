@@ -49,7 +49,7 @@ class SessionCreationTest {
         main {owner.openCreatedSession(record.intent.requestId)}
         until("created session reader") {owner.state.value.let {it.selectedSessionId==record.createdSessionId && it.reader?.phase==SessionReadPhase.READY}}
         assertTrue(owner.state.value.reader!!.window!!.items.isEmpty())
-        main {owner.submitMessage("queue","继续新会话")}
+        main {owner.submitFixtureMessage("queue","继续新会话")}
         until("new session admission") {owner.state.value.outbox?.records?.singleOrNull()?.everAgentQueued==true}
         assertEquals(record.createdSessionId,owner.state.value.outbox!!.records.single().intent.sessionId);assertEquals(1,test.commandWrites.get())
     }
@@ -72,5 +72,6 @@ class SessionCreationTest {
         assertEquals(1,test.creationWrites.get())
         main {owner.cancel()};until("local logout") {owner.state.value.phase==HomePhase.SIGNED_OUT}
         assertNull(owner.state.value.creation);assertTrue(owner.state.value.runtimes.isEmpty())
+        assertNull(owner.state.value.presentationOwner);assertNull(owner.state.value.composer)
     }
 }

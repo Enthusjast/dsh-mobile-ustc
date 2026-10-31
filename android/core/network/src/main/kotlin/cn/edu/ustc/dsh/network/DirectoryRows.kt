@@ -6,6 +6,7 @@ class RuntimeDirectoryEntry private constructor(val id: String, val hostId: Stri
     val protocolVersion: Long?, val scope: RelayScope?, val grantVersion: Long?, val role: String?, val expiresAt: Long?) {
     fun canList(now: Long = System.currentTimeMillis()): Boolean = protocolVersion == 1L && scope?.actions?.contains("session.list") == true && (expiresAt == null || expiresAt > now)
     fun canRead(now: Long = System.currentTimeMillis()): Boolean = protocolVersion == 1L && scope?.actions?.contains("session.read") == true && (expiresAt == null || expiresAt > now)
+    fun canReadMetadata(now: Long = System.currentTimeMillis()): Boolean = canList(now) && scope?.actions?.contains("session.metadata.read") == true
     fun creationScope(now: Long = System.currentTimeMillis()): RelayScope? = if (protocolVersion == 1L && role in setOf("operator", "owner") &&
         (expiresAt == null || expiresAt > now) && scope?.actions?.containsAll(setOf("session.create", "command.status")) == true && scope.workspaces.isNotEmpty())
         RelayScope(listOf("session.create", "command.status"), scope.workspaces, emptyList()) else null
@@ -26,7 +27,14 @@ class RuntimeDirectoryEntry private constructor(val id: String, val hostId: Stri
     }
 }
 
-class SessionDirectoryEntry private constructor(val id: String, val workspaceId: String?, val state: String, val lastPersisted: Long, val updatedAt: Long) {
+class SessionDirectoryEntry private constructor(val id: String, val workspaceId: String?, val state: String, val lastPersisted: Long, val updatedAt: Long,
+    val metadata: DirectoryDisplayMetadata? = null) {
+    fun withoutMetadata(): SessionDirectoryEntry = if (metadata == null) this else SessionDirectoryEntry(id, workspaceId, state, lastPersisted, updatedAt)
+    fun displayMetadata(grant: RuntimeDirectoryEntry?, now: Long = System.currentTimeMillis()): DirectoryDisplayMetadata? {
+        if (grant?.canReadMetadata(now) != true) return null
+        val scope = grant.scope ?: return null
+        return if (id in scope.sessions || workspaceId?.let(scope.workspaces::contains) == true) metadata else null
+    }
     fun viewScope(grant: RuntimeDirectoryEntry, includeApprovals: Boolean = false): RelayScope? = try {
         if (!grant.canRead() || grant.scope == null) null else {
             val actions = mutableSetOf("session.read")
@@ -43,8 +51,12 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
                 }
             }
             if ("file.download" in grant.scope.actions) actions += "file.download"
+            if (state != "unavailable" && "session.changes.read" in grant.scope.actions) actions += "session.changes.read"
+            val fork = state != "unavailable" && workspaceId != null && workspaceId in grant.scope.workspaces &&
+                grant.scope.actions.containsAll(forkActions)
+            if (fork) { actions += "session.fork"; actions += "session.create" }
             val selected = grant.scope.session(id, workspaceId, actions)
-            if ("file.download" in actions && workspaceId != null && workspaceId in grant.scope.workspaces)
+            if ((fork || "file.download" in actions) && workspaceId != null && workspaceId in grant.scope.workspaces)
                 RelayScope(actions, listOf(workspaceId), selected.sessions) else selected
         }
     } catch (_: ProtocolException) { null }
@@ -52,11 +64,17 @@ class SessionDirectoryEntry private constructor(val id: String, val workspaceId:
         if (!grant.canRead() || state == "unavailable") null else grant.scope?.readSession(id, workspaceId)
     } catch (_: ProtocolException) { null }
     companion object {
-        fun parse(root: JsonObject): SessionDirectoryEntry {
+        private val forkActions = setOf("session.read", "session.fork", "session.create", "command.status")
+        private val requiredFields = setOf("session_id", "state", "last_persisted_seq", "updated_at")
+        private val legacyFields = requiredFields + "workspace_id"
+        fun parse(root: JsonObject, namesProjection: Boolean = false): SessionDirectoryEntry {
+            if (!root.fields.keys.containsAll(requiredFields) || root.fields.keys.any { it !in legacyFields && (!namesProjection || it != "metadata") }) throw ProtocolException()
             val workspace = when (val value = root.fields["workspace_id"]) { null, JsonNull -> null; is JsonString -> Contract.uuid(value.value); else -> throw ProtocolException() }
             val state = root.string("state")
             if (state !in setOf("available", "running", "archived", "unavailable")) throw ProtocolException()
-            return SessionDirectoryEntry(Contract.uuid(root.string("session_id")), workspace, state, root.integer("last_persisted_seq", -1), relayTime(root.string("updated_at")))
+            val metadata = if ("metadata" in root.fields) DirectoryDisplayMetadata.parse(root.obj("metadata")) else null
+            if (workspace == null && metadata?.workspaceTitle != null || state == "unavailable" && (metadata?.title != null || metadata?.workspaceTitle != null)) throw ProtocolException()
+            return SessionDirectoryEntry(Contract.uuid(root.string("session_id")), workspace, state, root.integer("last_persisted_seq", -1), relayTime(root.string("updated_at")), metadata)
         }
     }
 }

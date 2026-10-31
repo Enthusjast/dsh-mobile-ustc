@@ -28,13 +28,22 @@ class RealtimeSessionTicket internal constructor(
                 val now = System.currentTimeMillis()
                 val challenge = DeviceChallenge.parse(link.receive(), now, expiresAt)
                 val capabilities = mutableListOf("connection.heartbeat.v1")
-                if ("session.read" in scope.actions) capabilities += listOf("session.read.v1","question.blocking.v1","question.timed.v1")
-                if (scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel", "session.create", "question.answer") }) capabilities += "command.relay.v1"
-                if ("message.submit" in scope.actions) capabilities += FILE_MESSAGE_CAPABILITY
-                if ("file.download" in scope.actions) capabilities += FILE_EXPORT_CAPABILITY
+                if ("session.read" in scope.actions) capabilities += listOf("session.read.v1", "question.blocking.v1", "question.timed.v1", SESSION_MESSAGE_ACTIONS_CAPABILITY)
+                if (scope.actions.any { it in setOf("message.submit", "session.archive", "session.cancel", "session.create", "session.fork", "session.model.select", "question.answer") }) capabilities += "command.relay.v1"
+                if ("message.submit" in scope.actions) capabilities += listOf(FILE_MESSAGE_CAPABILITY, IMAGE_MESSAGE_CAPABILITY)
+                if ("file.download" in scope.actions) {
+                    capabilities += FILE_EXPORT_CAPABILITY
+                    if ("session.read" in scope.actions) capabilities += SESSION_MEDIA_CAPABILITY
+                }
+                if ("session.read" in scope.actions && "session.changes.read" in scope.actions) capabilities += SESSION_CHANGES_CAPABILITY
+                if ("session.read" in scope.actions && "session.fork" in scope.actions && "session.create" in scope.actions) capabilities += SESSION_FORK_CAPABILITY
                 if ("session.archive" in scope.actions) capabilities += "session.archive.v1"
                 if ("session.cancel" in scope.actions) capabilities += "session.cancel.v1"
                 if ("session.create" in scope.actions) capabilities += listOf("session.create.v1", "session.create_options.v1")
+                if ("session.model.select" in scope.actions) {
+                    capabilities += SESSION_MODEL_SELECT_CAPABILITY
+                    if ("session.read" in scope.actions) capabilities += SESSION_MODELS_CAPABILITY
+                }
                 if ("approval.decide" in scope.actions) capabilities += SIGNED_APPROVAL_CAPABILITY
                 val hello = DeviceHello(deviceId, capabilities)
                 val proof = withContext(Dispatchers.Default) { DeviceProofs.relayHandshake(signer, hello, challenge, runtimeId, System.currentTimeMillis()) }

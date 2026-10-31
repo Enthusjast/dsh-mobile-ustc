@@ -524,14 +524,15 @@ internal class AccountFixture(private val context: Context) : AutoCloseable {
                         require(claims.string("iss") == deviceId && claims.string("runtime_id") == "55555555-5555-4555-8555-555555555555" && claims.string("aud") == RELAY_PROOF_AUDIENCE)
                         require(claims.string("connection_id") == connectionId && claims.string("challenge_id") == challengeId && claims.string("nonce") == nonce)
                         val capabilities = payload.array("capabilities").map { (it as JsonString).value }
-                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1","question.timed.v1","command.relay.v1", FILE_MESSAGE_CAPABILITY, FILE_EXPORT_CAPABILITY, "session.archive.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
+                        require(capabilities.toSet().all { it in setOf("connection.heartbeat.v1", "session.read.v1", "question.blocking.v1", "question.timed.v1", "command.relay.v1", FILE_MESSAGE_CAPABILITY, FILE_EXPORT_CAPABILITY, IMAGE_MESSAGE_CAPABILITY, SESSION_MEDIA_CAPABILITY, SESSION_MESSAGE_ACTIONS_CAPABILITY, SESSION_CHANGES_CAPABILITY, SESSION_FORK_CAPABILITY, "session.archive.v1", "session.cancel.v1", "session.create.v1", "session.create_options.v1", "approval.signed.v1") })
                         require(claims.string("hello_sha256") == DeviceHello(deviceId, capabilities).digest())
+                        val negotiated = capabilities.filter { it !in setOf(IMAGE_MESSAGE_CAPABILITY, SESSION_MEDIA_CAPABILITY, SESSION_MESSAGE_ACTIONS_CAPABILITY, SESSION_CHANGES_CAPABILITY, SESSION_FORK_CAPABILITY) }
                         relayProofReceived = true
                         if ("approval.signed.v1" in capabilities) approvalEndpoint.set(ApprovalEndpoint(connectionId, subscribedScope))
                         webSocket.send(JsonDocument.of(jsonObject("v" to 1L.json(), "type" to "hello.ok".json(), "payload" to jsonObject(
                             "role" to "device".json(), "connection_id" to connectionId.json(), "device_id" to deviceId.json(), "runtime_id" to "55555555-5555-4555-8555-555555555555".json(),
                             "grant_version" to 7L.json(), "scope" to subscribedScope.json(), "protocols" to JsonArray(listOf(1L.json())),
-                            "capabilities" to JsonArray(capabilities.map(String::json)), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(),
+                            "capabilities" to JsonArray(negotiated.map(String::json)), "heartbeat_seconds" to 20L.json(), "max_frame_bytes" to RELAY_FRAME_BYTES.toLong().json(),
                             "server_time" to java.time.Instant.now().toString().json(), "lease_expires_at" to java.time.Instant.ofEpochMilli(leaseExpires).toString().json()))).canonicalText())
                     } catch (_: Exception) { failure.set("native Relay proof validation failed"); webSocket.cancel() }
                 }

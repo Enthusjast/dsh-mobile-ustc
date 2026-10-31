@@ -51,12 +51,12 @@ class SessionArchiveDeliveryTest {
         awaitState(true, 1)
         val original = owner.state.value.outbox!!.records.single()
         assertEquals(CommandKind.ARCHIVE, original.intent.kind); assertFalse(original.everAgentQueued); assertEquals(1L, original.attempts)
-        main { owner.submitMessage("queue", "must restore first") }
+        main { owner.submitFixtureMessage("queue", "must restore first") }
         assertEquals(1, test.commandWrites.get())
         main { owner.archiveSession(owner.state.value.reader!!.runtimeEpoch!!, false, false) }
         awaitState(false, 2)
         assertEquals(2, test.archiveWrites.get())
-        main { owner.submitMessage("queue", "continue restored conversation") }
+        main { owner.submitFixtureMessage("queue", "continue restored conversation") }
         until("restored message admission") { owner.state.value.outbox?.records?.any { it.intent.kind == CommandKind.MESSAGE && it.everAgentQueued } == true }
         assertEquals(3, test.commandWrites.get())
     }

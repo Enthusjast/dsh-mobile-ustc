@@ -16,6 +16,8 @@ import cn.edu.ustc.dsh.network.*
 @Composable
 fun UploadsPanel(state: SessionUploadState, online: Boolean, onPick: (String?) -> Unit, onToggle: (String) -> Unit, onQuery: (String) -> Unit,
     onRemove: (String) -> Unit, onCancel: () -> Unit) {
+    val rows = state.rows.filter { it.stored.intent.image == null }
+    val selectedRows = rows.filter { it.stored.intent.requestId in state.selected }
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(
             Modifier.padding(16.dp),
@@ -35,9 +37,9 @@ fun UploadsPanel(state: SessionUploadState, online: Boolean, onPick: (String?) -
             state.error?.let { Text(fileErrorText(it), color = MaterialTheme.colorScheme.error) }
 
             HorizontalDivider()
-            Text(stringResource(R.string.file_ux_selection, state.selected.size), style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
-            if (state.selected.isEmpty()) Text(stringResource(R.string.file_ux_selection_empty), style = MaterialTheme.typography.bodySmall)
-            state.rows.filter { it.stored.intent.requestId in state.selected }.forEach { row ->
+            Text(stringResource(R.string.file_ux_selection, selectedRows.size), style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+            if (selectedRows.isEmpty()) Text(stringResource(R.string.file_ux_selection_empty), style = MaterialTheme.typography.bodySmall)
+            selectedRows.forEach { row ->
                 key("selected", row.stored.intent.requestId) {
                     Column {
                         Text(row.stored.intent.manifest.name, style = MaterialTheme.typography.bodyMedium)
@@ -52,8 +54,8 @@ fun UploadsPanel(state: SessionUploadState, online: Boolean, onPick: (String?) -
             }
             HorizontalDivider()
             Text(stringResource(R.string.file_ux_records), style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
-            if (state.rows.isEmpty()) Text(stringResource(R.string.file_ux_records_empty), style = MaterialTheme.typography.bodySmall)
-            state.rows.forEach { row -> key(row.stored.intent.requestId) {
+            if (rows.isEmpty()) Text(stringResource(R.string.file_ux_records_empty), style = MaterialTheme.typography.bodySmall)
+            rows.forEach { row -> key(row.stored.intent.requestId) {
                 val id = row.stored.intent.requestId
                 var details by remember { mutableStateOf(false) }
                 var deleting by remember { mutableStateOf(false) }
@@ -120,7 +122,7 @@ fun UploadsPanel(state: SessionUploadState, online: Boolean, onPick: (String?) -
                 )
                 HorizontalDivider()
             } }
-            if (state.rows.isNotEmpty()) Text(stringResource(R.string.file_ux_upload_lifecycle), style = MaterialTheme.typography.bodySmall)
+            if (rows.isNotEmpty()) Text(stringResource(R.string.file_ux_upload_lifecycle), style = MaterialTheme.typography.bodySmall)
         }
     }
 }

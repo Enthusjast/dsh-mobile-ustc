@@ -212,6 +212,25 @@ class HomeNavigationTest {
         assertEquals(0, fixture!!.ticketRequests.get())
     }
 
+    @Test fun appearanceUsesTheAcceptedOwnerAndReturnsToSettingsWithoutOpeningAReader() {
+        start(); directory()
+        val accepted = controller!!.state.value.presentationOwner!!
+        assertEquals(fixture!!.accountId, accepted.accountId)
+        assertEquals(fixture!!.deviceId, accepted.deviceId)
+        tab(R.string.nav_settings).performClick()
+        listAction("settings-list", R.string.directory_appearance_entry).performClick()
+        rule.onNodeWithTag("appearance-settings-list").assertIsDisplayed()
+        assertNull(controller!!.state.value.reader)
+        rule.onNodeWithContentDescription("返回设置").performClick()
+        tab(R.string.nav_settings).assertIsSelected()
+        listAction("settings-list", R.string.directory_appearance_entry).performClick()
+        rule.onNodeWithTag("appearance-settings-list").assertIsDisplayed()
+        systemBack()
+        tab(R.string.nav_settings).assertIsSelected()
+        assertEquals(0, fixture!!.ticketRequests.get())
+        assertEquals(0, fixture!!.subscriptions.get())
+    }
+
     @Test fun signoutDiscardsNavigationEvenWhenTheSameAccountIsRestoredInTheSameComposition() {
         start(); directory(); openRead(1)
         systemBack(); assertRetired(1); directory()

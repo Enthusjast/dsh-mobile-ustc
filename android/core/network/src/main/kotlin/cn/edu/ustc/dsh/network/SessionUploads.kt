@@ -38,7 +38,9 @@ class SessionUploads internal constructor(private val api: RemoteApi, private va
         Contract.uuid(runtimeId); Contract.uuid(sessionId); workspace?.let(Contract::uuid)
         scope.launch { while (isActive) { reload(); delay(1000) } }
     }
-    fun select(source: FileInputSource, resumeId: String? = null) = synchronized(lock) {
+    fun select(source: FileInputSource, resumeId: String? = null) = selectInternal(source, resumeId, null)
+    fun selectImage(source: FileInputSource, image: ImageUploadMetadata, resumeId: String? = null) = selectInternal(source, resumeId, image)
+    private fun selectInternal(source: FileInputSource, resumeId: String?, image: ImageUploadMetadata?) = synchronized(lock) {
         if (closed.get() || task?.isActive == true) { runCatching { source.close() }; return@synchronized }
         input = source
         activeId = resumeId
@@ -48,9 +50,10 @@ class SessionUploads internal constructor(private val api: RemoteApi, private va
             try {
                 val prior = resumeId?.let { requested -> journal.uploads(runtimeId, sessionId).firstOrNull { it.intent.requestId == requested } ?: throw CommandDataException("file.upload_not_found") }
                 if (prior?.messageId != null) throw CommandDataException("file.already_bound")
+                if (prior != null && ((prior.intent.image == null) != (image == null) || image != null && prior.intent.image?.same(image) != true)) throw RemoteRequestException("file.integrity_mismatch")
                 val manifest = fingerprint(source, prior?.intent?.manifest?.name ?: source.name)
                 if (prior != null && !prior.intent.manifest.same(manifest)) throw RemoteRequestException("file.integrity_mismatch")
-                val intent = prior?.intent ?: FileUploadIntent(UUID.randomUUID().toString(), runtimeId, sessionId, workspace, manifest)
+                val intent = prior?.intent ?: FileUploadIntent(UUID.randomUUID().toString(), runtimeId, sessionId, workspace, manifest, image)
                 val stored = journal.createUpload(intent)
                 id = intent.requestId; activeId = id; operationErrors.remove(id)
                 awaitLocal(stored, UploadPhase.REGISTERING)
@@ -105,11 +108,13 @@ class SessionUploads internal constructor(private val api: RemoteApi, private va
     fun toggle(id: String) {
         update { state -> toggleUploadSelection(state, id) }
     }
-    fun selectedFiles(): List<String> {
+    fun selectedFiles(): List<String> = selectedAttachments(false)
+    fun selectedImages(): List<String> = selectedAttachments(true)
+    private fun selectedAttachments(images: Boolean): List<String> {
         val state = mutable.value
         val views = state.selected.map { id -> state.rows.firstOrNull { it.stored.intent.requestId == id } ?: throw RemoteRequestException("file.staging_required") }
         if (views.any { !it.ready() }) throw RemoteRequestException("file.staging_required")
-        return views.map { it.stored.fileId ?: throw RemoteRequestException("file.state_changed") }
+        return views.filter { (it.stored.intent.image != null) == images }.map { it.stored.fileId ?: throw RemoteRequestException("file.state_changed") }
     }
     fun messageSaved() { update { it.copy(selected = emptySet()) }; scope.launch { reload() } }
     private suspend fun fingerprint(source: FileInputSource, name: String): FileManifest = withContext(Dispatchers.IO) {

@@ -181,7 +181,7 @@ class DeviceCompositionTest {
             for (choice in ApprovalChoice.entries) {
                 val mode = if (choice == ApprovalChoice.ALLOW_ONCE) "ALLOW" else "REJECT"
                 val marker = "REMOTE_APPROVAL_${mode}_ANDROID"
-                main { controller!!.submitMessage("queue", marker) }
+                main { controller!!.submitFixtureMessage("queue", marker) }
                 until("native pending $mode") { controller!!.state.value.approvals?.view?.items?.any { it.canReview } == true }
                 val reference = controller!!.state.value.approvals!!.view.items.single { it.canReview }
                 main { controller!!.reviewApproval(reference.status.id) }
@@ -207,7 +207,7 @@ class DeviceCompositionTest {
             }
             filePhase("phone-upload")
             main {
-                controller!!.pickDocument(null, "", "queue")
+                controller!!.pickFixtureDocument(null, "", "queue")
                 val consent = controller!!.state.value.documentPicker!!
                 controller!!.documentPicked(consent.id, FixtureDocumentProvider.URI)
             }
@@ -215,7 +215,7 @@ class DeviceCompositionTest {
             val upload = controller!!.state.value.uploads!!.rows.single().stored
             assertEquals(FixtureDocumentProvider.NAME, upload.intent.manifest.name)
             assertEquals(sha256(FixtureDocumentProvider.BYTES), upload.intent.manifest.sha256)
-            main { controller!!.toggleUpload(upload.intent.requestId); controller!!.submitMessage("queue", "") }
+            main { controller!!.toggleUpload(upload.intent.requestId); controller!!.submitFixtureMessage("queue", "") }
             until("native file-only message admission") { controller!!.state.value.uploads?.rows?.singleOrNull()?.stored?.messageId != null &&
                 controller!!.state.value.outbox?.records?.any { it.intent.fileIds() == listOf(upload.fileId) && it.everAgentQueued } == true }
             val fileMessage = controller!!.state.value.outbox!!.records.single { it.intent.fileIds() == listOf(upload.fileId) }

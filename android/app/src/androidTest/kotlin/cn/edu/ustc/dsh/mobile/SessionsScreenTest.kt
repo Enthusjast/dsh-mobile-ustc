@@ -35,7 +35,7 @@ class SessionsScreenTest {
         rule.onNodeWithText("读取更早消息").performScrollTo().performClick()
         rule.runOnIdle { assertEquals(1, pages) }
         rule.onNodeWithText("合成思考内容").assertDoesNotExist()
-        rule.onNodeWithText("查看思考过程").performScrollTo().performClick()
+        rule.onNodeWithText("思考过程").performScrollTo().performClick()
         rule.onNodeWithText("合成思考内容").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("合成回复").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("尚未确认保存").assertDoesNotExist()
@@ -77,9 +77,9 @@ class SessionsScreenTest {
         val fixture = ApprovalUiFixture()
         val state = mutableStateOf(fixture.state(role = "viewer").copy(reviewingApprovalId = null, reader = SessionReadState(SessionReadPhase.READY)))
         rule.setContent { DshTheme { SessionsScreen(state.value, {}, {}, {}, {}) } }
-        rule.onNodeWithText("当前会话需要你处理 · 查看").assertDoesNotExist()
+        rule.onNodeWithText("待答 0 · 限时 0 · 审批 1 · 原请求 0").assertDoesNotExist()
         rule.runOnIdle { state.value = fixture.state().copy(reviewingApprovalId = null, reader = SessionReadState(SessionReadPhase.READY)) }
-        rule.onNodeWithText("当前会话需要你处理 · 查看").assertIsDisplayed()
+        rule.onNodeWithText("待答 0 · 限时 0 · 审批 1 · 原请求 0").assertIsDisplayed()
     }
 
     private val otherRequest = "33333333-3333-4333-8333-333333333333"
@@ -136,10 +136,10 @@ class SessionsScreenTest {
         rule.setContent { DshTheme { SessionsScreen(ready(running = true), {}, {}, {}, {}) } }
         rule.onNodeWithText("bash").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("调用标识：call-1").assertDoesNotExist()
-        rule.onNodeWithContentDescription("查看调用信息：bash").performScrollTo().performClick()
-        assertEquals("已展开", rule.onNodeWithContentDescription("收起调用信息：bash").fetchSemanticsNode().config[SemanticsProperties.StateDescription])
+        rule.onNodeWithText("bash").performScrollTo().performClick()
+        assertEquals("已展开", rule.onNodeWithText("bash").fetchSemanticsNode().config[SemanticsProperties.StateDescription])
         rule.onNodeWithText("调用标识：call-1").performScrollTo().assertIsDisplayed()
-        rule.onNodeWithText("当前记录未提供更多详情。").performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText("当前记录未提供更多详情。").assertDoesNotExist()
         rule.onNodeWithText("任务已完成").assertDoesNotExist()
         captureUiFixture(rule, "details-tool-expanded", darkTheme = false)
     }
@@ -166,5 +166,76 @@ class SessionsScreenTest {
         rule.onNodeWithContentDescription("返回消息").performClick()
         rule.onNodeWithText("查看原中断请求").performScrollTo().performClick()
         rule.onAllNodesWithText("原请求：$request").onFirst().assertIsDisplayed()
+    }
+    @Test fun sessionInfoFilesAndOriginalRecordsAreSeparateTasks() {
+        rule.setContent { DshTheme { SessionsScreen(ready().copy(outbox = CommandOutboxState(listOf(pending(request, 100, CommandDelivery.PENDING, null, 0)), true)), {}, {}, {}, {}) } }
+        rule.onNodeWithContentDescription("会话详情").performClick()
+        rule.onNodeWithText("会话：$id\n电脑：$id\n运行环境：$id").assertIsDisplayed()
+        rule.onNodeWithText("本机发送记录").assertDoesNotExist()
+        rule.onNodeWithText("原请求记录").performClick()
+        rule.onNodeWithText("原请求：$request").assertIsDisplayed()
+        rule.onNodeWithText("刷新会话信息").assertDoesNotExist()
+        rule.onNodeWithContentDescription("返回消息").performClick()
+        rule.onNodeWithContentDescription("更多任务").performClick()
+        rule.onNodeWithText("会话文件").performClick()
+        rule.onNodeWithText("附件当前不可用。").assertIsDisplayed()
+        rule.onNodeWithText("本机发送记录").assertDoesNotExist()
+    }
+    @Test fun epochChangesRetireTheOriginalCancelConfirmationRatherThanRetargetingIt() {
+        val state = mutableStateOf(ready(running = true).copy(outbox = CommandOutboxState(connected = true)))
+        var cancelled: String? = null
+        rule.setContent { DshTheme { SessionsScreen(state.value, {}, {}, {}, {}, onCancelSession = { cancelled = it }) } }
+        rule.onNodeWithText("中断当前任务").performScrollTo().performClick()
+        rule.runOnIdle { state.value = state.value.copy(reader = state.value.reader!!.copy(runtimeEpoch = otherRequest)) }
+        rule.onNodeWithText("确认中断").assertDoesNotExist()
+        rule.runOnIdle { state.value = state.value.copy(reader = state.value.reader!!.copy(runtimeEpoch = epoch)) }
+        rule.onNodeWithText("确认中断").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(null, cancelled) }
+    }
+    @Test fun quotingInsertsEditableLocalTextWithoutSubmittingOrCreatingARemoteRelation() {
+        val owner = CommandOwner(id, id, "a".repeat(64), id, id)
+        val state = mutableStateOf(ready().copy(presentationOwner = owner,
+            composer = MessageComposerState(ConversationResource(owner, id, id, id)), outbox = CommandOutboxState(connected = true)))
+        var submissions = 0
+        rule.setContent { DshTheme { SessionsScreen(state.value, {}, {}, {}, {}, onSubmit = { submissions++ },
+            onComposerChange = { state.value = state.value.copy(composer = it.copy(revision = it.revision + 1)) }) } }
+        rule.onNodeWithContentDescription("更多消息操作").performScrollTo().performClick()
+        rule.onNodeWithText("引用到本地草稿").performClick()
+        val expected = "> 合成思考内容\n> \n> 合成回复\n\n"
+        assertEquals(expected, rule.onNodeWithText("消息内容").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        rule.onNodeWithText("消息内容").performTextInput("继续编辑")
+        rule.runOnIdle {
+            assertEquals(expected + "继续编辑", state.value.composer!!.value.text)
+            assertEquals(0, submissions)
+        }
+    }
+    @Test fun pendingNavigationDoesNotClaimAndADisappearedHandleCannotReopenTheOldForm() {
+        val prompt = jsonObject("id" to "choice".json(), "question" to "按原标识定位的提问".json(), "options" to JsonArray(listOf(jsonObject("label" to "A".json()))))
+        val batch = jsonObject("question_id" to id.json(), "state" to "open".json(), "expires_at" to JsonNull, "questions" to JsonArray(listOf(prompt)))
+        val questions = SessionQuestions(SessionRoute(id, id, id, id), request).apply {
+            attach(id)
+            accept(SessionContent("question.timed.snapshot", request, id, jsonObject("revision" to 1L.json(), "items" to JsonArray(listOf(batch)))))
+        }.state(true)
+        val original = questions.items.single()
+        val state = mutableStateOf(initial().copy(reader = SessionReadState(SessionReadPhase.READY, questions = questions)))
+        val claims = mutableListOf<QuestionHandle>()
+        val releases = mutableListOf<QuestionHandle>()
+        rule.setContent { DshTheme { SessionsScreen(state.value, {}, {}, {}, {}, onClaim = { claims += it }, onRelease = { releases += it }) } }
+        rule.onNodeWithText("待答 0 · 限时 1 · 审批 0 · 原请求 0").performClick()
+        rule.onNodeWithText("限时提问 · 按原标识定位的提问").performClick()
+        rule.onNodeWithText("按原标识定位的提问").assertIsDisplayed()
+        rule.runOnIdle { assertEquals(emptyList<QuestionHandle>(), claims) }
+        rule.onNodeWithText("查看并答复").performClick()
+        rule.onNodeWithContentDescription("关闭答复表单").assertIsDisplayed()
+        rule.runOnIdle { state.value = state.value.copy(reader = state.value.reader!!.copy(questions = SessionQuestionState())) }
+        rule.onNodeWithContentDescription("关闭答复表单").assertDoesNotExist()
+        rule.runOnIdle {
+            assertEquals(listOf(original.handle), claims)
+            assertEquals(listOf(original.handle), releases)
+            val replacement = PresentedQuestion(original.batch, original.handle.copy(syncId = otherRequest), original.remainingMillis, null, false)
+            state.value = state.value.copy(reader = state.value.reader!!.copy(questions = questions.copy(items = listOf(replacement))))
+        }
+        rule.onNodeWithContentDescription("关闭答复表单").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(1, claims.size) }
     }
 }

@@ -13,7 +13,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
@@ -22,12 +21,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.activity.compose.BackHandler
+import cn.edu.ustc.dsh.command.CommandKind
+import cn.edu.ustc.dsh.command.RemoteCommandState
 
 @Composable
 fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: () -> Unit) {
     val state by model.state.collectAsStateWithLifecycle()
     if (state.phase == HomePhase.READY) {
-        key(model, state.issuer, state.subject, state.deviceId) {
+        key(model, state.presentationOwner?.fingerprint) {
             ReadyHomeRoute(state, model, onCancel)
         }
     } else {
@@ -35,17 +36,19 @@ fun HomeRoute(model: HomeViewModel, onSecuritySettings: () -> Unit, onCancel: ()
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () -> Unit) {
     // Only presentation state survives child pages. Leaving READY disposes this scope.
     val navigation = remember { HomeNavigation() }
     // Positions are scoped to this READY identity and contain only stable message keys and offsets.
     val readingPositions = remember { LinkedHashMap<Pair<String, String>, ChatReadingPosition>() }
+    var appearanceSettings by remember(state.presentationOwner?.fingerprint) { mutableStateOf(false) }
     val bindingState = state.binding
-    val shellVisible = !state.appUpdateSettings && !state.notificationSettings &&
+    val shellVisible = !appearanceSettings && !state.appUpdateSettings && !state.notificationSettings &&
         state.reviewingApprovalId == null && bindingState == null && state.creation == null && state.selectedSessionId == null
     val keyboard = LocalSoftwareKeyboardController.current
-    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val imeVisible = WindowInsets.isImeVisible
     val back: () -> Unit = { if (imeVisible) keyboard?.hide() else model.back() }
     LaunchedEffect(state.selectedRuntimeId, state.selectedSessionId, state.reader?.phase, state.knownTarget) {
         navigation.recordVisited(state)
@@ -90,7 +93,10 @@ private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () 
         navigation.destination = HomeDestination.COMPUTERS
     }
 
-    if (state.appUpdateSettings) {
+    if (appearanceSettings && state.presentationOwner != null) {
+        BackHandler { appearanceSettings = false }
+        AppearanceSettingsScreen(state.presentationOwner) { appearanceSettings = false }
+    } else if (state.appUpdateSettings) {
         BackHandler { model.closeAppUpdates() }
         val update = state.appUpdates ?: AppUpdateUiState()
         AppUpdatesScreen(update, { model.checkAppUpdates(update.viewId) },
@@ -114,6 +120,19 @@ private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () 
     } else if (state.creation != null) {
         BackHandler(onBack = back)
         SessionCreationScreen(state, model::createSession, model::refreshCreationOptions, model::queryCreation, model::sendPendingCreation, model::openCreatedSession, back)
+    } else if (state.changesOpen && state.changes != null) {
+        BackHandler { if (imeVisible) keyboard?.hide() else model.closeChanges() }
+        SessionChangesScreen(state.changes.copy(error = state.sessionActionError ?: state.changes.error),
+            model::loadChanges, model::loadNextChanges, model::reloadChanges, model::loadChangePatch,
+            model::loadNextChangePatch, model::copyChangePatch, model::closeChanges)
+    } else if (state.modelSelectionOpen) {
+        BackHandler { if (imeVisible) keyboard?.hide() else model.closeModelSelection() }
+        val original = state.outbox?.records.orEmpty().filter { it.intent.kind == CommandKind.MODEL_SELECT }
+            .maxWithOrNull(compareBy({ if (it.remote !in setOf(RemoteCommandState.SETTLED, RemoteCommandState.REJECTED)) 1 else 0 }, { it.createdAt }, { it.intent.requestId }))
+        SessionModelsScreen(requireNotNull(state.modelCatalog), original, state.modelBusy,
+            state.modelError ?: state.outbox?.error, model::loadModels, model::loadNextModels, model::reloadModels,
+            model::selectModel, model::queryModelSelection, model::sendPending, model::discardUnsentModelSelection,
+            { if (imeVisible) keyboard?.hide() else model.closeModelSelection() })
     } else if (state.selectedSessionId != null) {
         BackHandler(onBack = back)
         key(state.selectedRuntimeId, state.selectedSessionId) {
@@ -129,7 +148,12 @@ private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () 
                 model::reviewApproval, model::queryApprovals, model::archiveSession,
                 model::pickDocument, model::documentPicked, model::toggleUpload, model::queryUpload, model::removeUpload, model::cancelUpload,
                 model::browseExports, model::requestExport, model::queryExports, model::cancelExport, model::removeExport,
-                model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave, readingPosition = position)
+                model::chooseExportDestination, model::exportDestinationPicked, model::cancelExportSave, readingPosition = position,
+                onComposerChange = model::editComposer, onModels = model::openModelSelection,
+                onChanges = model::openChanges, onMessageAction = model::previewMessage,
+                onPickImage = { model.pickImage() }, onPickCamera = model::pickCamera, onPreviewMedia = model::previewImage,
+                onDismissImagePreview = model::dismissImagePreview, onCancelImage = model::cancelImage,
+                onReselectImage = { model.pickImage(it) }, onResolveFailedInput = model::resolveFailedInput)
         }
     } else {
         BackHandler(enabled = navigation.destination != HomeDestination.SESSIONS || navigation.directoryFromComputer) {
@@ -149,9 +173,18 @@ private fun ReadyHomeRoute(state: HomeState, model: HomeViewModel, onCancel: () 
             onBinding = model::openBinding,
             onNotifications = model::openNotificationSettings,
             onAppUpdates = model::openAppUpdates,
+            onAppearance = { if (state.presentationOwner != null) appearanceSettings = true },
             onExit = onCancel,
             onBackToComputers = backToComputers,
         )
+    }
+    if (state.messageActionsOpen && state.messageActions != null) {
+        val actions = state.messageActions
+        val original = actions.originalRequestId?.let { id -> state.outbox?.records?.firstOrNull { it.intent.requestId == id } }
+        SessionMessageActionPreview(actions.copy(error = state.sessionActionError ?: actions.error), original,
+            fork = { actions.preview?.anchor?.let(model::forkMessage) },
+            share = { actions.preview?.anchor?.let(model::shareMessage) },
+            queryOriginal = model::queryFork, openChild = model::openForkChild, dismiss = model::dismissMessageActions)
     }
 }
 

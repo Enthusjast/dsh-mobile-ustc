@@ -26,6 +26,7 @@ import cn.edu.ustc.dsh.network.SessionDirectoryEntry
 import cn.edu.ustc.dsh.network.SessionReadPhase
 import cn.edu.ustc.dsh.network.SessionReadState
 import cn.edu.ustc.dsh.protocol.*
+import cn.edu.ustc.dsh.command.CommandOwner
 import cn.edu.ustc.dsh.ui.DshTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -65,8 +66,8 @@ class DshAppShellTest {
         return RuntimeRow(id, workspace, "0.2.1", alias, grant)
     }
 
-    private fun session(id: String, workspaceId: String? = workspace) = SessionDirectoryEntry.parse(jsonObject(
-        "session_id" to id.json(), "workspace_id" to (workspaceId?.json() ?: JsonNull), "state" to "available".json(),
+    private fun session(id: String, workspaceId: String? = workspace, state: String = "available") = SessionDirectoryEntry.parse(jsonObject(
+        "session_id" to id.json(), "workspace_id" to (workspaceId?.json() ?: JsonNull), "state" to state.json(),
         "last_persisted_seq" to 0L.json(), "updated_at" to "2026-10-25T00:00:00Z".json(),
     ))
 
@@ -90,6 +91,7 @@ class DshAppShellTest {
         onCreate: (String) -> Unit = {},
         onBinding: () -> Unit = {},
         onNotifications: () -> Unit = {},
+        onAppearance: () -> Unit = {},
         onAppUpdates: () -> Unit = {},
         onExit: () -> Unit = {},
         onRefreshSessions: () -> Unit = {},
@@ -97,8 +99,38 @@ class DshAppShellTest {
         val density = LocalDensity.current
         SideEffect { fixtureDensity = density }
         DshAppShell(state, navigation, { navigation.destination = it }, onRuntime, onSession,
-            {}, onRefreshSessions, onCreate, onBinding, onNotifications, onAppUpdates, onExit,
+            {}, onRefreshSessions, onCreate, onBinding, onNotifications, onAppearance, onAppUpdates, onExit,
             { navigation.destination = HomeDestination.COMPUTERS })
+    }
+
+    @Test fun semanticNamesRemainGrantBoundAndKeepStableIdsAndStateFilters() {
+        fun named(id: String, state: String) = SessionDirectoryEntry.parse(jsonObject(
+            "session_id" to id.json(), "workspace_id" to workspace.json(), "state" to state.json(),
+            "last_persisted_seq" to 7L.json(), "updated_at" to "2026-10-30T12:00:00Z".json(),
+            "metadata" to jsonObject("v" to 1L.json(), "title" to "同名原生会话".json(), "workspace_title" to "原生工作区".json(),
+                "title_source" to "cached".json(), "title_as_of_seq" to 4L.json())), namesProjection = true)
+        val nav = navigation()
+        var current by mutableStateOf(state(listOf(runtime(runtimeA, listOf("session.list", "session.read", "session.metadata.read"))))
+            .copy(sessions = listOf(named(sessionA, "available"), named(sessionB, "archived"))))
+        rule.setContent { DshTheme { Shell(current, nav) } }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertTextContains("同名原生会话", substring = true)
+        rule.onNodeWithTag("session-$sessionA").assertTextContains(sessionA.take(8), substring = true)
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-open-search"))
+        rule.onNodeWithTag("directory-open-search").performClick()
+        rule.onNodeWithTag("directory-search").performTextInput("原生工作区")
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionB"))
+        rule.onNodeWithTag("session-$sessionB").assertExists()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-status-ACTIVE"))
+        rule.onNodeWithTag("directory-status-ACTIVE").performClick()
+        rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
+        rule.runOnIdle { current = current.copy(runtimes = listOf(runtime(runtimeA))) }
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.onNodeWithTag("directory-search").performTextClearance()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertExists().assert(!hasText("同名原生会话", substring = true))
+        rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(DirectorySessionFilter.ACTIVE, nav.directorySessionFilter) }
     }
 
     @Test fun listOnlyDirectoryHasNoBodyReadAction() {
@@ -160,7 +192,7 @@ class DshAppShellTest {
         rule.onNodeWithTag("runtime-filter-$collision").assertExists()
     }
 
-    @Test fun staleLoadingDeniedAndRevokedScopesNeverShowRetainedSessionRows() {
+    @Test fun refreshRetainsDisabledRowsButStaleDeniedAndRevokedScopesNeverDo() {
         val nav = navigation()
         var current by mutableStateOf(state())
         rule.setContent { DshTheme { Shell(current, nav) } }
@@ -168,7 +200,8 @@ class DshAppShellTest {
         rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
         rule.onNodeWithText("所选电脑的目录授权已变化，请重新选择电脑或刷新核对。").assertExists()
         rule.runOnIdle { nav.selectRuntime(runtimeA); current = current.copy(loadingSessions = true) }
-        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertIsNotEnabled().assertHasNoClickAction()
         rule.onNodeWithText("正在读取会话目录").assertExists()
         rule.runOnIdle { current = current.copy(loadingSessions = false, sessionError = "access.denied") }
         rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
@@ -219,7 +252,8 @@ class DshAppShellTest {
         rule.onNodeWithTag("directory-search").assertDoesNotExist()
         rule.onNodeWithTag("directory-open-search").assertIsNotEnabled()
         rule.onNodeWithContentDescription("刷新").assertIsNotEnabled()
-        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionA").assertIsNotEnabled().assertHasNoClickAction()
         rule.runOnIdle { current = current.copy(loadingSessions = false, sessions = listOf(session(sessionA))) }
         rule.onNodeWithTag("directory-search").assertIsEnabled()
         rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
@@ -439,6 +473,207 @@ class DshAppShellTest {
         rule.onNodeWithText("工作区 $workspace").assertDoesNotExist()
         rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
     }
+    @Test fun statusWorkspaceAndIdFiltersIntersectOnlyAcquiredAuthorizedRowsWithoutRequests() {
+        val otherWorkspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        val excludedWorkspace = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        val excludedSession = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        val nav = navigation()
+        val grant = runtime(runtimeA, workspaces = emptyList(), sessions = listOf(sessionA, sessionB, runtimeB))
+        val current = state(listOf(grant)).copy(sessions = listOf(
+            session(sessionA), session(sessionB, otherWorkspace, "archived"),
+            session(runtimeB, null, "unavailable"), session(excludedSession, excludedWorkspace, "archived"),
+        ))
+        var reads = 0
+        var refreshes = 0
+        var runtimeRequests = 0
+        rule.setContent { DshTheme { Shell(current, nav, onSession = { reads++ },
+            onRuntime = { runtimeRequests++ }, onRefreshSessions = { refreshes++ }) } }
+        rule.onNodeWithTag("directory-status-ARCHIVED").performClick()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionB"))
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.onNodeWithTag("session-$runtimeB").assertDoesNotExist()
+        rule.onNodeWithTag("session-$excludedSession").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-workspace-filter"))
+        rule.onNodeWithTag("directory-workspace-filter").performClick()
+        rule.onNodeWithTag("directory-workspace-$excludedWorkspace").assertDoesNotExist()
+        rule.onNodeWithTag("directory-workspace-$workspace").performScrollTo().performClick()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("当前目录没有匹配项"))
+        rule.onNodeWithText("当前授权范围内没有会话。").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-reset-filters"))
+        rule.onNodeWithTag("directory-reset-filters").performClick()
+        rule.runOnIdle {
+            assertEquals(DirectorySessionFilter.ALL, nav.directorySessionFilter)
+            assertEquals(null, nav.directoryWorkspaceId)
+            assertEquals("", nav.directoryQuery)
+        }
+        rule.onNodeWithTag("directory-status-ACTIVE").performClick()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$runtimeB"))
+        rule.onNodeWithTag("session-$runtimeB").assertExists()
+        rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-reset-filters"))
+        rule.onNodeWithTag("directory-reset-filters").performClick()
+        rule.onNodeWithTag("directory-open-search").performClick()
+        rule.onNodeWithTag("directory-search").performTextInput(otherWorkspace.uppercase())
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionB"))
+        rule.onNodeWithTag("session-$sessionA").assertDoesNotExist()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-search"))
+        rule.onNodeWithTag("directory-search").performTextReplacement(sessionA)
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("session-$sessionA"))
+        rule.onNodeWithTag("session-$sessionB").assertDoesNotExist()
+        rule.runOnIdle {
+            assertEquals(0, reads)
+            assertEquals(0, refreshes)
+            assertEquals(0, runtimeRequests)
+        }
+    }
+
+    @Test fun transientLoadsKeepFiltersButMissingWorkspacesAndOwnerChangesRetireThem() {
+        val nav = navigation()
+        val owner = CommandOwner(runtimeA, workspace, "a".repeat(64), sessionA, runtimeB)
+        val original = state().copy(presentationOwner = owner)
+        nav.reconcileDirectory(original)
+        nav.directoryWorkspaceId = workspace
+        nav.directorySessionFilter = DirectorySessionFilter.ARCHIVED
+        nav.directoryQuery = sessionA
+        nav.reconcileDirectory(original.copy(loadingSessions = true))
+        nav.reconcileDirectory(original.copy(sessionError = "network.unavailable"))
+        assertEquals(workspace, nav.directoryWorkspaceId)
+        assertEquals(DirectorySessionFilter.ARCHIVED, nav.directorySessionFilter)
+        assertEquals(sessionA, nav.directoryQuery)
+        // Fresh checkpoint objects with equal identities must preserve local filters.
+        nav.reconcileDirectory(original.copy(presentationOwner = CommandOwner(runtimeA, workspace, "a".repeat(64), sessionA, runtimeB)))
+        assertEquals(workspace, nav.directoryWorkspaceId)
+        nav.reconcileDirectory(original.copy(sessions = emptyList()))
+        assertEquals(null, nav.directoryWorkspaceId)
+        nav.reconcileDirectory(original)
+        assertEquals(null, nav.directoryWorkspaceId)
+        nav.directoryWorkspaceId = workspace
+        nav.reconcileDirectory(original.copy(presentationOwner = CommandOwner(runtimeA, workspace, "b".repeat(64), sessionA, runtimeB)))
+        assertEquals(null, nav.directoryWorkspaceId)
+        assertEquals(DirectorySessionFilter.ALL, nav.directorySessionFilter)
+        assertEquals("", nav.directoryQuery)
+        nav.directoryWorkspaceId = workspace
+        nav.directorySessionFilter = DirectorySessionFilter.ARCHIVED
+        nav.directoryQuery = sessionA
+        nav.selectRuntime(runtimeB)
+        assertEquals(null, nav.directoryWorkspaceId)
+        assertEquals(DirectorySessionFilter.ALL, nav.directorySessionFilter)
+        assertEquals("", nav.directoryQuery)
+        nav.directoryQuery = sessionB
+        nav.reconcileDirectory(original.copy(phase = HomePhase.SIGNED_OUT))
+        assertEquals("", nav.directoryQuery)
+    }
+
+    @Test fun scopeNarrowingAndRevocationRetireWorkspaceAndRecentHintsWithoutRestoringThem() {
+        val nav = navigation()
+        val original = state().copy(selectedSessionId = sessionA, reader = SessionReadState(SessionReadPhase.READY))
+        nav.reconcileDirectory(original)
+        nav.recordVisited(original)
+        nav.directoryWorkspaceId = workspace
+        val narrowed = original.copy(runtimes = listOf(runtime(runtimeA, workspaces = emptyList(), sessions = listOf(sessionB))))
+        nav.reconcileDirectory(narrowed)
+        assertEquals(null, nav.directoryWorkspaceId)
+        assertEquals(null, nav.recentSession(narrowed))
+        nav.reconcileDirectory(original)
+        assertEquals(null, nav.directoryWorkspaceId)
+        assertEquals(null, nav.recentSession(original))
+        nav.directoryWorkspaceId = workspace
+        nav.directoryQuery = sessionA
+        nav.directorySessionFilter = DirectorySessionFilter.ARCHIVED
+        nav.reconcileDirectory(original.copy(runtimes = listOf(runtime(runtimeA, listOf("session.read")))))
+        assertEquals(null, nav.directoryWorkspaceId)
+        assertEquals("", nav.directoryQuery)
+        assertEquals(DirectorySessionFilter.ALL, nav.directorySessionFilter)
+    }
+
+    @Test fun loadingErrorEmptyAndFilteredEmptyAreDistinctWhileFiltersRemainLocal() {
+        val nav = navigation()
+        var current by mutableStateOf(state().copy(loadingSessions = true))
+        var refreshes = 0
+        rule.setContent { DshTheme { Shell(current, nav, onRefreshSessions = { refreshes++ }) } }
+        rule.onNodeWithText("正在读取会话目录").assertExists()
+        rule.onNodeWithText("当前授权范围内没有会话。").assertDoesNotExist()
+        rule.onNodeWithTag("directory-status-ARCHIVED").assertIsNotEnabled()
+        rule.runOnIdle { current = current.copy(loadingSessions = false, refreshing = true, sessions = emptyList()) }
+        rule.onNodeWithText("正在核对电脑授权").assertExists()
+        rule.onNodeWithText("当前授权范围内没有会话。").assertDoesNotExist()
+        rule.onNodeWithTag("directory-status-ARCHIVED").assertIsNotEnabled()
+        rule.runOnIdle { current = current.copy(refreshing = false, loadingSessions = false, sessionError = "network.unavailable") }
+        rule.onNodeWithTag("directory-status-ARCHIVED").assertIsNotEnabled()
+        rule.onNodeWithText("当前目录没有匹配项").assertDoesNotExist()
+        rule.onNodeWithText("当前授权范围内没有会话。").assertDoesNotExist()
+        rule.runOnIdle { current = current.copy(sessionError = null, sessions = emptyList()) }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("当前授权范围内没有会话。"))
+        rule.runOnIdle { current = current.copy(sessions = listOf(session(sessionA))) }
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasTestTag("directory-status-ARCHIVED"))
+        rule.onNodeWithTag("directory-status-ARCHIVED").performClick()
+        rule.onNodeWithTag("session-directory").performScrollToNode(hasText("当前目录没有匹配项"))
+        rule.onNodeWithText("当前授权范围内没有会话。").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(0, refreshes) }
+    }
+
+    @Test fun appearanceRequiresAnOwnerAndHasAWorkingCallbackAfterOneIsAvailable() {
+        val nav = navigation(HomeDestination.SETTINGS)
+        var current by mutableStateOf(state())
+        var opened = 0
+        rule.setContent { DshTheme { Shell(current, nav, onAppearance = { opened++ }) } }
+        rule.onNodeWithTag("settings-list").performScrollToNode(hasTestTag("settings-appearance"))
+        rule.onNodeWithTag("settings-appearance").assertIsNotEnabled().assertHasNoClickAction()
+        rule.onNodeWithText("尚未取得当前账号的展示设置归属信息，暂不能打开；请完成登录或刷新账号状态。").assertExists()
+        rule.runOnIdle { current = current.copy(presentationOwner = CommandOwner(runtimeA, workspace, "a".repeat(64), sessionA, runtimeB)) }
+        rule.onNodeWithTag("settings-appearance").assertIsEnabled().performClick()
+        rule.runOnIdle { assertEquals(1, opened) }
+    }
+
+    @Test fun accountDetailsKeepFullIdentifiersReachable() {
+        val owner = CommandOwner(runtimeA, workspace, "d".repeat(64), sessionA, runtimeB)
+        val account = state().copy(subject = "full-account-subject-".repeat(6),
+            issuer = "https://identity.example.edu/school/complete-issuer", presentationOwner = owner)
+        val nav = navigation(HomeDestination.SETTINGS)
+        rule.setContent {
+            val density = LocalDensity.current.density
+            CompositionLocalProvider(LocalDensity provides Density(density, 2f)) {
+                DshTheme { Box(Modifier.width(320.dp).height(480.dp)) { Shell(account, nav) } }
+            }
+        }
+        clickSettingsItem("账号与设备详情")
+        for (identifier in listOf(account.subject, account.issuer, account.deviceId,
+                owner.accountId, owner.organizationId, owner.userId, owner.deploymentHash)) {
+            rule.onNodeWithTag("account-detail-list").performScrollToNode(hasText(identifier))
+            rule.onNodeWithText(identifier).assertIsDisplayed()
+        }
+        rule.onNodeWithText("关闭").performClick()
+        rule.onNodeWithTag("account-detail-list").assertDoesNotExist()
+    }
+
+    @Test fun computerHasOnePrimaryDirectoryActionAndNeverInventsPresence() {
+        val opened = mutableListOf<String>()
+        var creates = 0
+        val row = runtime(runtimeA, listOf("session.list", "session.read", "session.create", "command.status"))
+        val nav = navigation(HomeDestination.COMPUTERS)
+        rule.setContent { DshTheme { Shell(state(listOf(row)), nav,
+            onRuntime = { opened += it }, onCreate = { creates++ }) } }
+        rule.onNodeWithText("当前目录未提供连接状态").assertExists()
+        rule.onAllNodes(hasTestTag("computer-open-$runtimeA") and hasClickAction()).assertCountEquals(1)
+        rule.onNodeWithTag("computer-open-$runtimeA").performScrollTo().performClick()
+        rule.onNodeWithTag("computer-create-$runtimeA").performScrollTo().performClick()
+        rule.onNodeWithTag("computer-details-$runtimeA").performScrollTo().performClick()
+        rule.onNodeWithText(runtimeA).performScrollTo().assertIsDisplayed()
+        rule.runOnIdle { assertEquals(listOf(runtimeA), opened); assertEquals(1, creates) }
+    }
+
+    @Test fun computerLoadingAndErrorsDoNotMasqueradeAsAnEmptyDirectory() {
+        var current by mutableStateOf(state(emptyList()).copy(refreshing = true))
+        val nav = navigation(HomeDestination.COMPUTERS)
+        rule.setContent { DshTheme { Shell(current, nav) } }
+        rule.onNodeWithText("正在核对电脑授权").assertExists()
+        rule.onNodeWithText("尚无获授权的电脑").assertDoesNotExist()
+        rule.runOnIdle { current = current.copy(refreshing = false, error = "network.unavailable") }
+        rule.onNodeWithText("尚无获授权的电脑").assertDoesNotExist()
+        rule.runOnIdle { current = current.copy(error = null) }
+        rule.onNodeWithText("尚无获授权的电脑").assertExists()
+    }
+
     private fun clickSettingsItem(label: String) {
         rule.onNodeWithTag("settings-list").performScrollToNode(hasText(label))
         rule.onNodeWithText(label).assertIsDisplayed().performClick()

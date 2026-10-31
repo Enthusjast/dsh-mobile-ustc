@@ -76,4 +76,22 @@ class DirectoryRowsTest {
         assertNull(session(JsonNull).viewScope(RuntimeDirectoryEntry.parse(row().with("access" to access(listOf("session.read"), sessions = emptyList())))))
     }
 
+    @Test fun nativeChangesAndForkPreserveExplicitSourceAndCreateWorkspaceAuthority() {
+        val actions = listOf("session.read", "session.fork", "session.create", "command.status", "session.changes.read")
+        val grant = RuntimeDirectoryEntry.parse(row().with("access" to access(actions).with("role" to "operator".json())))
+        for (state in listOf("available", "running", "archived")) {
+            val selected = session(state = state).viewScope(grant)!!
+            assertTrue(selected.actions.containsAll(actions)); assertEquals(setOf(workspace), selected.workspaces)
+            assertEquals(setOf(session), selected.sessions); assertFalse("session.metadata.read" in selected.actions)
+        }
+        val sessionOnly = RuntimeDirectoryEntry.parse(row().with("access" to access(actions, workspaces = emptyList()).with("role" to "operator".json())))
+        val selected = session().viewScope(sessionOnly)!!
+        assertTrue("session.changes.read" in selected.actions); assertFalse("session.fork" in selected.actions)
+        assertFalse("session.create" in selected.actions); assertTrue(selected.workspaces.isEmpty())
+        val unavailable = session(state = "unavailable").viewScope(grant)!!
+        assertFalse("session.fork" in unavailable.actions); assertFalse("session.changes.read" in unavailable.actions)
+        val missingCreate = RuntimeDirectoryEntry.parse(row().with("access" to access(actions - "session.create").with("role" to "operator".json())))
+        assertFalse("session.fork" in session().viewScope(missingCreate)!!.actions)
+    }
+
 }

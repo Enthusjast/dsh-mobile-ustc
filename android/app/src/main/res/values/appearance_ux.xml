@@ -1,0 +1,33 @@
+<resources>
+    <string name="appearance_title">外观与阅读</string>
+    <string name="appearance_back">返回设置</string>
+    <string name="appearance_scope">仅保存当前账号、组织、部署和设备的外观偏好，不保存消息或草稿，也不改变访问权限。</string>
+    <string name="appearance_theme">显示主题</string>
+    <string name="appearance_theme_system">跟随系统</string>
+    <string name="appearance_theme_light">浅色</string>
+    <string name="appearance_theme_dark">深色</string>
+    <string name="appearance_reading_hint">下列大小仅影响聊天正文和代码，始终叠加系统字体大小；按钮和设置文字仍跟随系统。</string>
+    <string name="appearance_body_scale">聊天正文大小</string>
+    <string name="appearance_code_scale">代码大小</string>
+    <string name="appearance_scale_value">%1$d%%</string>
+    <string name="appearance_scale_range">可调整范围：80%%–160%%</string>
+    <string name="appearance_smaller">减小</string>
+    <string name="appearance_larger">增大</string>
+    <string name="appearance_smaller_label">减小%1$s</string>
+    <string name="appearance_larger_label">增大%1$s</string>
+    <string name="appearance_body_preview_title">正文预览</string>
+    <string name="appearance_body_preview">这是聊天正文的阅读预览。中文、English 和数字 0123456789 会一起缩放。你可以分别调整正文与代码，让长段内容更容易阅读。</string>
+    <string name="appearance_code_preview_title">代码预览</string>
+    <string name="appearance_code_preview">val message = \"中文与 English preview 0123456789 — a longer line for checking code wrapping\"\nprintln(message)</string>
+    <string name="appearance_wrap_code">代码自动换行</string>
+    <string name="appearance_wrap_hint">开启后长代码行会折行；关闭时可横向滚动。不会修改或截断代码内容。</string>
+    <string name="appearance_reset">恢复默认外观与阅读大小</string>
+    <string name="appearance_loading">正在读取此账号的外观偏好…</string>
+    <string name="appearance_ready">已读取本机偏好。更改会在本机保存。</string>
+    <string name="appearance_saving">预览已更新，正在保存…</string>
+    <string name="appearance_saved">已保存到本机。</string>
+    <string name="appearance_read_error">无法读取本机外观偏好，当前显示默认预览。请重试读取，避免覆盖已有设置。</string>
+    <string name="appearance_write_error">当前预览已生效，但本次更改未确认保存；下次打开可能恢复旧设置。请重试保存。</string>
+    <string name="appearance_retry_read">重新读取偏好</string>
+    <string name="appearance_retry_save">重试保存当前外观</string>
+</resources>

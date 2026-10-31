@@ -67,6 +67,7 @@ class SessionArchiveTest {
         rule.onNodeWithText("同时请求停止当前活动").assertDoesNotExist()
         rule.onNodeWithText("确认恢复").performClick()
         rule.runOnIdle { assertEquals(Triple(epoch, false, false), result) }
+        rule.onNodeWithText("原请求记录").performScrollTo().performClick()
         rule.onNodeWithText("归档操作已确认").performScrollTo().assertIsDisplayed()
         rule.onNodeWithText("命令已完成").assertDoesNotExist()
         rule.onNodeWithText("Agent 已入队").assertDoesNotExist()

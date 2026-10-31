@@ -1,6 +1,7 @@
 package cn.edu.ustc.dsh.mobile
 
 import android.app.KeyguardManager
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import cn.edu.ustc.dsh.command.*
@@ -43,9 +44,53 @@ class ChatDeliveryTest {
         main { owner.openSession(test.sessionId) }
         until("session $phase with encrypted journal") { owner.state.value.let { it.reader?.phase == phase && it.outbox != null } }
     }
+    @Test fun ordinaryDraftsAreClearedOnBackgroundAndPresentationOwnerTracksTheAcceptedAccount() {
+        val owner = controller!!; val test = fixture!!; open()
+        val presentation = requireNotNull(owner.state.value.presentationOwner)
+        assertEquals(test.accountId, presentation.accountId)
+        assertEquals(test.organizationId, presentation.organizationId)
+        assertEquals(owner.state.value.deviceId, presentation.deviceId)
+        assertEquals(presentation.fingerprint, owner.state.value.composer!!.resource.owner.fingerprint)
+        main { owner.editFixtureComposer("PRIVATE_FOREGROUND_DRAFT", "steer"); owner.foreground(false) }
+        assertNull(owner.state.value.composer)
+        main { owner.foreground(true) }
+        until("fresh foreground composer") { owner.state.value.let { it.reader?.phase == SessionReadPhase.READY && it.composer != null } }
+        assertEquals("", owner.state.value.composer!!.value.text)
+        assertEquals(presentation, owner.state.value.presentationOwner)
+        assertEquals(0, test.commandWrites.get())
+    }
+
+    @Test fun staleEditorAndSubmissionCannotReplaceOrSendANewerEdit() {
+        val owner = controller!!; open()
+        main { owner.editFixtureComposer("original", "queue") }
+        val stale = owner.state.value.composer!!
+        main {
+            owner.editFixtureComposer("newer", "steer")
+            owner.editComposer(stale)
+            owner.submitMessage(MessageSubmission(stale, true))
+        }
+        assertEquals("newer", owner.state.value.composer!!.value.text)
+        assertEquals("steer", owner.state.value.composer!!.mode)
+        assertTrue(owner.state.value.composer!!.revision > stale.revision)
+        assertEquals(0, fixture!!.commandWrites.get())
+        assertTrue(owner.state.value.outbox!!.records.isEmpty())
+    }
+    @Test fun forgedTextOrModeAtTheAcceptedRevisionCannotReplaceTheImmutableSubmission() {
+        val owner = controller!!; val test = fixture!!; open()
+        main { owner.editFixtureComposer("accepted text", "queue") }
+        val accepted = owner.state.value.composer!!
+        main {
+            owner.submitMessage(MessageSubmission(accepted.copy(value = TextFieldValue("forged text")), false))
+            owner.submitMessage(MessageSubmission(accepted.copy(mode = "steer"), false))
+        }
+        assertEquals(accepted, owner.state.value.composer)
+        assertFalse(owner.state.value.submitting)
+        assertTrue(owner.state.value.outbox!!.records.isEmpty())
+        assertEquals(0, test.commandWrites.get())
+    }
     @Test fun platformKeyTlsChatCommitsTheOriginalIntentBeforeReportingAgentAdmission() {
         val owner = controller!!; val test = fixture!!; open()
-        main { owner.submitMessage("steer", "发送中文🙂") }
+        main { owner.submitFixtureMessage("steer", "发送中文🙂") }
         until("native encrypted outbox admission") { owner.state.value.outbox?.records?.singleOrNull()?.everAgentQueued == true }
         val record = owner.state.value.outbox!!.records.single()
         assertEquals(1L, record.attempts); assertEquals("steer", record.intent.payload.string("mode")); assertEquals(1, test.commandWrites.get())
@@ -56,7 +101,7 @@ class ChatDeliveryTest {
     }
     @Test fun offlineIntentReopensFromSqlCipherAndOnlyAnExplicitActionSendsIt() {
         val owner = controller!!; val test = fixture!!; test.runtimeOffline = true; open(SessionReadPhase.OFFLINE)
-        main { owner.submitMessage("queue", "离线持久草稿", false) }
+        main { owner.submitFixtureMessage("queue", "离线持久草稿", false) }
         until("saved offline intent") { owner.state.value.outbox?.records?.size == 1 }
         val request = owner.state.value.outbox!!.records.single().intent.requestId
         main { owner.foreground(false); owner.foreground(true) }
@@ -71,12 +116,14 @@ class ChatDeliveryTest {
     }
     @Test fun lostSocketReceiptRecoversByStatusAndLogoutErasesPendingBodies() {
         val owner = controller!!; val test = fixture!!; test.dropNextCommandReply = true; open()
-        main { owner.submitMessage("queue", "回执丢失正文") }
+        main { owner.submitFixtureMessage("queue", "回执丢失正文") }
         until("fresh connection reconciles admission") { owner.state.value.outbox?.records?.singleOrNull()?.everAgentQueued == true }
         assertEquals(1, test.commandWrites.get())
         val scopeHash = CommandOwner.scopeHash(test.accountId, test.organizationId)
         main { owner.cancel() }
         until("local exit") { owner.state.value.phase == HomePhase.SIGNED_OUT }
+        assertNull(owner.state.value.presentationOwner)
+        assertNull(owner.state.value.composer)
         assertFalse(File(instrumentation.targetContext.noBackupFilesDir, "mobile-data/$scopeHash").exists())
     }
 
