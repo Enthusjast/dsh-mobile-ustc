@@ -17,7 +17,7 @@ func (repository *FileStore) FileMessageReference(ctx context.Context, id string
 		return nil, files.ErrInvalid
 	}
 	delivery := &files.Delivery{State: "bound"}
-	err := repository.database.DB.QueryRowContext(ctx, `select r.request_id::text,c.state from file_message_refs r join commands c on c.device_id=r.device_id and c.request_id=r.request_id where r.file_id=$1`, id).Scan(&delivery.RequestID, &delivery.CommandState)
+	err := repository.database.DB.QueryRowContext(ctx, `select r.request_id::text,c.state from file_message_refs r join command_records c on c.device_id=r.device_id and c.request_id=r.request_id where r.file_id=$1`, id).Scan(&delivery.RequestID, &delivery.CommandState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -177,7 +177,7 @@ func bindMessageFiles(ctx context.Context, tx *sql.Tx, ticket TicketRedemption, 
 // completed or uncertain messages never acquire fresh file authority.
 func fileMessageAllowsHandoff(ctx context.Context, tx *sql.Tx, id string, fresh bool) error {
 	var state string
-	err := tx.QueryRowContext(ctx, `select c.state from file_message_refs r join commands c on c.device_id=r.device_id and c.request_id=r.request_id where r.file_id=$1`, id).Scan(&state)
+	err := tx.QueryRowContext(ctx, `select c.state from file_message_refs r join command_records c on c.device_id=r.device_id and c.request_id=r.request_id where r.file_id=$1`, id).Scan(&state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

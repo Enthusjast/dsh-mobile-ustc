@@ -103,6 +103,13 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 		select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action, coalesce(child_session_id::text, ''), fork_outcome
 		from commands where device_id = $1 and request_id = $2 for update`, ticket.DeviceID, requestID).
 		Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction, &status.ChildSessionID, &forkOutcome)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = transaction.QueryRowContext(ctx, `
+		select request_id::text, user_id::text, runtime_id::text, coalesce(session_id::text, ''), coalesce(workspace_id::text, ''), state, payload_sha256, updated_at, action, coalesce(child_session_id::text, ''), fork_outcome
+		from command_archive where device_id = $1 and request_id = $2`, ticket.DeviceID, requestID).
+			Scan(&status.RequestID, &existingUserID, &existingRuntimeID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &existingAction, &status.ChildSessionID, &forkOutcome)
+	}
+
 	if err == nil {
 		if existingAction.Valid && existingAction.String != action || action == "session.fork" && !existingAction.Valid || existingUserID != ticket.UserID || existingRuntimeID != ticket.RuntimeID || ((workspaceID == "" || action == "session.fork") && status.SessionID != sessionID) || status.WorkspaceID != workspaceID || status.PayloadSHA256 != payloadSHA256 {
 			return CommandStatus{}, ErrCommandConflict
@@ -129,6 +136,15 @@ func recordAuthorizedCommand(ctx context.Context, transaction *sql.Tx, ticket Ti
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+
+	var retired bool
+	if err := transaction.QueryRowContext(ctx, `select exists(select 1 from command_keys where device_id=$1 and request_id=$2)
+        and not exists(select 1 from commands where device_id=$1 and request_id=$2)`, ticket.DeviceID, requestID).Scan(&retired); err != nil {
+		return CommandStatus{}, ErrDatabaseUnavailable
+	}
+	if retired {
+		return CommandStatus{}, ErrCommandConflict
 	}
 
 	err = transaction.QueryRowContext(ctx, `
@@ -255,6 +271,16 @@ func (postgres *Postgres) recordRealtimeCommandReceipt(ctx context.Context, rece
 		where c.device_id = $1 and c.request_id = $2 and c.runtime_id = $3
 		for update`, receipt.DeviceID, receipt.RequestID, receipt.RuntimeID).
 		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created, &status.ChildSessionID, &forkOutcome)
+	archived := false
+	if errors.Is(err, sql.ErrNoRows) {
+		err = transaction.QueryRowContext(ctx, `
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at,coalesce(c.child_session_id::text,''),c.fork_outcome
+		from command_archive c
+		where c.device_id = $1 and c.request_id = $2 and c.runtime_id = $3`, receipt.DeviceID, receipt.RequestID, receipt.RuntimeID).
+			Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created, &status.ChildSessionID, &forkOutcome)
+		archived = err == nil
+	}
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}
@@ -312,6 +338,9 @@ func (postgres *Postgres) recordRealtimeCommandReceipt(ctx context.Context, rece
 		if status.State == "outcome_unknown" && receipt.State == "host_accepted" {
 			return CommandStatus{}, ErrCommandTransition
 		}
+	}
+	if archived && (status.State != receipt.State || forkChanged) {
+		return CommandStatus{}, ErrCommandTransition
 	}
 	if status.State == receipt.State && !forkChanged {
 		if err := transaction.Commit(); err != nil {
@@ -404,6 +433,14 @@ func (postgres *Postgres) markRealtimeCommandUnknown(ctx context.Context, ticket
 		where c.device_id = $1 and c.user_id = $2 and c.request_id = $3 and c.runtime_id = $4
 		for update`, ticket.DeviceID, ticket.UserID, requestID, ticket.RuntimeID).
 		Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created, &status.ChildSessionID, &forkOutcome)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = transaction.QueryRowContext(ctx, `
+		select c.request_id::text, coalesce(c.session_id::text, ''), coalesce(c.workspace_id::text, ''), c.state, c.payload_sha256, c.updated_at,c.action,c.created_at,coalesce(c.child_session_id::text,''),c.fork_outcome
+		from command_archive c
+		where c.device_id = $1 and c.user_id = $2 and c.request_id = $3 and c.runtime_id = $4`, ticket.DeviceID, ticket.UserID, requestID, ticket.RuntimeID).
+			Scan(&status.RequestID, &status.SessionID, &status.WorkspaceID, &status.State, &status.PayloadSHA256, &status.UpdatedAt, &action, &created, &status.ChildSessionID, &forkOutcome)
+	}
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return CommandStatus{}, ErrCommandTransition
 	}

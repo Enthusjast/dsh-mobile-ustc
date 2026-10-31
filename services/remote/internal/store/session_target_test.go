@@ -145,6 +145,7 @@ func TestCommandActionMigrationRollbackPreservesStatusWithoutReclassifyingIt(t *
 	if _, err := h.database.RecordRealtimeCommand(h.ctx, h.ticket, "question.answer", id, h.request.SessionID, digest); err != nil {
 		t.Fatal(err)
 	}
+	applyCommandArchiveFixtureMigration(t, h.ctx, h.database, "down")
 	_, source, _, _ := runtime.Caller(0)
 	for _, direction := range []string{"down", "up"} {
 		body, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../deploy/sql/016_command_actions."+direction+".sql"))
@@ -155,6 +156,7 @@ func TestCommandActionMigrationRollbackPreservesStatusWithoutReclassifyingIt(t *
 			t.Fatal(err)
 		}
 	}
+	applyCommandArchiveFixtureMigration(t, h.ctx, h.database, "up")
 	if _, err := h.database.DB.ExecContext(h.ctx, `update runtime_grants set scope=jsonb_set(scope,'{actions}','["session.read","question.answer","command.status"]')`); err != nil {
 		t.Fatal(err)
 	}

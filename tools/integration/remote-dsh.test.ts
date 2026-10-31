@@ -875,7 +875,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const unavailableModelRequest = randomUUID()
   mobile.send({ ...modelSelection, request_id: unavailableModelRequest, payload: { ...modelSelection.payload, model: 'unavailable' } })
   await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === unavailableModelRequest && frame.payload.state === 'rejected')
-  assert.equal(query(`select action from commands where request_id='${selectionRequest}'`), 'session.model.select')
+  assert.equal(query(`select action from command_records where request_id='${selectionRequest}'`), 'session.model.select')
   assert.equal(query(`select count(*) from audit_log where action='command.receipt' and metadata->>'request_id'='${selectionRequest}' and metadata->>'state'='settled'`), '1')
   t.diagnostic('The current phone selected an available native DSH model through explicit session.model.select authority and the new capability. Its original request settled once after checkpoint; a matching retry stayed settled, changed content conflicted, and a missing catalog model was rejected without closing the Host.')
   const creationRetryFrom = mobile.frames.length
@@ -988,12 +988,25 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const partialMessages = mobile.frames.slice(cancelableFrom).filter(frame => frame.type === 'session.event' && frame.payload.type === 'assistant/message')
   assert.ok(partialMessages.every(frame => frame.payload.data.interrupted === true), 'canceled model call published a non-interrupted message')
   assert.equal(JSON.stringify(partialMessages).includes('Unexpected uncanceled completion'), false)
+  // Age only completed fixture metadata; never age or archive active/unknown intents.
+  query(`update commands set created_at=clock_timestamp()-interval '60 days', updated_at=clock_timestamp()-interval '60 days' where request_id in ('${cancelId}','${creationId}')`)
+  const archivedCommands = JSON.parse(execFileSync(serviceBin, ['archive', 'commands', '--batch-id', randomUUID(), '--expected-epoch', databaseEpoch], {
+    env: { ...serviceEnv, REMOTE_DATABASE_EPOCH: databaseEpoch }, encoding: 'utf8', timeout: 10_000,
+  })) as { entries: number; hot_days: number }
+  assert.equal(archivedCommands.entries, 2)
+  assert.equal(archivedCommands.hot_days, 30)
+  assert.equal(query(`select count(*) from commands where request_id in ('${cancelId}','${creationId}')`), '0')
+  const beforeArchivedCreateRetry = mobile.frames.length, nativeCountBeforeArchiveRetry = (await command('session.list', {})).payload.items.length
+  mobile.send(creation)
+  const historicalCreation = await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === creationId && frame.payload.state === 'settled', beforeArchivedCreateRetry)
+  assert.equal(historicalCreation.session_id, sessionId)
+  assert.equal((await command('session.list', {})).payload.items.length, nativeCountBeforeArchiveRetry)
   const cancelRetryFrom = mobile.frames.length
   mobile.send(cancel)
   await mobile.wait(frame => frame.type === 'command.receipt' && frame.request_id === cancelId && frame.payload.state === 'settled', cancelRetryFrom)
   assert.equal((await phone('GET', `/v1/commands/${cancelId}?device_id=${device.device_id}`)).state, 'settled')
-  assert.equal(query(`select count(*) from commands where request_id='${cancelId}'`), '1')
-  assert.equal(query(`select count(*) from commands where request_id='${staleCancelId}'`), '0')
+  assert.equal(query(`select count(*) from command_records where request_id='${cancelId}'`), '1')
+  assert.equal(query(`select count(*) from command_records where request_id='${staleCancelId}'`), '0')
 
   const archiveCommand = (archived: boolean, stopActivity = false) => ({
     v: 1, type: 'session.archive', request_id: randomUUID(), runtime_id: enrollment.runtime_id,
@@ -1240,7 +1253,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   for (const secret of [workspace, code, ...credentialSecrets, ...hostResourceSecrets, ticket.ticket]) {
     assert.equal(dump.includes(secret), false, 'Relay persisted a local path or raw credential')
   }
-  assert.equal(query(`select count(*) from commands where request_id='${requestId}'`), '1')
+  assert.equal(query(`select count(*) from command_records where request_id='${requestId}'`), '1')
   const deviceRevokedAt = Date.now()
   await phone('DELETE', `/v1/devices/${listedSiblingDeviceId}`)
   assert.equal((await siblingPhone('GET', '/v1/devices/current')).state, 'revoked')
@@ -1293,7 +1306,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   const finalMetrics = await until(async () => {
     const body = await readMetrics()
     const commandsMatch = commandActions.every(action => metricSample(body, 'command_transitions_total', { action, from: 'none', to: 'received', origin: 'device' }) ===
-      Number(query(`select count(*) from commands where action='${action}'`)))
+      Number(query(`select count(*) from command_records where action='${action}'`)))
     const receiptsMatch = metricSample(body, 'command_transitions_total', { origin: 'host' }, true) === Number(query(`select count(*) from audit_log where action='command.receipt'`))
     const approvalsMatch = metricSample(body, 'approval_state_transitions_total', { cause: 'registration' }, true) === Number(query(`select count(*) from audit_log where action='approval.pending'`)) &&
       metricSample(body, 'approval_state_transitions_total', { cause: 'decision' }, true) === Number(query(`select count(*) from audit_log where action='approval.decided'`)) &&
@@ -1328,6 +1341,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   t.diagnostic('An actual CLI profile flush exception produced a failed checkpoint and the corresponding private native failure counter; neither the private error nor local path entered metrics. Ordinary history and later commands continued after removal of the fixture fault.')
   t.diagnostic(`Device/grant revocations closed their sockets within five seconds; last grant closed after ${Date.now() - grantRevokedAt} ms. Durable control outbox acknowledged.`)
   t.diagnostic('A real Bash approved through the normal plugin was held after guard; scoped grant invalidation blocked its body before the three-second lease expired and durably reported the invalidated fact.')
+  t.diagnostic('The production command archive moved aged settled create/cancel metadata out of the hot table; original phone retries returned the same native session and terminal states through the normal signed Relay.')
   t.diagnostic(`Remote cancellation interrupted the held model call after ${cancelLatency} ms; stale epoch rejected and settled retry preserved.`)
   t.diagnostic('Native archive/restore persisted through the Go relay: archived history remained readable, writes were denied, busy archive refused, explicit archive-and-stop aborted the held turn, and a historical settled retry did not undo a later restore.')
   t.diagnostic('Blocking question snapshots, invalid-answer rejection, two-device answer competition and durable retry passed without storing question/answer bodies.')
@@ -1549,7 +1563,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
     const fresh = await recovered.wait(frame => frame.type === 'session.snapshot' && frame.request_id === freshRead)
     for (const value of [marker, nextMarker]) assert.equal(fresh.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(value)).length, 1,
       'reconciliation or new admission duplicated a native message')
-    assert.equal(query(`select count(*) from commands where request_id='${requestId}' and device_id='${ownerDevice.device_id}'`), '1')
+    assert.equal(query(`select count(*) from command_records where request_id='${requestId}' and device_id='${ownerDevice.device_id}'`), '1')
     assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
     const recoveredDump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
     for (const secret of [marker, nextMarker, unusedTicket.ticket]) assert.equal(recoveredDump.includes(secret), false, 'owner crash recovery persisted a body or raw ticket')
@@ -1663,7 +1677,7 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
       const outageMillis = Date.now() - started
       assert.equal(query(`select count(*) from realtime_tickets where device_id='${ownerDevice.device_id}' and runtime_id='${enrollment.runtime_id}'`), ticketCountBefore,
         'outage minted a ticket without current database authority')
-      assert.equal(query(`select state from commands where request_id='${requestId}' and device_id='${ownerDevice.device_id}'`), 'agent_queued')
+      assert.equal(query(`select state from command_records where request_id='${requestId}' and device_id='${ownerDevice.device_id}'`), 'agent_queued')
       assert.equal(query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`), hostConnectionBefore, 'fault fixture lost the stale Host ownership record')
       assert.equal(query(`select execution_outcome is null from approvals where id='${runningApproval.approvalId}'`), 't', 'server invented the offline native outcome before its report')
       // Wait for actual persisted leases; do not delete routes/consumers or forge expiry.

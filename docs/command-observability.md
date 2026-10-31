@@ -98,3 +98,6 @@ histogram_quantile(0.95, sum by (le, operation, result) (rate(dsh_remote_command
 
 共享[命令准入预算](shared-command-limits.md)耗尽时，command store 尝试结果为固定 `limited`。
 它包含共享配额检查的耗时，不产生 command 状态转换；主体 UUID 和策略摘要不作为指标标签。
+
+[命令元数据归档](command-archive.md)移动热表中的终态记录时不新增命令阶段计数。
+核对保留期间的完整元数据时使用 `command_records`，不能把热表行数当作归档后的全部命令数。

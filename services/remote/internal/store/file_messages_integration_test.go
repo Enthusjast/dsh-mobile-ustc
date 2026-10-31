@@ -311,6 +311,7 @@ func TestPostgresFileMessageMigrationRollbackCannotReviveConsumedUploads(t *test
 		t.Fatal(err)
 	}
 	_, source, _, _ := runtime.Caller(0)
+	applyCommandArchiveFixtureMigration(t, h.ctx, h.database, "down")
 	for _, name := range []string{"011_file_message_refs.down.sql", "011_file_message_refs.up.sql"} {
 		raw, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../deploy/sql", name))
 		if err != nil {
@@ -318,6 +319,7 @@ func TestPostgresFileMessageMigrationRollbackCannotReviveConsumedUploads(t *test
 		}
 		h.exec(t, string(raw))
 	}
+	applyCommandArchiveFixtureMigration(t, h.ctx, h.database, "up")
 	if _, err := h.repository.RenewHandoff(h.ctx, h.host, offer.HandoffID, fileTestPolicy); err == nil {
 		t.Fatal("rollback revived old handoff")
 	}

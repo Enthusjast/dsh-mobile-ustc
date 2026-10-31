@@ -18,7 +18,7 @@ func (postgres *Postgres) QuestionAnswerStatus(ctx context.Context, identity Use
 	}
 	err := postgres.DB.QueryRowContext(ctx, `select c.request_id::text,c.session_id::text,c.state,c.payload_sha256,c.updated_at
 	 from users u join devices d on d.user_id=u.id and d.id=$3 and d.revoked_at is null and d.proof_key_thumbprint=$4
-	 join commands c on c.user_id=u.id and c.device_id=d.id and c.request_id=$7 and c.runtime_id=$5 and c.session_id=$6 and c.workspace_id is null and c.action='question.answer'
+	 join command_records c on c.user_id=u.id and c.device_id=d.id and c.request_id=$7 and c.runtime_id=$5 and c.session_id=$6 and c.workspace_id is null and c.action='question.answer'
 	 join runtimes r on r.id=c.runtime_id and r.revoked_at is null and `+runtimeEnrollmentApprovedSQL+`
 	 join installations i on i.id=r.installation_id and i.revoked_at is null join hosts h on h.id=i.host_id and h.state='active'
 	 join org_memberships m on m.org_id=h.org_id and m.user_id=u.id

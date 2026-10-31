@@ -12,6 +12,7 @@ import (
 
 func TestPostgresFileMigrationRollbackCannotReviveUnboundCleanRows(t *testing.T) {
 	h := newFileFixture(t)
+	applyCommandArchiveFixtureMigration(t, h.ctx, h.database, "down")
 	file := h.scanning(t)
 	claim := h.claim(t)
 	if err := h.repository.CompleteScan(h.ctx, claim); err != nil {
@@ -91,6 +92,7 @@ func TestPostgresFileMigrationRollbackCannotReviveUnboundCleanRows(t *testing.T)
 	if _, err := h.database.DB.ExecContext(h.ctx, string(scope)); err != nil {
 		t.Fatal(err)
 	}
+	applyCommandArchiveFixtureMigration(t, h.ctx, h.database, "up")
 	if _, err := h.repository.Status(h.ctx, h.actor, file.ID); !errors.Is(err, files.ErrAccess) {
 		t.Fatal("migration replay converted old metadata into current authority")
 	}

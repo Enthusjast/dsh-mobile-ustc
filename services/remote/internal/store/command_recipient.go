@@ -20,7 +20,7 @@ func (postgres *Postgres) AuthorizeRealtimeCommandReceipt(ctx context.Context, t
 	var sessionID, creationWorkspace, sessionWorkspace sql.NullString
 	err := postgres.DB.QueryRowContext(ctx, `
 		select c.session_id::text, c.workspace_id::text, s.workspace_id::text
-		from commands c
+		from command_records c
 		left join sessions s on s.runtime_id = c.runtime_id and s.id = c.session_id
 		where c.device_id = $1 and c.user_id = $2 and c.runtime_id = $3
 		  and c.request_id = $4 and c.payload_sha256 = $5`, ticket.DeviceID, ticket.UserID, ticket.RuntimeID, status.RequestID, status.PayloadSHA256).

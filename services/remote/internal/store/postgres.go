@@ -365,7 +365,7 @@ func (postgres *Postgres) CommandStatus(ctx context.Context, identity UserIdenti
 		       case when c.action = 'session.fork' then 'session.fork' else '' end
 		from users u
 		join devices d on d.user_id = u.id and d.id = $3 and d.revoked_at is null
-		join commands c on c.device_id = d.id and c.user_id = u.id and c.request_id = $4::uuid
+		join command_records c on c.device_id = d.id and c.user_id = u.id and c.request_id = $4::uuid
 		left join sessions s on s.id = c.session_id and s.runtime_id = c.runtime_id
 		left join workspaces w on w.id = c.workspace_id and w.runtime_id = c.runtime_id
 		join runtime_grants g on g.runtime_id = c.runtime_id and g.user_id = u.id
