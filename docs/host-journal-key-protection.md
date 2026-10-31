@@ -7,7 +7,8 @@
 仓库提供[Linux Secret Service 适配器](linux-secret-service-journal-key.md)，其目标发行版和
 生产会话仍需验收。另有可选的[macOS Keychain 命令适配](macos-keychain-journal-key.md)，
 目前只有接口核查与 Linux 上的 Darwin 协议夹具，尚无 macOS 平台验收；DPAPI 和硬件密钥
-适配尚未实现。默认的本地
+适配尚未启用。[当前用户 DPAPI 原生协议基础](windows-dpapi-primitive.md)已有 MinGW／Wine
+验证，但 Windows 受保护日志仍失败关闭，私有 ACL／文件持久化与真实平台验收尚未接入。默认的本地
 文件模式仍会使用 `.key`；它适用于明确接受该边界的开发环境，不能当作平台保护。生产集成
 必须自行提供经过审阅的平台封装器并配置 `requireProtectedJournalKey: true`，封装器缺失、
 不可用、损坏或身份不匹配时启动失败，不回退到文件模式。
