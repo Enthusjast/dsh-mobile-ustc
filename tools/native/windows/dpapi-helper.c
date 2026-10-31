@@ -42,6 +42,8 @@ done:
     return allowed;
 }
 
+#include "private-helper-acl.h"
+
 static uint32_t dsh_read_u32(const BYTE *input) {
     return (uint32_t)input[0] | ((uint32_t)input[1] << 8) | ((uint32_t)input[2] << 16) | ((uint32_t)input[3] << 24);
 }
@@ -82,6 +84,7 @@ static BOOL dsh_write_all(HANDLE output, const BYTE *data, DWORD length) {
 
 int wmain(int argc, wchar_t **argv) {
     BYTE *request = NULL;
+    DSH_HELPER_GUARD guard = {{0}, 0};
     DATA_BLOB input = {0, NULL}, entropy = {0, NULL}, output = {0, NULL};
     BYTE header[12] = {0};
     DWORD length = 0;
@@ -90,7 +93,7 @@ int wmain(int argc, wchar_t **argv) {
     int result = 1;
     if (argc != 2 || (wcscmp(argv[1], L"journal-protect-v1") != 0 && wcscmp(argv[1], L"journal-unprotect-v1") != 0)) goto done;
     protect = wcscmp(argv[1], L"journal-protect-v1") == 0;
-    if (!dsh_current_user_allowed()) goto done;
+    if (!dsh_current_user_allowed() || !dsh_lock_helper_image(&guard)) goto done;
     request = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DSH_REQUEST_MAX + 1u);
     if (request == NULL || !dsh_read_request(request, &length) || length < DSH_HEADER_SIZE || memcmp(request, request_magic, sizeof(request_magic)) != 0) goto done;
     context_size = dsh_read_u32(request + 8); data_size = dsh_read_u32(request + 12);
@@ -118,6 +121,7 @@ done:
     if (entropy.pbData != NULL) { SecureZeroMemory(entropy.pbData, entropy.cbData); HeapFree(GetProcessHeap(), 0, entropy.pbData); }
     if (request != NULL) { SecureZeroMemory(request, DSH_REQUEST_MAX + 1u); HeapFree(GetProcessHeap(), 0, request); }
     SecureZeroMemory(header, sizeof(header));
+    dsh_close_helper_guard(&guard);
     if (result != 0) {
         static const BYTE message[] = "DPAPI operation unavailable\n";
         (void)dsh_write_all(GetStdHandle(STD_ERROR_HANDLE), message, (DWORD)sizeof(message) - 1u);

@@ -98,3 +98,6 @@ Android APP 或 PLAN.md，没有尝试 TokenWorks，也未执行大负载、真�
 封装／发布流程；不能删除当前 Win32 拒绝或绕开文件权限来把协议基础当作生产后端。
 真实 Windows 的 SID／域策略、DPAPI 备份恢复、UI、文件替换、NTFS 持久性、升级和回滚仍需
 各自证据。Wine 验证既不是这些出口的替代，也不改变真实 Windows acceptance 为 false 的记录。
+
+后续[helper 安装文件自检](windows-helper-file-guard.md)增加 owner／DACL、重解析点、
+链接及共享句柄门禁；仍不是完整的启动端可信验证，也不启用 Windows 日志。

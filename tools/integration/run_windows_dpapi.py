@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 from pathlib import Path
 import struct
 import subprocess
@@ -45,7 +46,7 @@ def compile_helpers(repo, output, compiler, sdk):
              "-B" + str(runtime[0]) + "/", "-B" + str(sdk / "usr/x86_64-w64-mingw32/bin") + "/",
              "-isystem", str(sdk / "usr/x86_64-w64-mingw32/include"), "-L" + str(sdk / "usr/x86_64-w64-mingw32/lib")]
     sources, binaries = {}, {}
-    for name in ("dpapi-helper", "dpapi-policy-test"):
+    for name in ("dpapi-helper", "dpapi-policy-test", "dpapi-acl-test"):
         source = repo / "tools/native/windows" / (name + ".c")
         binary = output / (name + ".exe")
         result = subprocess.run([str(compiler), *flags, str(source), "-o", str(binary), "-lcrypt32", "-ladvapi32"],
@@ -56,6 +57,8 @@ def compile_helpers(repo, output, compiler, sdk):
         binary.chmod(0o600)
         sources[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
         binaries[binary.name] = hashlib.sha256(binary.read_bytes()).hexdigest()
+    for header in (repo / "tools/native/windows").glob("*.h"):
+        sources[header.name] = hashlib.sha256(header.read_bytes()).hexdigest()
     return {"compiler": subprocess.check_output([str(compiler), "--version"]).decode().splitlines()[0],
             "flags": [value for value in flags if not value.startswith(("-B", "-L")) and value != str(sdk / "usr/x86_64-w64-mingw32/include")],
             "sources": sources, "binaries": binaries}
@@ -73,15 +76,48 @@ def probe(repo, output, compiler, sdk, wine, wineserver):
         policy = subprocess.run([str(wine), str(output / "dpapi-policy-test.exe")], env=environment, capture_output=True, timeout=60)
         (output / "policy.stderr").write_bytes(policy.stderr); (output / "policy.stderr").chmod(0o600)
         require(policy.returncode == 0 and policy.stdout == b"")
-        helper = output / "dpapi-helper.exe"
-        cases = []
+        installed = prefix / "drive_c/dsh-helper-fixture"
+        installed.mkdir(mode=0o700)
+        shutil.copyfile(output / "dpapi-helper.exe", installed / "dpapi-helper.exe")
+        (installed / "dpapi-helper.exe").chmod(0o600)
+        helper = r"C:\dsh-helper-fixture\dpapi-helper.exe"
+        acl_test = subprocess.run([str(wine), str(output / "dpapi-acl-test.exe"), helper], env=environment, capture_output=True, timeout=20)
+        (output / "acl-test.stderr").write_bytes(acl_test.stderr); (output / "acl-test.stderr").chmod(0o600)
+        require(acl_test.returncode == 0 and acl_test.stdout in (b"", b"ACL_FIXTURE_WRITE_DAC_NOT_RETAINED\r\n", b"ACL_FIXTURE_WRITE_DAC_NOT_RETAINED\n"))
+        summary["unverified_cases"] = ["wine-file-object-write-dac-ace-readback"] if acl_test.stdout else []
+        cases = ["helper-owner-and-dacl-policy", "helper-attributes-and-links", "helper-file-sharing-lock"]
         def call(operation, raw, accepted):
-            result = subprocess.run([str(wine), str(helper), operation], input=raw, env=environment, capture_output=True, timeout=15)
+            result = subprocess.run([str(wine), helper, operation], input=raw, env=environment, capture_output=True, timeout=15)
             if accepted:
                 require(result.returncode == 0 and len(result.stdout) <= 12 + MAX_WRAPPED)
             else:
                 require(result.returncode != 0 and result.stdout == b"" and result.stderr.endswith(ERROR))
             return result.stdout
+        def rejected_before_input(path):
+            child = subprocess.Popen([str(wine), path, "journal-protect-v1"], env=environment, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                child.wait(timeout=5)
+                require(child.returncode != 0 and child.stdout.read() == b"" and child.stderr.read().endswith(ERROR))
+            finally:
+                if child.poll() is None:
+                    child.kill(); child.wait(timeout=5)
+                child.stdin.close(); child.stdout.close(); child.stderr.close()
+        unsafe = installed / "unsafe.exe"
+        shutil.copyfile(installed / "dpapi-helper.exe", unsafe); unsafe.chmod(0o666)
+        rejected_before_input(r"C:\dsh-helper-fixture\unsafe.exe"); cases.append("unsafe-image-rejected-before-stdin")
+        unsafe.unlink()
+        extra_link = installed / "extra-link.exe"
+        os.link(installed / "dpapi-helper.exe", extra_link)
+        try:
+            rejected_before_input(helper); cases.append("hardlinked-image-rejected-before-stdin")
+        finally:
+            extra_link.unlink()
+        installed.chmod(0o777)
+        try:
+            rejected_before_input(helper); cases.append("unsafe-parent-rejected-before-stdin")
+        finally:
+            installed.chmod(0o700)
         key = os.urandom(32)
         context = b"fixture/runtime/path/provider\0" + os.urandom(16)
         wrapped = response(call("journal-protect-v1", request(key, context), True))
@@ -145,7 +181,7 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
         result = probe(repo, output, args.compiler, args.sdk_root, args.wine, args.wineserver)
-        print(json.dumps({"state": result["state"], "scope": result["scope"], "case_count": result["case_count"], "journal_enabled": False}, sort_keys=True))
+        print(json.dumps({"state": result["state"], "scope": result["scope"], "case_count": result["case_count"], "journal_enabled": False, "unverified_cases": result["unverified_cases"]}, sort_keys=True))
     except (ProbeError, OSError, ValueError, subprocess.SubprocessError):
         print("DPAPI Wine fixture failed; inspect its private output, Windows journal remains disabled", file=sys.stderr)
         return 1
