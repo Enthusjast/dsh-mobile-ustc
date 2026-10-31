@@ -62,3 +62,6 @@ Go / PostgreSQL / npm DSH 双节点夹具使用独立测试命令对端。没有
 
 本机没有 `secret-tool`，因此这些证据不代表已验证目标发行版的该二进制、生产会话解锁策略、
 学校资源登录、安装登记或恢复流程；生产部署前仍需分别验收。
+
+[可选 macOS Keychain 签名适配](macos-keychain-installation-signer.md)共用规范密钥和签名检查；
+其 Darwin 协议夹具不代表真实 macOS 平台验收。

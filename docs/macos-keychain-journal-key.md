@@ -6,7 +6,8 @@
 
 **当前证据是 Apple 接口源码核查、Linux 上的 Darwin 命令协议夹具，以及 Linux 原有链路回归。**
 尚未在真实 macOS 执行。此实现不能作为完整 macOS 发行、Keychain 权限、锁定／解锁、系统提示、
-扩展 ACL、沙箱或 APFS 持久性的验收通过；Windows DPAPI 和 macOS 安装签名器仍是独立工作。
+扩展 ACL、沙箱或 APFS 持久性的验收通过；Windows DPAPI 仍是独立工作；另有[可选安装签名器](macos-keychain-installation-signer.md)，
+同样只有命令协议夹具，未完成真实 macOS 验收。
 
 ## 调用与绑定
 

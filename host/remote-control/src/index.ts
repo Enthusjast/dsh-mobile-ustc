@@ -40,6 +40,8 @@ export { MacOSKeychainJournalProtector } from './macos-keychain-journal-protecto
 export type { MacOSKeychainJournalOptions } from './macos-keychain-journal-protector.js'
 export { LinuxSecretServiceJournalProtector } from './secret-service-journal-protector.js'
 export type { LinuxSecretServiceJournalOptions } from './secret-service-journal-protector.js'
+export { MacOSKeychainInstallationSigner } from './macos-keychain-installation-signer.js'
+export type { MacOSKeychainInstallationSignerOptions } from './macos-keychain-installation-signer.js'
 export { LinuxSecretServiceInstallationSigner } from './secret-service-installation-signer.js'
 export type { LinuxSecretServiceInstallationSignerOptions } from './secret-service-installation-signer.js'
 export { LinuxInstallationKeyStore, LinuxInstallationKeyError } from './linux-installation-key.js'
