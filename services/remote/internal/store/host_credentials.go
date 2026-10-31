@@ -131,6 +131,9 @@ func (postgres *Postgres) createHostCredentialChallengeOnce(ctx context.Context,
 		values ($1, 'installation', $2, 'host.credential.challenge', 'success', $3::jsonb)`, orgID, installationID, string(metadata)); err != nil {
 		return HostCredentialChallenge{}, transactionFailure(err)
 	}
+	if err := checkHostCredentialDeadlines(ctx, transaction, result.ExpiresAt); err != nil {
+		return HostCredentialChallenge{}, err
+	}
 	if err := transaction.Commit(); err != nil {
 		return HostCredentialChallenge{}, transactionFailure(err)
 	}
@@ -208,6 +211,9 @@ func (postgres *Postgres) exchangeHostCredentialOnce(ctx context.Context, identi
 	if challengeKeyVersion != keyVersion {
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
 	}
+	if err := checkHostCredentialDeadlines(ctx, transaction, expiresAt); err != nil {
+		return HostConnectionCredential{}, err
+	}
 	if err := auth.VerifyHostCredentialProof(proof, publicJWK, installationID, challengeID, publicKeyThumbprint, challengeDigest); err != nil {
 		return HostConnectionCredential{}, ErrHostCredentialInvalid
 	}
@@ -254,10 +260,29 @@ func (postgres *Postgres) exchangeHostCredentialOnce(ctx context.Context, identi
 		values ($1, 'installation', $2, 'host.credential.issue', 'success', $3::jsonb)`, orgID, installationID, string(metadata)); err != nil {
 		return HostConnectionCredential{}, transactionFailure(err)
 	}
+	if err := checkHostCredentialDeadlines(ctx, transaction, expiresAt, result.ExpiresAt); err != nil {
+		return HostConnectionCredential{}, err
+	}
 	if err := transaction.Commit(); err != nil {
 		return HostConnectionCredential{}, transactionFailure(err)
 	}
 	return result, nil
+}
+
+// Rows are locked, but their deadlines continue to elapse during statement,
+// trigger and audit waits. This final check is the issuance decision point;
+// transaction_timestamp() and booleans evaluated before a lock wait are stale.
+func checkHostCredentialDeadlines(ctx context.Context, transaction *sql.Tx, deadlines ...time.Time) error {
+	var now time.Time
+	if err := transaction.QueryRowContext(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
+		return transactionFailure(err)
+	}
+	for _, deadline := range deadlines {
+		if !deadline.After(now) {
+			return ErrHostCredentialInvalid
+		}
+	}
+	return nil
 }
 
 // ValidateHostConnectionCredential validates the short-lived token and its

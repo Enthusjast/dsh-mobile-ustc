@@ -1,5 +1,7 @@
 # Remote service foundation
 
+Host [challenge and credential issuance deadlines](../../docs/host-credential-expiry.md) are rechecked against the database clock after row/trigger/audit waits and before commit. Expiry rolls back consumption, credentials and success audit; a still-live challenge remains retryable after an aborted exchange. No migration or TTL change is required.
+
 Offline [connection policy operations](../../docs/connection-policy-operations.md) add `connection-limits status` and `replace`. A current database epoch, expected old digest, stable operation UUID and drained consumer registry gate each new replacement. Occupancy is preserved, receipts/audit commit atomically, and historical exact retries reconcile without resetting policy. Apply migration 043.
 
 Production [shared connection limits](../../docs/shared-connection-limits.md) bound current logical Host/device occupancy across nodes by total, user, device and installation. Apply migration 041. Optional `REMOTE_CONNECTION_LIMITS_FILE` must match the shared policy; `remote connection-limits describe` prints it offline. Registered-key proof precedes device occupancy, generation-fenced close releases it, and Host takeover reuses its runtime slot atomically. Pending handshakes have a separate per-node budget.
