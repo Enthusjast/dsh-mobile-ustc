@@ -143,6 +143,7 @@ func TestApprovalEvidenceAndDecisionRollbackTogetherOnFailure(t *testing.T) {
 
 func TestApprovalEvidenceDoesNotInventHistoricalKeySnapshots(t *testing.T) {
 	f := newApprovalFixture(t)
+	applyEvidenceRetentionFixtureMigration(t, f.ctx, f.database, "down")
 	applyColdHistoryImportFixtureMigration(t, f.ctx, f.database, "down")
 	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "down")
 	fingerprintDown, err := os.ReadFile("../../../../deploy/sql/027_approval_evidence_fingerprints.down.sql")
@@ -180,6 +181,7 @@ func TestApprovalEvidenceDoesNotInventHistoricalKeySnapshots(t *testing.T) {
 	}
 	applyEvidenceExportFixtureMigration(t, f.ctx, f.database, "up")
 	applyColdHistoryImportFixtureMigration(t, f.ctx, f.database, "up")
+	applyEvidenceRetentionFixtureMigration(t, f.ctx, f.database, "up")
 	var captured sql.NullString
 	var count int
 	if err := f.database.DB.QueryRowContext(f.ctx, `select decision_evidence_epoch::text,(select count(*) from approval_decision_evidence) from approvals where id=$1`, f.request.ApprovalID).Scan(&captured, &count); err != nil || captured.Valid || count != 0 {

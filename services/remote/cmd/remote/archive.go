@@ -17,6 +17,9 @@ func runArchiveCommand(arguments []string, output io.Writer) error {
 	if len(arguments) == 0 {
 		return errors.New("remote archive requires a maintenance or verification command")
 	}
+	if arguments[0] == "retain-approval" {
+		return runApprovalEvidenceRetentionCommand(arguments[1:], output)
+	}
 	if arguments[0] == "verify-approval" {
 		return runApprovalEvidenceCommand(arguments[1:], output)
 	}

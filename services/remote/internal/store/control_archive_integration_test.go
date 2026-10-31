@@ -447,6 +447,7 @@ func TestControlArchiveMigrationRollbackOnlyBeforeUseOrRecovery(t *testing.T) {
 	}
 	t.Run("unused", func(t *testing.T) {
 		ctx, db := newPostgresIntegrationDatabase(t)
+		applyEvidenceRetentionFixtureMigration(t, ctx, db, "down")
 		applyColdHistoryImportFixtureMigration(t, ctx, db, "down")
 		applyAuditColdExportFixtureMigration(t, ctx, db, "down")
 		applyEvidenceExportFixtureMigration(t, ctx, db, "down")
@@ -489,6 +490,7 @@ func TestControlArchiveMigrationRollbackOnlyBeforeUseOrRecovery(t *testing.T) {
 		applyEvidenceExportFixtureMigration(t, ctx, db, "up")
 		applyAuditColdExportFixtureMigration(t, ctx, db, "up")
 		applyColdHistoryImportFixtureMigration(t, ctx, db, "up")
+		applyEvidenceRetentionFixtureMigration(t, ctx, db, "up")
 		var exists bool
 		if err := db.DB.QueryRowContext(ctx, `select to_regclass('control_event_ack_archive') is not null`).Scan(&exists); err != nil || !exists {
 			t.Fatal("reapplied migration lacks acknowledgement history", err)
