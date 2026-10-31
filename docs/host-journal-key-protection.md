@@ -5,7 +5,9 @@
 `.wrapped-key` 文件，命令和审批内容仍由现有 AES-256-GCM 日志加密。
 
 仓库提供[Linux Secret Service 适配器](linux-secret-service-journal-key.md)，其目标发行版和
-生产会话仍需验收；Keychain、DPAPI 和硬件密钥适配尚未实现。默认的本地
+生产会话仍需验收。另有可选的[macOS Keychain 命令适配](macos-keychain-journal-key.md)，
+目前只有接口核查与 Linux 上的 Darwin 协议夹具，尚无 macOS 平台验收；DPAPI 和硬件密钥
+适配尚未实现。默认的本地
 文件模式仍会使用 `.key`；它适用于明确接受该边界的开发环境，不能当作平台保护。生产集成
 必须自行提供经过审阅的平台封装器并配置 `requireProtectedJournalKey: true`，封装器缺失、
 不可用、损坏或身份不匹配时启动失败，不回退到文件模式。
