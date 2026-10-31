@@ -116,11 +116,14 @@ func (control *ApprovalControl) register(ctx context.Context, connection Runtime
 	if err := lockApprovalSession(ctx, transaction, request); err != nil {
 		return ApprovalStatus{}, err
 	}
-	now, err := approvalDatabaseTime(ctx, transaction)
-	if err != nil {
-		return ApprovalStatus{}, err
+	checkCurrent := func() error {
+		now, err := approvalCurrentRuntimeTime(ctx, transaction, request.RuntimeID)
+		if err != nil {
+			return err
+		}
+		return approvalRequestTime(request, now)
 	}
-	if err := approvalRequestTime(request, now); err != nil {
+	if err := checkCurrent(); err != nil {
 		return ApprovalStatus{}, err
 	}
 	ended, err := endRuntimeApprovals(ctx, transaction, orgID, request.RuntimeID, "", true)
@@ -138,6 +141,9 @@ func (control *ApprovalControl) register(ctx context.Context, connection Runtime
 		}
 		if existingConnection != connection.ConnectionID {
 			return ApprovalStatus{}, ErrRuntimeConnectionStale
+		}
+		if err := checkCurrent(); err != nil {
+			return ApprovalStatus{}, err
 		}
 		if err := transaction.Commit(); err != nil {
 			return ApprovalStatus{}, ErrDatabaseUnavailable
@@ -172,6 +178,9 @@ func (control *ApprovalControl) register(ctx context.Context, connection Runtime
 	status, _, err := readApproval(ctx, transaction, request.ApprovalID)
 	if err != nil || approvalChange(ctx, transaction, orgID, "installation", request.InstallationID, "", "approval.pending", status) != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
+	}
+	if err := checkCurrent(); err != nil {
+		return ApprovalStatus{}, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
@@ -241,24 +250,32 @@ func (control *ApprovalControl) decide(ctx context.Context, principal auth.Princ
 	if connectionID != registeredConnection {
 		return ApprovalStatus{}, ErrRuntimeConnectionStale
 	}
-	// Read the database clock after all potentially blocking locks.
-	now, err := approvalDatabaseTime(ctx, transaction)
-	if err != nil {
-		return ApprovalStatus{}, err
+	// Locks pin identity, keys and scope, not time. Use the same validation
+	// after locks and after all CAS/evidence/audit/outbox waits, including
+	// exact retries. Reuse the shared verifier's decision freshness rules.
+	verifyCurrent := func() (approval.VerifiedDecision, error) {
+		now, err := approvalCurrentRuntimeTime(ctx, transaction, request.RuntimeID)
+		if err != nil {
+			return approval.VerifiedDecision{}, err
+		}
+		if err := control.assurance.Verify(principal, control.policy.AssuranceProfile, control.policy.MaxAuthAgeSeconds, now); err != nil {
+			return approval.VerifiedDecision{}, err
+		}
+		if grantExpires.Valid && !grantExpires.Time.After(now) {
+			return approval.VerifiedDecision{}, ErrAccessDenied
+		}
+		return approval.VerifyDecision(compact, key, rawContext, now)
 	}
-	if err := control.assurance.Verify(principal, control.policy.AssuranceProfile, control.policy.MaxAuthAgeSeconds, now); err != nil {
-		return ApprovalStatus{}, err
-	}
-	if grantExpires.Valid && !grantExpires.Time.After(now) {
-		return ApprovalStatus{}, ErrAccessDenied
-	}
-	verified, err := approval.VerifyDecision(compact, key, rawContext, now)
+	verified, err := verifyCurrent()
 	if err != nil {
 		return ApprovalStatus{}, err
 	}
 	if status.PayloadSHA256 != "" {
 		if status.PayloadSHA256 != verified.PayloadSHA256 {
 			return ApprovalStatus{}, ErrApprovalConflict
+		}
+		if _, err := verifyCurrent(); err != nil {
+			return ApprovalStatus{}, err
 		}
 		if err := transaction.Commit(); err != nil {
 			return ApprovalStatus{}, ErrDatabaseUnavailable
@@ -274,8 +291,8 @@ func (control *ApprovalControl) decide(ctx context.Context, principal auth.Princ
 	if verified.Claims.Decision == "reject" {
 		state = "denied"
 	}
-	// Expiry checks use the final write's database clock, so time spent waiting or
-	// verifying never buys a later admission window. A failed CAS consumes nothing.
+	// Check again at the state write, then once more after its evidence triggers
+	// and the later audit/outbox writes. A failed admission consumes nothing.
 	result, err := transaction.ExecContext(ctx, `
 		update approvals set state = $2, decision = $3, decided_by = $4, decided_device_id = $5,
 		    decision_jws = $6, decision_payload_sha256 = $7, decision_key_version = $8,
@@ -303,6 +320,9 @@ func (control *ApprovalControl) decide(ctx context.Context, principal auth.Princ
 	status, _, err = readApproval(ctx, transaction, request.ApprovalID)
 	if err != nil || approvalChange(ctx, transaction, orgID, "device", ticket.DeviceID, ticket.DeviceID, "approval.decided", status) != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
+	}
+	if _, err := verifyCurrent(); err != nil {
+		return ApprovalStatus{}, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return ApprovalStatus{}, ErrDatabaseUnavailable
@@ -412,6 +432,23 @@ func approvalDatabaseTime(ctx context.Context, transaction *sql.Tx) (time.Time, 
 	var now time.Time
 	if err := transaction.QueryRowContext(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
 		return time.Time{}, ErrDatabaseUnavailable
+	}
+	return now.UTC(), nil
+}
+
+// The caller already holds the runtime row lock. A predicate evaluated while
+// acquiring that lock can be stale after the row or later statements unblock.
+func approvalCurrentRuntimeTime(ctx context.Context, transaction *sql.Tx, runtimeID string) (time.Time, error) {
+	var now, lastSeen time.Time
+	err := transaction.QueryRowContext(ctx, `select clock_timestamp(), last_seen_at from runtimes where id=$1`, runtimeID).Scan(&now, &lastSeen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, ErrRuntimeConnectionStale
+	}
+	if err != nil {
+		return time.Time{}, ErrDatabaseUnavailable
+	}
+	if !lastSeen.After(now.Add(-45 * time.Second)) {
+		return time.Time{}, ErrRuntimeConnectionStale
 	}
 	return now.UTC(), nil
 }

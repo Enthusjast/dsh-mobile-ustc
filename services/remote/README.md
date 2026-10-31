@@ -1,5 +1,7 @@
 # Remote service foundation
 
+Signed [approval admission deadlines](../../docs/approval-admission-expiry.md) are rechecked after evidence/audit/outbox waits and before commit. Registration and decision retries also recheck current Host heartbeat after locks. Expiry rolls back new state, immutable evidence and events; valid bounded waits and exact retries remain supported without changing TTLs or schema.
+
 Host [challenge and credential issuance deadlines](../../docs/host-credential-expiry.md) are rechecked against the database clock after row/trigger/audit waits and before commit. Expiry rolls back consumption, credentials and success audit; a still-live challenge remains retryable after an aborted exchange. No migration or TTL change is required.
 
 Offline [connection policy operations](../../docs/connection-policy-operations.md) add `connection-limits status` and `replace`. A current database epoch, expected old digest, stable operation UUID and drained consumer registry gate each new replacement. Occupancy is preserved, receipts/audit commit atomically, and historical exact retries reconcile without resetting policy. Apply migration 043.
