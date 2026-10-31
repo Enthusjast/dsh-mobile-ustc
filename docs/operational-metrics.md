@@ -40,7 +40,7 @@ REMOTE_METRICS_LISTEN_ADDR=127.0.0.1:9090 go run ./cmd/remote
 | `command_timestamp_anomalies_total{interval}` | 缺失/倒退的数据库时间；不产生虚假的零延迟样本 |
 | `command_forward_duration_seconds{result}` | 已登记命令的当前租约复查、转发和回执处理；区分 forwarded / duplicate / denied / queue_full / unknown / reconcile_unavailable |
 | `relay_revoked_connections_total{role,reason}` | 选中进行授权失效处理的连接，每个连接最多累计一次；区分 access_revoked / authority_unavailable |
-| `control_run_duration_seconds{worker,result}` | outbox / leases / consumer 所有权 / consumer_cleanup 的独立尝试耗时，区分 ok / error / cancelled |
+| `control_run_duration_seconds{worker,result}` | outbox / leases / consumer 所有权 / consumer_cleanup / approval_expiry 的独立尝试耗时，区分 ok / error / cancelled |
 | `control_available{worker}` | 最近一次尝试成功为 1，失败或首次成功前为 0；停止时取消不更新可用性 |
 | `control_last_success_timestamp_seconds{worker}` | 最近成功的 Unix 时间，尚未成功为 0 |
 | `control_events_total{topic,result}` | 本进程 apply_error / ack_error / published 尝试数；重试不等同新的业务事件 |

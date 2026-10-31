@@ -13,6 +13,7 @@ type ConsumerRepository interface {
 	Repository
 	Renew(context.Context) error
 	PruneEphemeral(context.Context) error
+	ExpireApprovals(context.Context, int) (int, error)
 }
 
 type fencedRepository struct {
@@ -49,6 +50,16 @@ func RunConsumer(ctx context.Context, repository ConsumerRepository, relay Relay
 	done := make(chan struct{})
 	go func() { defer close(done); Run(worker, fencedRepository{repository, fatal}, relay, metrics) }()
 	defer func() { cancel(); <-done }()
+	expiryDone := make(chan struct{})
+	go func() {
+		defer close(expiryDone)
+		repeat(worker, time.Second, "approval_expiry", func(attempt context.Context) error {
+			_, err := repository.ExpireApprovals(attempt, 32)
+			fencedRepository{repository, fatal}.report(err)
+			return err
+		}, metrics)
+	}()
+	defer func() { cancel(); <-expiryDone }()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	iterations := 0
