@@ -1433,6 +1433,118 @@ test('real Go service and npm DSH share authorized sessions through PostgreSQL a
   await ownerReader.wait(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
   t.diagnostic('The installation owner paged both profiles and retired the fixture sibling through the scoped API. Exact retry wrote one audit, every relay acknowledged, and the same real DSH Host connection served a new owner-phone native snapshot afterward. The shared installation and primary profile stayed active.')
   t.diagnostic('The retired fixture profile name was enrolled again under the same installation with a fresh runtime UUID and no inherited grants. Both confirmations activated the replacement; a delayed DELETE for the historical UUID left it active and preserved the primary real DSH connection.')
+  if (process.env.REMOTE_TEST_RELAY_CRASH === '1') {
+    assert.ok(crossNode && phoneService, 'native relay crash requires two owned relay children')
+    const marker = `RELAY_CRASH_NATIVE_${randomUUID()}`, requestId = randomUUID()
+    const crashCommand = { v: 1, type: 'message.submit', request_id: requestId, runtime_id: enrollment.runtime_id,
+      session_id: sessionId, payload: { mode: 'queue', content: [{ type: 'text', text: marker }] } }
+    const from = ownerReader.frames.length
+    ownerReader.send(crashCommand)
+    await ownerReader.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', from)
+    assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
+    const unusedTicket = await ownerPhone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 201)
+    const unusedDigest = createHash('sha256').update(unusedTicket.ticket).digest('hex')
+    const hostConnectionBefore = query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`)
+    const ownerGenerationBefore = query(`select generation from control_consumers where node_id='${nodeIDs[0]}'`)
+    const survivorGeneration = query(`select generation from control_consumers where node_id='${nodeIDs[1]}'`)
+    const nativeBefore = query(`select dsh_session_id from sessions where id='${sessionId}'`)
+    const routeBefore = query(`select node_id::text||'/'||generation::text||'/'||connection_id::text from relay_runtime_routes where runtime_id='${enrollment.runtime_id}'`)
+    const survivor = async () => {
+      phoneService!.check(); dsh.check()
+      const response = await fetch(phoneOrigin + '/readyz', { signal: AbortSignal.timeout(1000) })
+      await response.arrayBuffer()
+      assert.equal(response.status, 204, 'surviving relay lost database readiness')
+      assert.equal(query(`select generation='${survivorGeneration}'::uuid and lease_until>clock_timestamp() from control_consumers where node_id='${nodeIDs[1]}'`), 't')
+    }
+    await survivor()
+    const started = Date.now()
+    // This handle was created by this test. Never accept an external PID or
+    // signal DSH, PostgreSQL, the survivor, or a host supervisor.
+    serviceFaultExpected = true
+    const [code, signal] = await service.stop('SIGKILL')
+    assert.equal(code, null); assert.equal(signal, 'SIGKILL')
+    await until(async () => ownerReader.closed ? true : undefined, 'old routed phone closed after owner SIGKILL', 5000)
+    const closureMillis = Date.now() - started
+    assert.equal(query(`select connection_id from runtimes where id='${enrollment.runtime_id}'`), hostConnectionBefore)
+    assert.equal(query(`select node_id::text||'/'||generation::text||'/'||connection_id::text from relay_runtime_routes where runtime_id='${enrollment.runtime_id}'`), routeBefore,
+      'crash fixture cleared stale ownership instead of exercising recovery')
+    assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch)
+    await survivor()
+    const refused = new WebSocket(phoneOrigin.replace('http:', 'ws:') + '/v1/realtime', 'dsh.remote.v1', {
+      headers: { authorization: `DSH-Ticket ${unusedTicket.ticket}` }, handshakeTimeout: 4000,
+    })
+    refused.on('error', () => {})
+    try {
+      await new Promise<void>((accept, reject) => {
+        const timer = setTimeout(() => { refused.terminate(); reject(new Error('dead-owner admission did not end')) }, 5000)
+        refused.once('unexpected-response', (_request: unknown, response: any) => {
+          clearTimeout(timer); response.resume()
+          try { assert.equal(response.statusCode, 503, 'dead owner manufactured a local business connection'); accept() } catch (cause) { reject(cause) }
+        })
+        refused.once('open', () => { clearTimeout(timer); refused.terminate(); reject(new Error('dead owner admitted a new business socket')) })
+        refused.once('error', () => { clearTimeout(timer); reject(new Error('dead-owner admission failed without its expected HTTP rejection')) })
+      })
+    } finally { refused.terminate() }
+    assert.equal(query(`select consumed_at is null from realtime_tickets where token_sha256=decode('${unusedDigest}','hex')`), 't',
+      'failed private transport consumed a phone ticket')
+    assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued',
+      'owner crash changed a durable native receipt')
+    await until(async () => {
+      await survivor()
+      if (query(`select lease_until<=clock_timestamp() from control_consumers where node_id='${nodeIDs[0]}'`) === 't') return true
+      await new Promise(resolve => setTimeout(resolve, 100))
+      return undefined
+    }, 'natural crashed-node lease expiry', 12000)
+    service = await startProcess(serviceBin, [], serviceEnv); serviceFaultExpected = false
+    await until(async () => {
+      service.check(); await survivor()
+      try { const response = await fetch(origin + '/readyz', { signal: AbortSignal.timeout(500) }); await response.arrayBuffer(); return response.status === 204 ? true : undefined } catch { return undefined }
+    }, 'restarted owner readiness', 10000)
+    assert.notEqual(query(`select generation from control_consumers where node_id='${nodeIDs[0]}'`), ownerGenerationBefore)
+    await until(async () => {
+      service.check(); await survivor()
+      const connection = query(`select coalesce(connection_id::text,'') from runtimes where id='${enrollment.runtime_id}'`)
+      return connection && connection !== hostConnectionBefore ? true : undefined
+    }, 'same native Host reconnected after its Relay crashed', 30000)
+    assert.equal((await local('GET', '/m0/probe')).runtime_epoch, probe.runtime_epoch)
+    assert.equal(query(`select dsh_session_id from sessions where id='${sessionId}'`), nativeBefore)
+    assert.equal(query(`select consumed_at is null from realtime_tickets where token_sha256=decode('${unusedDigest}','hex')`), 't')
+    await phone('POST', '/v1/realtime/tickets', { runtime_id: enrollment.runtime_id, scope }, 403)
+    const recovered = await connectPhone(ownerPhone, ownerDevice.device_id, ownerPhoneKey)
+    const oldSnapshot = ownerReader.frames.find(frame => frame.type === 'session.snapshot' && frame.request_id === ownerReadRequest)
+    const staleRead = randomUUID()
+    recovered.send({ v: 1, type: 'session.page', request_id: staleRead, runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+      session_id: sessionId, subscription_id: oldSnapshot.subscription_id,
+      payload: { sync_id: oldSnapshot.sync_id, through_seq: oldSnapshot.payload.cursor, before_seq: oldSnapshot.payload.cursor + 1, max_messages: 5 } })
+    await recovered.wait(frame => frame.type === 'error' && frame.request_id === staleRead && frame.payload.code === 'protocol.resync_required')
+    const subscribe = { v: 1, type: 'session.subscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, session_id: sessionId, payload: { max_messages: 100 } }
+    recovered.send(subscribe)
+    const snapshot = await recovered.wait(frame => frame.type === 'session.snapshot' && frame.request_id === subscribe.request_id)
+    assert.notEqual(snapshot.subscription_id, oldSnapshot.subscription_id); assert.notEqual(snapshot.sync_id, oldSnapshot.sync_id)
+    assert.equal(snapshot.runtime_epoch, probe.runtime_epoch)
+    assert.equal(snapshot.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(marker)).length, 1,
+      'owner restart automatically replayed or lost the durable native message')
+    const retryFrom = recovered.frames.length
+    recovered.send(crashCommand)
+    await recovered.wait(frame => frame.type === 'command.receipt' && frame.request_id === requestId && frame.payload.state === 'agent_queued', retryFrom)
+    recovered.send({ v: 1, type: 'session.unsubscribe', request_id: randomUUID(), runtime_id: enrollment.runtime_id, runtime_epoch: probe.runtime_epoch,
+      session_id: sessionId, subscription_id: snapshot.subscription_id, payload: {} })
+    const nextId = randomUUID(), nextMarker = `RELAY_CRASH_RECOVERED_${randomUUID()}`
+    recovered.send({ ...crashCommand, request_id: nextId, payload: { mode: 'queue', content: [{ type: 'text', text: nextMarker }] } })
+    await recovered.wait(frame => frame.type === 'command.receipt' && frame.request_id === nextId && frame.payload.state === 'agent_queued')
+    const freshRead = randomUUID()
+    recovered.send({ ...subscribe, request_id: freshRead })
+    const fresh = await recovered.wait(frame => frame.type === 'session.snapshot' && frame.request_id === freshRead)
+    for (const value of [marker, nextMarker]) assert.equal(fresh.payload.records.filter((record: any) => record.type === 'user/message' && JSON.stringify(record.data).includes(value)).length, 1,
+      'reconciliation or new admission duplicated a native message')
+    assert.equal(query(`select count(*) from commands where request_id='${requestId}' and device_id='${ownerDevice.device_id}'`), '1')
+    assert.equal((await ownerPhone('GET', `/v1/commands/${requestId}?device_id=${ownerDevice.device_id}`)).state, 'agent_queued')
+    const recoveredDump = execFileSync(pgDump, ['--dbname', database, '--data-only', '--no-owner'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+    for (const secret of [marker, nextMarker, unusedTicket.ticket]) assert.equal(recoveredDump.includes(secret), false, 'owner crash recovery persisted a body or raw ticket')
+    await survivor()
+    t.diagnostic(`SIGKILL terminated only the owned Host Relay child; its routed phone closed in ${closureMillis} ms. The same native DSH epoch and session recovered after natural node-lease expiry and explicit restart in ${Date.now() - started} ms. The survivor kept its process, generation and database readiness; stale routes were retained, failed transport consumed no ticket, old sync was rejected, one original-ID retry and a new native command each appeared once.`)
+    return
+  }
   if (process.env.REMOTE_TEST_DATABASE_OUTAGE === '1') {
     try {
       assert.ok(crossNode && phoneService, 'database outage requires two owned relay processes')

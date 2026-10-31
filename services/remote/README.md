@@ -1,5 +1,7 @@
 # Remote service foundation
 
+The opt-in [native Relay owner-crash drill](../../docs/native-relay-crash-drill.md) kills only the fixture-owned Host Relay child, keeps PostgreSQL/ingress/DSH running, and waits for natural node-lease expiry before explicit restart. Actual DSH reconnection preserves epoch/session and original command facts, rejects old sync identities, and accepts fresh commands. Run the terminal wrapper with `--relay-crash`; it is separate from the database-outage drill and does not certify production supervision or automatic ingress failover.
+
 Node-local [send payload budgets](../../docs/relay-node-send-budgets.md) bound queued and in-flight encoded bytes across all connections, with independent ordinary/control reserves. Defaults are 256 MiB/16 MiB; optional protected `REMOTE_RELAY_QUEUE_LIMITS_FILE` configures them once before admission. `remote queue-limits describe` works offline, and private fixed-label gauges include retiring writers until their write finishes. Existing frame/queue limits and failure/reconciliation paths remain in force.
 
 The independent [approval expiry worker](../../docs/approval-expiry-worker.md) terminates expired v1 metadata without another Host registration. Bounded runtime-first claims support concurrent nodes; state, audit and outbox commit together while signed evidence and native execution facts are retained. It runs separately from consumer renewal, routing and authority checks. Apply migration 044 for the active-expiry index.

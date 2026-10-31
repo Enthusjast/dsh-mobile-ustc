@@ -122,6 +122,14 @@ retry replays its body. The Host receipt is a protocol fixture in this test;
 native durable acceptance has separate DSH evidence above. The focused record
 is `.local/relay-routing-owner-crash-second.log`.
 
+The separate [native DSH owner-crash drill](native-relay-crash-drill.md) now
+SIGKILLs only the real Host's owned Relay child while PostgreSQL and the ingress
+survivor remain online. After natural consumer-lease expiry, explicit restart
+and normal plugin reconnection preserve the native epoch/session, reject the
+old sync, retain one original message across reconciliation, and accept a new
+native message. It restarts the same node identity; production supervision and
+automatic migration through another ingress remain deployment gates.
+
 Before the subsequent test-scope change, clean revision `dcb4c83` also passed
 the existing single-node 3000-connection profile: 200 active streams × 20 Hz for
 30 seconds, 120000/120000 deliveries, admission 7.009 seconds, end-to-end p95
